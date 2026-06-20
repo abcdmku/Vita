@@ -14,6 +14,8 @@ import (
 
 	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/capabilities/hostname"
+	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/hardware"
@@ -160,6 +162,8 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		nodeconfig.Name: DecodeJSONRequest[nodeconfig.ApplyRequest],
 		nodetime.Name:   DecodeJSONRequest[nodetime.ApplyRequest],
 		hostname.Name:   DecodeJSONRequest[hostname.ApplyRequest],
+		identity.Name:   DecodeJSONRequest[identity.ApplyRequest],
+		network.Name:    DecodeJSONRequest[network.ApplyRequest],
 	}
 }
 

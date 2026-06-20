@@ -7,6 +7,8 @@ import (
 
 	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/capabilities/hostname"
+	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/hardware"
@@ -23,6 +25,8 @@ func main() {
 
 	registry, err := capabilities.NewRegistry(
 		hostname.NewCapability(),
+		identity.NewCapability(),
+		network.NewCapability(),
 		nodeconfig.NewCapability(),
 		nodetime.NewCapability(),
 	)

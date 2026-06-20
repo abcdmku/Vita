@@ -14,6 +14,8 @@ import (
 
 	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/capabilities/hostname"
+	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/hardware"
@@ -97,6 +99,8 @@ func TestReadRoutesReturnExpectedJSON(t *testing.T) {
 func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	registry := mustRegistry(t,
 		&mockTxCapability{name: nodetime.Name},
+		&mockTxCapability{name: network.Name},
+		&mockTxCapability{name: identity.Name},
 		&mockTxCapability{name: hostname.Name},
 		&mockTxCapability{name: nodeconfig.Name},
 	)
@@ -109,7 +113,7 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	}
 	var got OperationsResponse
 	decodeResponse(t, response, &got)
-	want := []string{hostname.Name, nodeconfig.Name, nodetime.Name}
+	want := []string{hostname.Name, identity.Name, network.Name, nodeconfig.Name, nodetime.Name}
 	if !reflect.DeepEqual(got.Operations, want) {
 		t.Fatalf("operations = %v, want %v", got.Operations, want)
 	}
@@ -171,6 +175,18 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	desiredConfig := nodeconfig.Config{Mode: nodeconfig.ModeMaintenance, RemoteAccess: nodeconfig.RemoteAccessEnabled}
 	desiredTime := time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)
 	desiredHostname := "vita-node-2"
+	desiredIdentity := identity.Attestation{
+		DID:    "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+		Handle: "alice.example.com",
+		SigningKeyRef: identity.SigningKeyRef{
+			ID:     "key:identity-signing-primary",
+			Handle: "identity-signing-primary",
+		},
+	}
+	networkAllow := []network.Rule{
+		{Proto: network.ProtoTCP, Port: 443, SourceCIDR: "10.0.0.0/8", Interface: "eth0"},
+	}
+	desiredNetwork := network.Policy{Allow: &networkAllow}
 	registry := mustRegistry(t,
 		&routedTxCapability{
 			name:   nodeconfig.Name,
@@ -214,13 +230,44 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 				return nil
 			},
 		},
+		&routedTxCapability{
+			name:   identity.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(identity.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("identity request = %T, want identity.ApplyRequest", request)
+				}
+				if typedRequest.Desired != desiredIdentity {
+					return fmt.Errorf("identity desired = %#v, want %#v", typedRequest.Desired, desiredIdentity)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
+			name:   network.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(network.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("network request = %T, want network.ApplyRequest", request)
+				}
+				if typedRequest.Desired == nil {
+					return errors.New("network desired = nil")
+				}
+				if !reflect.DeepEqual(*typedRequest.Desired, desiredNetwork) {
+					return fmt.Errorf("network desired = %#v, want %#v", *typedRequest.Desired, desiredNetwork)
+				}
+				return nil
+			},
+		},
 	)
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names. Registration is proven below: /apply routes a plan to all three registered
+	// names. Registration is proven below: /apply routes a plan to all five registered
 	// capabilities and commits them in order.
-	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}}]}`)
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
@@ -233,6 +280,8 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		{Index: 0, Capability: nodeconfig.Name},
 		{Index: 1, Capability: nodetime.Name},
 		{Index: 2, Capability: hostname.Name},
+		{Index: 3, Capability: identity.Name},
+		{Index: 4, Capability: network.Name},
 	}
 	if !reflect.DeepEqual(result.Applied, wantApplied) {
 		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
@@ -240,9 +289,32 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("Error = %#v, want nil", result.Error)
 	}
-	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name}
+	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name, identity.Name, network.Name}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestApplyRejectsRegisteredCapabilityWithoutDecoder(t *testing.T) {
+	events := []string{}
+	registry := mustRegistry(t, &mockTxCapability{name: "test.no-decoder", events: &events})
+	handler := mustHandler(t, handlerConfig{registry: registry})
+
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"test.no-decoder","request":{"value":"one"}}]}`)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	var errorResponse ErrorResponse
+	decodeResponse(t, response, &errorResponse)
+	if errorResponse.Error.Code != "unsupported_request_type" {
+		t.Fatalf("error code = %q, want unsupported_request_type", errorResponse.Error.Code)
+	}
+	if !strings.Contains(errorResponse.Error.Message, "no registered request decoder") {
+		t.Fatalf("error message = %q, want missing decoder detail", errorResponse.Error.Message)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want no apply calls", events)
 	}
 }
 
