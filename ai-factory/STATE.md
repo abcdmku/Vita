@@ -8,26 +8,29 @@
 golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
 complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
-## Status: RUNNING — Codex substrate restored (credits back ~14:32 CDT); full parallel pipeline resumed
+## Status: RUNNING — full parallel pipeline (Codex restored ~14:32 CDT after a usage-limit window)
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
 run the loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
-**44 contracts merged.** Parallel mode: Opus 4.8 subagents each drive one independent contract
-(dispatch GPT-5.5 → verify → reviewer gate) concurrently; orchestrator serial-merges with a typecheck
-gate (now **native TS 7.0.1-rc**).
-- **Agent — functional end-to-end:** registry/health (P1-004), hw discovery (P1-005), transaction
-  engine (P1-006), loopback transport w/ fail-closed /apply (P1-008), capability registration (P1-013),
-  **sysdeps** syscall facade (vendored x/sys); transactional caps nodeconfig (P1-007), time (P1-009),
-  hostname (P1-010), identity (P5-002, in gate). All wired caps applicable over /apply (fixed a latent
-  gap where time/hostname were rejected — see Lessons).
-- **Controller↔agent:** typed client (P2-006) + UniFi-style node-overview (P2-007).
-- **OS image (plan-level only):** Debian root scaffold (P1-011) + UKI/Secure-Boot scaffold (P1-012, TEST
-  keys only). Real privileged builds (disk layout, RAUC, dm-verity, QEMU boot) need a Linux build host.
-- **SDK/models:** storage (P0-019), backup/recovery (P0-020), recovery-key N-of-M flow (P0-021),
-  identity (P5-001), lockfile-policy default-deny supply-chain gate (P4-002), first-party manifests (P4-001).
-Reviewer gate has blocked **24 buggy merges (all real)** incl. a faked dependency, commit-point
-mutations, supply-chain bypasses, path traversal. typecheck=0 (TS7), agent container green.
-Next: disk-image layout → RAUC → dm-verity → QEMU boot (needs build host); more agent caps; identity/PDS;
-controller UI; agent operation-name discovery (the /capabilities-vs-operations follow-up).
+**61 contracts merged.** (During a Codex usage-limit window ~13:18–14:32 CDT, the orchestrator built
+R0/R1 directly per CLAUDE.md §1.1 — P8-001/P8-002 SDK models — then resumed the full pipeline.)
+- **Agent — functional end-to-end, 7 transactional capabilities all wired/discoverable/applicable:**
+  registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
+  fail-closed /apply (P1-008), `/operations` discovery (P1-015), `sysdeps` syscall facade (vendored
+  x/sys), full wiring (P1-013/016/020). Caps: nodeconfig, time, hostname, identity, network, storage,
+  update. (Fixed a latent gap where time/hostname were unusable over /apply — see Lessons.)
+- **Controller↔agent:** typed client (P2-006), node-overview (P2-007), operation discovery + plan-preview
+  (P2-008), update-preview (P2-010), storage-change preview (P2-011).
+- **OS image (plan-level only):** root (P1-011) → UKI/Secure-Boot (P1-012) → A/B disk layout + RAUC bundle
+  (P1-014). dm-verity (P1-017) + real build/QEMU boot are BLOCKED on a Linux build host (see Lessons/blocked/).
+- **SDK/models:** storage (P0-019), backup/recovery (P0-020), recovery-key N-of-M (P0-021), identity
+  (P5-001), PDS (P5-003), network (P8-001), update/RAUC (P8-002).
+- **Packages:** catalog (P1-003), lockfile-policy default-deny gate (P4-002), first-party manifests
+  (P4-001), install resolver (P3-001), Deno sandbox policy (P3-002). **Simulation harness** (P6-003).
+Reviewer gate has blocked **31 buggy merges (all real)** incl. a faked dependency, commit-point
+mutations, supply-chain bypasses, path traversal, closed-graph + absent≠zero gaps. typecheck=0 (TS7),
+agent container green (13 pkgs).
+Next (buildable): more agent caps (backup) + controller change-previews + identity/PDS; the boot chain
+resumes when a Linux build host is available.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
@@ -69,7 +72,7 @@ TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). 
 - Hostname/identity persistence across reboot (P1-010 is kernel-only; persist via the atomic-file pattern).
 - Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Done (44)
+## Done (61) — full authoritative list in ai-factory/task-contracts/done/
 P0-001..P0-016 (SDK core + audit + ADRs + safeNormalize + typecheck), P0-019/020/021 (storage, backup/
 recovery, recovery-key flow), P1-001..P1-003 (package contract, PDS manifest, catalog), P1-004..P1-013
 (Go agent: skeleton→discovery→engine→nodeconfig/time/hostname caps→transport→registration + sysdeps +
