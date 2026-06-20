@@ -37,10 +37,10 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P0-014 (shared isCanonicalPlan — DRY across envelope + controller; cross-cutting → reviewer-gated)
-  dispatching. P1-001 (package contract schema, §9.2) queued. **First R2 (P2-001) passed the gate.**
-- Deferred (P2-001 reviewer notes, folded into P0-014/later): controller `currentPlan` cast →
-  isCanonicalPlan (P0-014); `previewPlan` could reuse `validation.plan` instead of re-normalizing.
+- P0-014 **round 2** building. Round 1 reviewer-BLOCKED (not merged): `isCanonicalPlan` threw
+  `RangeError` on a cyclic object instead of returning false — a crash/DoS vector since the
+  controller feeds untrusted `currentPlan` through it. Re-dispatched with fail-closed + regression
+  test. P1-001 (package contract §9.2) queued. First R2 (P2-001) passed the gate.
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
@@ -103,6 +103,12 @@ frozen.
 - Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation); Go agent skeleton via Docker (draft).
 
 ## Lessons (most recent first)
+- **Reviewer keeps catching fail-closed/edge-case bugs (P0-014 round 1):** a shared boundary guard
+  over `unknown` threw on cyclic input instead of returning false — dangerous because the controller
+  feeds untrusted data through it. Pattern (2nd time): the reviewer excels at adversarial edge cases
+  the "tests pass" check misses. **Takeaway:** for any guard/validator over untrusted/`unknown`
+  input, the contract should explicitly require fail-closed-never-throw + a malformed/cyclic
+  regression test up front.
 - **Reviewer gate blocked a real merge (P0-012 round 1):** "tests pass + no test weakened" is NOT
   sufficient — the determinism gate's undefined/bigint sentinels collided with real object returns,
   a false positive that the passing tests didn't probe. My verify caught scope/weakening but not the

@@ -52,6 +52,10 @@ conventions you must follow are below.
 - Match the style, naming, and comment density of surrounding code. Read neighboring files first.
 - No secrets in code or commits. Reference secrets; never embed them (spec §13.1).
 - Determinism and reproducibility over cleverness.
+- **Validators/guards over untrusted or `unknown` input must be fail-closed and NEVER throw** —
+  handle cyclic, deeply-nested, and malformed shapes by returning a rejection, not by crashing
+  (a throw at a trust boundary is a DoS). Prove it with a malformed/cyclic regression test. (This has
+  bitten twice — see `ai-factory/STATE.md` lessons.)
 
 ---
 
