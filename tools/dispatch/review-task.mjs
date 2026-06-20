@@ -45,6 +45,24 @@ const base = git(["merge-base", "main", branch]).stdout.trim() || "main";
 const diff = git(["diff", `${base}..${branch}`]).stdout || "";
 const files = git(["diff", "--name-only", `${base}..${branch}`]).stdout.trim();
 
+// Run the contract's acceptance on the branch artifact so the reviewer has REAL pass/fail evidence —
+// its read-only workspace cannot run tests, and the worker's sandbox may have blocked the Go container
+// lane. Throwaway detached worktree so main is untouched.
+let acceptanceEvidence = "(orchestrator did not run it)";
+if (c.acceptance_command) {
+  const revWt = join(REPO, ".vita-worktrees", `review-${id}`);
+  git(["worktree", "remove", "--force", revWt]);
+  git(["worktree", "prune"]);
+  const add = git(["worktree", "add", "--detach", "--force", revWt, branch]);
+  if (add.status === 0) {
+    const acc = spawnSync(c.acceptance_command, { cwd: revWt, shell: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const out = ((acc.stdout || "") + "\n" + (acc.stderr || "")).split(/\r?\n/).filter(Boolean).slice(-14).join("\n");
+    acceptanceEvidence = `${acc.status === 0 ? "PASS (exit 0)" : `FAIL (exit ${acc.status})`}\n${out}`;
+    git(["worktree", "remove", "--force", revWt]);
+    git(["worktree", "prune"]);
+  }
+}
+
 const instructions = [
   "You are an INDEPENDENT senior reviewer for the Vita project (a TypeScript-first personal Node OS).",
   "Review the diff below (treat it as a higher-risk R2+ change) for merge into main. You did NOT write it.",
@@ -61,6 +79,14 @@ const instructions = [
   "  VERDICT: reject    (fundamentally wrong approach)",
   "",
   `Changed files:\n${files}`,
+  "",
+  `=== ORCHESTRATOR-RUN ACCEPTANCE on this branch (\`${c.acceptance_command}\`) ===`,
+  acceptanceEvidence,
+  "(This is the exact acceptance command, run by the orchestrator on the branch artifact — for Go it is",
+  "the pinned golang Linux container. Treat a PASS as the verified test/build/container result; do NOT",
+  "block solely because the worker report says it could not run the lane. Judge code correctness and",
+  "security from the diff.)",
+  "=== END ACCEPTANCE ===",
   "",
   `=== TASK CONTRACT ${id} ===`,
   c.raw,
