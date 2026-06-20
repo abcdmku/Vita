@@ -68,6 +68,11 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **Fail-closed probes must include EXOTIC objects too (P2-004 r1).** A param guard accepted
+  `new Date()`/`new Map()`/prototype-bearing objects as "valid empty params". My probe used a plain
+  `{}` and missed it. **Standard probe set now:** garbage, partial, cyclic, method-shadowed, hostile
+  iterator, throwing/flipping proxy, AND exotic prototype-bearing objects (Date/Map/Proxy). Accept
+  only true plain objects at a boundary. (7th reviewer block.)
 - **Pre-hardening pre-empts fail-closed, not domain semantics (P6-001).** Loading the full
   fail-closed checklist into the contract made the worker nail every adversarial-input class first try,
   but the reviewer still caught spec-§13.1 correctness gaps (embedded secrets in ref fields; empty
