@@ -8,13 +8,21 @@
 OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — needs a Linux/Go/Docker
 host the owner must opt into.**
 
-## Status: RUNNING — OS build path (owner chose "set up Docker", 2026-06-20)
-26 portable contracts merged (typecheck=0, 112 tests). Now opening the deferred OS layers. Toolchain READY + validated: **Go 1.26.4** (native + golang:1.26 container) and **Docker** (Debian 13
-trixie + Linux engine). Go builds run in the container via `tools/build/go-in-docker.mjs`. **OS path PROVEN end-to-end:** P1-004 Go agent skeleton (R3 privileged TCB) built by GPT-5.5, go
-test+vet clean in golang:1.26, reviewer-confirmed NO arbitrary-execution surface, merged. Next:
-P1-005 capability discovery (FR-004, read-only procfs/sysfs, tested for real in the Linux container),
-then the agent transaction engine (FR-007) + privileged capability impls, then the image pipeline
-(Debian/UKI/RAUC/dm-verity) + QEMU boot in Docker.
+## Status: PAUSED at OS milestone — awaiting owner direction
+28 contracts merged (typecheck=0, 112 TS tests; Go agent 3 pkgs green). **OS path PROVEN + advancing:**
+Docker/Go toolchain set up + validated (Go 1.26.4 + Debian 13 trixie via golang:1.26); two R3
+privileged-agent contracts built by GPT-5.5, container-tested (go test+vet), reviewer-gated, merged —
+**P1-004** (agent skeleton: narrow typed capabilities + fail-closed dispatch + /healthz) and **P1-005**
+(read-only procfs/sysfs capability discovery, FR-004). Paused here as a courtesy checkpoint given the
+very long autonomous run (owner had chosen "set up Docker → build the OS").
+**To resume:** owner says "keep going" / "focus on <area>" / "stop". **If a scheduled wakeup fires
+while this says PAUSED, re-pause — do NOT auto-dispatch.** (A stale wakeup fired once and was held.)
+
+### OS roadmap from here (owner picks depth)
+- TRACTABLE next (Go, container-testable): agent transaction engine (apply plan + rollback, FR-007);
+  privileged capability impls (storage/network/update) behind build tags; agent RPC/status transport.
+- HEAVY LIFT (more Docker setup, privileged/loopback): Debian image assembly (mkosi/debootstrap),
+  signed UKI + Secure Boot, RAUC A/B bundles, dm-verity, QEMU x86 boot (FR-001/023, Phase-1 boot gate).
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
