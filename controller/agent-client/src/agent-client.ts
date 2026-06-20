@@ -30,6 +30,7 @@ export interface AgentClientOptions {
 export interface AgentClient {
   getHealth(): Promise<AgentHealth>;
   getCapabilities(): Promise<AgentCapabilities>;
+  getOperations(): Promise<readonly string[]>;
   apply(plan: AgentApplyPlan): Promise<AgentApplyResult>;
 }
 
@@ -246,6 +247,7 @@ const ACCELERATOR_OPTIONAL_FIELDS = Object.freeze([
   "architecture",
 ]);
 const DETECTED_DEVICE_FIELDS = Object.freeze(["class", "vendorID", "deviceID"]);
+const OPERATIONS_RESPONSE_FIELDS = Object.freeze(["operations"]);
 const APPLY_RESULT_REQUIRED_FIELDS = Object.freeze([
   "outcome",
   "applied",
@@ -314,6 +316,10 @@ export class LoopbackAgentClient implements AgentClient {
 
   getCapabilities(): Promise<AgentCapabilities> {
     return this.#request("/capabilities", "GET", validateCapabilities);
+  }
+
+  getOperations(): Promise<readonly string[]> {
+    return this.#request("/operations", "GET", validateOperations);
   }
 
   apply(plan: AgentApplyPlan): Promise<AgentApplyResult> {
@@ -519,6 +525,27 @@ function validateCapabilities(payload: PlainJsonObject): ValidationResult<AgentC
   return accept({
     ...base,
     detectedDevices: detectedDevices.value,
+  });
+}
+
+function validateOperations(payload: PlainJsonObject): ValidationResult<readonly string[]> {
+  const fields = expectFields(payload, OPERATIONS_RESPONSE_FIELDS);
+
+  if (!fields.ok) return fields;
+
+  return validateOperationNameArray(field(payload, "operations"), "operations");
+}
+
+function validateOperationNameArray(
+  value: PlainJson | undefined,
+  path: string,
+): ValidationResult<readonly string[]> {
+  return validateArray(value, path, (item, itemPath) => {
+    if (typeof item !== "string" || item === "") {
+      return reject(`${itemPath} must be a non-empty string.`);
+    }
+
+    return accept(item);
   });
 }
 
