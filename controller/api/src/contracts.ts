@@ -6,6 +6,11 @@ import type {
   PackageContract,
   PackageContractValidationResult,
 } from "../../../sdk/manifests/src/package-contract.ts";
+import type {
+  Capsule,
+  CapsuleValidationResult,
+} from "../../../storage/capsules/src/capsule.ts";
+import type { SimulationProfileKind } from "../../../simulation/profiles/src/profiles.ts";
 import type { PlanDiff } from "../../../sdk/typescript/src/diff.ts";
 import type {
   BackupSchedule,
@@ -330,6 +335,39 @@ export type AppInstallPreviewResponse =
       readonly error: ControllerApiError;
     };
 
+export interface CapsuleImportPreviewRequest {
+  readonly capsule: Capsule;
+  readonly targetArch: DeviceArchitecture;
+  readonly policy: BrokerPolicy;
+}
+
+export type CapsuleValidationPass = Extract<CapsuleValidationResult, { readonly ok: true }>;
+
+export type CapsuleImportPreviewResponse =
+  | {
+      readonly ok: true;
+      readonly validation: CapsuleValidationPass;
+      readonly targetArch: DeviceArchitecture;
+      readonly migratable: true;
+      readonly migrationReasons: readonly string[];
+      readonly missingProfiles: readonly SimulationProfileKind[];
+      readonly grantedCapabilities: readonly CapabilityGrant[];
+      readonly deniedCapabilities: readonly CapabilityDenial[];
+      readonly reasons: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly validation: CapsuleValidationResult;
+      readonly targetArch?: DeviceArchitecture;
+      readonly migratable: boolean;
+      readonly migrationReasons: readonly string[];
+      readonly missingProfiles: readonly SimulationProfileKind[];
+      readonly grantedCapabilities: readonly CapabilityGrant[];
+      readonly deniedCapabilities: readonly CapabilityDenial[];
+      readonly reasons: readonly string[];
+      readonly error: ControllerApiError;
+    };
+
 export interface ControllerApi {
   getOverview(): OverviewResponse;
   getStorageOverview(): StorageOverviewResponse;
@@ -339,6 +377,7 @@ export interface ControllerApi {
   previewPlan(params: PlanPreviewRequest): PlanPreviewResponse;
   listApps(): AppSummaryResponse;
   previewAppInstall(params: AppInstallPreviewRequest): AppInstallPreviewResponse;
+  previewCapsuleImport(params: CapsuleImportPreviewRequest): CapsuleImportPreviewResponse;
 }
 
 export type ControllerApiMethod =
@@ -349,7 +388,8 @@ export type ControllerApiMethod =
   | "getNodeHealth"
   | "previewPlan"
   | "listApps"
-  | "previewAppInstall";
+  | "previewAppInstall"
+  | "previewCapsuleImport";
 
 export type ControllerApiRequest =
   | {
@@ -383,6 +423,10 @@ export type ControllerApiRequest =
   | {
       readonly method: "previewAppInstall";
       readonly params: AppInstallPreviewRequest;
+    }
+  | {
+      readonly method: "previewCapsuleImport";
+      readonly params: CapsuleImportPreviewRequest;
     };
 
 export interface ControllerApiDispatchRequest {
@@ -430,6 +474,11 @@ export type ControllerApiDispatchResult =
       readonly ok: true;
       readonly method: "previewAppInstall";
       readonly response: AppInstallPreviewResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "previewCapsuleImport";
+      readonly response: CapsuleImportPreviewResponse;
     }
   | {
       readonly ok: false;

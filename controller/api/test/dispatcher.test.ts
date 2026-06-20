@@ -5,10 +5,13 @@ import {
   createInMemoryControllerApi,
   dispatchControllerRequest,
 } from "../src/dispatcher.ts";
+import { REQUIRED_PROFILES } from "../../../simulation/profiles/src/profiles.ts";
 import { normalize } from "../../../sdk/typescript/src/plan.ts";
 import type { ControllerApiDispatchResult, IdentityRole } from "../src/contracts.ts";
 import type { BrokerPolicy, CapabilityGrant } from "../../../runtime/permission-broker/src/grants.ts";
 import type { PackageContract } from "../../../sdk/manifests/src/package-contract.ts";
+import type { Capsule } from "../../../storage/capsules/src/capsule.ts";
+import type { DeviceArchitecture } from "../../../sdk/typescript/src/capabilities.ts";
 import type { DesiredState } from "../../../sdk/typescript/src/plan.ts";
 
 test("overview and node health route through the dispatcher", () => {
@@ -543,6 +546,199 @@ test("previewAppInstall rejects malformed policy even for valid zero-capability 
   assert.match(preview.reasons[0] ?? "", /policy/i);
 });
 
+test("previewCapsuleImport returns a ready preview for valid neutral capsules", () => {
+  const preview = dispatchCapsulePreview(
+    validCapsule({
+      architectures: ["x86_64", "arm64"],
+      dataAccess: "read-write",
+    }),
+    "arm64",
+    matchingPolicy({ dataAccess: "read-write" }),
+  );
+
+  assert.equal(preview.ok, true);
+
+  if (!preview.ok) {
+    assert.fail(`expected capsule import preview to pass: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.targetArch, "arm64");
+  assert.equal(preview.migratable, true);
+  assert.deepEqual(preview.migrationReasons, []);
+  assert.deepEqual(preview.missingProfiles, []);
+  assert.deepEqual(preview.deniedCapabilities, []);
+  assert.equal(preview.grantedCapabilities.length, 3);
+  assert.equal("granted" in preview, false);
+  assert.equal("denied" in preview, false);
+});
+
+test("previewCapsuleImport surfaces missing sim coverage and over-policy grants", () => {
+  const preview = dispatchCapsulePreview(
+    validCapsule({
+      dataAccess: "read-write",
+      requiredProfiles: REQUIRED_PROFILES.filter((profile) => profile !== "power-loss"),
+    }),
+    "x86_64",
+    matchingPolicy({ dataAccess: "read-only" }),
+  );
+
+  assert.equal(preview.ok, false);
+
+  if (preview.ok) {
+    assert.fail(`expected capsule import preview to fail: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.error.code, "CAPABILITY_DENIED");
+  assert.equal(preview.migratable, true);
+  assert.deepEqual(preview.missingProfiles, ["power-loss"]);
+  assert.equal(preview.deniedCapabilities.length, 1);
+  assert.deepEqual(preview.deniedCapabilities[0]?.capability, {
+    kind: "data",
+    class: "app-state",
+    access: "read-write",
+    scope: "state",
+  });
+  assert.match(preview.reasons.join("\n"), /power-loss/);
+  assert.match(preview.reasons.join("\n"), /policy/i);
+});
+
+test("previewCapsuleImport reports architecture migration readiness reasons", () => {
+  const preview = dispatchCapsulePreview(
+    validCapsule({
+      architectureNeutral: false,
+      architectures: ["x86_64"],
+      dataAccess: "read-write",
+      packageClass: "oci-service",
+      runtimeArchitectures: ["x86_64"],
+    }),
+    "arm64",
+    matchingPolicy({ dataAccess: "read-write" }),
+  );
+
+  assert.equal(preview.ok, false);
+
+  if (preview.ok) {
+    assert.fail(`expected wrong-architecture capsule to fail: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.error.code, "VALIDATION_FAILED");
+  assert.equal(preview.migratable, false);
+  assert.match(preview.migrationReasons.join("\n"), /target architecture arm64/);
+  assert.match(preview.migrationReasons.join("\n"), /state snapshot/i);
+  assert.match(preview.migrationReasons.join("\n"), /runtime artifacts/i);
+});
+
+test("previewCapsuleImport requires declared target architecture for neutral runtimes", () => {
+  const preview = dispatchCapsulePreview(
+    validCapsule({
+      architectureNeutral: true,
+      architectures: ["x86_64"],
+      dataAccess: "read-write",
+      packageClass: "wasm-component",
+      runtimeArchitectures: ["x86_64", "arm64"],
+    }),
+    "arm64",
+    matchingPolicy({ dataAccess: "read-write" }),
+  );
+
+  assert.equal(preview.ok, false);
+
+  if (preview.ok) {
+    assert.fail(`expected x86-only neutral runtime to fail: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.migratable, false);
+  assert.deepEqual(preview.missingProfiles, []);
+  assert.deepEqual(preview.deniedCapabilities, []);
+  assert.match(preview.migrationReasons.join("\n"), /does not declare target architecture arm64/);
+});
+
+test("previewCapsuleImport fail-closes accessor and exotic inputs without throwing", () => {
+  const accessorParams: Record<string, unknown> = {};
+  let capsuleReads = 0;
+
+  Object.defineProperty(accessorParams, "capsule", {
+    enumerable: true,
+    get() {
+      capsuleReads += 1;
+      return validCapsule();
+    },
+  });
+  Object.defineProperty(accessorParams, "targetArch", {
+    enumerable: true,
+    value: "x86_64",
+  });
+  Object.defineProperty(accessorParams, "policy", {
+    enumerable: true,
+    value: matchingPolicy({ dataAccess: "read-write" }),
+  });
+
+  assertDispatchInvalidParams("previewCapsuleImport", accessorParams, "top-level-accessor");
+  assert.equal(capsuleReads, 0);
+
+  const nestedPolicy = matchingPolicy({ dataAccess: "read-write" }) as unknown as Record<
+    string,
+    unknown
+  >;
+  let policyReads = 0;
+
+  Object.defineProperty(nestedPolicy, "data", {
+    enumerable: true,
+    get() {
+      policyReads += 1;
+      return [];
+    },
+  });
+
+  assertDispatchInvalidParams(
+    "previewCapsuleImport",
+    {
+      capsule: validCapsule({ dataAccess: "read-write" }),
+      targetArch: "x86_64",
+      policy: nestedPolicy,
+    },
+    "nested-policy-accessor",
+  );
+  assert.equal(policyReads, 0);
+
+  const shadowedCapsule = validCapsule({ dataAccess: "read-write" });
+  const requiredProfiles = shadowedCapsule.simulation.requiredProfiles as unknown as Record<
+    string,
+    unknown
+  >;
+  requiredProfiles.some = () => true;
+
+  assertDispatchInvalidParams(
+    "previewCapsuleImport",
+    {
+      capsule: shadowedCapsule,
+      targetArch: "x86_64",
+      policy: matchingPolicy({ dataAccess: "read-write" }),
+    },
+    "method-shadowed-capsule",
+  );
+
+  const proxyCapsule = new Proxy(validCapsule({ dataAccess: "read-write" }), {
+    getPrototypeOf() {
+      throw new Error("proxy should not escape");
+    },
+  });
+
+  assertDispatchInvalidParams(
+    "previewCapsuleImport",
+    {
+      capsule: proxyCapsule,
+      targetArch: "x86_64",
+      policy: matchingPolicy({ dataAccess: "read-write" }),
+    },
+    "throwing-proxy-capsule",
+  );
+});
+
 test("dispatcher rejects unknown methods with a typed error", () => {
   const api = createInMemoryControllerApi();
 
@@ -610,6 +806,34 @@ function dispatchPreview(packageContract: unknown, policy: unknown) {
   return preview.response;
 }
 
+function dispatchCapsulePreview(
+  capsule: unknown,
+  targetArch: DeviceArchitecture,
+  policy: unknown,
+) {
+  const api = createInMemoryControllerApi();
+  let preview: ControllerApiDispatchResult | undefined;
+
+  assert.doesNotThrow(() => {
+    preview = dispatchControllerRequest(api, {
+      method: "previewCapsuleImport",
+      params: {
+        capsule,
+        targetArch,
+        policy,
+      },
+    });
+  });
+
+  assert.notEqual(preview, undefined);
+
+  if (preview === undefined || !preview.ok || preview.method !== "previewCapsuleImport") {
+    assert.fail(`expected capsule import preview response: ${JSON.stringify(preview)}`);
+  }
+
+  return preview.response;
+}
+
 function assertDispatchInvalidParams(method: string, params: unknown, label: string): void {
   const api = createInMemoryControllerApi();
   let result: ControllerApiDispatchResult | undefined;
@@ -628,6 +852,181 @@ function assertDispatchInvalidParams(method: string, params: unknown, label: str
   }
 
   assert.equal(result.error.code, "INVALID_PARAMS");
+}
+
+function validCapsule(
+  options: {
+    readonly architectureNeutral?: boolean;
+    readonly architectures?: PackageContract["architectures"];
+    readonly dataAccess?: "read-only" | "read-write";
+    readonly packageClass?: PackageContract["packageClass"];
+    readonly requiredProfiles?: readonly string[];
+    readonly runtimeArchitectures?: readonly DeviceArchitecture[];
+  } = {},
+): Capsule {
+  const dataAccess = options.dataAccess ?? "read-write";
+  const runtimeArchitectures = options.runtimeArchitectures ?? ["x86_64", "arm64"];
+
+  return {
+    manifest: {
+      package: validPackageContract({
+        architectures: options.architectures ?? ["x86_64", "arm64"],
+        dataAccess,
+        packageClass: options.packageClass ?? "ts-service",
+      }),
+      versions: {
+        capsule: "1",
+        package: "1.2.3",
+        runtime: "1",
+        state: "7",
+        policy: "1",
+        simulation: "1",
+      },
+      signatures: [
+        {
+          ref: "signature://vita/notes/1.2.3/sigstore",
+          keyRef: "publisher-key://vita/first-party/stable",
+          algorithm: "sigstore-bundle",
+          digest: digest("a34d88f8f4f5b74051f10b39a6f8a62ffb1a4d993db1ea5744d70d7f4a7dd04f"),
+          signedAt: "2026-06-01T12:20:00.000Z",
+        },
+      ],
+      sbom: {
+        format: "spdx-json",
+        ref: "sbom://vita/notes/1.2.3/spdx",
+        digest: digest("497f6eca5576b90883c4632f4a6012db0826829f6d95cb5fae40897a7f4d7c3e"),
+        generatedAt: "2026-06-01T12:00:00.000Z",
+      },
+    },
+    runtime: {
+      ociImageIndexes: [
+        {
+          name: "notes-service",
+          ref: "oci://registry.example.invalid/vita/notes@sha256:8c4f2d730f5f0f91f0a6373d9867a22f45e4b508ea258e321fdb61c09f771d25",
+          digest: digest("8c4f2d730f5f0f91f0a6373d9867a22f45e4b508ea258e321fdb61c09f771d25"),
+          mediaType: "application/vnd.oci.image.index.v1+json",
+          platforms: runtimeArchitectures.map((architecture) => ({
+            os: "linux",
+            architecture,
+          })),
+        },
+      ],
+      wasmComponents: [
+        {
+          name: "notes-renderer",
+          ref: "wasm://vita/notes/1.2.3/renderer",
+          digest: digest("5b3db6c7aa7dfaa8f9d2698b0f6f30f3cfba71d9acaa6168d7a4a4d8f56e6f5c"),
+          mediaType: "application/wasm",
+          componentId: "com.vita.notes.renderer",
+        },
+      ],
+      typescript: {
+        source: {
+          ref: "artifact://vita/notes/1.2.3/source",
+          digest: digest("b0f5e8c4af6f3a5e513d67fd77f4a5a9f8f9362d653880f4dd9c6cfe77987f5b"),
+          mediaType: "application/vnd.vita.typescript-source",
+          entrypoint: "src/main.ts",
+        },
+        compiled: {
+          ref: "artifact://vita/notes/1.2.3/compiled",
+          digest: digest("dd3fd69f459fef75ad205b5f8f50df24ed34cb6a56a54edfc832790a93fb2bc0"),
+          mediaType: "application/javascript",
+          entrypoint: "dist/main.js",
+        },
+      },
+    },
+    state: {
+      snapshot: {
+        ref: "snapshot://vita/notes/2026-06-01T12:30:00Z",
+        architectureNeutral: options.architectureNeutral ?? true,
+        consistency: "application-consistent",
+        digest: digest("7f4f8dcf3688a770886fd18a97ed8d691a59d221429d7f429a9634a31e1a0f08"),
+        createdAt: "2026-06-01T12:30:00.000Z",
+      },
+      exports: [
+        {
+          name: "notes-state-json",
+          format: "json",
+          ref: "export://vita/notes/2026-06-01/state-json",
+          digest: digest("43d907b11d3f093f2fead79f5064dd530a4b0c42df75e8308152e1e2d1d7f2a7"),
+          dataClass: "app-state",
+          rebuildable: false,
+        },
+      ],
+      migrationMetadata: {
+        currentVersion: "7",
+        minimumSupportedVersion: "5",
+        migrations: [
+          {
+            id: "notes-state-6-to-7",
+            fromVersion: "6",
+            toVersion: "7",
+            reversible: true,
+            hookRef: "artifact://vita/notes/1.2.3/migrations/6-to-7",
+          },
+        ],
+      },
+    },
+    policy: {
+      dataGrants: [
+        {
+          name: "state",
+          class: "app-state",
+          access: dataAccess,
+          scope: "state",
+        },
+      ],
+      networkGrants: [
+        {
+          name: "web",
+          direction: "ingress",
+          protocol: "https",
+          ports: [443],
+          public: false,
+        },
+        {
+          name: "updates",
+          direction: "egress",
+          protocol: "https",
+          destination: "updates.example.invalid",
+          ports: [443],
+        },
+      ],
+      resourceLimits: {
+        cpuCores: 2,
+        ramMiB: 512,
+        storageMiB: 1024,
+      },
+      identityBindings: [
+        {
+          name: "owner",
+          identityRef: "identity://vita/local-owner",
+          role: "admin",
+        },
+      ],
+    },
+    simulation: {
+      requiredProfiles: options.requiredProfiles ?? Array.from(REQUIRED_PROFILES),
+      expectedHealthChecks: [
+        {
+          name: "http",
+          type: "http",
+          target: "/healthz",
+          intervalSeconds: 30,
+          timeoutSeconds: 5,
+        },
+      ],
+      failureTests: [
+        {
+          name: "restore-after-power-loss",
+          profile: "power-loss",
+          fault: "host-power-loss",
+          expectedHealth: "http",
+          timeoutSeconds: 120,
+        },
+      ],
+    },
+  };
 }
 
 function matchingPolicy(
@@ -666,14 +1065,16 @@ function matchingPolicy(
 
 function validPackageContract(
   options: {
+    readonly architectures?: PackageContract["architectures"];
     readonly dataAccess?: "read-only" | "read-write";
+    readonly packageClass?: PackageContract["packageClass"];
     readonly zeroCapabilities?: boolean;
   } = {},
 ): PackageContract {
   const zeroCapabilities = options.zeroCapabilities ?? false;
 
   return {
-    packageClass: "ts-service",
+    packageClass: options.packageClass ?? "ts-service",
     identity: {
       id: "com.vita.notes",
       name: "Vita Notes",
@@ -687,7 +1088,7 @@ function validPackageContract(
       algorithm: "sha256",
       value: "8c4f2d730f5f0f91f0a6373d9867a22f45e4b508ea258e321fdb61c09f771d25",
     },
-    architectures: ["x86_64"],
+    architectures: options.architectures ?? ["x86_64"],
     resources: {
       cpuCores: 1,
       ramMiB: 256,
@@ -777,5 +1178,12 @@ function validPackageContract(
       low: 0,
     },
     requiredSimulationProfiles: [],
+  };
+}
+
+function digest(value: string): { readonly algorithm: "sha256"; readonly value: string } {
+  return {
+    algorithm: "sha256",
+    value,
   };
 }
