@@ -109,3 +109,51 @@ test("encodeEnvelope is deterministic for the same envelope", () => {
 
   assert.equal(encodeEnvelope(envelope), encodeEnvelope(envelope));
 });
+
+test("verifyEnvelope rejects cyclic or throwing plan shapes without throwing", () => {
+  const cyclicConfig: Record<string, unknown> = {};
+  cyclicConfig.self = cyclicConfig;
+  const cyclicPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "cycle",
+        config: cyclicConfig,
+      },
+    ],
+  };
+
+  const throwingConfig: Record<string, unknown> = {};
+  Object.defineProperty(throwingConfig, "boom", {
+    enumerable: true,
+    get() {
+      throw new Error("boom");
+    },
+  });
+  const throwingPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "throws",
+        config: throwingConfig,
+      },
+    ],
+  };
+
+  assertEnvelopeRejectsWithoutThrow(cyclicPlan);
+  assertEnvelopeRejectsWithoutThrow(throwingPlan);
+});
+
+function assertEnvelopeRejectsWithoutThrow(plan: unknown): void {
+  assert.doesNotThrow(() => {
+    assert.equal(
+      verifyEnvelope({
+        schemaVersion: 1,
+        planHash: "unused",
+        plan,
+        createdAtRef: "source:test",
+      }),
+      false,
+    );
+  });
+}

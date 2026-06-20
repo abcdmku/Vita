@@ -5,6 +5,7 @@ import {
   createInMemoryControllerApi,
   dispatchControllerRequest,
 } from "../src/dispatcher.ts";
+import { normalize } from "../../../sdk/typescript/src/plan.ts";
 import type { ControllerApiDispatchResult } from "../src/contracts.ts";
 import type { DesiredState } from "../../../sdk/typescript/src/plan.ts";
 
@@ -167,6 +168,64 @@ test("previewPlan returns a typed validation error for overprivileged input with
     ["apps/0/config/publicAccess"],
   );
 });
+
+test("dispatcher rejects malformed currentPlan without throwing", () => {
+  const cyclicConfig: Record<string, unknown> = {};
+  cyclicConfig.self = cyclicConfig;
+  const cyclicPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "cycle",
+        config: cyclicConfig,
+      },
+    ],
+  };
+
+  const throwingConfig: Record<string, unknown> = {};
+  Object.defineProperty(throwingConfig, "boom", {
+    enumerable: true,
+    get() {
+      throw new Error("boom");
+    },
+  });
+  const throwingPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "throws",
+        config: throwingConfig,
+      },
+    ],
+  };
+
+  assertPreviewCurrentPlanRejectsWithoutThrow(cyclicPlan);
+  assertPreviewCurrentPlanRejectsWithoutThrow(throwingPlan);
+});
+
+function assertPreviewCurrentPlanRejectsWithoutThrow(currentPlan: unknown): void {
+  const api = createInMemoryControllerApi();
+  let preview: ControllerApiDispatchResult | undefined;
+
+  assert.doesNotThrow(() => {
+    preview = dispatchControllerRequest(api, {
+      method: "previewPlan",
+      params: {
+        desiredState: {},
+        currentPlan,
+      },
+    });
+  });
+
+  assert.notEqual(preview, undefined);
+
+  if (preview === undefined || preview.ok) {
+    assert.fail(`expected invalid currentPlan to fail: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.error.code, "INVALID_PARAMS");
+  assert.match(preview.error.message, /currentPlan/);
+}
 
 test("dispatcher rejects unknown methods with a typed error", () => {
   const api = createInMemoryControllerApi();

@@ -1,6 +1,6 @@
 import { diffPlans } from "../../../sdk/typescript/src/diff.ts";
 import { explainPlan } from "../../../sdk/typescript/src/explain.ts";
-import { normalize } from "../../../sdk/typescript/src/plan.ts";
+import { isCanonicalPlan, normalize } from "../../../sdk/typescript/src/plan.ts";
 import { validatePlan } from "../../../sdk/typescript/src/validate.ts";
 import type { DeviceSnapshot } from "../../../sdk/typescript/src/capabilities.ts";
 import type { CanonicalPlan, DesiredState } from "../../../sdk/typescript/src/plan.ts";
@@ -342,9 +342,13 @@ function readPlanPreviewParams(params: unknown): PlanPreviewRequest {
     return { desiredState };
   }
 
+  if (!isCanonicalPlan(currentPlan)) {
+    throw new TypeError("previewPlan params.currentPlan must be a canonical plan.");
+  }
+
   return {
     desiredState,
-    currentPlan: currentPlan as CanonicalPlan,
+    currentPlan,
   };
 }
 

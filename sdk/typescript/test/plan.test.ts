@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { normalize, planHash } from "../src/plan.ts";
+import { isCanonicalPlan, normalize, planHash } from "../src/plan.ts";
 import type { DesiredState } from "../src/plan.ts";
 
 const representativeState: DesiredState = {
@@ -173,3 +173,69 @@ test("representative state normalizes to the expected top-level plan shape", () 
   assert.equal(plan.apps.length, 2);
   assert.equal(plan.backups.length, 1);
 });
+
+test("isCanonicalPlan accepts normalized plans and rejects malformed shapes", () => {
+  const plan = normalize(representativeState);
+
+  assert.equal(isCanonicalPlan(plan), true);
+  assert.equal(
+    isCanonicalPlan({
+      apps: plan.apps,
+      backups: plan.backups,
+      identity: plan.identity,
+      storage: plan.storage,
+    }),
+    false,
+  );
+  assert.equal(
+    isCanonicalPlan({
+      ...plan,
+      apps: {},
+    }),
+    false,
+  );
+  assert.equal(isCanonicalPlan("not a plan"), false);
+});
+
+test("isCanonicalPlan fails closed for cyclic or throwing inputs", () => {
+  const cyclicConfig: Record<string, unknown> = {};
+  cyclicConfig.self = cyclicConfig;
+  const cyclicPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "cycle",
+        config: cyclicConfig,
+      },
+    ],
+  };
+
+  const throwingConfig: Record<string, unknown> = {};
+  Object.defineProperty(throwingConfig, "boom", {
+    enumerable: true,
+    get() {
+      throw new Error("boom");
+    },
+  });
+  const throwingPlan = {
+    ...normalize({}),
+    apps: [
+      {
+        id: "throws",
+        config: throwingConfig,
+      },
+    ],
+  };
+
+  assertPlanGuardRejectsWithoutThrow(cyclicPlan);
+  assertPlanGuardRejectsWithoutThrow(throwingPlan);
+});
+
+function assertPlanGuardRejectsWithoutThrow(value: unknown): void {
+  let result: boolean | undefined;
+
+  assert.doesNotThrow(() => {
+    result = isCanonicalPlan(value);
+  });
+  assert.equal(result, false);
+}
