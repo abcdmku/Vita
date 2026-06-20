@@ -31,11 +31,14 @@ canonical normalizer, authoring API (defineSystem/app/backup), capabilities + ac
 (unified), plan diff, plan validation (fail-closed), plan envelope (tamper-evident), determinism
 gate, plan explain. All verified; the cross-cutting reconcile (P0-007) reviewer-approved.
 
+## Milestone: SDK Phase-0 core + audit cleanup COMPLETE
+12 contracts merged; `sdk/typescript` = 8 modules, **42 tests**, audit-clean (all 15 findings fixed,
+the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge → fixed round 2). Solid
+foundation to build the controller on.
+
 ## In flight
-- P0-012 **round 2** building. Round 1 was REVISED by the reviewer (NOT merged): its repro.ts
-  undefined/bigint handling used sentinel objects that COLLIDE with real return values (false
-  determinism positive). Re-dispatched with a collision-free fix + negative tests. P0-010, P0-011
-  merged (reviewer-approved; suite 37/37).
+- P0-013 (Week-1 ADRs, R0) dispatching. P2-001 (controller API skeleton — **first real R2**, →
+  reviewer-gated) queued next.
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
@@ -75,6 +78,8 @@ P0-010/011/012.
 - **P0-010** — unify shared types + §14.1 fidelity (audit cleanup). 35/35. Reviewer-approved. Commit c702404.
 - **P0-011** — envelope integrity honesty + structural validation + bind metadata. 37/37.
   Reviewer-approved. Commit e4531be.
+- **P0-012** — fix §8.3 example to validate + coverage gaps + collision-free repro. 42/42.
+  Reviewer-approved (round 2; round 1 reviewer-blocked a determinism bug). Commit c75a2d8.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
