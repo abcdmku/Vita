@@ -8,7 +8,7 @@
 proceeding in parallel.
 
 ## Status: RUNNING — autonomous loop active
-Workers: GPT-5.5 xhigh via Codex (`codex login`). 20 contracts merged; suites green (sdk 45, controller 10, manifests 4, atproto 4, broker 10, capsules 10). Test totals grow per tick.
+Workers: GPT-5.5 xhigh via Codex (`codex login`). 22 contracts merged; suites green (sdk 45, controller 12, manifests 4, atproto 4, broker 10, capsules 10, sim 8). Test totals grow per tick.
 
 **Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20. No human-approval pause;
 quality floor (independent verify + rubric + stop-conditions) still applies. Reverts on "stop
@@ -25,9 +25,8 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P6-001 **round 2** building. Round 1: pre-hardening eliminated ALL fail-closed findings (✓ the
-  checklist works), but the reviewer caught §13.1 SEMANTIC gaps — embedded material allowed in `ref`
-  fields (secrets-as-references not enforced) + empty signatures accepted. Re-dispatched. (6th block.)
+- P1-003 (package catalog entry types + fail-closed validator §9.2/§9.3, R1) dispatching.
+  P2-005 (controller capsule-import preview — validity+migration+sim+grant readiness, R2) queued.
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -45,12 +44,12 @@ Go-agent / OS-image / lockfile path. Absent steering, the loop proceeds in id or
   — extract a single shared enum/constants module for auditability/drift.
 
 ## Reviewer gate — validated & load-bearing
-`npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked four buggy merges** that passed
+`npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked seven buggy merges** that passed
 local tests: P0-012 (determinism sentinel collision), P0-014 (guard threw on cyclic input — DoS),
 and P2-002 ×2 (partial-malformed grants + alias; then method-shadowing bypass). All fixed-forward and
 merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-boundary guards.
 
-## Done (20)
+## Done (22)
 - **P0-001** plan model + canonical normalizer · **P0-002** authoring API + §8.3 example ·
   **P0-003** capabilities + accelerator selection · **P0-004** plan diff (FR-006) ·
   **P0-005** plan validation (fail-closed) · **P0-006** plan envelope (tamper-evident) ·
@@ -63,6 +62,7 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 - **P2-001** controller API skeleton — **first R2** ✓rev (getOverview/getNodeHealth/previewPlan).
 - **P2-002** permission-broker decision core — **TCB R2** ✓rev (3 rounds; default-deny, fail-closed, intrinsic-safe).
 - **P2-003** controller app endpoints — install-preview shows granted/denied caps via broker (FR-010, §28.5) ✓rev r2.
+- **P2-004** controller storage/backup/identity overview (protection-state model, §11 roles) ✓rev r2 · **P6-002** simulation profile types + validator (§13/§20.1).
 - **P1-002** PDS manifest · **P6-001** capsule manifest types + fail-closed validator (§13) ✓rev r2.
 
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
