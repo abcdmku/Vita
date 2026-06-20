@@ -26,10 +26,11 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P2-002 **round 2** building. Round 1 reviewer-BLOCKED (not merged): 4 security holes in the TCB
-  broker — **partial-but-typed** malformed data/network inputs could still grant (my garbage-only
-  probe missed it); an undocumented `package` alias widened the trust boundary. Re-dispatched with
-  strict shape validation (reuse the P1 validator) + adversarial tests. Queue empties after → author next.
+- P2-002 **round 3** building — the TCB permission broker is hard, blocked twice by the reviewer.
+  R1: partial-malformed grants + undocumented alias. R2: method-shadowing bypass (shape-valid
+  contract with `egress.some = () => true` lied to the check). Round 3 re-architects to
+  **normalize-untrusted-to-plain-via-intrinsic-safe-reads, then decide** + brevity. If round 3 fails,
+  escalate (decompose into normalizer + decision-rules, or dual-candidate per spec §18.4).
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -65,6 +66,12 @@ now mandates fail-closed-never-throw validators to pre-empt the latter class.
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **TCB guards must not execute methods off untrusted objects (P2-002 r2).** A shape-valid contract
+  with a shadowed array method (`egress.some = () => true`) or hostile iterator bypasses grant checks
+  that call `.some`/`.includes`/`.find` on the untrusted object. **Fix pattern:** normalize untrusted
+  input to plain trusted data with intrinsic-safe reads first, reject exotic shapes, then decide.
+  (Now in AGENTS.md.) The broker has needed 3 rounds — a hard adversarial-input problem; if serial
+  fix-forward stalls, decompose or run spec §18.4 dual-candidate.
 - **Fail-closed must reject PARTIAL malformed input, not just garbage (P2-002 r1).** The broker
   granted on typed-but-incomplete data/network declarations; my "wholly-garbage → denied" probe gave
   false confidence. **Takeaway:** verify validators against partial/missing-required-field inputs;

@@ -60,7 +60,14 @@ conventions you must follow are below.
   one of two required sides → reject, don't grant the present side). Validate the FULL required shape
   — reuse the canonical validator (e.g. `validatePackageContract`), not a looser local re-check — and
   read declarations ONLY from the documented typed field (no undocumented aliases at a trust
-  boundary; absent/ambiguous ⇒ deny). (This class has bitten three times — see `ai-factory/STATE.md`.)
+  boundary; absent/ambiguous ⇒ deny).
+- **At a trust boundary, NEVER execute methods off untrusted objects.** Calling `x.includes/.some/
+  .find/.forEach` or `for…of` on attacker-controlled data lets a shape-valid input shadow those
+  methods (or supply a hostile iterator/getter/proxy) and lie to your security check. **Normalize
+  untrusted input to plain trusted data first** using intrinsic-safe reads (`Array.isArray`, index
+  access, `Object.hasOwn`, `Reflect.ownKeys`, `Array.prototype.X.call(plainArr, …)`), reject exotic
+  shapes, THEN decide over the plain data. Prove it with a method-shadowing / hostile-iterator
+  regression test. (This class has bitten repeatedly — see `ai-factory/STATE.md`.)
 
 ---
 
