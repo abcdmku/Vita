@@ -2,10 +2,10 @@
 node_modules/
 .pnpm-store/
 
-# build output
-dist/
-build/
+# build output (anchored to repo root — `build/` unanchored swallowed tools/build/ source)
+/build/
 out/
+**/dist/
 *.tsbuildinfo
 
 # worker / loop runtime artifacts
