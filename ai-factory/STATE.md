@@ -26,25 +26,39 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
       build lane still TODO.
 
 ## In flight
-- (none) — queue drained; authoring the next Phase-0 slice.
+- P0-007 (reconcile SDK accelerator model) ready; dispatching next.
 
 ## Blocked
 - (none)
 
+## Ready queue
+- P0-005 (plan validation), P0-006 (plan envelope), P0-007 (reconcile accelerators).
+
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer (`sdk/typescript`). 4/4 tests. Commit 56d3d48.
-- **P0-002** — defineSystem/app/backup authoring API + example `system.ts`. 5/5 tests; P0-001
-  regression 4/4. Commit 2f23bfa.
-- **P0-003** — capability snapshot + accelerator selection (CPU fallback). 4/4 tests; full SDK
-  regression 13/13 green.
+- **P0-002** — defineSystem/app/backup authoring API + example `system.ts`. 5/5 tests. Commit 2f23bfa.
+- **P0-003** — capability snapshot + accelerator selection (CPU fallback). 4/4 tests. (Reviewer later
+  flagged it diverges from P0-002's accel model + a readonly leak → fix-forward as P0-007.)
+- **P0-004** — plan diff engine (structured + human-readable, FR-006). 4/4; SDK regression 17/17.
+  Commit d23f2e7.
+
+## Reviewer gate — VALIDATED
+`npm run review` (GPT-5.5 xhigh) works end-to-end. First real run (on P0-003) returned
+`VERDICT: revise` with two correct blocking findings (accel-model fragmentation + readonly leak).
+Recorded in `P0-003.review.md`. R2+ merges will be gated on this; R1 fix-forward.
 
 ## Next up
-- Reproducible-build / lockfile lane (closes the last Phase-0 exit gate — build inputs pinned).
-- Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation).
-- Go agent skeleton + health endpoint — needs Go (Docker path); queue as `draft` until set up.
-- Validate the R2-R4 reviewer tool (`npm run review`) before the first R2+ task.
+- P0-007 reconcile accelerators (fixes reviewer findings) → then P0-006 (independent), P0-005
+  (validation, builds on reconciled accel model).
+- Reproducible-build / lockfile lane (closes last Phase-0 exit gate).
+- Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation); Go agent skeleton via Docker (draft).
 
 ## Lessons (most recent first)
+- **Reviewer caught a multi-task integration gap:** independent builders P0-002 and P0-003 each
+  defined their own accelerator types → two divergent models. The per-file verify missed it; the
+  GPT-5.5 reviewer caught it. **Process fix:** when contracts share a concept (e.g. accelerators in
+  both define-system and capabilities), name the single owning module in the contract so workers
+  import rather than re-invent. P0-007 reconciles the existing split.
 - **Dispatch/foreground git race (caused a scare, no data lost):** while a background `dispatch` had
   `task/P0-002` checked out in the shared working tree, a foreground commit (the auto-merge override)
   landed on that branch instead of `main`, then dispatch's final `git checkout main` made it look
