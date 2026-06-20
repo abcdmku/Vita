@@ -8,21 +8,13 @@
 OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — needs a Linux/Go/Docker
 host the owner must opt into.**
 
-## Status: PAUSED at OS milestone — awaiting owner direction
-28 contracts merged (typecheck=0, 112 TS tests; Go agent 3 pkgs green). **OS path PROVEN + advancing:**
-Docker/Go toolchain set up + validated (Go 1.26.4 + Debian 13 trixie via golang:1.26); two R3
-privileged-agent contracts built by GPT-5.5, container-tested (go test+vet), reviewer-gated, merged —
-**P1-004** (agent skeleton: narrow typed capabilities + fail-closed dispatch + /healthz) and **P1-005**
-(read-only procfs/sysfs capability discovery, FR-004). Paused here as a courtesy checkpoint given the
-very long autonomous run (owner had chosen "set up Docker → build the OS").
-**To resume:** owner says "keep going" / "focus on <area>" / "stop". **If a scheduled wakeup fires
-while this says PAUSED, re-pause — do NOT auto-dispatch.** (A stale wakeup fired once and was held.)
-
-### OS roadmap from here (owner picks depth)
-- TRACTABLE next (Go, container-testable): agent transaction engine (apply plan + rollback, FR-007);
-  privileged capability impls (storage/network/update) behind build tags; agent RPC/status transport.
-- HEAVY LIFT (more Docker setup, privileged/loopback): Debian image assembly (mkosi/debootstrap),
-  signed UKI + Secure Boot, RAUC A/B bundles, dm-verity, QEMU x86 boot (FR-001/023, Phase-1 boot gate).
+## Status: RUNNING — OS build (autonomous to completion)
+Owner 2026-06-20: **"continue, don't ask again"** — run the loop continuously, no milestone pauses or
+direction asks; only stop on "stop" / a §24 stop condition. 28 contracts merged; OS path proven
+(Go agent skeleton P1-004 + capability discovery P1-005, both R3 container-tested + reviewer-gated).
+Building the agent: **P1-006 transaction engine (apply+rollback, FR-007)** dispatching, then privileged
+capability impls, then the Debian image pipeline (UKI/RAUC/dm-verity) + QEMU boot — all via Docker.
+Reviewer gate has blocked 10 buggy merges (all real). typecheck=0, Go agent green.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
