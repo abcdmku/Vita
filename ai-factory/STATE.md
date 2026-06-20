@@ -25,10 +25,10 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P2-005 **round 2** building. Round 1 (8th block): TOCTOU at the top-level params object — accessor
-  (getter) properties accepted, so capsule/policy could return different values across the validate vs
-  grant reads. Re-dispatched: snapshot input once, reject accessor properties at every level. Also fix
-  migration-readiness over-report for arch-neutral x86-only OCI. P1-003 catalog merged (23 done).
+- P2-005 **round 3** building. TOCTOU fixed (r2 ✓). Remaining (9th block): migration readiness used
+  neutralRuntime OR declared-arch — an x86-only TS/WASM capsule previewed arm64-migratable. Round 3:
+  require declared-arch(targetArch) AND runtime-ready. Plus API de-dup. Deferred follow-up: extract a
+  shared safe-normalize util (controller snapshotter duplicates capsule/sim/broker normalization).
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
