@@ -37,8 +37,9 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P0-013 (Week-1 ADRs, R0) dispatching. P2-001 (controller API skeleton — **first real R2**, →
-  reviewer-gated) queued next.
+- P2-001 (controller API skeleton — **first real R2**) building → reviewer-gated. P0-013 ADRs merged.
+- Queue empties after P2-001 → author portable work next: permission-broker stubs (R2),
+  package-contract schema (packages/, R1/R2), atproto manifest types (R1), isCanonicalPlan DRY (R1).
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
