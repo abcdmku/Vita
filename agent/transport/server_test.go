@@ -94,6 +94,45 @@ func TestReadRoutesReturnExpectedJSON(t *testing.T) {
 	}
 }
 
+func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
+	registry := mustRegistry(t,
+		&mockTxCapability{name: nodetime.Name},
+		&mockTxCapability{name: hostname.Name},
+		&mockTxCapability{name: nodeconfig.Name},
+	)
+	handler := mustHandler(t, handlerConfig{registry: registry})
+
+	response := perform(handler, http.MethodGet, "/operations", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got OperationsResponse
+	decodeResponse(t, response, &got)
+	want := []string{hostname.Name, nodeconfig.Name, nodetime.Name}
+	if !reflect.DeepEqual(got.Operations, want) {
+		t.Fatalf("operations = %v, want %v", got.Operations, want)
+	}
+}
+
+func TestOperationsEmptyRegistryReturnsEmptyArray(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t)})
+
+	response := perform(handler, http.MethodGet, "/operations", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got OperationsResponse
+	decodeResponse(t, response, &got)
+	if got.Operations == nil {
+		t.Fatalf("operations = nil, want empty array; body=%s", response.Body.String())
+	}
+	if len(got.Operations) != 0 {
+		t.Fatalf("operations = %v, want empty", got.Operations)
+	}
+}
+
 func TestApplyCommitsValidPlan(t *testing.T) {
 	events := []string{}
 	registry := mustRegistry(t, &mockTxCapability{name: "test.apply", events: &events})
@@ -179,9 +218,8 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names — distinct concerns. Registration is proven below: /apply routes a plan to all three
-	// registered capabilities and commits them in order. (Exposing operation names over the API
-	// for controller plan-building is a separate follow-up.)
+	// names. Registration is proven below: /apply routes a plan to all three registered
+	// capabilities and commits them in order.
 	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
@@ -353,6 +391,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 	}{
 		{name: "health rejects non GET", method: http.MethodPost, path: "/healthz", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "capabilities rejects non GET", method: http.MethodPost, path: "/capabilities", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
+		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "unknown path", method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound},
 	}

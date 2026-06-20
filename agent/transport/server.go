@@ -65,6 +65,10 @@ type ResultError struct {
 	Capability string `json:"capability,omitempty"`
 }
 
+type OperationsResponse struct {
+	Operations []string `json:"operations"`
+}
+
 type handler struct {
 	version         string
 	startedAt       time.Time
@@ -183,6 +187,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHealth(w, r)
 	case "/capabilities":
 		h.handleCapabilities(w, r)
+	case "/operations":
+		h.handleOperations(w, r)
 	case "/apply":
 		h.handleApply(w, r)
 	default:
@@ -225,6 +231,17 @@ func (h *handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, capabilities)
+}
+
+func (h *handler) handleOperations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	names := h.registry.Names()
+	sort.Strings(names)
+	writeJSON(w, http.StatusOK, OperationsResponse{Operations: names})
 }
 
 func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
