@@ -31,6 +31,7 @@ export interface AgentClient {
   getHealth(): Promise<AgentHealth>;
   getCapabilities(): Promise<AgentCapabilities>;
   getOperations(): Promise<readonly string[]>;
+  getState(capability: string): Promise<AgentCapabilityState>;
   apply(plan: AgentApplyPlan): Promise<AgentApplyResult>;
 }
 
@@ -112,6 +113,7 @@ export interface AgentDetectedDevice {
 }
 
 export type AgentCapabilityRequest = CanonicalJsonObject;
+export type AgentCapabilityState = PlainJsonObject;
 
 export interface AgentApplyOperation<
   TRequest extends AgentCapabilityRequest = AgentCapabilityRequest,
@@ -320,6 +322,14 @@ export class LoopbackAgentClient implements AgentClient {
 
   getOperations(): Promise<readonly string[]> {
     return this.#request("/operations", "GET", validateOperations);
+  }
+
+  getState(capability: string): Promise<AgentCapabilityState> {
+    return this.#request(
+      `/read/${encodeURIComponent(capability)}`,
+      "GET",
+      validateCapabilityState,
+    );
   }
 
   apply(plan: AgentApplyPlan): Promise<AgentApplyResult> {
@@ -534,6 +544,12 @@ function validateOperations(payload: PlainJsonObject): ValidationResult<readonly
   if (!fields.ok) return fields;
 
   return validateOperationNameArray(field(payload, "operations"), "operations");
+}
+
+function validateCapabilityState(
+  payload: PlainJsonObject,
+): ValidationResult<AgentCapabilityState> {
+  return accept(payload);
 }
 
 function validateOperationNameArray(
