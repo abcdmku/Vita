@@ -95,11 +95,9 @@ func (fs linuxConfigFileSystem) AtomicWrite(ctx context.Context, content []byte)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Rename is the single commit point: callers only receive an undo after nil error.
 	if err := os.Rename(tmpName, fs.path); err != nil {
 		return fmt.Errorf("replace node config: %w", err)
-	}
-	if err := os.Chmod(fs.path, configFileMode); err != nil {
-		return fmt.Errorf("secure node config file: %w", err)
 	}
 
 	return nil

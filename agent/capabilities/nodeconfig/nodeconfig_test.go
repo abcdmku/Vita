@@ -154,7 +154,7 @@ func TestAtomicWriteFailureLeavesLiveFileUnchanged(t *testing.T) {
 	ctx := context.Background()
 	prior := []byte("mode=normal\nremote_access=disabled\n")
 	fs := newMemoryFileSystem(prior)
-	fs.failNextAtomicWrite = true
+	fs.failNextAtomicWriteBeforeCommit = true
 	capability := newCapability(fs)
 
 	undo, err := capability.Apply(ctx, ApplyRequest{Desired: configMaintEnabled})
@@ -172,6 +172,43 @@ func TestAtomicWriteFailureLeavesLiveFileUnchanged(t *testing.T) {
 	}
 	if reflect.DeepEqual(fs.temp, fs.live) {
 		t.Fatal("test did not simulate a partial temp distinct from the live file")
+	}
+}
+
+func TestCommitPointFailureIsTrackedWithUndo(t *testing.T) {
+	ctx := context.Background()
+	prior := []byte("mode=normal\nremote_access=disabled\n")
+	fs := newMemoryFileSystem(prior)
+	fs.failNextAtomicWriteAtCommitPoint = true
+	nodeCapability := newCapability(fs)
+	registry := mustRegistry(t, nodeCapability, failingTxCapability{name: "test.later"})
+
+	result := transaction.Apply(ctx, registry, transaction.Plan{
+		{Capability: Name, Request: ApplyRequest{Desired: configMaintEnabled}},
+		{Capability: "test.later", Request: testRequest{}},
+	}, func(context.Context) error {
+		return nil
+	})
+
+	if !fs.observedCommitPointFailure {
+		t.Fatal("test did not inject a failure at the atomic commit point")
+	}
+	if !result.WasRolledBack() {
+		t.Fatalf("Outcome = %q, want rolledBack; err=%v", result.Outcome, result.Err)
+	}
+	wantApplied := []transaction.AppliedOperation{{Index: 0, Capability: Name}}
+	if !reflect.DeepEqual(result.Applied, wantApplied) {
+		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
+	}
+	if got := fs.mustLiveBytes(t); !reflect.DeepEqual(got, prior) {
+		t.Fatalf("live config after rollback = %q, want exact prior bytes %q", got, prior)
+	}
+	wantRolledBack := []transaction.RolledBackOperation{{Index: 0, Capability: Name}}
+	if !reflect.DeepEqual(result.RolledBack, wantRolledBack) {
+		t.Fatalf("RolledBack = %v, want %v", result.RolledBack, wantRolledBack)
+	}
+	if len(result.RollbackErrors) != 0 {
+		t.Fatalf("RollbackErrors = %v, want none", result.RollbackErrors)
 	}
 }
 
@@ -217,10 +254,12 @@ func TestApplyRejectsInvalidRequestWithoutWriting(t *testing.T) {
 }
 
 type memoryFileSystem struct {
-	exists              bool
-	live                []byte
-	temp                []byte
-	failNextAtomicWrite bool
+	exists                           bool
+	live                             []byte
+	temp                             []byte
+	failNextAtomicWriteBeforeCommit  bool
+	failNextAtomicWriteAtCommitPoint bool
+	observedCommitPointFailure       bool
 }
 
 func newMemoryFileSystem(initial []byte) *memoryFileSystem {
@@ -245,13 +284,17 @@ func (fs *memoryFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 	if len(fs.temp) > 1 {
 		fs.temp = cloneBytes(fs.temp[:len(fs.temp)/2])
 	}
-	if fs.failNextAtomicWrite {
-		fs.failNextAtomicWrite = false
+	if fs.failNextAtomicWriteBeforeCommit {
+		fs.failNextAtomicWriteBeforeCommit = false
 		return errSimulatedWrite
 	}
 	fs.live = cloneBytes(content)
 	fs.exists = true
 	fs.temp = nil
+	if fs.failNextAtomicWriteAtCommitPoint {
+		fs.failNextAtomicWriteAtCommitPoint = false
+		fs.observedCommitPointFailure = true
+	}
 	return nil
 }
 
