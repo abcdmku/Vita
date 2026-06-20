@@ -13,6 +13,7 @@ out/
 .vita-worktrees/
 tools/loop/state/*.local.json
 ai-factory/task-contracts/*.result.json
+ai-factory/task-contracts/*.worker.md
 
 # secrets — NEVER commit (spec §16 Security: keys unavailable to dev agents)
 .env
