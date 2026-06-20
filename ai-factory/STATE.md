@@ -14,7 +14,7 @@ direction asks; only stop on "stop" / a §24 stop condition. 28 contracts merged
 (Go agent skeleton P1-004 + capability discovery P1-005, both R3 container-tested + reviewer-gated).
 Building the agent: **P1-006 transaction engine (apply+rollback, FR-007)** dispatching, then privileged
 capability impls, then the Debian image pipeline (UKI/RAUC/dm-verity) + QEMU boot — all via Docker.
-Reviewer gate has blocked 10 buggy merges (all real). typecheck=0, Go agent green.
+Reviewer gate has blocked 11 buggy merges (all real). typecheck=0, Go agent green.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
@@ -59,12 +59,6 @@ P1-001..P1-003 (package contract, PDS manifest, catalog), P2-001..P2-005 (contro
 endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profiles). Audit:
 `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. Reviews: `ai-factory/evaluation/reviews/`.
 
-## Next options (owner picks)
-1. **Keep building portable TS** — adopt `safeNormalize` everywhere; more controller/runtime/protocol
-   surface; design-system; SDK examples.
-2. **"set up Docker"** — open the real OS path: Go system agent, Debian image, RAUC, QEMU boot, full
-   reproducible-build/lockfile pinning. The biggest deferred chunk.
-3. **Stop / take stock.**
 
 ## Lessons (most recent first)
 - **strip-types acceptance does NOT type-check.** node --experimental-strip-types erases types; 48
