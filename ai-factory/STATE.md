@@ -24,13 +24,15 @@ applies. Reverts when owner says "stop auto-merging".
       build lane still TODO.
 
 ## In flight
-- P0-002 (authoring API + example) dispatching to a worker; P0-003 (capabilities) ready next.
+- P0-003 (capabilities/accelerator selection) ready; dispatching next.
 
 ## Blocked
 - (none)
 
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer (`sdk/typescript`). 4/4 tests. Commit 56d3d48.
+- **P0-002** — defineSystem/app/backup authoring API + example `system.ts`. 5/5 tests; P0-001
+  regression 4/4. Commit 2f23bfa.
 
 ## Next up
 - P0-003 capabilities/accelerator selection.
@@ -39,6 +41,12 @@ applies. Reverts when owner says "stop auto-merging".
 - Go agent skeleton + health endpoint — needs Go (Docker path); queue as `draft` until set up.
 
 ## Lessons (most recent first)
+- **Dispatch/foreground git race (caused a scare, no data lost):** while a background `dispatch` had
+  `task/P0-002` checked out in the shared working tree, a foreground commit (the auto-merge override)
+  landed on that branch instead of `main`, then dispatch's final `git checkout main` made it look
+  reverted. Recovered by ff-merging `task/P0-002`. **Fix:** dispatch now runs the worker in an
+  isolated `git worktree` (`.vita-worktrees/<id>`), so background workers never touch the main
+  working tree. Discipline still: don't run git on `main` while a dispatch is mid-flight.
 - **Windows codex spawn:** Node `spawnSync('codex')` can't launch the `.cmd` shim → status null.
   Fixed: `codex.cmd` + `shell` on win32, prompt via stdin (keeps untrusted content off the cmdline).
 - **Worker report artifact:** Codex `-o <id>.worker.md` lands in the task tree; gitignored
