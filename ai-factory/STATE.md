@@ -25,17 +25,23 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
 - [ ] Build inputs are pinned — TS baseline pinned in `tsconfig.base.json`; lockfile/reproducible
       build lane still TODO.
 
+## Milestone: SDK Phase-0 core COMPLETE
+9 contracts merged (P0-001..P0-009), `sdk/typescript` = 8 modules, 33 tests green: plan model +
+canonical normalizer, authoring API (defineSystem/app/backup), capabilities + accelerator selection
+(unified), plan diff, plan validation (fail-closed), plan envelope (tamper-evident), determinism
+gate, plan explain. All verified; the cross-cutting reconcile (P0-007) reviewer-approved.
+
 ## In flight
-- P0-009 (plan explain) building — last seeded SDK slice.
+- **SDK core audit** running (multi-agent workflow: 6 dimensions × adversarial verify) before we
+  build the controller on this foundation. Findings → cleanup contracts.
 
 ## Blocked
 - (none)
 
 ## Ready queue
-- P0-009 (plan explain). After it merges the SDK Phase-0 core is complete; next portable slices:
-  Week-1 ADRs (author tools/checks/adr-structure.mjs first), P0-007 cleanup notes, controller API
-  skeleton (first real R2 → reviewer-gated). OS image / Go agent / lockfile lane need a Linux/Go/
-  Docker host — decision point for the owner.
+- (empty — audit will produce cleanup contracts; then Week-1 ADRs and the first R2 controller-API
+  skeleton, both portable. OS image / Go agent / lockfile lane need a Linux/Go/Docker host —
+  owner decision point.)
 
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer. 4/4 tests. Commit 56d3d48.
@@ -48,6 +54,7 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
 - **P0-006** — canonical plan envelope (seal/verify/encode, tamper-evident). 3/3; suite 27/27.
   Commit 9542444.
 - **P0-008** — determinism/reproducibility gate (assertDeterministic). 3/3; suite 30/30. Commit 220b191.
+- **P0-009** — human-readable plan explanation (inspect before apply). 3/3; suite 33/33. Commit 13e7a40.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
