@@ -4,16 +4,17 @@
 > not a log (git history + the Done list below are the log).
 
 ## Current phase
-**Phase 0 complete** (charter + AI factory + foundations). Portable Phase 1/2 control-plane built.
+**Phase 1 — Bootable immutable foundation** (spec §21) starting via Docker/Go. Phase 0 complete (charter + AI factory + foundations). Portable Phase 1/2 control-plane built.
 OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — needs a Linux/Go/Docker
 host the owner must opt into.**
 
-## Status: PAUSED at milestone — awaiting owner direction
-26 contracts merged; **project type-checks clean (`npm run typecheck` = 0)** and **112 node tests
-green**. The portable TypeScript surface is mature and audited. The loop reached a natural pause point
-(Phase-0 exit gates met; no human-approved *next* objective beyond "keep building portable").
-**To resume:** owner says "keep going" / "focus on <area>" / "set up Docker" / "stop". If a scheduled
-wakeup fires while this says PAUSED, do NOT auto-dispatch — re-pause and wait for the owner.
+## Status: RUNNING — OS build path (owner chose "set up Docker", 2026-06-20)
+26 portable contracts merged (typecheck=0, 112 tests). Now opening the deferred OS layers. Toolchain
+setup in progress: **Docker Desktop booting** (Linux engine for Debian image / RAUC / QEMU) + **Go**
+installing (native, for the agent's portable logic + cross-compile). First OS target: **Go system
+agent skeleton + health endpoint** (spec §25 Week 2, §7.1, §19 `agent/`) — narrow typed capabilities,
+fail-closed dispatch; then capability discovery (FR-004), then the image pipeline (Debian/UKI/RAUC/
+dm-verity) and QEMU boot in Docker. Go-agent is R3 (privileged TCB) → reviewer-gated, extra scrutiny.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
