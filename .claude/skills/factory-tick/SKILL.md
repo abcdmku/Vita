@@ -41,6 +41,10 @@ ready-checklist (CLAUDE.md §4) passes.
   secrets. (`git diff main..task/<id>` falsely flags files `main` gained after the fork.)
 - Score against `ai-factory/evaluation/rubric.md`. Below threshold → send back (new contract that
   references `failed/<id>.report.md`).
+- **Run `npm run typecheck`** for any TS change — the `node --test` acceptance erases types and does
+  NOT type-check (strip-types), so strict-TS violations pass acceptance. Confirm the touched files are
+  typecheck-clean. (Don't trust a green acceptance alone — that false-negative/false-positive gap is
+  why P0-015's "failure" was actually correct code and other merges had latent type errors.)
 
 ## 6. Integrate by risk class
 - **R0 / R1**: bring **only product files** to main — `git checkout task/<id> -- <the contract's

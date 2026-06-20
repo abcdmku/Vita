@@ -30,10 +30,13 @@ Fill **every** field concretely:
 - `target_paths` = the only paths the worker may touch (spec §19 layout). Never include a protected
   path (`ai-factory/protected-policy/**`, `release/signing/**`, keys).
 - `acceptance_command` = exact + runnable. Preferred patterns on this machine:
-  - TS unit: `node --experimental-strip-types --test <explicit .test.ts file>` (in-process; no install).
-  - Multi-file TS: list the explicit test files (Node 22 directory discovery does not propagate the
-    strip-types flag to child processes — pass files explicitly).
+  - TS unit (one file): `node --experimental-strip-types --test sdk/typescript/test/foo.test.ts`.
+  - All tests in a dir: `node --experimental-strip-types --test sdk/typescript/test/*.test.ts` —
+    **UNQUOTED**. Node's test runner expands the `*` itself, so it works under cmd.exe too.
   - Docs/ADRs: a small `node` checker that asserts required sections/links exist.
+  - **NEVER wrap paths in escaped quotes** in the YAML (`\"…\"`). The frontmatter parser turns `\"`
+    into a literal backslash-quote; node then can't find a single-file path (globs survive by luck).
+    Use bare paths. (This caused a false-negative on P0-015.)
 - `allowed_network: false` unless the task genuinely needs it (most don't).
 - Write tight Objective / Non-goals / Definition-of-done. Non-goals prevent scope creep.
 

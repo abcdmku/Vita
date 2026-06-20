@@ -36,6 +36,11 @@ conventions you must follow are below.
 
 ### TypeScript (the default)
 - Strict mode per [tsconfig.base.json](tsconfig.base.json). No `any` escapes without justification.
+- **Your code MUST type-check: `npm run typecheck` (tsc, strict).** The `node --experimental-strip-types`
+  acceptance command ERASES types and does NOT type-check — passing it is not enough. Run
+  `npm run typecheck` yourself and fix every error in files you touched. `noUncheckedIndexedAccess` and
+  `exactOptionalPropertyTypes` are on — guard indexed access and optional fields. NEVER silence errors
+  with `any`, `@ts-ignore`, `@ts-expect-error`, or unsound casts; fix the types properly.
 - **No remote imports** in production artifacts; pin everything; lockfiles are mandatory (spec §9.3).
 - **No package lifecycle scripts**, no native Node-API addons, no FFI, no arbitrary `subprocess`
   inside sandboxed TS (spec §8.2, §9.3). Config/plan code must be deterministic and I/O-free.

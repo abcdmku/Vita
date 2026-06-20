@@ -1,0 +1,23 @@
+{
+  "//": "Type-check lane (spec §20.1 'TypeScript stable compile'). Checks all first-party TS against",
+  "//2": "the strict baseline WITHOUT emitting — `npm run typecheck`. The acceptance tests run via",
+  "//3": "node --experimental-strip-types which ERASES types, so this is what actually enforces strict TS.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": [
+    "sdk/**/*.ts",
+    "controller/**/*.ts",
+    "runtime/**/*.ts",
+    "packages/**/*.ts",
+    "protocols/**/*.ts",
+    "storage/**/*.ts",
+    "simulation/**/*.ts",
+    "accelerators/**/*.ts",
+    "agent/**/*.ts"
+  ],
+  "exclude": ["node_modules", ".vita-worktrees", "**/dist"]
+}

@@ -12,7 +12,12 @@
     "tick": "node tools/loop/tick.mjs",
     "dispatch": "node tools/dispatch/dispatch-task.mjs",
     "review": "node tools/dispatch/review-task.mjs",
-    "auth:check": "node tools/dispatch/check-auth.mjs"
+    "auth:check": "node tools/dispatch/check-auth.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "workspaces": []
+  "workspaces": [],
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3"
+  }
 }
