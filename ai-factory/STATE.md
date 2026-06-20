@@ -9,17 +9,25 @@ golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline
 complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
 ## Status: RUNNING — wide parallel OS build (autonomous to completion)
-Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents to go faster"** — run the
-loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
-**35 contracts merged.** Parallel mode: Opus 4.8 subagents each drive one independent contract
+Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
+run the loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
+**44 contracts merged.** Parallel mode: Opus 4.8 subagents each drive one independent contract
 (dispatch GPT-5.5 → verify → reviewer gate) concurrently; orchestrator serial-merges with a typecheck
-gate. Agent TCB merged: registry/health (P1-004), discovery (P1-005), transaction engine (P1-006),
-nodeconfig cap (P1-007), **time cap (P1-009)**, + the audited **sysdeps** syscall facade. OS/SDK merged:
-**Debian root-image scaffold (P1-011)**, **storage model (P0-019)**, **backup/recovery model (P0-020)**,
-first-party manifests (P4-001). In round-2/3 gate: P1-008 transport, P1-010 hostname, P4-002 lockfile.
-Reviewer gate has blocked **18 buggy merges (all real)** incl. a faked dependency + commit-point
-mutations. typecheck=0, agent container green. Next waves: UKI/Secure-Boot→RAUC→dm-verity→QEMU boot,
-identity/PDS, controller↔agent bridge, WASM loader.
+gate (now **native TS 7.0.1-rc**).
+- **Agent — functional end-to-end:** registry/health (P1-004), hw discovery (P1-005), transaction
+  engine (P1-006), loopback transport w/ fail-closed /apply (P1-008), capability registration (P1-013),
+  **sysdeps** syscall facade (vendored x/sys); transactional caps nodeconfig (P1-007), time (P1-009),
+  hostname (P1-010), identity (P5-002, in gate). All wired caps applicable over /apply (fixed a latent
+  gap where time/hostname were rejected — see Lessons).
+- **Controller↔agent:** typed client (P2-006) + UniFi-style node-overview (P2-007).
+- **OS image (plan-level only):** Debian root scaffold (P1-011) + UKI/Secure-Boot scaffold (P1-012, TEST
+  keys only). Real privileged builds (disk layout, RAUC, dm-verity, QEMU boot) need a Linux build host.
+- **SDK/models:** storage (P0-019), backup/recovery (P0-020), recovery-key N-of-M flow (P0-021),
+  identity (P5-001), lockfile-policy default-deny supply-chain gate (P4-002), first-party manifests (P4-001).
+Reviewer gate has blocked **24 buggy merges (all real)** incl. a faked dependency, commit-point
+mutations, supply-chain bypasses, path traversal. typecheck=0 (TS7), agent container green.
+Next: disk-image layout → RAUC → dm-verity → QEMU boot (needs build host); more agent caps; identity/PDS;
+controller UI; agent operation-name discovery (the /capabilities-vs-operations follow-up).
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
@@ -54,15 +62,21 @@ TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). 
 
 ## Open follow-ups (deferred, minor; do when next touching the area)
 - Spec markdown §8.3 example still shows the old shape (owner decides — spec is out of agent scope).
-- Migrate broker/capsule/catalog/controller validators to use the new `safeNormalize` primitive (DRY;
-  should prevent the recurring boundary-bug class).
+- safeNormalize retrofit into EXISTING validators dropped (P0-017/018) — changes hostile-path/size
+  semantics; use it in NEW validators only (see Lessons).
+- Agent operation-name discovery over the API (for controller plan-building) — `/capabilities` is
+  hardware; the registered operation names are a separate endpoint/field to add + wire to P2-006.
+- Hostname/identity persistence across reboot (P1-010 is kernel-only; persist via the atomic-file pattern).
 - Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Done (28)
-P0-001..P0-016 (SDK core + audit cleanup + ADRs + safeNormalize + typecheck cleanup),
-P1-001..P1-003 (package contract, PDS manifest, catalog), P2-001..P2-005 (controller skeleton, app
-endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profiles). Audit:
-`ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. Reviews: `ai-factory/evaluation/reviews/`.
+## Done (44)
+P0-001..P0-016 (SDK core + audit + ADRs + safeNormalize + typecheck), P0-019/020/021 (storage, backup/
+recovery, recovery-key flow), P1-001..P1-003 (package contract, PDS manifest, catalog), P1-004..P1-013
+(Go agent: skeleton→discovery→engine→nodeconfig/time/hostname caps→transport→registration + sysdeps +
+x/sys vendor), P2-001..P2-007 (controller skeleton, app endpoints, overview, capsule-import, agent
+client, node-overview), P4-001/002 (first-party manifests, lockfile policy), P5-001 (identity model),
+P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Failed/dropped: P0-017/018
+(safeNormalize retrofit — see Lessons).
 
 
 ## Lessons (most recent first)
