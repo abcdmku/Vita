@@ -32,10 +32,18 @@ canonical normalizer, authoring API (defineSystem/app/backup), capabilities + ac
 gate, plan explain. All verified; the cross-cutting reconcile (P0-007) reviewer-approved.
 
 ## In flight
-- SDK hardening from the audit: P0-012 (fix §8.3 example + coverage) building. P0-010, P0-011 merged
-  (both reviewer-approved; suite 37/37). All cross-cutting → reviewer-gated.
-- Deferred minor (P0-011 reviewer note): `verifyEnvelope`'s structural plan check duplicates shape
-  knowledge from plan.ts/validate.ts — fold into a shared `isCanonicalPlan` later.
+- P0-012 **round 2** building. Round 1 was REVISED by the reviewer (NOT merged): its repro.ts
+  undefined/bigint handling used sentinel objects that COLLIDE with real return values (false
+  determinism positive). Re-dispatched with a collision-free fix + negative tests. P0-010, P0-011
+  merged (reviewer-approved; suite 37/37).
+
+## Reviewer-gate follow-ups (deferred)
+- (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
+  → fold into a shared `isCanonicalPlan`.
+- (P0-012) the SPEC markdown §8.3 example still shows the old shape that fails validation — owner
+  decision whether to update the spec example (product/spec is out of agent scope).
+- (P0-012) an inline `defineSystem` example in define-system.test.ts lacks `allowedCapabilities`
+  (teaching the old pattern) — tidy when next touching that file.
 
 ## SDK core audit — DONE (2026-06-20)
 Multi-agent workflow (23 agents, 6 dimensions × adversarial verify) → **15 confirmed findings**
@@ -84,6 +92,12 @@ frozen.
 - Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation); Go agent skeleton via Docker (draft).
 
 ## Lessons (most recent first)
+- **Reviewer gate blocked a real merge (P0-012 round 1):** "tests pass + no test weakened" is NOT
+  sufficient — the determinism gate's undefined/bigint sentinels collided with real object returns,
+  a false positive that the passing tests didn't probe. My verify caught scope/weakening but not the
+  logic flaw; the GPT-5.5 reviewer did. **Takeaway:** keep gating cross-cutting/logic-heavy R1 on the
+  reviewer, and prefer collision-free encodings over magic-key sentinels. A multi-agent audit also
+  surfaces this class (the audit had flagged the undefined-handling gap; the fix introduced the bug).
 - **Reviewer caught a multi-task integration gap:** independent builders P0-002 and P0-003 each
   defined their own accelerator types → two divergent models. The per-file verify missed it; the
   GPT-5.5 reviewer caught it. **Process fix:** when contracts share a concept (e.g. accelerators in
