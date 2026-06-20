@@ -32,8 +32,10 @@ canonical normalizer, authoring API (defineSystem/app/backup), capabilities + ac
 gate, plan explain. All verified; the cross-cutting reconcile (P0-007) reviewer-approved.
 
 ## In flight
-- SDK hardening from the audit: P0-011 (envelope honesty) building. P0-010 merged (reviewer-approved,
-  35/35). P0-012 unblocked. All cross-cutting → reviewer-gated.
+- SDK hardening from the audit: P0-012 (fix §8.3 example + coverage) building. P0-010, P0-011 merged
+  (both reviewer-approved; suite 37/37). All cross-cutting → reviewer-gated.
+- Deferred minor (P0-011 reviewer note): `verifyEnvelope`'s structural plan check duplicates shape
+  knowledge from plan.ts/validate.ts — fold into a shared `isCanonicalPlan` later.
 
 ## SDK core audit — DONE (2026-06-20)
 Multi-agent workflow (23 agents, 6 dimensions × adversarial verify) → **15 confirmed findings**
@@ -63,6 +65,8 @@ P0-010/011/012.
 - **P0-008** — determinism/reproducibility gate (assertDeterministic). 3/3; suite 30/30. Commit 220b191.
 - **P0-009** — human-readable plan explanation (inspect before apply). 3/3; suite 33/33. Commit 13e7a40.
 - **P0-010** — unify shared types + §14.1 fidelity (audit cleanup). 35/35. Reviewer-approved. Commit c702404.
+- **P0-011** — envelope integrity honesty + structural validation + bind metadata. 37/37.
+  Reviewer-approved. Commit e4531be.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
