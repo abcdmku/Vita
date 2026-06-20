@@ -37,8 +37,8 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P1-002 (AT Protocol PDS manifest, R1) dispatching; P2-002 (permission broker capability-grant
-  decision core, R2 → reviewer-gated) queued. P1-001 (package contract) merged.
+- P2-002 (permission broker capability-grant decision core, R2 → reviewer-gated) building. P1-002
+  (PDS manifest) merged. Queue empties after P2-002 → author portable work next.
 
 ## Owner steering welcome
 Portable surface is now broad. Open areas the loop can deepen: **controller** (more endpoints),
@@ -93,6 +93,7 @@ P0-010/011/012.
 - **P0-014** — shared fail-closed `isCanonicalPlan` guard (DRY envelope + controller). 45/45 + 5/5.
   Reviewer-approved (round 2; round 1 blocked a cyclic-throw DoS). Commit be9676f.
 - **P1-001** — package contract schema + fail-closed validator (§9.2/§9.1). 4/4. Commit 95b0eae.
+- **P1-002** — AT Protocol PDS module manifest; buildPdsManifest validates against P1-001 (FR-018). 4/4. Commit 1177085.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
