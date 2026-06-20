@@ -50,7 +50,7 @@ test("sealEnvelope then verifyEnvelope round-trips true", () => {
   assert.equal(verifyEnvelope(envelope), true);
 });
 
-test("tampering with the plan without updating planHash fails verification", () => {
+test("altering the plan without updating planHash fails verification", () => {
   const envelope = sealEnvelope(normalize(desiredState), { createdAtRef });
   const tamperedPlan: CanonicalPlan = normalize({
     ...desiredState,
@@ -67,6 +67,38 @@ test("tampering with the plan without updating planHash fails verification", () 
     verifyEnvelope({
       ...envelope,
       plan: tamperedPlan,
+    }),
+    false,
+  );
+});
+
+test("a malformed plan with a matching planHash fails verification", () => {
+  const plan = normalize(desiredState);
+  const malformedPlan = {
+    apps: plan.apps,
+    backups: plan.backups,
+    identity: plan.identity,
+    storage: plan.storage,
+  } as unknown as CanonicalPlan;
+  const envelope = sealEnvelope(malformedPlan, { createdAtRef });
+
+  assert.equal(verifyEnvelope(envelope), false);
+});
+
+test("altering createdAtRef or schemaVersion without updating planHash fails verification", () => {
+  const envelope = sealEnvelope(normalize(desiredState), { createdAtRef });
+
+  assert.equal(
+    verifyEnvelope({
+      ...envelope,
+      createdAtRef: "source:plan-request:002",
+    }),
+    false,
+  );
+  assert.equal(
+    verifyEnvelope({
+      ...envelope,
+      schemaVersion: envelope.schemaVersion + 1,
     }),
     false,
   );
