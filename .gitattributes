@@ -1,0 +1,5 @@
+# Normalize line endings — reproducibility matters (spec §16, §8.4).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary

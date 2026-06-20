@@ -1,0 +1,20 @@
+{
+  "//": "Shared TypeScript baseline. Spec §5: TypeScript 6.0 stable at bootstrap; code must pass a TS 7 RC compat lane. No behavior known to be removed in TS 7. See ADR 0006.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": false,
+    "declaration": true,
+    "sourceMap": true
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "vita",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript-first personal Node OS — AI-factory monorepo root",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "ready": "node tools/loop/tick.mjs --list",
+    "tick": "node tools/loop/tick.mjs",
+    "dispatch": "node tools/dispatch/dispatch-task.mjs",
+    "auth:check": "node tools/dispatch/check-auth.mjs"
+  },
+  "workspaces": []
+}
