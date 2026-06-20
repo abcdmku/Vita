@@ -70,21 +70,33 @@ const prompt = [
 const workerReport = join(TASK_DIR, `${id}.worker.md`);
 console.log(`\nDispatching ${id} → ${MODEL} (effort=${EFFORT}) on ${branch} …\n`);
 
+// Codex CLI is an npm-installed shim. On Windows it is `codex.cmd`, which Node can only launch
+// via the shell; elsewhere `codex` is directly executable. The prompt is passed on STDIN (not as a
+// positional arg) so the command line contains no untrusted content — safe under shell:true. The
+// `-c` values are bare (no inner quotes): Codex treats unparseable TOML as a literal string.
+const isWin = process.platform === "win32";
 const run = spawnSync(
-  "codex",
+  isWin ? "codex.cmd" : "codex",
   [
     "exec",
     "-m", MODEL,
-    "-c", `model_reasoning_effort="${EFFORT}"`,
-    "-c", 'approval_policy="never"',
+    "-c", `model_reasoning_effort=${EFFORT}`,
+    "-c", "approval_policy=never",
     "-s", "workspace-write",
     "-C", REPO,
     "--skip-git-repo-check",
     "-o", workerReport,
-    prompt,
   ],
-  { cwd: REPO, encoding: "utf8", stdio: "inherit" },
+  {
+    cwd: REPO,
+    input: prompt,
+    encoding: "utf8",
+    stdio: ["pipe", "inherit", "inherit"],
+    shell: isWin,
+    maxBuffer: 64 * 1024 * 1024,
+  },
 );
+if (run.error) console.error(`codex spawn error: ${run.error.message}`);
 
 // Capture whatever the worker produced onto the task branch.
 git(["add", "-A"]);
@@ -117,6 +129,7 @@ const result = {
   effort: EFFORT,
   has_changes: hasChanges,
   codex_status: run.status,
+  codex_error: run.error ? run.error.message : null,
   acceptance_command: c.acceptance_command,
   acceptance_status: acc.status,
   passed,
