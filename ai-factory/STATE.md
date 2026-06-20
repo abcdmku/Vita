@@ -25,10 +25,10 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- **Permission broker (P2-002) MERGED** after 3 reviewer rounds — the hardest, most security-critical
-  component is in (normalize-then-decide, defends method-shadowing/hostile-iterators/partials).
-- P2-003 (controller app endpoints — list + install-preview showing granted/denied capabilities via
-  the broker, R2 → reviewer-gated) dispatching. P6-001 (capsule manifest types §13, R1) queued.
+- P2-003 **round 2** building. Round 1 reviewer-BLOCKED (5th block): controller-boundary fail-closed
+  gaps — "zero denials = success" silently accepted a malformed policy for a zero-capability app; a
+  hostile proxy throwing from `.length` made the method throw. Re-dispatched (validate policy shape +
+  wrap all untrusted reads, no throw). P6-001 (capsule types §13) queued.
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -67,6 +67,11 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **Trust-boundary fail-closed has many shapes (P2-003 r1).** Beyond garbage/partial/method-shadowing:
+  a throwing PROXY getter (`.length`) crashes an unguarded reader, and "no denials" wrongly reads as
+  success for a zero-capability app under a malformed policy. **Takeaway:** wrap the WHOLE boundary
+  method so any throw → typed error; validate the policy shape too; success needs positive evidence,
+  not just absence of denials. (5th reviewer block — gate remains load-bearing.)
 - **TCB guards must not execute methods off untrusted objects (P2-002 r2).** A shape-valid contract
   with a shadowed array method (`egress.some = () => true`) or hostile iterator bypasses grant checks
   that call `.some`/`.includes`/`.find` on the untrusted object. **Fix pattern:** normalize untrusted
