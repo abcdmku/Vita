@@ -25,9 +25,11 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P0-015 (shared **safeNormalize** primitive — the canonical intrinsic-safe untrusted-input
-  normalizer every validator should import; correct-by-construction trust boundaries) dispatching →
-  reviewer-gated. Queue empties after → adopt it across existing validators + more controller/runtime.
+- **Type-safety lane added (tsc 6.0.3 strict).** It exposed 48 latent strict-TS errors in merged
+  code (acceptance ran via strip-types, which does not type-check). P0-016 (make `npm run typecheck`
+  = 0) queued. P0-015 **round 2** building — reviewer found the primitive itself wasn't strict-TS
+  clean + 2 robustness gaps (catch can throw on hostile error.message; budget enforced after
+  snapshot); behavior was correct (the dispatch "fail" was a contract acceptance-string typo, fixed).
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -70,6 +72,10 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **Acceptance via strip-types does NOT type-check (P0-015 review).** node --experimental-strip-types
+  ERASES types; 48 strict-TS errors slipped through 24 merges. **Fix:** `npm run typecheck` lane (tsc),
+  now required by AGENTS + factory-tick. Also: independent verification caught a dispatch FALSE-NEGATIVE
+  (an escaped-quote acceptance-string typo failed correct code) — never trust the status alone.
 - **TOCTOU via accessor properties at the trust boundary (P2-005 r1).** A plain params object with
   GETTER props returns different values per read — validate one value, act on another. **Fix:** snapshot
   untrusted input to plain data ONCE (reject accessor descriptors at EVERY level incl. top-level params),
