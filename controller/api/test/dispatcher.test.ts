@@ -7,6 +7,8 @@ import {
 } from "../src/dispatcher.ts";
 import { normalize } from "../../../sdk/typescript/src/plan.ts";
 import type { ControllerApiDispatchResult } from "../src/contracts.ts";
+import type { BrokerPolicy, CapabilityGrant } from "../../../runtime/permission-broker/src/grants.ts";
+import type { PackageContract } from "../../../sdk/manifests/src/package-contract.ts";
 import type { DesiredState } from "../../../sdk/typescript/src/plan.ts";
 
 test("overview and node health route through the dispatcher", () => {
@@ -227,6 +229,208 @@ function assertPreviewCurrentPlanRejectsWithoutThrow(currentPlan: unknown): void
   assert.match(preview.error.message, /currentPlan/);
 }
 
+test("listApps and previewAppInstall expose a valid least-privilege app preview", () => {
+  const api = createInMemoryControllerApi();
+
+  const apps = dispatchControllerRequest(api, {
+    method: "listApps",
+  });
+
+  assert.equal(apps.ok, true);
+
+  if (!apps.ok || apps.method !== "listApps") {
+    assert.fail(`expected app list response: ${JSON.stringify(apps)}`);
+  }
+
+  assert.equal(apps.response.apps.length > 0, true);
+  assert.equal(typeof apps.response.apps[0]?.id, "string");
+  assert.equal(typeof apps.response.apps[0]?.version, "string");
+  assert.match(apps.response.apps[0]?.status ?? "", /^(installed|available)$/);
+
+  const preview = dispatchPreview(validPackageContract(), matchingPolicy());
+
+  assert.equal(preview.ok, true);
+
+  if (!preview.ok) {
+    assert.fail(`expected install preview to pass: ${JSON.stringify(preview)}`);
+  }
+
+  const expectedCapabilities: readonly CapabilityGrant[] = [
+    {
+      kind: "data",
+      class: "app-state",
+      access: "read-only",
+      scope: "state",
+    },
+    {
+      kind: "network",
+      direction: "ingress",
+      protocol: "https",
+      port: 443,
+      public: false,
+    },
+    {
+      kind: "network",
+      direction: "egress",
+      protocol: "https",
+      destination: "updates.example.invalid",
+      port: 443,
+    },
+  ];
+
+  assert.equal(preview.validation.ok, true);
+  assert.deepEqual(preview.grantedCapabilities, expectedCapabilities);
+  assert.deepEqual(preview.deniedCapabilities, []);
+  assert.deepEqual(preview.reasons, []);
+});
+
+test("previewAppInstall returns denied capabilities with reasons for overprivileged apps", () => {
+  const preview = dispatchPreview(
+    validPackageContract({ dataAccess: "read-write" }),
+    matchingPolicy({ dataAccess: "read-only" }),
+  );
+
+  assert.equal(preview.ok, false);
+
+  if (preview.ok) {
+    assert.fail(`expected install preview to deny: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.error.code, "CAPABILITY_DENIED");
+  assert.equal(
+    preview.grantedCapabilities.some(
+      (capability) =>
+        capability.kind === "data" &&
+        capability.class === "app-state" &&
+        capability.access === "read-write" &&
+        capability.scope === "state",
+    ),
+    false,
+  );
+  assert.equal(preview.deniedCapabilities.length, 1);
+  assert.deepEqual(preview.deniedCapabilities[0]?.capability, {
+    kind: "data",
+    class: "app-state",
+    access: "read-write",
+    scope: "state",
+  });
+  assert.equal(preview.deniedCapabilities[0]?.code, "POLICY_DENIED");
+  assert.match(preview.reasons[0] ?? "", /policy/i);
+});
+
+test("previewAppInstall returns typed errors for invalid and method-shadowed contracts", () => {
+  const partial = dispatchPreview(
+    {
+      identity: {
+        id: "com.example.partial",
+      },
+    },
+    matchingPolicy(),
+  );
+
+  assert.equal(partial.ok, false);
+
+  if (partial.ok) {
+    assert.fail(`expected partial contract to fail: ${JSON.stringify(partial)}`);
+  }
+
+  assert.equal(partial.validation.ok, false);
+  assert.equal(partial.error.code, "VALIDATION_FAILED");
+
+  const shadowedContract = validPackageContract();
+  const egress = shadowedContract.network.egress as unknown as Record<string, unknown>;
+  egress.some = () => true;
+
+  let shadowed: ReturnType<typeof dispatchPreview> | undefined;
+
+  assert.doesNotThrow(() => {
+    shadowed = dispatchPreview(shadowedContract, matchingPolicy());
+  });
+
+  assert.notEqual(shadowed, undefined);
+
+  if (shadowed === undefined || shadowed.ok) {
+    assert.fail(`expected method-shadowed contract to fail: ${JSON.stringify(shadowed)}`);
+  }
+
+  assert.equal(shadowed.error.code, "INVALID_PARAMS");
+  assert.match(shadowed.reasons[0] ?? "", /malformed/i);
+});
+
+test("previewAppInstall fail-closes hostile contract and policy inputs without throwing", () => {
+  const throwingContract = new Proxy(validPackageContract(), {
+    get(target, key, receiver) {
+      if (key === "data") {
+        throw new Error("contract boom");
+      }
+
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const throwingPolicy: Record<string, unknown> = {};
+  Object.defineProperty(throwingPolicy, "data", {
+    enumerable: true,
+    get() {
+      throw new Error("policy boom");
+    },
+  });
+  Object.defineProperty(throwingPolicy, "network", {
+    enumerable: true,
+    value: matchingPolicy().network,
+  });
+
+  let contractPreview: ReturnType<typeof dispatchPreview> | undefined;
+  let policyPreview: ReturnType<typeof dispatchPreview> | undefined;
+
+  assert.doesNotThrow(() => {
+    contractPreview = dispatchPreview(throwingContract, matchingPolicy());
+  });
+  assert.doesNotThrow(() => {
+    policyPreview = dispatchPreview(validPackageContract(), throwingPolicy);
+  });
+
+  assert.notEqual(contractPreview, undefined);
+  assert.notEqual(policyPreview, undefined);
+
+  if (contractPreview === undefined || contractPreview.ok) {
+    assert.fail(`expected hostile contract to fail: ${JSON.stringify(contractPreview)}`);
+  }
+
+  if (policyPreview === undefined || policyPreview.ok) {
+    assert.fail(`expected hostile policy to fail: ${JSON.stringify(policyPreview)}`);
+  }
+
+  assert.equal(contractPreview.error.code, "VALIDATION_FAILED");
+  assert.equal(policyPreview.error.code, "INVALID_PARAMS");
+});
+
+test("previewAppInstall rejects malformed policy even for valid zero-capability apps", () => {
+  const malformedPolicy = {
+    data: [],
+    network: {
+      egress: [],
+    },
+  };
+
+  const preview = dispatchPreview(
+    validPackageContract({ zeroCapabilities: true }),
+    malformedPolicy,
+  );
+
+  assert.equal(preview.ok, false);
+
+  if (preview.ok) {
+    assert.fail(`expected malformed policy to fail: ${JSON.stringify(preview)}`);
+  }
+
+  assert.equal(preview.validation.ok, true);
+  assert.equal(preview.error.code, "INVALID_PARAMS");
+  assert.deepEqual(preview.grantedCapabilities, []);
+  assert.deepEqual(preview.deniedCapabilities, []);
+  assert.match(preview.reasons[0] ?? "", /policy/i);
+});
+
 test("dispatcher rejects unknown methods with a typed error", () => {
   const api = createInMemoryControllerApi();
 
@@ -244,3 +448,176 @@ test("dispatcher rejects unknown methods with a typed error", () => {
   assert.equal(result.error.code, "UNKNOWN_METHOD");
   assert.match(result.error.message, /applyPlan/);
 });
+
+function dispatchPreview(packageContract: unknown, policy: unknown) {
+  const api = createInMemoryControllerApi();
+  let preview: ControllerApiDispatchResult | undefined;
+
+  assert.doesNotThrow(() => {
+    preview = dispatchControllerRequest(api, {
+      method: "previewAppInstall",
+      params: {
+        packageContract,
+        policy,
+      },
+    });
+  });
+
+  assert.notEqual(preview, undefined);
+
+  if (preview === undefined || !preview.ok || preview.method !== "previewAppInstall") {
+    assert.fail(`expected app install preview response: ${JSON.stringify(preview)}`);
+  }
+
+  return preview.response;
+}
+
+function matchingPolicy(
+  options: {
+    readonly dataAccess?: "read-only" | "read-write";
+  } = {},
+): BrokerPolicy {
+  return {
+    data: [
+      {
+        class: "app-state",
+        access: options.dataAccess ?? "read-only",
+        scope: "state",
+      },
+    ],
+    network: {
+      ingress: [
+        {
+          name: "web",
+          protocol: "https",
+          port: 443,
+          public: false,
+        },
+      ],
+      egress: [
+        {
+          name: "updates",
+          protocol: "https",
+          destinations: ["updates.example.invalid"],
+          ports: [443],
+        },
+      ],
+    },
+  };
+}
+
+function validPackageContract(
+  options: {
+    readonly dataAccess?: "read-only" | "read-write";
+    readonly zeroCapabilities?: boolean;
+  } = {},
+): PackageContract {
+  const zeroCapabilities = options.zeroCapabilities ?? false;
+
+  return {
+    packageClass: "ts-service",
+    identity: {
+      id: "com.vita.notes",
+      name: "Vita Notes",
+    },
+    signingPublisher: {
+      id: "vita.first-party",
+      signingKeyRef: "publisher-key://vita/first-party/stable",
+    },
+    version: "1.2.3",
+    digest: {
+      algorithm: "sha256",
+      value: "8c4f2d730f5f0f91f0a6373d9867a22f45e4b508ea258e321fdb61c09f771d25",
+    },
+    architectures: ["x86_64"],
+    resources: {
+      cpuCores: 1,
+      ramMiB: 256,
+      storageMiB: 512,
+    },
+    accelerators: {
+      required: [],
+      optional: [],
+      preference: ["cpu"],
+    },
+    network: {
+      ingress: zeroCapabilities
+        ? []
+        : [
+            {
+              name: "web",
+              protocol: "https",
+              port: 443,
+              public: false,
+            },
+          ],
+      egress: zeroCapabilities
+        ? []
+        : [
+            {
+              name: "updates",
+              protocol: "https",
+              destinations: ["updates.example.invalid"],
+              ports: [443],
+            },
+          ],
+    },
+    data: {
+      classes: zeroCapabilities ? [] : ["app-state"],
+      volumes: zeroCapabilities
+        ? []
+        : [
+            {
+              name: "state",
+              mountPath: "/var/lib/vita-notes",
+              class: "app-state",
+              access: options.dataAccess ?? "read-only",
+              persistence: "persistent",
+              backup: true,
+              sizeMiB: 512,
+            },
+          ],
+    },
+    secrets: [],
+    backup: {
+      strategy: "none",
+      includeVolumes: [],
+      quiesceHooks: [],
+      backupHooks: [],
+    },
+    restore: {
+      requireCleanVerification: true,
+      verificationHooks: [],
+    },
+    healthChecks: [],
+    updates: {
+      channel: "stable",
+      strategy: "replace",
+      schemaMigrations: [],
+    },
+    rollback: {
+      maxRollbackVersions: 2,
+      maxRollbackAgeDays: 30,
+      requiresFreshBackup: true,
+    },
+    exportFormats: ["json"],
+    endOfSupportDate: "2028-12-31",
+    sbom: {
+      format: "spdx-json",
+      digest: {
+        algorithm: "sha256",
+        value: "497f6eca5576b90883c4632f4a6012db0826829f6d95cb5fae40897a7f4d7c3e",
+      },
+      generatedAt: "2026-06-01T12:00:00.000Z",
+    },
+    vulnerabilityStatus: {
+      status: "clean",
+      scannedAt: "2026-06-01T12:10:00.000Z",
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+    },
+    requiredSimulationProfiles: [],
+  };
+}

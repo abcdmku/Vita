@@ -1,10 +1,26 @@
+import { validatePackageContract } from "../../../sdk/manifests/src/package-contract.ts";
 import { diffPlans } from "../../../sdk/typescript/src/diff.ts";
 import { explainPlan } from "../../../sdk/typescript/src/explain.ts";
 import { isCanonicalPlan, normalize } from "../../../sdk/typescript/src/plan.ts";
 import { validatePlan } from "../../../sdk/typescript/src/validate.ts";
+import { decideGrants } from "../../../runtime/permission-broker/src/decide.ts";
 import type { DeviceSnapshot } from "../../../sdk/typescript/src/capabilities.ts";
+import type {
+  PackageContract,
+  PackageContractValidationResult,
+} from "../../../sdk/manifests/src/package-contract.ts";
 import type { CanonicalPlan, DesiredState } from "../../../sdk/typescript/src/plan.ts";
 import type {
+  BrokerPolicy,
+  CapabilityDenial,
+  CapabilityGrant,
+  RequestedCapability,
+} from "../../../runtime/permission-broker/src/grants.ts";
+import type {
+  AppInstallPreviewRequest,
+  AppInstallPreviewResponse,
+  AppSummary,
+  AppSummaryResponse,
   ControllerApi,
   ControllerApiDispatchRequest,
   ControllerApiDispatchResult,
@@ -12,6 +28,7 @@ import type {
   EmptyParams,
   GetOverviewRequest,
   HealthSummary,
+  ListAppsRequest,
   NodeCapabilitySummary,
   NodeHealthRequest,
   NodeHealthResponse,
@@ -42,6 +59,23 @@ export interface InMemoryControllerOptions {
 }
 
 const EMPTY_PARAMS: EmptyParams = Object.freeze({});
+const POLICY_SHAPE_PROBE_CAPABILITY: RequestedCapability = Object.freeze({
+  kind: "unknown",
+  name: "policy-shape-probe",
+});
+
+const DEFAULT_APPS: readonly AppSummary[] = [
+  {
+    id: "com.vita.notes",
+    version: "1.2.3",
+    status: "available",
+  },
+  {
+    id: "atproto-pds",
+    version: "1.0.0",
+    status: "installed",
+  },
+];
 
 const DEFAULT_DEVICE_SNAPSHOT: DeviceSnapshot = Object.freeze({
   memoryGB: 32,
@@ -89,6 +123,8 @@ export function createInMemoryControllerApi(
     getOverview: () => overviewFromNodes(nodes),
     getNodeHealth: (params) => nodeHealthFromNodes(params, nodes, deviceSnapshot),
     previewPlan: (params) => previewPlan(params, deviceSnapshot, fallbackCurrentPlan),
+    listApps: () => listApps(),
+    previewAppInstall: (params) => previewAppInstall(params),
   };
 }
 
@@ -117,6 +153,19 @@ export function dispatchControllerRequest(
           method: "previewPlan",
           response: api.previewPlan(readPlanPreviewParams(request.params)),
         };
+      case "listApps":
+        readListAppsParams(request.params);
+        return {
+          ok: true,
+          method: "listApps",
+          response: api.listApps(),
+        };
+      case "previewAppInstall":
+        return {
+          ok: true,
+          method: "previewAppInstall",
+          response: api.previewAppInstall(readAppInstallPreviewParams(request.params)),
+        };
       default:
         return dispatchError("UNKNOWN_METHOD", `Unknown controller API method: ${request.method}`);
     }
@@ -124,6 +173,84 @@ export function dispatchControllerRequest(
     return dispatchError(
       "INVALID_PARAMS",
       error instanceof Error ? error.message : "Invalid controller API request parameters.",
+    );
+  }
+}
+
+function listApps(): AppSummaryResponse {
+  return {
+    apps: DEFAULT_APPS,
+  };
+}
+
+function previewAppInstall(params: AppInstallPreviewRequest): AppInstallPreviewResponse {
+  try {
+    const validation = validatePackageContract(params.packageContract);
+
+    if (!validation.ok) {
+      return appPreviewError(
+        validation,
+        [],
+        [],
+        reasonsFromValidation(validation),
+        "VALIDATION_FAILED",
+        "Package contract failed validation.",
+      );
+    }
+
+    const policyValidation = validatePolicyShape(validation.contract, params.policy);
+
+    if (!policyValidation.ok) {
+      return appPreviewError(
+        validation,
+        [],
+        [],
+        policyValidation.reasons,
+        "INVALID_PARAMS",
+        "Broker policy or package input is malformed.",
+      );
+    }
+
+    const capabilities = capabilitiesFromPackageContract(validation.contract);
+    const decision = decideGrants(
+      {
+        packageContract: validation.contract,
+        capabilities,
+      },
+      params.policy,
+    );
+    const reasons = reasonsFromDenials(decision.denied);
+
+    if (decision.denied.length > 0) {
+      const malformedDenial = firstInputMalformedDenial(decision.denied);
+
+      return appPreviewError(
+        validation,
+        decision.granted,
+        decision.denied,
+        reasons,
+        malformedDenial === undefined ? "CAPABILITY_DENIED" : "INVALID_PARAMS",
+        malformedDenial?.reason ?? "Package capabilities exceed broker policy.",
+      );
+    }
+
+    return {
+      ok: true,
+      validation,
+      grantedCapabilities: decision.granted,
+      deniedCapabilities: [],
+      reasons: [],
+    };
+  } catch {
+    const validation = packageValidationFailure("Install preview failed closed.");
+
+    return appPreviewError(
+      validation,
+      [],
+      [],
+      ["Install preview failed closed."],
+      "INVALID_PARAMS",
+      "Install preview failed closed.",
     );
   }
 }
@@ -176,6 +303,183 @@ function previewPlan(
       },
     };
   }
+}
+
+function validatePolicyShape(
+  packageContract: PackageContract,
+  policy: BrokerPolicy,
+):
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reasons: readonly string[];
+    } {
+  const decision = decideGrants(
+    {
+      packageContract,
+      capabilities: [POLICY_SHAPE_PROBE_CAPABILITY],
+    },
+    policy,
+  );
+  const malformedDenial = firstInputMalformedDenial(decision.denied);
+
+  if (malformedDenial === undefined) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    reasons: [malformedDenial.reason],
+  };
+}
+
+function capabilitiesFromPackageContract(contract: PackageContract): readonly CapabilityGrant[] {
+  const capabilities: CapabilityGrant[] = [];
+
+  const volumes = contract.data.volumes;
+  for (let index = 0; index < volumes.length; index += 1) {
+    const volume = volumes[index];
+
+    if (volume !== undefined) {
+      capabilities[capabilities.length] = {
+        kind: "data",
+        class: volume.class,
+        access: volume.access,
+        scope: volume.name,
+      };
+    }
+  }
+
+  const ingress = contract.network.ingress;
+  for (let index = 0; index < ingress.length; index += 1) {
+    const rule = ingress[index];
+
+    if (rule !== undefined) {
+      capabilities[capabilities.length] = {
+        kind: "network",
+        direction: "ingress",
+        protocol: rule.protocol,
+        port: rule.port,
+        public: rule.public,
+      };
+    }
+  }
+
+  const egress = contract.network.egress;
+  for (let ruleIndex = 0; ruleIndex < egress.length; ruleIndex += 1) {
+    const rule = egress[ruleIndex];
+
+    if (rule === undefined) {
+      continue;
+    }
+
+    for (let destinationIndex = 0; destinationIndex < rule.destinations.length; destinationIndex += 1) {
+      const destination = rule.destinations[destinationIndex];
+
+      if (destination === undefined) {
+        continue;
+      }
+
+      for (let portIndex = 0; portIndex < rule.ports.length; portIndex += 1) {
+        const port = rule.ports[portIndex];
+
+        if (port !== undefined) {
+          capabilities[capabilities.length] = {
+            kind: "network",
+            direction: "egress",
+            protocol: rule.protocol,
+            destination,
+            port,
+          };
+        }
+      }
+    }
+  }
+
+  return capabilities;
+}
+
+function firstInputMalformedDenial(
+  denials: readonly CapabilityDenial[],
+): CapabilityDenial | undefined {
+  for (let index = 0; index < denials.length; index += 1) {
+    const denial = denials[index];
+
+    if (
+      denial !== undefined &&
+      (denial.code === "MALFORMED_POLICY" ||
+        denial.code === "MALFORMED_REQUEST" ||
+        denial.code === "INVALID_PACKAGE_CONTRACT")
+    ) {
+      return denial;
+    }
+  }
+
+  return undefined;
+}
+
+function reasonsFromValidation(
+  validation: Extract<PackageContractValidationResult, { readonly ok: false }>,
+): readonly string[] {
+  const reasons: string[] = [];
+
+  for (let index = 0; index < validation.errors.length; index += 1) {
+    const error = validation.errors[index];
+
+    if (error !== undefined) {
+      reasons[reasons.length] =
+        error.path === "" ? error.message : `${error.path}: ${error.message}`;
+    }
+  }
+
+  return reasons;
+}
+
+function reasonsFromDenials(denials: readonly CapabilityDenial[]): readonly string[] {
+  const reasons: string[] = [];
+
+  for (let index = 0; index < denials.length; index += 1) {
+    const denial = denials[index];
+
+    if (denial !== undefined) {
+      reasons[reasons.length] = denial.reason;
+    }
+  }
+
+  return reasons;
+}
+
+function packageValidationFailure(message: string): PackageContractValidationResult {
+  return {
+    ok: false,
+    errors: [
+      {
+        path: "",
+        message,
+      },
+    ],
+  };
+}
+
+function appPreviewError(
+  validation: PackageContractValidationResult,
+  grantedCapabilities: readonly CapabilityGrant[],
+  deniedCapabilities: readonly CapabilityDenial[],
+  reasons: readonly string[],
+  code: ControllerApiError["code"],
+  message: string,
+): AppInstallPreviewResponse {
+  return {
+    ok: false,
+    validation,
+    grantedCapabilities,
+    deniedCapabilities,
+    reasons,
+    error: {
+      code,
+      message,
+    },
+  };
 }
 
 function overviewFromNodes(nodes: readonly InMemoryNode[]): OverviewResponse {
@@ -308,6 +612,19 @@ function readOverviewParams(params: unknown): GetOverviewRequest {
   return EMPTY_PARAMS;
 }
 
+function readListAppsParams(params: unknown): ListAppsRequest {
+  if (params === undefined) {
+    return EMPTY_PARAMS;
+  }
+
+  if (!isRecord(params)) {
+    throw new TypeError("listApps params must be an object when provided.");
+  }
+
+  rejectUnknownParams(params, new Set<string>(), "listApps");
+  return EMPTY_PARAMS;
+}
+
 function readNodeHealthParams(params: unknown): NodeHealthRequest {
   if (!isRecord(params)) {
     throw new TypeError("getNodeHealth params must be an object.");
@@ -350,6 +667,24 @@ function readPlanPreviewParams(params: unknown): PlanPreviewRequest {
     desiredState,
     currentPlan,
   };
+}
+
+function readAppInstallPreviewParams(params: unknown): AppInstallPreviewRequest {
+  if (!isRecord(params)) {
+    throw new TypeError("previewAppInstall params must be an object.");
+  }
+
+  rejectUnknownParams(params, new Set(["packageContract", "policy"]), "previewAppInstall");
+
+  if (!Object.prototype.hasOwnProperty.call(params, "packageContract")) {
+    throw new TypeError("previewAppInstall params.packageContract is required.");
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(params, "policy")) {
+    throw new TypeError("previewAppInstall params.policy is required.");
+  }
+
+  return params as unknown as AppInstallPreviewRequest;
 }
 
 function rejectUnknownParams(

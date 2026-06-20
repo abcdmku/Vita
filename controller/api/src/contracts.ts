@@ -2,9 +2,18 @@ import type {
   DeviceArchitecture,
   ReadonlyAcceleratorCapability,
 } from "../../../sdk/typescript/src/capabilities.ts";
+import type {
+  PackageContract,
+  PackageContractValidationResult,
+} from "../../../sdk/manifests/src/package-contract.ts";
 import type { PlanDiff } from "../../../sdk/typescript/src/diff.ts";
 import type { CanonicalPlan, DesiredState } from "../../../sdk/typescript/src/plan.ts";
 import type { ValidationResult } from "../../../sdk/typescript/src/validate.ts";
+import type {
+  BrokerPolicy,
+  CapabilityDenial,
+  CapabilityGrant,
+} from "../../../runtime/permission-broker/src/grants.ts";
 
 export type EmptyParams = Readonly<Record<string, never>>;
 
@@ -72,7 +81,11 @@ export type PlanValidationPass = Extract<ValidationResult, { readonly ok: true }
 export type PlanValidationFailure = Extract<ValidationResult, { readonly ok: false }>;
 
 export interface ControllerApiError {
-  readonly code: "UNKNOWN_METHOD" | "INVALID_PARAMS" | "VALIDATION_FAILED";
+  readonly code:
+    | "UNKNOWN_METHOD"
+    | "INVALID_PARAMS"
+    | "VALIDATION_FAILED"
+    | "CAPABILITY_DENIED";
   readonly message: string;
 }
 
@@ -89,13 +102,65 @@ export type PlanPreviewResponse =
       readonly error: ControllerApiError;
     };
 
+export type AppStatus = "installed" | "available";
+
+export interface AppSummary {
+  readonly id: string;
+  readonly version: string;
+  readonly status: AppStatus;
+}
+
+export type ListAppsRequest = EmptyParams;
+
+export interface AppSummaryResponse {
+  readonly apps: readonly AppSummary[];
+}
+
+export interface AppInstallPreviewRequest {
+  readonly packageContract: PackageContract;
+  readonly policy: BrokerPolicy;
+}
+
+export type PackageContractValidationPass = Extract<
+  PackageContractValidationResult,
+  { readonly ok: true }
+>;
+export type PackageContractValidationFailure = Extract<
+  PackageContractValidationResult,
+  { readonly ok: false }
+>;
+
+export type AppInstallPreviewResponse =
+  | {
+      readonly ok: true;
+      readonly validation: PackageContractValidationPass;
+      readonly grantedCapabilities: readonly CapabilityGrant[];
+      readonly deniedCapabilities: readonly CapabilityDenial[];
+      readonly reasons: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly validation: PackageContractValidationResult;
+      readonly grantedCapabilities: readonly CapabilityGrant[];
+      readonly deniedCapabilities: readonly CapabilityDenial[];
+      readonly reasons: readonly string[];
+      readonly error: ControllerApiError;
+    };
+
 export interface ControllerApi {
   getOverview(): OverviewResponse;
   getNodeHealth(params: NodeHealthRequest): NodeHealthResponse;
   previewPlan(params: PlanPreviewRequest): PlanPreviewResponse;
+  listApps(): AppSummaryResponse;
+  previewAppInstall(params: AppInstallPreviewRequest): AppInstallPreviewResponse;
 }
 
-export type ControllerApiMethod = "getOverview" | "getNodeHealth" | "previewPlan";
+export type ControllerApiMethod =
+  | "getOverview"
+  | "getNodeHealth"
+  | "previewPlan"
+  | "listApps"
+  | "previewAppInstall";
 
 export type ControllerApiRequest =
   | {
@@ -109,6 +174,14 @@ export type ControllerApiRequest =
   | {
       readonly method: "previewPlan";
       readonly params: PlanPreviewRequest;
+    }
+  | {
+      readonly method: "listApps";
+      readonly params?: ListAppsRequest;
+    }
+  | {
+      readonly method: "previewAppInstall";
+      readonly params: AppInstallPreviewRequest;
     };
 
 export interface ControllerApiDispatchRequest {
@@ -131,6 +204,16 @@ export type ControllerApiDispatchResult =
       readonly ok: true;
       readonly method: "previewPlan";
       readonly response: PlanPreviewResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "listApps";
+      readonly response: AppSummaryResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "previewAppInstall";
+      readonly response: AppInstallPreviewResponse;
     }
   | {
       readonly ok: false;
