@@ -6,7 +6,7 @@ import {
   dispatchControllerRequest,
 } from "../src/dispatcher.ts";
 import { normalize } from "../../../sdk/typescript/src/plan.ts";
-import type { ControllerApiDispatchResult } from "../src/contracts.ts";
+import type { ControllerApiDispatchResult, IdentityRole } from "../src/contracts.ts";
 import type { BrokerPolicy, CapabilityGrant } from "../../../runtime/permission-broker/src/grants.ts";
 import type { PackageContract } from "../../../sdk/manifests/src/package-contract.ts";
 import type { DesiredState } from "../../../sdk/typescript/src/plan.ts";
@@ -59,6 +59,118 @@ test("overview and node health route through the dispatcher", () => {
     health.response.capabilities.accelerators.map((accelerator) => accelerator.kind),
     ["intel.npu", "nvidia.cuda"],
   );
+});
+
+test("storage, backup, and identity overview endpoints route through the dispatcher", () => {
+  const api = createInMemoryControllerApi();
+
+  const storage = dispatchControllerRequest(api, {
+    method: "getStorageOverview",
+  });
+
+  assert.equal(storage.ok, true);
+
+  if (!storage.ok || storage.method !== "getStorageOverview") {
+    assert.fail(`expected storage overview response: ${JSON.stringify(storage)}`);
+  }
+
+  assert.equal(storage.response.summary.health, "healthy");
+  assert.equal(storage.response.summary.encryptedVolumes, 2);
+  assert.equal(storage.response.pools.length, 1);
+  assert.equal(storage.response.volumes.length, 2);
+  assert.equal(storage.response.volumes[0]?.snapshotCadence, "hourly");
+  assert.deepEqual(
+    storage.response.volumes[0]?.protectionStates.map((state) => [
+      state.protectionLevel,
+      state.backupClass,
+      state.isBackup,
+    ]),
+    [
+      ["snapshot", "not-backup", false],
+      ["mirror", "not-backup", false],
+      ["local-backup", "backup", true],
+      ["off-site-backup", "backup", true],
+    ],
+  );
+  assert.equal(
+    storage.response.volumes[0]?.protectionStates.some(
+      (state) => state.protectionLevel === "mirror" && state.isBackup,
+    ),
+    false,
+  );
+  assert.equal(Object.isFrozen(storage.response.volumes[0]?.protectionStates), true);
+
+  const backup = dispatchControllerRequest(api, {
+    method: "getBackupStatus",
+  });
+
+  assert.equal(backup.ok, true);
+
+  if (!backup.ok || backup.method !== "getBackupStatus") {
+    assert.fail(`expected backup status response: ${JSON.stringify(backup)}`);
+  }
+
+  assert.equal(backup.response.summary.backupTargetCount, 2);
+  assert.deepEqual(
+    backup.response.targets.map((target) => [target.targetKind, target.protectionState.level]),
+    [
+      ["attached-disk", "local-backup"],
+      ["remote-object", "off-site-backup"],
+    ],
+  );
+  assert.equal(
+    backup.response.targets.every((target) => target.protectionState.isBackup),
+    true,
+  );
+  assert.equal(
+    backup.response.targets.some((target) => target.protectionState.protectionLevel === "mirror"),
+    false,
+  );
+  assert.deepEqual(
+    backup.response.nonBackupProtection.map((entry) => [
+      entry.protectionState.protectionLevel,
+      entry.protectionState.backupClass,
+      entry.protectionState.isBackup,
+    ]),
+    [
+      ["snapshot", "not-backup", false],
+      ["mirror", "not-backup", false],
+    ],
+  );
+  assert.equal(backup.response.targets[0]?.lastRun.result, "succeeded");
+  assert.equal(backup.response.targets[0]?.lastRestoreTest.result, "passed");
+  assert.equal(Object.isFrozen(backup.response.targets[0]?.protectionState), true);
+
+  const identity = dispatchControllerRequest(api, {
+    method: "getIdentitySummary",
+  });
+
+  assert.equal(identity.ok, true);
+
+  if (!identity.ok || identity.method !== "getIdentitySummary") {
+    assert.fail(`expected identity summary response: ${JSON.stringify(identity)}`);
+  }
+
+  const expectedRoles: readonly IdentityRole[] = [
+    "owner",
+    "administrator",
+    "member",
+    "restricted-member",
+    "guest",
+    "service",
+  ];
+  assert.deepEqual(
+    identity.response.roles.map((role) => role.role),
+    expectedRoles,
+  );
+  assert.equal(identity.response.passkeys.required, true);
+  assert.equal(identity.response.passkeys.state, "partial");
+  assert.equal(identity.response.auditLog.available, true);
+  assert.equal(identity.response.auditLog.retentionDays, 365);
+  assert.deepEqual(Object.keys(identity.response.roles[0] ?? {}).sort(), [
+    "principalCount",
+    "role",
+  ]);
 });
 
 test("previewPlan returns validation, diff, and explanation for a valid desired state", () => {
@@ -449,6 +561,32 @@ test("dispatcher rejects unknown methods with a typed error", () => {
   assert.match(result.error.message, /applyPlan/);
 });
 
+test("new overview endpoints reject malformed params without throwing", () => {
+  const prototypeBearing = Object.create({ inherited: true }) as Record<string, unknown>;
+  const malformedParams = [
+    { label: "unknown-field", value: { unexpected: true } },
+    { label: "date", value: new Date("2026-06-20T00:00:00.000Z") },
+    { label: "map", value: new Map() },
+    { label: "proxy", value: new Proxy({}, {}) },
+    { label: "prototype-bearing", value: prototypeBearing },
+  ];
+  const methods = ["getStorageOverview", "getBackupStatus", "getIdentitySummary"];
+
+  for (let methodIndex = 0; methodIndex < methods.length; methodIndex += 1) {
+    const method = methods[methodIndex] ?? "";
+
+    for (let paramIndex = 0; paramIndex < malformedParams.length; paramIndex += 1) {
+      const malformed = malformedParams[paramIndex];
+
+      if (malformed === undefined) {
+        assert.fail("expected malformed params fixture");
+      }
+
+      assertDispatchInvalidParams(method, malformed.value, malformed.label);
+    }
+  }
+});
+
 function dispatchPreview(packageContract: unknown, policy: unknown) {
   const api = createInMemoryControllerApi();
   let preview: ControllerApiDispatchResult | undefined;
@@ -470,6 +608,26 @@ function dispatchPreview(packageContract: unknown, policy: unknown) {
   }
 
   return preview.response;
+}
+
+function assertDispatchInvalidParams(method: string, params: unknown, label: string): void {
+  const api = createInMemoryControllerApi();
+  let result: ControllerApiDispatchResult | undefined;
+
+  assert.doesNotThrow(() => {
+    result = dispatchControllerRequest(api, {
+      method,
+      params,
+    });
+  }, `${method} should not throw for ${label} params`);
+
+  assert.notEqual(result, undefined);
+
+  if (result === undefined || result.ok) {
+    assert.fail(`expected ${method} ${label} params to fail: ${JSON.stringify(result)}`);
+  }
+
+  assert.equal(result.error.code, "INVALID_PARAMS");
 }
 
 function matchingPolicy(

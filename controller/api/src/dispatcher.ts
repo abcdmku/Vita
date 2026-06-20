@@ -1,3 +1,5 @@
+import { types as nodeTypes } from "node:util";
+
 import { validatePackageContract } from "../../../sdk/manifests/src/package-contract.ts";
 import { diffPlans } from "../../../sdk/typescript/src/diff.ts";
 import { explainPlan } from "../../../sdk/typescript/src/explain.ts";
@@ -21,14 +23,21 @@ import type {
   AppInstallPreviewResponse,
   AppSummary,
   AppSummaryResponse,
+  BackupProtectionState,
+  BackupStatusResponse,
   ControllerApi,
   ControllerApiDispatchRequest,
   ControllerApiDispatchResult,
   ControllerApiError,
   EmptyParams,
+  GetBackupStatusRequest,
+  GetIdentitySummaryRequest,
   GetOverviewRequest,
+  GetStorageOverviewRequest,
   HealthSummary,
+  IdentitySummaryResponse,
   ListAppsRequest,
+  NonBackupProtectionState,
   NodeCapabilitySummary,
   NodeHealthRequest,
   NodeHealthResponse,
@@ -37,16 +46,17 @@ import type {
   PlanPreviewRequest,
   PlanPreviewResponse,
   ProtectionSummary,
+  StorageOverviewResponse,
 } from "./contracts.ts";
 
 type JsonRecord = Readonly<Record<string, unknown>>;
-type ProtectionState = "protected" | "warning" | "unprotected";
+type NodeProtectionState = "protected" | "warning" | "unprotected";
 
 interface InMemoryNode {
   readonly nodeId: string;
   readonly status: NodeHealthStatus;
   readonly uptimeSeconds: number;
-  readonly protection: ProtectionState;
+  readonly protection: NodeProtectionState;
   readonly publicServices: number;
   readonly privateServices: number;
   readonly blockedRequests24h: number;
@@ -62,6 +72,38 @@ const EMPTY_PARAMS: EmptyParams = Object.freeze({});
 const POLICY_SHAPE_PROBE_CAPABILITY: RequestedCapability = Object.freeze({
   kind: "unknown",
   name: "policy-shape-probe",
+});
+
+const SNAPSHOT_PROTECTION: NonBackupProtectionState = Object.freeze({
+  level: "snapshot",
+  protectionLevel: "snapshot",
+  backupClass: "not-backup",
+  isBackup: false,
+  description: "Read-only local snapshots for file and version recovery.",
+});
+
+const MIRROR_PROTECTION: NonBackupProtectionState = Object.freeze({
+  level: "mirror",
+  protectionLevel: "mirror",
+  backupClass: "not-backup",
+  isBackup: false,
+  description: "Live mirror for availability; not a backup.",
+});
+
+const LOCAL_BACKUP_PROTECTION: BackupProtectionState = Object.freeze({
+  level: "local-backup",
+  protectionLevel: "local-backup",
+  backupClass: "backup",
+  isBackup: true,
+  description: "Independent attached-disk backup for node restore.",
+});
+
+const OFF_SITE_BACKUP_PROTECTION: BackupProtectionState = Object.freeze({
+  level: "off-site-backup",
+  protectionLevel: "off-site-backup",
+  backupClass: "backup",
+  isBackup: true,
+  description: "Encrypted off-site backup for complete node loss.",
 });
 
 const DEFAULT_APPS: readonly AppSummary[] = [
@@ -121,6 +163,9 @@ export function createInMemoryControllerApi(
 
   return {
     getOverview: () => overviewFromNodes(nodes),
+    getStorageOverview: () => storageOverview(),
+    getBackupStatus: () => backupStatus(),
+    getIdentitySummary: () => identitySummary(),
     getNodeHealth: (params) => nodeHealthFromNodes(params, nodes, deviceSnapshot),
     previewPlan: (params) => previewPlan(params, deviceSnapshot, fallbackCurrentPlan),
     listApps: () => listApps(),
@@ -140,6 +185,27 @@ export function dispatchControllerRequest(
           ok: true,
           method: "getOverview",
           response: api.getOverview(),
+        };
+      case "getStorageOverview":
+        readStorageOverviewParams(request.params);
+        return {
+          ok: true,
+          method: "getStorageOverview",
+          response: api.getStorageOverview(),
+        };
+      case "getBackupStatus":
+        readBackupStatusParams(request.params);
+        return {
+          ok: true,
+          method: "getBackupStatus",
+          response: api.getBackupStatus(),
+        };
+      case "getIdentitySummary":
+        readIdentitySummaryParams(request.params);
+        return {
+          ok: true,
+          method: "getIdentitySummary",
+          response: api.getIdentitySummary(),
         };
       case "getNodeHealth":
         return {
@@ -181,6 +247,185 @@ function listApps(): AppSummaryResponse {
   return {
     apps: DEFAULT_APPS,
   };
+}
+
+function storageOverview(): StorageOverviewResponse {
+  const poolCapacity = Object.freeze({
+    totalGiB: 2_048,
+    usedGiB: 768,
+    availableGiB: 1_280,
+  });
+  const dataCapacity = Object.freeze({
+    totalGiB: 1_792,
+    usedGiB: 704,
+    availableGiB: 1_088,
+  });
+  const appCapacity = Object.freeze({
+    totalGiB: 256,
+    usedGiB: 64,
+    availableGiB: 192,
+  });
+
+  return Object.freeze({
+    summary: Object.freeze({
+      health: "healthy",
+      capacity: poolCapacity,
+      encryptedVolumes: 2,
+      snapshotProtectedVolumes: 2,
+      mirrorProtectedVolumes: 1,
+      backupProtectedVolumes: 2,
+      unprotectedVolumes: 0,
+    }),
+    pools: Object.freeze([
+      Object.freeze({
+        id: "pool-primary",
+        label: "Primary data pool",
+        health: "healthy",
+        capacity: poolCapacity,
+        encryptionState: "encrypted",
+        protectionStates: Object.freeze([
+          SNAPSHOT_PROTECTION,
+          MIRROR_PROTECTION,
+          LOCAL_BACKUP_PROTECTION,
+          OFF_SITE_BACKUP_PROTECTION,
+        ]),
+      }),
+    ]),
+    volumes: Object.freeze([
+      Object.freeze({
+        id: "volume-data",
+        poolId: "pool-primary",
+        label: "Authoritative data",
+        mountPath: "/data",
+        health: "healthy",
+        capacity: dataCapacity,
+        encryptionState: "encrypted",
+        snapshotCadence: "hourly",
+        protectionStates: Object.freeze([
+          SNAPSHOT_PROTECTION,
+          MIRROR_PROTECTION,
+          LOCAL_BACKUP_PROTECTION,
+          OFF_SITE_BACKUP_PROTECTION,
+        ]),
+      }),
+      Object.freeze({
+        id: "volume-app-state",
+        poolId: "pool-primary",
+        label: "Application state",
+        mountPath: "/var/lib/vita/apps",
+        health: "healthy",
+        capacity: appCapacity,
+        encryptionState: "encrypted",
+        snapshotCadence: "daily",
+        protectionStates: Object.freeze([
+          SNAPSHOT_PROTECTION,
+          LOCAL_BACKUP_PROTECTION,
+          OFF_SITE_BACKUP_PROTECTION,
+        ]),
+      }),
+    ]),
+  });
+}
+
+function backupStatus(): BackupStatusResponse {
+  return Object.freeze({
+    summary: Object.freeze({
+      backupTargetCount: 2,
+      healthyTargets: 2,
+      restoreTestsPassing: 2,
+      lastSuccessfulBackupAt: "2026-06-20T04:15:00.000Z",
+    }),
+    targets: Object.freeze([
+      Object.freeze({
+        id: "backup-attached-disk",
+        label: "Attached recovery disk",
+        targetKind: "attached-disk",
+        enabled: true,
+        schedule: "daily",
+        protectionState: LOCAL_BACKUP_PROTECTION,
+        lastRun: Object.freeze({
+          result: "succeeded",
+          finishedAt: "2026-06-20T04:15:00.000Z",
+        }),
+        nextRunAt: "2026-06-21T04:15:00.000Z",
+        lastRestoreTest: Object.freeze({
+          result: "passed",
+          testedAt: "2026-06-19T12:00:00.000Z",
+        }),
+      }),
+      Object.freeze({
+        id: "backup-remote-object",
+        label: "Remote encrypted object target",
+        targetKind: "remote-object",
+        enabled: true,
+        schedule: "daily",
+        protectionState: OFF_SITE_BACKUP_PROTECTION,
+        lastRun: Object.freeze({
+          result: "succeeded",
+          finishedAt: "2026-06-20T04:10:00.000Z",
+        }),
+        nextRunAt: "2026-06-21T04:10:00.000Z",
+        lastRestoreTest: Object.freeze({
+          result: "passed",
+          testedAt: "2026-06-18T12:00:00.000Z",
+        }),
+      }),
+    ]),
+    nonBackupProtection: Object.freeze([
+      Object.freeze({
+        id: "snapshot-local",
+        label: "Local snapshots",
+        protectionState: SNAPSHOT_PROTECTION,
+      }),
+      Object.freeze({
+        id: "mirror-primary",
+        label: "Primary pool mirror",
+        protectionState: MIRROR_PROTECTION,
+      }),
+    ]),
+  });
+}
+
+function identitySummary(): IdentitySummaryResponse {
+  return Object.freeze({
+    roles: Object.freeze([
+      Object.freeze({
+        role: "owner",
+        principalCount: 1,
+      }),
+      Object.freeze({
+        role: "administrator",
+        principalCount: 1,
+      }),
+      Object.freeze({
+        role: "member",
+        principalCount: 2,
+      }),
+      Object.freeze({
+        role: "restricted-member",
+        principalCount: 1,
+      }),
+      Object.freeze({
+        role: "guest",
+        principalCount: 0,
+      }),
+      Object.freeze({
+        role: "service",
+        principalCount: 3,
+      }),
+    ]),
+    passkeys: Object.freeze({
+      required: true,
+      state: "partial",
+      enrolledPrincipals: 4,
+      unenrolledPrincipals: 1,
+    }),
+    auditLog: Object.freeze({
+      available: true,
+      retentionDays: 365,
+      lastEventAt: "2026-06-20T10:00:00.000Z",
+    }),
+  });
 }
 
 function previewAppInstall(params: AppInstallPreviewRequest): AppInstallPreviewResponse {
@@ -600,28 +845,35 @@ function defaultNode(device: DeviceSnapshot): InMemoryNode {
 }
 
 function readOverviewParams(params: unknown): GetOverviewRequest {
-  if (params === undefined) {
-    return EMPTY_PARAMS;
-  }
+  return readEmptyParams(params, "getOverview");
+}
 
-  if (!isRecord(params)) {
-    throw new TypeError("getOverview params must be an object when provided.");
-  }
+function readStorageOverviewParams(params: unknown): GetStorageOverviewRequest {
+  return readEmptyParams(params, "getStorageOverview");
+}
 
-  rejectUnknownParams(params, new Set<string>(), "getOverview");
-  return EMPTY_PARAMS;
+function readBackupStatusParams(params: unknown): GetBackupStatusRequest {
+  return readEmptyParams(params, "getBackupStatus");
+}
+
+function readIdentitySummaryParams(params: unknown): GetIdentitySummaryRequest {
+  return readEmptyParams(params, "getIdentitySummary");
 }
 
 function readListAppsParams(params: unknown): ListAppsRequest {
+  return readEmptyParams(params, "listApps");
+}
+
+function readEmptyParams(params: unknown, method: string): EmptyParams {
   if (params === undefined) {
     return EMPTY_PARAMS;
   }
 
   if (!isRecord(params)) {
-    throw new TypeError("listApps params must be an object when provided.");
+    throw new TypeError(`${method} params must be a plain object when provided.`);
   }
 
-  rejectUnknownParams(params, new Set<string>(), "listApps");
+  rejectUnknownParams(params, new Set<string>(), method);
   return EMPTY_PARAMS;
 }
 
@@ -713,5 +965,15 @@ function dispatchError(
 }
 
 function isRecord(value: unknown): value is JsonRecord {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value) || nodeTypes.isProxy(value)) {
+    return false;
+  }
+
+  try {
+    const prototype = Object.getPrototypeOf(value);
+
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
 }

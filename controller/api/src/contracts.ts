@@ -7,7 +7,12 @@ import type {
   PackageContractValidationResult,
 } from "../../../sdk/manifests/src/package-contract.ts";
 import type { PlanDiff } from "../../../sdk/typescript/src/diff.ts";
-import type { CanonicalPlan, DesiredState } from "../../../sdk/typescript/src/plan.ts";
+import type {
+  BackupSchedule,
+  CanonicalPlan,
+  DesiredState,
+  SnapshotCadence,
+} from "../../../sdk/typescript/src/plan.ts";
 import type { ValidationResult } from "../../../sdk/typescript/src/validate.ts";
 import type {
   BrokerPolicy,
@@ -45,6 +50,184 @@ export interface OverviewResponse {
 }
 
 export type GetOverviewRequest = EmptyParams;
+
+export type StorageHealthStatus = "healthy" | "degraded" | "critical";
+export type StorageEncryptionState = "encrypted" | "unencrypted" | "unknown";
+export type ProtectionLevel = "snapshot" | "mirror" | "local-backup" | "off-site-backup";
+export type ProtectionBackupClass = "not-backup" | "backup";
+
+export type ProtectionState =
+  | {
+      readonly level: "snapshot";
+      readonly protectionLevel: "snapshot";
+      readonly backupClass: "not-backup";
+      readonly isBackup: false;
+      readonly description: string;
+    }
+  | {
+      readonly level: "mirror";
+      readonly protectionLevel: "mirror";
+      readonly backupClass: "not-backup";
+      readonly isBackup: false;
+      readonly description: string;
+    }
+  | {
+      readonly level: "local-backup";
+      readonly protectionLevel: "local-backup";
+      readonly backupClass: "backup";
+      readonly isBackup: true;
+      readonly description: string;
+    }
+  | {
+      readonly level: "off-site-backup";
+      readonly protectionLevel: "off-site-backup";
+      readonly backupClass: "backup";
+      readonly isBackup: true;
+      readonly description: string;
+    };
+
+export type BackupProtectionState = Extract<
+  ProtectionState,
+  { readonly backupClass: "backup" }
+>;
+export type NonBackupProtectionState = Extract<
+  ProtectionState,
+  { readonly backupClass: "not-backup" }
+>;
+
+export interface CapacitySummary {
+  readonly totalGiB: number;
+  readonly usedGiB: number;
+  readonly availableGiB: number;
+}
+
+export interface StorageOverviewSummary {
+  readonly health: StorageHealthStatus;
+  readonly capacity: CapacitySummary;
+  readonly encryptedVolumes: number;
+  readonly snapshotProtectedVolumes: number;
+  readonly mirrorProtectedVolumes: number;
+  readonly backupProtectedVolumes: number;
+  readonly unprotectedVolumes: number;
+}
+
+export interface StoragePoolOverview {
+  readonly id: string;
+  readonly label: string;
+  readonly health: StorageHealthStatus;
+  readonly capacity: CapacitySummary;
+  readonly encryptionState: StorageEncryptionState;
+  readonly protectionStates: readonly ProtectionState[];
+}
+
+export interface StorageVolumeOverview {
+  readonly id: string;
+  readonly poolId: string;
+  readonly label: string;
+  readonly mountPath: string;
+  readonly health: StorageHealthStatus;
+  readonly capacity: CapacitySummary;
+  readonly encryptionState: StorageEncryptionState;
+  readonly snapshotCadence: SnapshotCadence;
+  readonly protectionStates: readonly ProtectionState[];
+}
+
+export interface StorageOverviewResponse {
+  readonly summary: StorageOverviewSummary;
+  readonly pools: readonly StoragePoolOverview[];
+  readonly volumes: readonly StorageVolumeOverview[];
+}
+
+export type GetStorageOverviewRequest = EmptyParams;
+
+export type BackupTargetKind =
+  | "attached-disk"
+  | "peer-node"
+  | "remote-object"
+  | "remote-sftp"
+  | "vendor-managed";
+
+export type BackupRunResult = "succeeded" | "failed" | "never-run" | "unknown";
+export type RestoreTestResult = "passed" | "failed" | "not-run" | "unknown";
+
+export interface BackupRunSummary {
+  readonly result: BackupRunResult;
+  readonly finishedAt?: string;
+}
+
+export interface RestoreTestSummary {
+  readonly result: RestoreTestResult;
+  readonly testedAt?: string;
+}
+
+export interface BackupTargetStatus {
+  readonly id: string;
+  readonly label: string;
+  readonly targetKind: BackupTargetKind;
+  readonly enabled: boolean;
+  readonly schedule: BackupSchedule;
+  readonly protectionState: BackupProtectionState;
+  readonly lastRun: BackupRunSummary;
+  readonly nextRunAt?: string;
+  readonly lastRestoreTest: RestoreTestSummary;
+}
+
+export interface NonBackupProtectionStatus {
+  readonly id: string;
+  readonly label: string;
+  readonly protectionState: NonBackupProtectionState;
+}
+
+export interface BackupStatusSummary {
+  readonly backupTargetCount: number;
+  readonly healthyTargets: number;
+  readonly restoreTestsPassing: number;
+  readonly lastSuccessfulBackupAt?: string;
+}
+
+export interface BackupStatusResponse {
+  readonly summary: BackupStatusSummary;
+  readonly targets: readonly BackupTargetStatus[];
+  readonly nonBackupProtection: readonly NonBackupProtectionStatus[];
+}
+
+export type GetBackupStatusRequest = EmptyParams;
+
+export type IdentityRole =
+  | "owner"
+  | "administrator"
+  | "member"
+  | "restricted-member"
+  | "guest"
+  | "service";
+
+export interface IdentityRoleSummary {
+  readonly role: IdentityRole;
+  readonly principalCount: number;
+}
+
+export type PasskeyEnrollmentState = "complete" | "partial" | "not-enrolled";
+
+export interface PasskeyEnrollmentSummary {
+  readonly required: boolean;
+  readonly state: PasskeyEnrollmentState;
+  readonly enrolledPrincipals: number;
+  readonly unenrolledPrincipals: number;
+}
+
+export interface AuditLogSummary {
+  readonly available: boolean;
+  readonly retentionDays: number;
+  readonly lastEventAt?: string;
+}
+
+export interface IdentitySummaryResponse {
+  readonly roles: readonly IdentityRoleSummary[];
+  readonly passkeys: PasskeyEnrollmentSummary;
+  readonly auditLog: AuditLogSummary;
+}
+
+export type GetIdentitySummaryRequest = EmptyParams;
 
 export interface NodeHealthRequest {
   readonly nodeId: string;
@@ -149,6 +332,9 @@ export type AppInstallPreviewResponse =
 
 export interface ControllerApi {
   getOverview(): OverviewResponse;
+  getStorageOverview(): StorageOverviewResponse;
+  getBackupStatus(): BackupStatusResponse;
+  getIdentitySummary(): IdentitySummaryResponse;
   getNodeHealth(params: NodeHealthRequest): NodeHealthResponse;
   previewPlan(params: PlanPreviewRequest): PlanPreviewResponse;
   listApps(): AppSummaryResponse;
@@ -157,6 +343,9 @@ export interface ControllerApi {
 
 export type ControllerApiMethod =
   | "getOverview"
+  | "getStorageOverview"
+  | "getBackupStatus"
+  | "getIdentitySummary"
   | "getNodeHealth"
   | "previewPlan"
   | "listApps"
@@ -166,6 +355,18 @@ export type ControllerApiRequest =
   | {
       readonly method: "getOverview";
       readonly params?: GetOverviewRequest;
+    }
+  | {
+      readonly method: "getStorageOverview";
+      readonly params?: GetStorageOverviewRequest;
+    }
+  | {
+      readonly method: "getBackupStatus";
+      readonly params?: GetBackupStatusRequest;
+    }
+  | {
+      readonly method: "getIdentitySummary";
+      readonly params?: GetIdentitySummaryRequest;
     }
   | {
       readonly method: "getNodeHealth";
@@ -194,6 +395,21 @@ export type ControllerApiDispatchResult =
       readonly ok: true;
       readonly method: "getOverview";
       readonly response: OverviewResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "getStorageOverview";
+      readonly response: StorageOverviewResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "getBackupStatus";
+      readonly response: BackupStatusResponse;
+    }
+  | {
+      readonly ok: true;
+      readonly method: "getIdentitySummary";
+      readonly response: IdentitySummaryResponse;
     }
   | {
       readonly ok: true;
