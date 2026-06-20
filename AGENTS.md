@@ -57,6 +57,21 @@ conventions you must follow are below.
   the privileged surface beyond the contract. Capabilities are a CLOSED typed set; unknown/unregistered
   requests are rejected (fail-closed). Linux-syscall-specific impls go behind `//go:build linux` build
   tags with portable interfaces, so the skeleton compiles/tests in the container.
+- **Dependencies are VENDORED (`agent/vendor/`); you build OFFLINE.** Go auto-uses `vendor/` — no
+  network. NEVER fabricate a local module that masquerades as an upstream import path (e.g. a fake
+  `replace golang.org/x/sys => ./...` with a hand-rolled `unix` shim) — that defeats dependency
+  provenance on TCB code and will be rejected. If a needed dep is already vendored, import it for real.
+  If it is NOT vendored, STOP and say so in your report (the orchestrator vendors deps; you cannot).
+- **Privileged syscalls go through `agent/internal/sysdeps`** (the single audited site importing the
+  vendored `golang.org/x/sys/unix`) — e.g. `sysdeps.SetHostname`, `sysdeps.SetRealtimeClock`. Use it
+  (or the real vendored `x/sys/unix`), NOT stdlib `syscall` where `x/sys` provides the typed call.
+- **Single commit-point ordering (R3, the P1-006/P1-007 lesson).** In a transactional `Apply`, the
+  irreversible privileged effect (rename, `sethostname`, clock set) must be the SINGLE commit point:
+  no fallible step may run AFTER it, and no irreversible step may run BEFORE the point at which an Undo
+  is recorded. Guarantee exactly two outcomes — (a) success + a working restoring `Undo`, or (b) error
+  with the live system UNCHANGED. Never a third state (mutated-but-reported-failed). Prove the
+  partial-failure case with a regression test (inject a failure at/after the effect; assert no
+  untracked mutation).
 
 ### General
 - Match the style, naming, and comment density of surrounding code. Read neighboring files first.
