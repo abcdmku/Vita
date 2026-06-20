@@ -17,7 +17,9 @@ import (
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
+	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
@@ -103,6 +105,8 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 		&mockTxCapability{name: identity.Name},
 		&mockTxCapability{name: hostname.Name},
 		&mockTxCapability{name: nodeconfig.Name},
+		&mockTxCapability{name: update.Name},
+		&mockTxCapability{name: storage.Name},
 	)
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
@@ -113,7 +117,7 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	}
 	var got OperationsResponse
 	decodeResponse(t, response, &got)
-	want := []string{hostname.Name, identity.Name, network.Name, nodeconfig.Name, nodetime.Name}
+	want := []string{hostname.Name, identity.Name, network.Name, nodeconfig.Name, storage.Name, nodetime.Name, update.Name}
 	if !reflect.DeepEqual(got.Operations, want) {
 		t.Fatalf("operations = %v, want %v", got.Operations, want)
 	}
@@ -187,6 +191,28 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		{Proto: network.ProtoTCP, Port: 443, SourceCIDR: "10.0.0.0/8", Interface: "eth0"},
 	}
 	desiredNetwork := network.Policy{Allow: &networkAllow}
+	storageQuotaSystem := int64(32)
+	storageQuotaUser := int64(768)
+	storageQuotaApp := int64(96)
+	storageQuotaSnapshots := int64(384)
+	storageQuotaBackup := int64(128)
+	storageAppID := "local-search"
+	storageSubvolumes := []storage.Subvolume{
+		{Role: storage.RoleSystemState, Path: "/data/system-state", QuotaGiB: &storageQuotaSystem},
+		{Role: storage.RoleUserData, Path: "/data/user-data", QuotaGiB: &storageQuotaUser},
+		{Role: storage.RoleAppState, Path: "/data/app-state/local-search", AppID: &storageAppID, QuotaGiB: &storageQuotaApp},
+		{Role: storage.RoleSnapshots, Path: "/data/snapshots", QuotaGiB: &storageQuotaSnapshots},
+		{Role: storage.RoleLocalBackupCache, Path: "/data/local-backup-cache", QuotaGiB: &storageQuotaBackup},
+	}
+	desiredStorage := storage.Layout{Subvolumes: &storageSubvolumes}
+	desiredUpdate := update.Plan{
+		TargetSlot: update.SlotB,
+		Bundle: update.BundleRef{
+			Ref:       "https://updates.example.invalid/vita-os-1.3.0.raucb",
+			Integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Version:   "1.3.0",
+		},
+	}
 	registry := mustRegistry(t,
 		&routedTxCapability{
 			name:   nodeconfig.Name,
@@ -261,13 +287,44 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 				return nil
 			},
 		},
+		&routedTxCapability{
+			name:   storage.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(storage.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("storage request = %T, want storage.ApplyRequest", request)
+				}
+				if typedRequest.Desired == nil {
+					return errors.New("storage desired = nil")
+				}
+				if !reflect.DeepEqual(*typedRequest.Desired, desiredStorage) {
+					return fmt.Errorf("storage desired = %#v, want %#v", *typedRequest.Desired, desiredStorage)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
+			name:   update.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(update.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("update request = %T, want update.ApplyRequest", request)
+				}
+				if typedRequest.Desired != desiredUpdate {
+					return fmt.Errorf("update desired = %#v, want %#v", typedRequest.Desired, desiredUpdate)
+				}
+				return nil
+			},
+		},
 	)
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names. Registration is proven below: /apply routes a plan to all five registered
+	// names. Registration is proven below: /apply routes a plan to all seven registered
 	// capabilities and commits them in order.
-	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}}]}`)
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}},{"capability":"storage.layout","request":{"desired":{"subvolumes":[{"role":"system-state","path":"/data/system-state","quotaGiB":32},{"role":"user-data","path":"/data/user-data","quotaGiB":768},{"role":"app-state","path":"/data/app-state/local-search","appId":"local-search","quotaGiB":96},{"role":"snapshots","path":"/data/snapshots","quotaGiB":384},{"role":"local-backup-cache","path":"/data/local-backup-cache","quotaGiB":128}]}}},{"capability":"update.plan","request":{"desired":{"targetSlot":"b","bundle":{"ref":"https://updates.example.invalid/vita-os-1.3.0.raucb","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"1.3.0"}}}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
@@ -282,6 +339,8 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		{Index: 2, Capability: hostname.Name},
 		{Index: 3, Capability: identity.Name},
 		{Index: 4, Capability: network.Name},
+		{Index: 5, Capability: storage.Name},
+		{Index: 6, Capability: update.Name},
 	}
 	if !reflect.DeepEqual(result.Applied, wantApplied) {
 		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
@@ -289,7 +348,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("Error = %#v, want nil", result.Error)
 	}
-	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name, identity.Name, network.Name}
+	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name, identity.Name, network.Name, storage.Name, update.Name}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
