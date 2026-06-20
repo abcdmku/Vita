@@ -10,10 +10,11 @@ host the owner must opt into.**
 
 ## Status: RUNNING — OS build path (owner chose "set up Docker", 2026-06-20)
 26 portable contracts merged (typecheck=0, 112 tests). Now opening the deferred OS layers. Toolchain READY + validated: **Go 1.26.4** (native + golang:1.26 container) and **Docker** (Debian 13
-trixie + Linux engine). Go builds run in the container via `tools/build/go-in-docker.mjs`. First OS
-contract **P1-004 (Go system agent skeleton + health endpoint)** dispatching — R3 (privileged TCB) →
-reviewer-gated, extra scrutiny (the reviewer must find no arbitrary-execution path). Then capability
-discovery (FR-004), then the image pipeline (Debian/UKI/RAUC/dm-verity) + QEMU boot in Docker.
+trixie + Linux engine). Go builds run in the container via `tools/build/go-in-docker.mjs`. **OS path PROVEN end-to-end:** P1-004 Go agent skeleton (R3 privileged TCB) built by GPT-5.5, go
+test+vet clean in golang:1.26, reviewer-confirmed NO arbitrary-execution surface, merged. Next:
+P1-005 capability discovery (FR-004, read-only procfs/sysfs, tested for real in the Linux container),
+then the agent transaction engine (FR-007) + privileged capability impls, then the image pipeline
+(Debian/UKI/RAUC/dm-verity) + QEMU boot in Docker.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
@@ -52,7 +53,7 @@ TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). 
   should prevent the recurring boundary-bug class).
 - Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Done (26)
+## Done (27)
 P0-001..P0-016 (SDK core + audit cleanup + ADRs + safeNormalize + typecheck cleanup),
 P1-001..P1-003 (package contract, PDS manifest, catalog), P2-001..P2-005 (controller skeleton, app
 endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profiles). Audit:
