@@ -76,6 +76,12 @@ Authoritative source: [ai-factory/protected-policy/risk-classes.md](ai-factory/p
 > pass, and never when a stop condition (`protected-policy/boundaries.md`) fires. Verification and
 > stop-conditions are the quality floor and are NOT waived. Reverts when the owner says "stop
 > auto-merging".
+>
+> ⚠️ **R2/R3/R4 reviewer gate (owner, 2026-06-20): consult a GPT-5.5 xhigh reviewer before merging.**
+> For R2–R4, after your own verification, run `npm run review -- <id>` (an independent Codex review
+> of the task branch). Merge only if its `VERDICT: approve` AND your verification pass. On
+> `revise`/`reject`, do NOT merge — address the blocking findings (re-dispatch the builder with them)
+> or escalate. R0/R1 do not need the reviewer.
 
 | Class | Examples | Your authority |
 |---|---|---|

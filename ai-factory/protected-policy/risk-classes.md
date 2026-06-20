@@ -10,6 +10,11 @@
 > stop-conditions in [boundaries.md](boundaries.md) are NOT waived; a change that fails verification
 > or trips a stop condition is reported, not merged. **To revert:** the owner says "stop
 > auto-merging" (or removes this banner); merge authority then returns to the table below.
+>
+> ⚠️ **R2/R3/R4 reviewer gate (owner, 2026-06-20).** For R2–R4, an **independent GPT-5.5 xhigh
+> reviewer** must approve before merge: run `npm run review -- <id>`; merge only on `VERDICT:
+> approve` (plus the orchestrator's own verification). `revise`/`reject` → do not merge; fix the
+> blocking findings or re-dispatch. R0/R1 are unaffected. Reverts when the owner lifts it.
 
 ## Classes
 

@@ -12,6 +12,8 @@ Worker execution is live (GPT-5.5 xhigh via Codex `codex login`). The end-to-end
 **Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20 ("auto merge everything until
 I say not to"). No human-approval pause; quality floor (verify + rubric + stop-conditions) still
 applies. Reverts when owner says "stop auto-merging".
+**R2/R3/R4 reviewer gate** — owner 2026-06-20: those classes also require an independent GPT-5.5
+xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 unaffected.
 
 ## Phase 0 exit gates (spec §21)
 - [x] One task can pass through spec → test → implementation → review → evaluation → merge.

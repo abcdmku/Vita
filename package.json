@@ -11,6 +11,7 @@
     "ready": "node tools/loop/tick.mjs --list",
     "tick": "node tools/loop/tick.mjs",
     "dispatch": "node tools/dispatch/dispatch-task.mjs",
+    "review": "node tools/dispatch/review-task.mjs",
     "auth:check": "node tools/dispatch/check-auth.mjs"
   },
   "workspaces": []

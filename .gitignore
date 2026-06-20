@@ -14,6 +14,8 @@ out/
 tools/loop/state/*.local.json
 ai-factory/task-contracts/*.result.json
 ai-factory/task-contracts/*.worker.md
+ai-factory/task-contracts/*.review.md
+ai-factory/task-contracts/*.review.json
 
 # secrets — NEVER commit (spec §16 Security: keys unavailable to dev agents)
 .env

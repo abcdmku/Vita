@@ -46,9 +46,13 @@ ready-checklist (CLAUDE.md §4) passes.
   done/` and flip its `status` to `done`; commit (message references the contract id + worker). The
   `task/<id>` branch persists as the audit trail. (`*.worker.md` / `*.result.json` are gitignored
   factory artifacts, never product code.)
-- **R2 / R3 / R4**: do **not** merge. Surface a summary + evidence to the human and stop on that
-  contract; record "awaiting human approval" in STATE.md. Move to `done/` only after the human's
-  approval is recorded.
+- **R2 / R3 / R4** (auto-merge override active — owner 2026-06-20, with a reviewer gate): after your
+  own verification, run `npm run review -- <id>` (independent GPT-5.5 xhigh review of the branch).
+  Merge with the **same clean-checkout steps as R0/R1** ONLY if `<id>.review.json` decision is
+  `approve` **and** your verification passed. On `revise`/`reject`: do **not** merge — re-dispatch the
+  builder with the reviewer's blocking findings (new/updated contract referencing them), or escalate
+  to the human if it keeps failing. (If the owner lifts the override, R2+ revert to human approval per
+  `protected-policy/risk-classes.md`.)
 - On FAIL: move `queue/<id>.md` → `failed/`, keep `<id>.worker.md` as `failed/<id>.report.md`,
   keep the branch for inspection.
 
