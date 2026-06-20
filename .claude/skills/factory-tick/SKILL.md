@@ -41,8 +41,11 @@ ready-checklist (CLAUDE.md §4) passes.
   references `failed/<id>.report.md`).
 
 ## 6. Integrate by risk class
-- **R0 / R1**: `git checkout main && git merge --no-ff task/<id>`; move `queue/<id>.md` → `done/`;
-  commit (message references the contract id). Delete the merged branch.
+- **R0 / R1**: bring **only product files** to main — `git checkout task/<id> -- <the contract's
+  target_paths>` — so factory artifacts stay out of product history; then `git mv queue/<id>.md
+  done/` and flip its `status` to `done`; commit (message references the contract id + worker). The
+  `task/<id>` branch persists as the audit trail. (`*.worker.md` / `*.result.json` are gitignored
+  factory artifacts, never product code.)
 - **R2 / R3 / R4**: do **not** merge. Surface a summary + evidence to the human and stop on that
   contract; record "awaiting human approval" in STATE.md. Move to `done/` only after the human's
   approval is recorded.
