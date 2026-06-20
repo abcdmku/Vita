@@ -8,7 +8,7 @@
 golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
 complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
-## Status: RUNNING (degraded) — Codex substrate usage-limited; orchestrator doing R0/R1 DIRECTLY (CLAUDE.md 1.1); R2+ gated until credits return
+## Status: RUNNING — Codex substrate restored (credits back ~14:32 CDT); full parallel pipeline resumed
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
 run the loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
 **44 contracts merged.** Parallel mode: Opus 4.8 subagents each drive one independent contract
