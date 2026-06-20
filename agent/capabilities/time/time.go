@@ -25,6 +25,18 @@ type ApplyRequest struct {
 
 func (ApplyRequest) CapabilityRequest() {}
 
+// Validate is the transport's pre-transaction request check (P1-008). It enforces only STATIC
+// validity; the ±maxClockSkew drift bound is a runtime property enforced in Apply against the live
+// clock, not here (a stateless check must not depend on the wall clock).
+func (ReadRequest) Validate() error { return nil }
+
+func (r ApplyRequest) Validate() error {
+	if r.Desired.IsZero() {
+		return &InvalidRequestError{Reason: "desired time is zero"}
+	}
+	return nil
+}
+
 type ReadResponse struct {
 	Current time.Time `json:"current"`
 }

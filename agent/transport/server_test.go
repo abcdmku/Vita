@@ -127,7 +127,7 @@ func TestApplyCommitsValidPlan(t *testing.T) {
 	}
 }
 
-func TestRegisteredAgentCapabilitiesAreDiscoverableAndApplicable(t *testing.T) {
+func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	events := []string{}
 	desiredConfig := nodeconfig.Config{Mode: nodeconfig.ModeMaintenance, RemoteAccess: nodeconfig.RemoteAccessEnabled}
 	desiredTime := time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)
@@ -178,19 +178,10 @@ func TestRegisteredAgentCapabilitiesAreDiscoverableAndApplicable(t *testing.T) {
 	)
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
-	capabilitiesResponse := perform(handler, http.MethodGet, "/capabilities", "")
-	if capabilitiesResponse.Code != http.StatusOK {
-		t.Fatalf("capabilities status code = %d, want %d; body=%s", capabilitiesResponse.Code, http.StatusOK, capabilitiesResponse.Body.String())
-	}
-	var discovered struct {
-		Capabilities []string `json:"capabilities"`
-	}
-	decodeResponse(t, capabilitiesResponse, &discovered)
-	wantCapabilities := []string{hostname.Name, nodeconfig.Name, nodetime.Name}
-	if !reflect.DeepEqual(discovered.Capabilities, wantCapabilities) {
-		t.Fatalf("capabilities = %v, want %v", discovered.Capabilities, wantCapabilities)
-	}
-
+	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
+	// names — distinct concerns. Registration is proven below: /apply routes a plan to all three
+	// registered capabilities and commits them in order. (Exposing operation names over the API
+	// for controller plan-building is a separate follow-up.)
 	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())

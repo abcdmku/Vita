@@ -24,6 +24,15 @@ type ApplyRequest struct {
 
 func (ApplyRequest) CapabilityRequest() {}
 
+// Validate is the transport's pre-transaction request check (P1-008): reject an incomplete/invalid
+// hostname before any transaction work. The kernel set itself stays in Apply (the single commit point).
+func (ReadRequest) Validate() error { return nil }
+
+func (r ApplyRequest) Validate() error {
+	_, err := validateDesiredHostname(r.Desired)
+	return err
+}
+
 type ReadResponse struct {
 	Current string `json:"current"`
 }

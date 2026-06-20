@@ -66,6 +66,7 @@ endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profile
 
 
 ## Lessons (most recent first)
+- **Latent integration bug: 2 of 3 agent capabilities were unusable over /apply** (time.set/hostname.set). The transport pre-transaction gate (P1-008) requires every request type to implement Validate(), and a per-capability decoder must be registered in DefaultRequestDecoders — but nodetime/hostname had neither, and P1-013 added an integration test that ALSO mis-asserted /capabilities returns operation names (it returns hardware). It reached main because I verified that merge by counting grep ^ok lines (8) instead of checking the exit code / grepping FAIL. FIX: drift stays in Apply (runtime), static Validate() added to time+hostname requests, hostname decoder registered, test corrected. VERIFICATION RULE: a Go/test gate passes only on EXIT 0 (or an explicit no-FAIL check) — never infer pass from an ok-line count.
 - **strip-types acceptance does NOT type-check.** node --experimental-strip-types erases types; 48
   strict-TS errors slipped through. Fix: `npm run typecheck` lane, required by AGENTS + factory-tick.
   Independent verification also caught a dispatch FALSE-NEGATIVE (escaped-quote acceptance typo) —
