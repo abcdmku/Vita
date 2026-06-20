@@ -63,11 +63,18 @@ if (c.acceptance_command) {
   }
 }
 
+// Strip the contract's "## Reviewer revision (round N)" history — it QUOTES prior (often already-fixed)
+// findings, which the reviewer can regurgitate as a CURRENT finding even when the code now fixes it.
+// The reviewer must judge only the current diff against the contract's requirements.
+const contractForReview = c.raw.replace(/\n## Reviewer revision[\s\S]*?(?=\n## )/g, "\n");
+
 const instructions = [
   "You are an INDEPENDENT senior reviewer for the Vita project (a TypeScript-first personal Node OS).",
   "Review the diff below (treat it as a higher-risk R2+ change) for merge into main. You did NOT write it.",
   "Judge against the task contract, AGENTS.md, ai-factory/evaluation/rubric.md, and the product spec",
   "(typescript_personal_node_os_build_spec.md — you may read repo files read-only). Hold a high bar.",
+  "CRITICAL: assess ONLY the CURRENT code in the diff below. A finding is BLOCKING only if you can point",
+  "to the offending line IN THIS DIFF. Do NOT re-report a prior-round finding unless it is still present.",
   "Be adversarial about: correctness; scope creep beyond the contract's target_paths; security and",
   "privileged surface (Go agent, boot, storage, identity, signing, permission broker);",
   "determinism/reproducibility; and TEST INTEGRITY — flag any weakened, deleted, skipped, or gamed test.",
@@ -88,8 +95,8 @@ const instructions = [
   "security from the diff.)",
   "=== END ACCEPTANCE ===",
   "",
-  `=== TASK CONTRACT ${id} ===`,
-  c.raw,
+  `=== TASK CONTRACT ${id} (requirements; prior-round revision history stripped) ===`,
+  contractForReview,
   "=== END CONTRACT ===",
   "",
   `=== DIFF (${base.slice(0, 9)}..${branch}) ===`,
