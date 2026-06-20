@@ -26,11 +26,10 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P2-002 **round 3** building — the TCB permission broker is hard, blocked twice by the reviewer.
-  R1: partial-malformed grants + undocumented alias. R2: method-shadowing bypass (shape-valid
-  contract with `egress.some = () => true` lied to the check). Round 3 re-architects to
-  **normalize-untrusted-to-plain-via-intrinsic-safe-reads, then decide** + brevity. If round 3 fails,
-  escalate (decompose into normalizer + decision-rules, or dual-candidate per spec §18.4).
+- **Permission broker (P2-002) MERGED** after 3 reviewer rounds — the hardest, most security-critical
+  component is in (normalize-then-decide, defends method-shadowing/hostile-iterators/partials).
+- P2-003 (controller app endpoints — list + install-preview showing granted/denied capabilities via
+  the broker, R2 → reviewer-gated) dispatching. P6-001 (capsule manifest types §13, R1) queued.
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -44,6 +43,8 @@ Go-agent / OS-image / lockfile path. Absent steering, the loop proceeds in id or
 - (P0-012) an inline `defineSystem` example in `define-system.test.ts` lacks `allowedCapabilities` —
   tidy when next touching that file.
 - (P2-001) `previewPlan` re-normalizes instead of reusing `validation.plan` — minor simplification.
+- (P2-002) broker `decide.ts` is sizable and duplicates runtime enum sets (data classes/access/protocols)
+  — extract a single shared enum/constants module for auditability/drift.
 
 ## Reviewer gate — validated & load-bearing
 `npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked two buggy merges** that passed
@@ -62,6 +63,7 @@ now mandates fail-closed-never-throw validators to pre-empt the latter class.
 - **P0-013** Week-1 ADRs (adr-check) · **P0-014** shared fail-closed `isCanonicalPlan` ✓rev r2.
 - **P1-001** package contract schema (§9.2) · **P1-002** AT Protocol PDS manifest (FR-018).
 - **P2-001** controller API skeleton — **first R2** ✓rev (getOverview/getNodeHealth/previewPlan).
+- **P2-002** permission-broker decision core — **TCB R2** ✓rev (3 rounds; default-deny, fail-closed, intrinsic-safe).
 
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
