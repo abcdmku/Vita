@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/capabilities/update"
@@ -100,11 +102,13 @@ func TestReadRoutesReturnExpectedJSON(t *testing.T) {
 
 func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	registry := mustRegistry(t,
+		&mockTxCapability{name: backup.Name},
 		&mockTxCapability{name: nodetime.Name},
 		&mockTxCapability{name: network.Name},
 		&mockTxCapability{name: identity.Name},
 		&mockTxCapability{name: hostname.Name},
 		&mockTxCapability{name: nodeconfig.Name},
+		&mockTxCapability{name: pdssync.Name},
 		&mockTxCapability{name: update.Name},
 		&mockTxCapability{name: storage.Name},
 	)
@@ -117,7 +121,7 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	}
 	var got OperationsResponse
 	decodeResponse(t, response, &got)
-	want := []string{hostname.Name, identity.Name, network.Name, nodeconfig.Name, storage.Name, nodetime.Name, update.Name}
+	want := []string{backup.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, storage.Name, nodetime.Name, update.Name}
 	if !reflect.DeepEqual(got.Operations, want) {
 		t.Fatalf("operations = %v, want %v", got.Operations, want)
 	}
@@ -212,6 +216,31 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 			Integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			Version:   "1.3.0",
 		},
+	}
+	backupRetentionCount := int64(7)
+	backupRetentionMaxAgeDays := int64(30)
+	backupSchedule := "0 2 * * *"
+	backupKeyStoreRef := "keystore:local-tpm"
+	desiredBackup := backup.Policy{
+		Schedule: backup.Schedule{Cron: &backupSchedule},
+		Targets: []backup.TargetRef{
+			{ID: "target:system-state"},
+			{ID: "target:user-data"},
+		},
+		Retention: backup.Retention{
+			Count:      &backupRetentionCount,
+			MaxAgeDays: &backupRetentionMaxAgeDays,
+		},
+		RecoveryKeyRef: backup.RecoveryKeyRef{
+			ID:          "rk:owner-primary",
+			Handle:      "rk_handle_owner_primary",
+			KeyStoreRef: &backupKeyStoreRef,
+		},
+	}
+	desiredPDSSync := pdssync.SyncState{
+		Repo:     "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+		Cursor:   42,
+		RepoHead: "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy",
 	}
 	registry := mustRegistry(t,
 		&routedTxCapability{
@@ -318,13 +347,47 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 				return nil
 			},
 		},
+		&routedTxCapability{
+			name:   backup.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(backup.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("backup request = %T, want backup.ApplyRequest", request)
+				}
+				if typedRequest.Desired == nil {
+					return errors.New("backup desired = nil")
+				}
+				if !reflect.DeepEqual(*typedRequest.Desired, desiredBackup) {
+					return fmt.Errorf("backup desired = %#v, want %#v", *typedRequest.Desired, desiredBackup)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
+			name:   pdssync.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(pdssync.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("pdssync request = %T, want pdssync.ApplyRequest", request)
+				}
+				if typedRequest.Desired == nil {
+					return errors.New("pdssync desired = nil")
+				}
+				if *typedRequest.Desired != desiredPDSSync {
+					return fmt.Errorf("pdssync desired = %#v, want %#v", *typedRequest.Desired, desiredPDSSync)
+				}
+				return nil
+			},
+		},
 	)
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names. Registration is proven below: /apply routes a plan to all seven registered
+	// names. Registration is proven below: /apply routes a plan to all nine registered
 	// capabilities and commits them in order.
-	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}},{"capability":"storage.layout","request":{"desired":{"subvolumes":[{"role":"system-state","path":"/data/system-state","quotaGiB":32},{"role":"user-data","path":"/data/user-data","quotaGiB":768},{"role":"app-state","path":"/data/app-state/local-search","appId":"local-search","quotaGiB":96},{"role":"snapshots","path":"/data/snapshots","quotaGiB":384},{"role":"local-backup-cache","path":"/data/local-backup-cache","quotaGiB":128}]}}},{"capability":"update.plan","request":{"desired":{"targetSlot":"b","bundle":{"ref":"https://updates.example.invalid/vita-os-1.3.0.raucb","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"1.3.0"}}}}]}`)
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}},{"capability":"storage.layout","request":{"desired":{"subvolumes":[{"role":"system-state","path":"/data/system-state","quotaGiB":32},{"role":"user-data","path":"/data/user-data","quotaGiB":768},{"role":"app-state","path":"/data/app-state/local-search","appId":"local-search","quotaGiB":96},{"role":"snapshots","path":"/data/snapshots","quotaGiB":384},{"role":"local-backup-cache","path":"/data/local-backup-cache","quotaGiB":128}]}}},{"capability":"update.plan","request":{"desired":{"targetSlot":"b","bundle":{"ref":"https://updates.example.invalid/vita-os-1.3.0.raucb","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"1.3.0"}}}},{"capability":"backup.policy","request":{"desired":{"schedule":{"cron":"0 2 * * *"},"targets":[{"id":"target:system-state"},{"id":"target:user-data"}],"retention":{"count":7,"maxAgeDays":30},"recoveryKeyRef":{"id":"rk:owner-primary","handle":"rk_handle_owner_primary","keyStoreRef":"keystore:local-tpm"}}}},{"capability":"pds.sync-state","request":{"desired":{"repo":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","cursor":42,"repoHead":"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"}}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
@@ -341,6 +404,8 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		{Index: 4, Capability: network.Name},
 		{Index: 5, Capability: storage.Name},
 		{Index: 6, Capability: update.Name},
+		{Index: 7, Capability: backup.Name},
+		{Index: 8, Capability: pdssync.Name},
 	}
 	if !reflect.DeepEqual(result.Applied, wantApplied) {
 		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
@@ -348,7 +413,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("Error = %#v, want nil", result.Error)
 	}
-	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name, identity.Name, network.Name, storage.Name, update.Name}
+	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name, identity.Name, network.Name, storage.Name, update.Name, backup.Name, pdssync.Name}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}

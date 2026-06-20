@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/capabilities/update"
@@ -161,11 +163,13 @@ func NewHandler(config Config) (http.Handler, error) {
 
 func DefaultRequestDecoders() map[string]RequestDecoder {
 	return map[string]RequestDecoder{
+		backup.Name:     DecodeJSONRequest[backup.ApplyRequest],
 		nodeconfig.Name: DecodeJSONRequest[nodeconfig.ApplyRequest],
 		nodetime.Name:   DecodeJSONRequest[nodetime.ApplyRequest],
 		hostname.Name:   DecodeJSONRequest[hostname.ApplyRequest],
 		identity.Name:   DecodeJSONRequest[identity.ApplyRequest],
 		network.Name:    DecodeJSONRequest[network.ApplyRequest],
+		pdssync.Name:    DecodeJSONRequest[pdssync.ApplyRequest],
 		storage.Name:    DecodeJSONRequest[storage.ApplyRequest],
 		update.Name:     DecodeJSONRequest[update.ApplyRequest],
 	}
