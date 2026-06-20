@@ -9,6 +9,10 @@
 Worker execution is live (GPT-5.5 xhigh via Codex `codex login`). The end-to-end loop is proven:
 **P0-001 merged to `main`** (spec → contract → GPT-5.5 worker → independent verify → rubric → merge).
 
+**Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20 ("auto merge everything until
+I say not to"). No human-approval pause; quality floor (verify + rubric + stop-conditions) still
+applies. Reverts when owner says "stop auto-merging".
+
 ## Phase 0 exit gates (spec §21)
 - [x] One task can pass through spec → test → implementation → review → evaluation → merge.
       *(Demonstrated R1 single-impl via P0-001. Dual-candidate (§18.4) still to be exercised on the

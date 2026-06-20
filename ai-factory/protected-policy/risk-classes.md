@@ -3,6 +3,14 @@
 > Authoritative implementation of spec §18.3–§18.4. Ordinary agents (orchestrator and workers)
 > **may not edit this file**. Changes require a human.
 
+> ⚠️ **ACTIVE HUMAN OVERRIDE — auto-merge all risk classes.**
+> Authorized by the owner on **2026-06-20**: "auto merge everything until I say not to."
+> While this banner is present, the orchestrator may auto-merge **R0–R4** without a human-approval
+> pause. The quality floor still applies — independent verification, rubric scoring, and the
+> stop-conditions in [boundaries.md](boundaries.md) are NOT waived; a change that fails verification
+> or trips a stop condition is reported, not merged. **To revert:** the owner says "stop
+> auto-merging" (or removes this banner); merge authority then returns to the table below.
+
 ## Classes
 
 | Class | Examples | Merge authority |
