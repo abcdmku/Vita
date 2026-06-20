@@ -4,120 +4,77 @@
 > not a log (git history + the Done list below are the log).
 
 ## Current phase
-**Phase 0 — Charter and AI factory** (spec §21) — exit gates nearly met; portable Phase 1/2 work
-proceeding in parallel.
+**Phase 0 complete** (charter + AI factory + foundations). Portable Phase 1/2 control-plane built.
+OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — needs a Linux/Go/Docker
+host the owner must opt into.**
 
-## Status: RUNNING — autonomous loop active
-Workers: GPT-5.5 xhigh via Codex (`codex login`). 22 contracts merged; suites green (sdk 45, controller 12, manifests 4, atproto 4, broker 10, capsules 10, sim 8). Test totals grow per tick.
+## Status: PAUSED at milestone — awaiting owner direction
+26 contracts merged; **project type-checks clean (`npm run typecheck` = 0)** and **112 node tests
+green**. The portable TypeScript surface is mature and audited. The loop reached a natural pause point
+(Phase-0 exit gates met; no human-approved *next* objective beyond "keep building portable").
+**To resume:** owner says "keep going" / "focus on <area>" / "set up Docker" / "stop". If a scheduled
+wakeup fires while this says PAUSED, do NOT auto-dispatch — re-pause and wait for the owner.
 
-**Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20. No human-approval pause;
-quality floor (independent verify + rubric + stop-conditions) still applies. Reverts on "stop
-auto-merging".
-**R2/R3/R4 reviewer gate** — owner 2026-06-20: those classes (and any cross-cutting / test-modifying
-R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `approve` before merge.
+**Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
+test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
++ `npm run typecheck` + rubric + stop-conditions. Owner overrides 2026-06-20.
 
-## Phase 0 exit gates (spec §21)
-- [x] One task passes spec → test → implement → review → evaluate → merge (proven many times).
-- [x] Agent sessions auditable — `task/<id>` branch + commit + worker report per task.
-- [x] Protected policies/tests unchangeable by agents — dispatch refuses protected `target_paths`;
-      integration verifies no protected file changed.
-- [ ] Build inputs pinned — TS baseline pinned (`tsconfig.base.json`) + determinism gate; full
-      dependency lockfile/Nix lane still needs a toolchain host.
+## Phase 0 exit gates (spec §21) — met
+- [x] One task passes spec → test → implement → review → evaluate → merge (proven 26×, incl. dual
+      rounds on TCB code).
+- [x] Agent sessions auditable — `task/<id>` branch + commit + worker report + review per task.
+- [x] Protected policies/tests unchangeable by agents — dispatch refuses protected paths; verified.
+- [x] Build inputs pinned — `tsconfig.base.json` + **`package-lock.json` (tsc 6.0.3 pinned)** +
+      determinism gate + strict typecheck lane. (Full Nix/repro-image pinning still needs a Linux host.)
 
-## In flight
-- **Type-safety lane added (tsc 6.0.3 strict).** It exposed 48 latent strict-TS errors in merged
-  code (acceptance ran via strip-types, which does not type-check). P0-016 (make `npm run typecheck`
-  = 0) queued. P0-015 **round 2** building — reviewer found the primitive itself wasn't strict-TS
-  clean + 2 robustness gaps (catch can throw on hostile error.message; budget enforced after
-  snapshot); behavior was correct (the dispatch "fail" was a contract acceptance-string typo, fixed).
+## What's built (portable, all verified + type-safe)
+- **SDK** (`sdk/typescript`, 52 tests): plan model + normalizer · authoring API · capabilities +
+  accelerators · diff · validation · envelope · determinism gate · explain · **`safeNormalize`**
+  (the canonical intrinsic-safe trust-boundary primitive).
+- **Manifests/protocols**: package-contract schema (§9.2) · package catalog entry (§9.3) · AT Protocol
+  PDS manifest (FR-018).
+- **Controller** (`controller/api`, 17 tests): `previewPlan`, `previewAppInstall` (shows granted/denied
+  caps), storage/backup/identity overview (protection-state model), `previewCapsuleImport`.
+- **Security TCB**: permission broker (default-deny, fail-closed, intrinsic-safe) — 3 reviewer rounds.
+- **Portability**: capsule format (§13) · simulation profile types (§13/§20.1).
+- **CI lanes**: `npm run typecheck` (strict tsc 6.0.3) + node-native test suites + determinism gate.
+- **Governance**: Week-1 ADRs · an AI factory that hardened itself — AGENTS.md absorbed every security
+  + type-safety lesson the reviewer taught.
 
-## Owner steering welcome
-Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
-**permission-broker** (P2-002), **packages/catalog**, **PDS/atproto** (P1-002), **storage/capsules**,
-**simulation profiles**. Say "focus on <area>" to prioritize, or "set up Docker" to open the
-Go-agent / OS-image / lockfile path. Absent steering, the loop proceeds in id order.
+## Reviewer gate — load-bearing (blocked 8 buggy merges that passed local tests)
+determinism collision · cyclic-throw DoS · partial-malformed grants · method-shadowing TCB bypass ·
+controller-boundary throw/accept · §13.1 secret-leak · incomplete-roles/exotic-params ·
+TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). None reached `main`.
 
-## Open follow-ups (deferred, minor)
-- (P0-012) the **spec markdown** §8.3 example still shows the old shape that fails the validator —
-  owner decides whether to update the spec (product/spec is out of agent scope).
-- (P0-012) an inline `defineSystem` example in `define-system.test.ts` lacks `allowedCapabilities` —
-  tidy when next touching that file.
-- (P2-001) `previewPlan` re-normalizes instead of reusing `validation.plan` — minor simplification.
-- (P2-002) broker `decide.ts` is sizable and duplicates runtime enum sets (data classes/access/protocols)
-  — extract a single shared enum/constants module for auditability/drift.
+## Open follow-ups (deferred, minor; do when next touching the area)
+- Spec markdown §8.3 example still shows the old shape (owner decides — spec is out of agent scope).
+- Migrate broker/capsule/catalog/controller validators to use the new `safeNormalize` primitive (DRY;
+  should prevent the recurring boundary-bug class).
+- Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Reviewer gate — validated & load-bearing
-`npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked seven buggy merges** that passed
-local tests: P0-012 (determinism sentinel collision), P0-014 (guard threw on cyclic input — DoS),
-and P2-002 ×2 (partial-malformed grants + alias; then method-shadowing bypass). All fixed-forward and
-merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-boundary guards.
+## Done (26)
+P0-001..P0-016 (SDK core + audit cleanup + ADRs + safeNormalize + typecheck cleanup),
+P1-001..P1-003 (package contract, PDS manifest, catalog), P2-001..P2-005 (controller skeleton, app
+endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profiles). Audit:
+`ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. Reviews: `ai-factory/evaluation/reviews/`.
 
-## Done (24)
-- **P0-001** plan model + canonical normalizer · **P0-002** authoring API + §8.3 example ·
-  **P0-003** capabilities + accelerator selection · **P0-004** plan diff (FR-006) ·
-  **P0-005** plan validation (fail-closed) · **P0-006** plan envelope (tamper-evident) ·
-  **P0-007** reconcile accelerator model (first reviewer-gate cycle) · **P0-008** determinism gate ·
-  **P0-009** plan explain.
-- **P0-010** type unification (audit) ✓rev · **P0-011** envelope honesty (audit) ✓rev ·
-  **P0-012** §8.3 example validates + coverage (audit) ✓rev r2.
-- **P0-013** Week-1 ADRs (adr-check) · **P0-014** shared fail-closed `isCanonicalPlan` ✓rev r2.
-- **P1-001** package contract schema (§9.2) · **P1-002** AT Protocol PDS manifest (FR-018).
-- **P2-001** controller API skeleton — **first R2** ✓rev (getOverview/getNodeHealth/previewPlan).
-- **P2-002** permission-broker decision core — **TCB R2** ✓rev (3 rounds; default-deny, fail-closed, intrinsic-safe).
-- **P2-003** controller app endpoints — install-preview shows granted/denied caps via broker (FR-010, §28.5) ✓rev r2.
-- **P2-004** controller storage/backup/identity overview (protection-state model, §11 roles) ✓rev r2 · **P6-002** simulation profile types + validator (§13/§20.1).
-- **P1-003** package catalog entry + validator (§9.2/§9.3) ✓rev (1st-round) · **P2-005** capsule-import preview — validity+migration+sim+grant (FR-020/021) ✓rev r3.
-- **P1-002** PDS manifest · **P6-001** capsule manifest types + fail-closed validator (§13) ✓rev r2.
-
-Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
+## Next options (owner picks)
+1. **Keep building portable TS** — adopt `safeNormalize` everywhere; more controller/runtime/protocol
+   surface; design-system; SDK examples.
+2. **"set up Docker"** — open the real OS path: Go system agent, Debian image, RAUC, QEMU boot, full
+   reproducible-build/lockfile pinning. The biggest deferred chunk.
+3. **Stop / take stock.**
 
 ## Lessons (most recent first)
-- **Acceptance via strip-types does NOT type-check (P0-015 review).** node --experimental-strip-types
-  ERASES types; 48 strict-TS errors slipped through 24 merges. **Fix:** `npm run typecheck` lane (tsc),
-  now required by AGENTS + factory-tick. Also: independent verification caught a dispatch FALSE-NEGATIVE
-  (an escaped-quote acceptance-string typo failed correct code) — never trust the status alone.
-- **TOCTOU via accessor properties at the trust boundary (P2-005 r1).** A plain params object with
-  GETTER props returns different values per read — validate one value, act on another. **Fix:** snapshot
-  untrusted input to plain data ONCE (reject accessor descriptors at EVERY level incl. top-level params),
-  never re-read across decisions. Now in AGENTS.md. 8th block.
-- **Improved contracts → first-round approve (P1-003).** Pre-specifying BOTH the fail-closed checklist
-  AND domain semantics (§13.1/§9.3) up front landed a security validator clean in 1 round (vs P6-001 2
-  rounds). §18.5 process-improvement win.
-- **Fail-closed probes must include EXOTIC objects too (P2-004 r1).** A param guard accepted
-  `new Date()`/`new Map()`/prototype-bearing objects as "valid empty params". My probe used a plain
-  `{}` and missed it. **Standard probe set now:** garbage, partial, cyclic, method-shadowed, hostile
-  iterator, throwing/flipping proxy, AND exotic prototype-bearing objects (Date/Map/Proxy). Accept
-  only true plain objects at a boundary. (7th reviewer block.)
-- **Pre-hardening pre-empts fail-closed, not domain semantics (P6-001).** Loading the full
-  fail-closed checklist into the contract made the worker nail every adversarial-input class first try,
-  but the reviewer still caught spec-§13.1 correctness gaps (embedded secrets in ref fields; empty
-  signatures). **Takeaway:** pre-harden the mechanical class (fail-closed/intrinsic-safe) up front;
-  the gate stays essential for domain/spec-semantic correctness which can't be fully pre-listed.
-- **Trust-boundary fail-closed has many shapes (P2-003 r1).** Beyond garbage/partial/method-shadowing:
-  a throwing PROXY getter (`.length`) crashes an unguarded reader, and "no denials" wrongly reads as
-  success for a zero-capability app under a malformed policy. **Takeaway:** wrap the WHOLE boundary
-  method so any throw → typed error; validate the policy shape too; success needs positive evidence,
-  not just absence of denials. (5th reviewer block — gate remains load-bearing.)
-- **TCB guards must not execute methods off untrusted objects (P2-002 r2).** A shape-valid contract
-  with a shadowed array method (`egress.some = () => true`) or hostile iterator bypasses grant checks
-  that call `.some`/`.includes`/`.find` on the untrusted object. **Fix pattern:** normalize untrusted
-  input to plain trusted data with intrinsic-safe reads first, reject exotic shapes, then decide.
-  (Now in AGENTS.md.) The broker has needed 3 rounds — a hard adversarial-input problem; if serial
-  fix-forward stalls, decompose or run spec §18.4 dual-candidate.
-- **Fail-closed must reject PARTIAL malformed input, not just garbage (P2-002 r1).** The broker
-  granted on typed-but-incomplete data/network declarations; my "wholly-garbage → denied" probe gave
-  false confidence. **Takeaway:** verify validators against partial/missing-required-field inputs;
-  validate the FULL required shape (reuse the canonical validator, not a looser local re-check); read
-  ALL fields a decision reads (no undocumented aliases at a trust boundary). 3rd reviewer-block, most
-  security-significant — strong proof the R2 gate is load-bearing.
-- **Never `&`-background a dispatch** — orphans it (no completion notification); use the tool's
-  run_in_background param. (Recovered an orphaned worktree this session.)
-- **Reviewer catches fail-closed/edge-case bugs the suite misses** (P0-014 cyclic-throw, P0-012
-  sentinel collision). Keep gating cross-cutting/validator R1s; require fail-closed-never-throw +
-  malformed/cyclic regression tests up front (now in AGENTS.md).
-- **Multi-task integration gaps** (P0-002/P0-003 divergent accel types) — name the single owning
-  module when a concept spans contracts so workers import, not re-invent.
-- **Dispatch/foreground-git race** — workers run in isolated `.vita-worktrees/<id>`; never run
-  foreground git on main while a dispatch's worktree teardown may be happening.
-- **Windows codex spawn** — launch `codex.cmd` via shell + prompt over stdin (Node can't exec the
-  `.cmd` shim directly).
+- **strip-types acceptance does NOT type-check.** node --experimental-strip-types erases types; 48
+  strict-TS errors slipped through. Fix: `npm run typecheck` lane, required by AGENTS + factory-tick.
+  Independent verification also caught a dispatch FALSE-NEGATIVE (escaped-quote acceptance typo) —
+  never trust a status alone.
+- **TOCTOU via accessor getters; snapshot once, reject accessors at every level** → `safeNormalize`.
+- **TCB guards must not execute methods off untrusted objects; normalize-then-decide.**
+- **Fail-closed must reject PARTIAL/exotic input, not just garbage.**
+- **Pre-specifying the fail-closed checklist + domain semantics in the contract → first-round approve**
+  (P1-003 vs P6-001's 2 rounds) — §18.5 process improvement.
+- **Name the single owning module when a concept spans contracts** (avoid divergent re-invention).
+- **Workers isolated in `.vita-worktrees/<id>`; never `&`-background a dispatch; never run foreground
+  git on main during a worktree teardown. Windows: launch `codex.cmd` via shell, prompt over stdin.**
