@@ -8,10 +8,16 @@
 golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
 complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
-## Status: RUNNING — full parallel pipeline; buildable control plane comprehensively complete
+## Status: PAUSED (Codex usage limit) — resume dispatch/gate ~7:32 PM local (2026-06-20). Build green.
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
-run the loop continuously; only stop on "stop" / a §24 stop condition.
-**82 contracts merged.**
+run the loop continuously; only stop on "stop" / a §24 stop condition. (A usage-limit window is an external
+blocker, NOT a §24 stop — do R0/R1 directly, resume R2+ when credits return.)
+**88 contracts merged.** Codex worker substrate hit its USAGE LIMIT again (~23:57 UTC, "try again at 7:32
+PM"); this halts BOTH dispatch (GPT-5.5 workers) AND the reviewer gate (also Codex). During the window the
+orchestrator did **P0-025 (semver utility, R1) DIRECTLY** (CLAUDE.md §1.1) — TS7 clean, 7/7. **P7-005**
+(audit-log store, R3) is PAUSED mid-fix: round-2 landed (mutex + concurrency) but round-3 (the symlink/
+predictable-temp atomic-write fix) is NOT merged — `task/P7-005` stays at round-2, do NOT merge it; re-dispatch
+round-3 when credits return. P2-022 was integrated on independent verification (a reviewer false-negative).
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
