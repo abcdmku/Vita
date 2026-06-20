@@ -37,10 +37,9 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P0-014 **round 2** building. Round 1 reviewer-BLOCKED (not merged): `isCanonicalPlan` threw
-  `RangeError` on a cyclic object instead of returning false — a crash/DoS vector since the
-  controller feeds untrusted `currentPlan` through it. Re-dispatched with fail-closed + regression
-  test. P1-001 (package contract §9.2) queued. First R2 (P2-001) passed the gate.
+- P1-001 (package contract schema §9.2, R1) building. P0-014 merged (reviewer-approved round 2;
+  fail-closed shared guard). Queue empties after P1-001 → author portable work (permission broker
+  R2, atproto manifest R1, more controller endpoints R2, capsule types R1).
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
@@ -86,6 +85,8 @@ P0-010/011/012.
   Commit 125a7ce.
 - **P2-001** — controller API skeleton (getOverview/getNodeHealth/previewPlan via SDK), FR-008.
   4/4. **First R2 — reviewer-approved.** Commit 760690d.
+- **P0-014** — shared fail-closed `isCanonicalPlan` guard (DRY envelope + controller). 45/45 + 5/5.
+  Reviewer-approved (round 2; round 1 blocked a cyclic-throw DoS). Commit be9676f.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
