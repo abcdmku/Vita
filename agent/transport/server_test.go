@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
@@ -121,6 +124,96 @@ func TestApplyCommitsValidPlan(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, []string{"apply:one"}) {
 		t.Fatalf("events = %v, want [apply:one]", events)
+	}
+}
+
+func TestRegisteredAgentCapabilitiesAreDiscoverableAndApplicable(t *testing.T) {
+	events := []string{}
+	desiredConfig := nodeconfig.Config{Mode: nodeconfig.ModeMaintenance, RemoteAccess: nodeconfig.RemoteAccessEnabled}
+	desiredTime := time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)
+	desiredHostname := "vita-node-2"
+	registry := mustRegistry(t,
+		&routedTxCapability{
+			name:   nodeconfig.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(nodeconfig.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("nodeconfig request = %T, want nodeconfig.ApplyRequest", request)
+				}
+				if typedRequest.Desired != desiredConfig {
+					return fmt.Errorf("nodeconfig desired = %#v, want %#v", typedRequest.Desired, desiredConfig)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
+			name:   nodetime.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(nodetime.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("time request = %T, want nodetime.ApplyRequest", request)
+				}
+				if !typedRequest.Desired.Equal(desiredTime) {
+					return fmt.Errorf("time desired = %s, want %s", typedRequest.Desired, desiredTime)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
+			name:   hostname.Name,
+			events: &events,
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(hostname.ApplyRequest)
+				if !ok {
+					return fmt.Errorf("hostname request = %T, want hostname.ApplyRequest", request)
+				}
+				if typedRequest.Desired != desiredHostname {
+					return fmt.Errorf("hostname desired = %q, want %q", typedRequest.Desired, desiredHostname)
+				}
+				return nil
+			},
+		},
+	)
+	handler := mustHandler(t, handlerConfig{registry: registry})
+
+	capabilitiesResponse := perform(handler, http.MethodGet, "/capabilities", "")
+	if capabilitiesResponse.Code != http.StatusOK {
+		t.Fatalf("capabilities status code = %d, want %d; body=%s", capabilitiesResponse.Code, http.StatusOK, capabilitiesResponse.Body.String())
+	}
+	var discovered struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	decodeResponse(t, capabilitiesResponse, &discovered)
+	wantCapabilities := []string{hostname.Name, nodeconfig.Name, nodetime.Name}
+	if !reflect.DeepEqual(discovered.Capabilities, wantCapabilities) {
+		t.Fatalf("capabilities = %v, want %v", discovered.Capabilities, wantCapabilities)
+	}
+
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var result ApplyResult
+	decodeResponse(t, response, &result)
+	if result.Outcome != transaction.OutcomeCommitted {
+		t.Fatalf("Outcome = %q, want %q; error=%#v", result.Outcome, transaction.OutcomeCommitted, result.Error)
+	}
+	wantApplied := []OperationResult{
+		{Index: 0, Capability: nodeconfig.Name},
+		{Index: 1, Capability: nodetime.Name},
+		{Index: 2, Capability: hostname.Name},
+	}
+	if !reflect.DeepEqual(result.Applied, wantApplied) {
+		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
+	}
+	if result.Error != nil {
+		t.Fatalf("Error = %#v, want nil", result.Error)
+	}
+	wantEvents := []string{nodeconfig.Name, nodetime.Name, hostname.Name}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
 }
 
@@ -417,6 +510,38 @@ func (c *mockTxCapability) Apply(_ context.Context, request capabilities.TypedRe
 		return nil, c.applyErr
 	}
 	return mockUndo{value: typedRequest.Value, events: c.events}, nil
+}
+
+type routedTxCapability struct {
+	name   string
+	apply  func(capabilities.TypedRequest) error
+	events *[]string
+}
+
+func (c *routedTxCapability) Name() string {
+	return c.name
+}
+
+func (c *routedTxCapability) Handle(context.Context, capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+	return mockResponse{}, nil
+}
+
+func (c *routedTxCapability) Apply(_ context.Context, request capabilities.TypedRequest) (transaction.Undo, error) {
+	if c.apply != nil {
+		if err := c.apply(request); err != nil {
+			return nil, err
+		}
+	}
+	if c.events != nil {
+		*c.events = append(*c.events, c.name)
+	}
+	return noopUndo{}, nil
+}
+
+type noopUndo struct{}
+
+func (noopUndo) Undo(context.Context) error {
+	return nil
 }
 
 type mockUndo struct {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/hardware"
@@ -21,6 +22,7 @@ func main() {
 	startedAt := time.Now().UTC()
 
 	registry, err := capabilities.NewRegistry(
+		hostname.NewCapability(),
 		nodeconfig.NewCapability(),
 		nodetime.NewCapability(),
 	)
