@@ -8,7 +8,7 @@
 proceeding in parallel.
 
 ## Status: RUNNING — autonomous loop active
-Workers: GPT-5.5 xhigh via Codex (`codex login`). 19 contracts merged; suites green (sdk 45, controller 10, manifests 4, atproto 4, broker 10). Test totals grow per tick.
+Workers: GPT-5.5 xhigh via Codex (`codex login`). 20 contracts merged; suites green (sdk 45, controller 10, manifests 4, atproto 4, broker 10, capsules 10). Test totals grow per tick.
 
 **Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20. No human-approval pause;
 quality floor (independent verify + rubric + stop-conditions) still applies. Reverts on "stop
@@ -50,7 +50,7 @@ local tests: P0-012 (determinism sentinel collision), P0-014 (guard threw on cyc
 and P2-002 ×2 (partial-malformed grants + alias; then method-shadowing bypass). All fixed-forward and
 merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-boundary guards.
 
-## Done (19)
+## Done (20)
 - **P0-001** plan model + canonical normalizer · **P0-002** authoring API + §8.3 example ·
   **P0-003** capabilities + accelerator selection · **P0-004** plan diff (FR-006) ·
   **P0-005** plan validation (fail-closed) · **P0-006** plan envelope (tamper-evident) ·
@@ -63,6 +63,7 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 - **P2-001** controller API skeleton — **first R2** ✓rev (getOverview/getNodeHealth/previewPlan).
 - **P2-002** permission-broker decision core — **TCB R2** ✓rev (3 rounds; default-deny, fail-closed, intrinsic-safe).
 - **P2-003** controller app endpoints — install-preview shows granted/denied caps via broker (FR-010, §28.5) ✓rev r2.
+- **P1-002** PDS manifest · **P6-001** capsule manifest types + fail-closed validator (§13) ✓rev r2.
 
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
