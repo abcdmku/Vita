@@ -37,9 +37,14 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P1-001 (package contract schema §9.2, R1) building. P0-014 merged (reviewer-approved round 2;
-  fail-closed shared guard). Queue empties after P1-001 → author portable work (permission broker
-  R2, atproto manifest R1, more controller endpoints R2, capsule types R1).
+- P1-002 (AT Protocol PDS manifest, R1) dispatching; P2-002 (permission broker capability-grant
+  decision core, R2 → reviewer-gated) queued. P1-001 (package contract) merged.
+
+## Owner steering welcome
+Portable surface is now broad. Open areas the loop can deepen: **controller** (more endpoints),
+**permission-broker** (P2-002 seeds it), **packages/catalog**, **PDS/atproto** (P1-002 seeds it),
+**storage/capsules**, **simulation profiles**. Say "focus on <area>" to prioritize, or "set up Docker"
+to open the Go-agent / OS-image path. Absent steering, the loop proceeds in id order.
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
@@ -87,6 +92,7 @@ P0-010/011/012.
   4/4. **First R2 — reviewer-approved.** Commit 760690d.
 - **P0-014** — shared fail-closed `isCanonicalPlan` guard (DRY envelope + controller). 45/45 + 5/5.
   Reviewer-approved (round 2; round 1 blocked a cyclic-throw DoS). Commit be9676f.
+- **P1-001** — package contract schema + fail-closed validator (§9.2/§9.1). 4/4. Commit 95b0eae.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
