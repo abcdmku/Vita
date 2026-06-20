@@ -35,11 +35,17 @@ type ReadRequest struct{}
 
 func (ReadRequest) CapabilityRequest() {}
 
+func (ReadRequest) Validate() error { return nil }
+
 type ApplyRequest struct {
 	Desired Config `json:"desired"`
 }
 
 func (ApplyRequest) CapabilityRequest() {}
+
+func (r ApplyRequest) Validate() error {
+	return validateConfig(r.Desired)
+}
 
 type ReadResponse struct {
 	Exists bool   `json:"exists"`
@@ -139,7 +145,7 @@ func (c *Capability) Apply(ctx context.Context, req capabilities.TypedRequest) (
 	if c == nil || c.fs == nil {
 		return nil, &InvalidRequestError{Reason: "missing config filesystem"}
 	}
-	if err := validateConfig(applyReq.Desired); err != nil {
+	if err := applyReq.Validate(); err != nil {
 		return nil, err
 	}
 

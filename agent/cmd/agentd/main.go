@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
-	"github.com/vita/agent/status"
+	"github.com/vita/agent/capabilities/nodeconfig"
+	nodetime "github.com/vita/agent/capabilities/time"
+	"github.com/vita/agent/hardware"
+	"github.com/vita/agent/transport"
 )
 
 const (
@@ -17,12 +20,28 @@ const (
 func main() {
 	startedAt := time.Now().UTC()
 
-	registry, err := capabilities.NewRegistry()
+	registry, err := capabilities.NewRegistry(
+		nodeconfig.NewCapability(),
+		nodetime.NewCapability(),
+	)
 	if err != nil {
 		log.Fatalf("build capability registry: %v", err)
 	}
 
-	handler := status.NewHandler(agentVersion, startedAt, registry.Names())
+	if !transport.IsLoopbackTCPAddr(listenAddr) {
+		log.Fatalf("refusing to bind agent control surface to non-loopback address %s", listenAddr)
+	}
+
+	// No auth is wired yet; the control surface is intentionally loopback-only.
+	handler, err := transport.NewHandler(transport.Config{
+		Version:    agentVersion,
+		StartedAt:  startedAt,
+		Registry:   registry,
+		Discoverer: hardware.NewDiscoverer(),
+	})
+	if err != nil {
+		log.Fatalf("build control transport: %v", err)
+	}
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           handler,
