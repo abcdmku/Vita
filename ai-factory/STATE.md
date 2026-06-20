@@ -26,13 +26,13 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
       build lane still TODO.
 
 ## In flight
-- P0-006 (canonical plan envelope) building.
+- P0-008 (determinism gate) building.
 
 ## Blocked
 - (none)
 
 ## Ready queue
-- P0-006 (plan envelope), P0-008 (determinism gate), P0-009 (plan explain).
+- P0-008 (determinism gate), P0-009 (plan explain).
 
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer. 4/4 tests. Commit 56d3d48.
@@ -42,6 +42,8 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
 - **P0-004** — plan diff engine (FR-006). 4/4; SDK regression 17/17. Commit d23f2e7.
 - **P0-005** — plan validation (reject invalid + overprivileged, fail-closed). 4/4; suite 24/24.
   Commit 1b8fa60.
+- **P0-006** — canonical plan envelope (seal/verify/encode, tamper-evident). 3/3; suite 27/27.
+  Commit 9542444.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
