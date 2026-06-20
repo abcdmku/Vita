@@ -8,29 +8,35 @@
 golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
 complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
-## Status: RUNNING — full parallel pipeline (Codex restored ~14:32 CDT after a usage-limit window)
+## Status: RUNNING — full parallel pipeline; buildable control plane comprehensively complete
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
-run the loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
-**70 contracts merged.** (During a Codex usage-limit window ~13:18–14:32 CDT, the orchestrator built
-R0/R1 directly per CLAUDE.md §1.1 — P8-001/P8-002 SDK models — then resumed the full pipeline.)
-- **Agent — functional end-to-end, 7 transactional capabilities all wired/discoverable/applicable:**
+run the loop continuously; only stop on "stop" / a §24 stop condition.
+**82 contracts merged.**
+- **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
-  fail-closed /apply (P1-008), `/operations` discovery (P1-015), `sysdeps` syscall facade (vendored
-  x/sys), full wiring (P1-013/016/020). Caps: nodeconfig, time, hostname, identity, network, storage,
-  update. (Fixed a latent gap where time/hostname were unusable over /apply — see Lessons.)
-- **Controller↔agent:** typed client (P2-006), node-overview (P2-007), operation discovery + plan-preview
-  (P2-008), update-preview (P2-010), storage-change preview (P2-011).
+  fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
+  facade (vendored x/sys), full wiring (P1-013/016/020/022, P6-006, P7-003). Caps: nodeconfig, time,
+  hostname, identity, network, storage, update, backup, pdssync, capsule, timesync.
+- **Controller↔agent:** typed client (P2-006), node-overview (P2-007), operation/plan-preview (P2-008),
+  change-previews — update (P2-010), storage (P2-011), network (P2-012), backup (P2-014), capsule (P2-018),
+  node-config unified (P2-020, in gate); apply-flow (P2-013), node-state reader (P2-015), dashboard (P2-016),
+  package-runtime preview (P2-017), health monitor (P2-019).
 - **OS image (plan-level only):** root (P1-011) → UKI/Secure-Boot (P1-012) → A/B disk layout + RAUC bundle
   (P1-014). dm-verity (P1-017) + real build/QEMU boot are BLOCKED on a Linux build host (see Lessons/blocked/).
-- **SDK/models:** storage (P0-019), backup/recovery (P0-020), recovery-key N-of-M (P0-021), identity
-  (P5-001), PDS (P5-003), network (P8-001), update/RAUC (P8-002).
+- **SDK/models (12):** storage (P0-019), backup/recovery (P0-020), recovery-key N-of-M (P0-021), node-config
+  aggregate (P0-022), node-health (P0-023), identity (P5-001), PDS (P5-003), DID-doc/caps (P5-005/006),
+  network (P8-001), update/RAUC (P8-002), capsule-registry (P6-005).
 - **Packages:** catalog (P1-003), lockfile-policy default-deny gate (P4-002), first-party manifests
   (P4-001), install resolver (P3-001), Deno sandbox policy (P3-002). **Simulation harness** (P6-003).
-Reviewer gate has blocked **36 buggy merges (all real)** incl. a faked dependency, commit-point
-mutations, supply-chain bypasses, path traversal, closed-graph + absent≠zero gaps. typecheck=0 (TS7),
-agent container green (13 pkgs).
-Next (buildable): more agent caps (backup) + controller change-previews + identity/PDS; the boot chain
-resumes when a Linux build host is available.
+- **Capsules:** format (P6-001), agent cap (P6-004), registry model (P6-005), wiring (P6-006), preview (P2-018).
+Reviewer gate has blocked **41 buggy merges (all real)** incl. a faked dependency, commit-point
+mutations, supply-chain bypasses, path traversal, prototype pollution, dup-JSON-key smuggling, an
+INEFFECTIVE test (swallowed by a catch), and a section-preview fail-closed BYPASS. typecheck=0 (TS7),
+agent container green (17 pkgs). Factory self-hardening: workers now apply AGENTS.md lessons proactively
+(P7-002 timesync landed R3-clean, zero revise rounds).
+Next (buildable): incremental breadth (more caps/previews/wiring). The high-value frontier — a BOOTABLE
+signed image (FR-001) + whole-NodeConfig→plan apply — is gated on the Linux build host + the shared
+config→plan schema (blocked/). Owner has the honest comprehensive-completion signal.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
