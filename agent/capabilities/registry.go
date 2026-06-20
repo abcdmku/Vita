@@ -93,6 +93,15 @@ func (r *Registry) Dispatch(ctx context.Context, name string, req TypedRequest) 
 	return capability.Handle(ctx, req)
 }
 
+func (r *Registry) Lookup(name string) (Capability, bool) {
+	if r == nil {
+		return nil, false
+	}
+
+	capability, ok := r.capabilities[name]
+	return capability, ok
+}
+
 func (r *Registry) Names() []string {
 	if r == nil {
 		return []string{}
