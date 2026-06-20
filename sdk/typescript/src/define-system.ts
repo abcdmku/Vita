@@ -1,4 +1,11 @@
+import { bestAvailable as selectBestAvailable } from "./capabilities.ts";
 import { normalize } from "./plan.ts";
+import type {
+  AcceleratorRequest,
+  AcceleratorRefusal,
+  AcceleratorSelection,
+  DeviceSnapshot as AcceleratorDeviceSnapshot,
+} from "./capabilities.ts";
 import type {
   BackupSchedule,
   CanonicalPlan,
@@ -8,6 +15,18 @@ import type {
   JsonObject,
 } from "./plan.ts";
 
+export type {
+  AcceleratorCapability,
+  AcceleratorFallback,
+  AcceleratorPreference,
+  AcceleratorRequest,
+  AcceleratorRefusal,
+  AcceleratorSelection,
+  AcceleratorSelectionResult,
+  DeviceSnapshot as AcceleratorDeviceSnapshot,
+  ReadonlyAcceleratorCapability,
+} from "./capabilities.ts";
+
 export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
   ? (...args: Args) => Return
   : T extends readonly (infer Item)[]
@@ -16,29 +35,23 @@ export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
       ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
       : T;
 
-export type AcceleratorKind = "npu" | "gpu" | "cpu" | (string & {});
-
-export interface AcceleratorRequest extends JsonObject {
-  readonly prefer: readonly AcceleratorKind[];
-  readonly requireFallback: AcceleratorKind;
-}
-
-export interface AcceleratorSelection extends JsonObject {
-  readonly type: "accelerator-selection";
-  readonly prefer: readonly AcceleratorKind[];
-  readonly requireFallback: AcceleratorKind;
-  readonly selected?: AcceleratorKind;
-}
-
 export interface DeviceAiSnapshot {
-  readonly available?: readonly AcceleratorKind[];
-  readonly bestAvailable: (request: AcceleratorRequest) => AcceleratorSelection;
+  readonly bestAvailable: (
+    request: AcceleratorRequest,
+  ) => AcceleratorSelection | AcceleratorRefusal;
 }
 
-export interface DeviceSnapshot {
-  readonly memoryGB: number;
+export type DeviceSnapshotInput = AcceleratorDeviceSnapshot & {
+  readonly ai?: Partial<DeviceAiSnapshot>;
+};
+
+export type DeviceSnapshot = AcceleratorDeviceSnapshot & {
   readonly ai: DeviceAiSnapshot;
-}
+};
+
+type AuthorDevice<TDevice extends object> = TDevice extends AcceleratorDeviceSnapshot
+  ? Omit<TDevice, "ai"> & { readonly ai: DeviceAiSnapshot }
+  : TDevice;
 
 export interface DataAccessGrant extends JsonObject {
   readonly type: "data-access";
@@ -55,7 +68,7 @@ export interface DataSnapshot {
 }
 
 export interface SystemSnapshotInput<
-  TDevice extends object = DeviceSnapshot,
+  TDevice extends object = DeviceSnapshotInput,
   TData extends object = DataSnapshot,
 > {
   readonly device: TDevice;
@@ -63,17 +76,20 @@ export interface SystemSnapshotInput<
 }
 
 export type SystemSnapshot<
-  TDevice extends object = DeviceSnapshot,
+  TDevice extends object = DeviceSnapshotInput,
   TData extends object = DataSnapshot,
-> = DeepReadonly<SystemSnapshotInput<TDevice, TData>>;
+> = DeepReadonly<{
+  readonly device: AuthorDevice<TDevice>;
+  readonly data: TData;
+}>;
 
 export type SystemAuthor<
-  TDevice extends object = DeviceSnapshot,
+  TDevice extends object = DeviceSnapshotInput,
   TData extends object = DataSnapshot,
 > = (snapshot: SystemSnapshot<TDevice, TData>) => DesiredState;
 
 export interface DefinedSystem<
-  TDevice extends object = DeviceSnapshot,
+  TDevice extends object = DeviceSnapshotInput,
   TData extends object = DataSnapshot,
 > {
   (snapshot: SystemSnapshotInput<TDevice, TData>): CanonicalPlan;
@@ -83,7 +99,7 @@ export interface DefinedSystem<
 export interface AppOptions extends JsonObject {
   readonly publicAccess?: boolean;
   readonly memory?: string;
-  readonly accelerator?: AcceleratorSelection;
+  readonly accelerator?: AcceleratorSelection | AcceleratorRefusal;
   readonly dataAccess?: readonly DataAccessGrant[];
 }
 
@@ -95,11 +111,11 @@ export interface UsbBackupOptions {
 }
 
 export function defineSystem<
-  TDevice extends object = DeviceSnapshot,
+  TDevice extends object = DeviceSnapshotInput,
   TData extends object = DataSnapshot,
 >(fn: SystemAuthor<TDevice, TData>): DefinedSystem<TDevice, TData> {
   const evaluate = (snapshot: SystemSnapshotInput<TDevice, TData>): CanonicalPlan => {
-    const desiredState = fn(deepFreeze(snapshot));
+    const desiredState = fn(deepFreeze(authorSnapshot(snapshot)));
 
     if (isThenable(desiredState)) {
       throw new TypeError("defineSystem author functions must return DesiredState synchronously.");
@@ -170,4 +186,63 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   }
 
   return typeof (value as { readonly then?: unknown }).then === "function";
+}
+
+function authorSnapshot<TDevice extends object, TData extends object>(
+  snapshot: SystemSnapshotInput<TDevice, TData>,
+): { readonly device: AuthorDevice<TDevice>; readonly data: TData } {
+  return {
+    ...snapshot,
+    device: authorDevice(snapshot.device),
+  };
+}
+
+function authorDevice<TDevice extends object>(device: TDevice): AuthorDevice<TDevice> {
+  if (!isAcceleratorDeviceSnapshot(device)) {
+    return device as AuthorDevice<TDevice>;
+  }
+
+  const existingAi = objectProperty(device, "ai");
+  const aiBase = isObject(existingAi) ? existingAi : {};
+  let snapshotForSelection: AcceleratorDeviceSnapshot = device;
+  const ai: DeviceAiSnapshot = {
+    ...aiBase,
+    bestAvailable(request: AcceleratorRequest): AcceleratorSelection | AcceleratorRefusal {
+      return selectBestAvailable(snapshotForSelection, request);
+    },
+  };
+  const deviceWithAi = {
+    ...device,
+    ai,
+  };
+
+  snapshotForSelection = deviceWithAi as AcceleratorDeviceSnapshot;
+
+  return deviceWithAi as AuthorDevice<TDevice>;
+}
+
+function isAcceleratorDeviceSnapshot(device: object): device is AcceleratorDeviceSnapshot {
+  const memoryGB = objectProperty(device, "memoryGB");
+  const architecture = objectProperty(device, "architecture");
+  const accelerators = objectProperty(device, "accelerators");
+  const tpm = objectProperty(device, "tpm");
+  const virtualization = objectProperty(device, "virtualization");
+
+  return (
+    typeof memoryGB === "number" &&
+    (architecture === "x86_64" || architecture === "arm64") &&
+    Array.isArray(accelerators) &&
+    isObject(tpm) &&
+    isObject(virtualization)
+  );
+}
+
+function objectProperty(object: object, key: PropertyKey): unknown {
+  return Object.prototype.hasOwnProperty.call(object, key)
+    ? (object as Record<PropertyKey, unknown>)[key]
+    : undefined;
+}
+
+function isObject(value: unknown): value is object {
+  return value !== null && typeof value === "object";
 }

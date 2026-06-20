@@ -5,8 +5,6 @@ import exampleSystem from "../../examples/system.ts";
 import { app, backup, defineSystem } from "../src/define-system.ts";
 import { normalize, planHash } from "../src/plan.ts";
 import type {
-  AcceleratorRequest,
-  AcceleratorSelection,
   DataAccessGrant,
   SystemSnapshotInput,
 } from "../src/define-system.ts";
@@ -15,15 +13,19 @@ import type { DesiredState } from "../src/plan.ts";
 const fixedSnapshot: SystemSnapshotInput = {
   device: {
     memoryGB: 16,
-    ai: {
-      bestAvailable(request: AcceleratorRequest): AcceleratorSelection {
-        return {
-          type: "accelerator-selection",
-          prefer: request.prefer,
-          requireFallback: request.requireFallback,
-          selected: "npu",
-        };
+    architecture: "x86_64",
+    accelerators: [
+      {
+        kind: "intel.npu",
+        generation: "core-ultra",
       },
+    ],
+    tpm: {
+      present: true,
+      version: "2.0",
+    },
+    virtualization: {
+      hardware: true,
     },
   },
   data: {
@@ -106,25 +108,27 @@ test("the snapshot passed to the author function is deeply immutable", () => {
   const snapshotWithNestedArray: SystemSnapshotInput = {
     device: {
       ...fixedSnapshot.device,
-      ai: {
-        ...fixedSnapshot.device.ai,
-        available: ["npu", "gpu", "cpu"],
-      },
+      accelerators: [
+        {
+          kind: "amd.rocm",
+          memoryGB: 16,
+        },
+      ],
     },
     data: fixedSnapshot.data,
   };
   const system = defineSystem(({ device }) => {
-    const available = device.ai.available;
+    const accelerators = device.accelerators;
 
-    assert.notEqual(available, undefined);
     assert.equal(Object.isFrozen(device), true);
     assert.equal(Object.isFrozen(device.ai), true);
-    assert.equal(Object.isFrozen(available), true);
+    assert.equal(Object.isFrozen(accelerators), true);
+    assert.equal(Object.isFrozen(accelerators[0]), true);
     assert.throws(() => {
       (device as { memoryGB: number }).memoryGB = 8;
     }, TypeError);
     assert.throws(() => {
-      (available as string[]).push("tpu");
+      (accelerators as unknown[]).push({ kind: "cpu", architecture: "x86_64" });
     }, TypeError);
 
     return { apps: [app("local-search")] };

@@ -1,10 +1,31 @@
+import type { JsonObject } from "./plan.ts";
+
 export type AcceleratorCapability =
-  | { kind: "nvidia.cuda"; memoryGB: number; compute: string }
-  | { kind: "intel.npu"; generation: string }
-  | { kind: "amd.npu"; generation: string }
-  | { kind: "amd.rocm"; memoryGB: number }
-  | { kind: "intel.gpu"; memoryModel: "shared" | "dedicated" }
-  | { kind: "cpu"; architecture: "x86_64" | "arm64" };
+  | (JsonObject & {
+      readonly kind: "nvidia.cuda";
+      readonly memoryGB: number;
+      readonly compute: string;
+    })
+  | (JsonObject & {
+      readonly kind: "intel.npu";
+      readonly generation: string;
+    })
+  | (JsonObject & {
+      readonly kind: "amd.npu";
+      readonly generation: string;
+    })
+  | (JsonObject & {
+      readonly kind: "amd.rocm";
+      readonly memoryGB: number;
+    })
+  | (JsonObject & {
+      readonly kind: "intel.gpu";
+      readonly memoryModel: "shared" | "dedicated";
+    })
+  | (JsonObject & {
+      readonly kind: "cpu";
+      readonly architecture: "x86_64" | "arm64";
+    });
 
 export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
   ? (...args: Args) => Return
@@ -17,6 +38,7 @@ export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
 export type DeviceArchitecture = "x86_64" | "arm64";
 export type AcceleratorPreference = "npu" | "gpu" | "cpu";
 export type AcceleratorFallback = "cpu" | false;
+export type ReadonlyAcceleratorCapability = DeepReadonly<AcceleratorCapability>;
 
 export interface TpmCapability {
   readonly present: boolean;
@@ -62,22 +84,22 @@ export interface BestAvailableRequest extends AcceleratorRequest {
 
 export type AcceleratorSelectionResult = AcceleratorSelection | AcceleratorRefusal;
 
-export interface AcceleratorSelection {
+export interface AcceleratorSelection extends JsonObject {
   readonly type: "accelerator-selection";
-  readonly selected: AcceleratorCapability;
+  readonly selected: ReadonlyAcceleratorCapability;
   readonly selectedPreference: AcceleratorPreference;
   readonly fallback: boolean;
   readonly prefer: readonly AcceleratorPreference[];
   readonly requireFallback: AcceleratorFallback;
 }
 
-export interface AcceleratorRefusal {
+export interface AcceleratorRefusal extends JsonObject {
   readonly type: "accelerator-refusal";
   readonly code: "ACCELERATOR_UNAVAILABLE";
   readonly reason: string;
   readonly prefer: readonly AcceleratorPreference[];
   readonly requireFallback: false;
-  readonly available: readonly AcceleratorCapability[];
+  readonly available: readonly ReadonlyAcceleratorCapability[];
 }
 
 export function bestAvailable(request: BestAvailableRequest): AcceleratorSelectionResult;
@@ -104,10 +126,10 @@ export function bestAvailable(
     if (selected !== undefined) {
       return {
         type: "accelerator-selection",
-        selected,
+        selected: freezeCapability(selected),
         selectedPreference: preference,
         fallback: selected.kind === "cpu" && request.requireFallback === "cpu",
-        prefer: [...request.prefer],
+        prefer: freezePreferences(request.prefer),
         requireFallback: request.requireFallback,
       };
     }
@@ -116,10 +138,10 @@ export function bestAvailable(
   if (request.requireFallback === "cpu") {
     return {
       type: "accelerator-selection",
-      selected: cpuFallback(request.snapshot),
+      selected: freezeCapability(cpuFallback(request.snapshot)),
       selectedPreference: "cpu",
       fallback: true,
-      prefer: [...request.prefer],
+      prefer: freezePreferences(request.prefer),
       requireFallback: request.requireFallback,
     };
   }
@@ -128,9 +150,9 @@ export function bestAvailable(
     type: "accelerator-refusal",
     code: "ACCELERATOR_UNAVAILABLE",
     reason: "No preferred accelerator is available and CPU fallback was not allowed.",
-    prefer: [...request.prefer],
+    prefer: freezePreferences(request.prefer),
     requireFallback: false,
-    available,
+    available: freezeCapabilities(available),
   };
 }
 
@@ -172,4 +194,20 @@ function cpuFallback(snapshot: DeviceSnapshot): AcceleratorCapability {
     kind: "cpu",
     architecture: snapshot.architecture,
   };
+}
+
+function freezeCapability(capability: AcceleratorCapability): ReadonlyAcceleratorCapability {
+  return Object.freeze({ ...capability }) as ReadonlyAcceleratorCapability;
+}
+
+function freezeCapabilities(
+  capabilities: readonly AcceleratorCapability[],
+): readonly ReadonlyAcceleratorCapability[] {
+  return Object.freeze(capabilities.map(freezeCapability));
+}
+
+function freezePreferences(
+  preferences: readonly AcceleratorPreference[],
+): readonly AcceleratorPreference[] {
+  return Object.freeze([...preferences]);
 }
