@@ -11,7 +11,7 @@ complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 
 ## Status: RUNNING — full parallel pipeline (Codex restored ~14:32 CDT after a usage-limit window)
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** —
 run the loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
-**61 contracts merged.** (During a Codex usage-limit window ~13:18–14:32 CDT, the orchestrator built
+**70 contracts merged.** (During a Codex usage-limit window ~13:18–14:32 CDT, the orchestrator built
 R0/R1 directly per CLAUDE.md §1.1 — P8-001/P8-002 SDK models — then resumed the full pipeline.)
 - **Agent — functional end-to-end, 7 transactional capabilities all wired/discoverable/applicable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
@@ -26,7 +26,7 @@ R0/R1 directly per CLAUDE.md §1.1 — P8-001/P8-002 SDK models — then resumed
   (P5-001), PDS (P5-003), network (P8-001), update/RAUC (P8-002).
 - **Packages:** catalog (P1-003), lockfile-policy default-deny gate (P4-002), first-party manifests
   (P4-001), install resolver (P3-001), Deno sandbox policy (P3-002). **Simulation harness** (P6-003).
-Reviewer gate has blocked **31 buggy merges (all real)** incl. a faked dependency, commit-point
+Reviewer gate has blocked **36 buggy merges (all real)** incl. a faked dependency, commit-point
 mutations, supply-chain bypasses, path traversal, closed-graph + absent≠zero gaps. typecheck=0 (TS7),
 agent container green (13 pkgs).
 Next (buildable): more agent caps (backup) + controller change-previews + identity/PDS; the boot chain
@@ -72,7 +72,7 @@ TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). 
 - Hostname/identity persistence across reboot (P1-010 is kernel-only; persist via the atomic-file pattern).
 - Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Done (61) — full authoritative list in ai-factory/task-contracts/done/
+## Done (70) — full authoritative list in ai-factory/task-contracts/done/
 P0-001..P0-016 (SDK core + audit + ADRs + safeNormalize + typecheck), P0-019/020/021 (storage, backup/
 recovery, recovery-key flow), P1-001..P1-003 (package contract, PDS manifest, catalog), P1-004..P1-013
 (Go agent: skeleton→discovery→engine→nodeconfig/time/hostname caps→transport→registration + sysdeps +
