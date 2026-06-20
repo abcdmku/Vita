@@ -26,13 +26,16 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
       build lane still TODO.
 
 ## In flight
-- P0-008 (determinism gate) building.
+- P0-009 (plan explain) building — last seeded SDK slice.
 
 ## Blocked
 - (none)
 
 ## Ready queue
-- P0-008 (determinism gate), P0-009 (plan explain).
+- P0-009 (plan explain). After it merges the SDK Phase-0 core is complete; next portable slices:
+  Week-1 ADRs (author tools/checks/adr-structure.mjs first), P0-007 cleanup notes, controller API
+  skeleton (first real R2 → reviewer-gated). OS image / Go agent / lockfile lane need a Linux/Go/
+  Docker host — decision point for the owner.
 
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer. 4/4 tests. Commit 56d3d48.
@@ -44,6 +47,7 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
   Commit 1b8fa60.
 - **P0-006** — canonical plan envelope (seal/verify/encode, tamper-evident). 3/3; suite 27/27.
   Commit 9542444.
+- **P0-008** — determinism/reproducibility gate (assertDeterministic). 3/3; suite 30/30. Commit 220b191.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
