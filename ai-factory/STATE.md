@@ -53,7 +53,7 @@ TOCTOU-via-getters — plus exposing the **type-check gap** (48 latent errors). 
   should prevent the recurring boundary-bug class).
 - Broker `decide.ts` size + duplicated enum sets → shared constants module.
 
-## Done (27)
+## Done (28)
 P0-001..P0-016 (SDK core + audit cleanup + ADRs + safeNormalize + typecheck cleanup),
 P1-001..P1-003 (package contract, PDS manifest, catalog), P2-001..P2-005 (controller skeleton, app
 endpoints, overview, capsule-import), P6-001/P6-002 (capsule, simulation profiles). Audit:
