@@ -26,7 +26,7 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
       build lane still TODO.
 
 ## In flight
-- P0-003 (capabilities/accelerator selection) ready; dispatching next.
+- (none) — queue drained; authoring the next Phase-0 slice.
 
 ## Blocked
 - (none)
@@ -35,12 +35,14 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
 - **P0-001** — SDK plan model + canonical normalizer (`sdk/typescript`). 4/4 tests. Commit 56d3d48.
 - **P0-002** — defineSystem/app/backup authoring API + example `system.ts`. 5/5 tests; P0-001
   regression 4/4. Commit 2f23bfa.
+- **P0-003** — capability snapshot + accelerator selection (CPU fallback). 4/4 tests; full SDK
+  regression 13/13 green.
 
 ## Next up
-- P0-003 capabilities/accelerator selection.
-- Reproducible-build / lockfile lane (closes the last Phase-0 exit gate).
+- Reproducible-build / lockfile lane (closes the last Phase-0 exit gate — build inputs pinned).
 - Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation).
 - Go agent skeleton + health endpoint — needs Go (Docker path); queue as `draft` until set up.
+- Validate the R2-R4 reviewer tool (`npm run review`) before the first R2+ task.
 
 ## Lessons (most recent first)
 - **Dispatch/foreground git race (caused a scare, no data lost):** while a background `dispatch` had

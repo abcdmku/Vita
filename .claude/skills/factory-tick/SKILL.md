@@ -35,8 +35,10 @@ ready-checklist (CLAUDE.md §4) passes.
 ## 5. Verify independently (never trust the worker's word — spec §18.6)
 - Read `<id>.result.json` and the worker report `<id>.worker.md`.
 - Re-run the acceptance command yourself: `git checkout task/<id>` → run it → `git checkout main`.
-- Read the diff (`git diff main..task/<id>`). Confirm: does exactly the contract, stays in
-  `target_paths`, touches no protected path, weakens no test, no secrets.
+- Read the worker's TRUE diff against the **merge-base** (NOT `main`, which may have advanced since
+  the branch forked): `b=$(git merge-base main task/<id>); git diff "$b..task/<id>"`. Confirm: does
+  exactly the contract, stays in `target_paths`, touches no protected path, weakens no test, no
+  secrets. (`git diff main..task/<id>` falsely flags files `main` gained after the fork.)
 - Score against `ai-factory/evaluation/rubric.md`. Below threshold → send back (new contract that
   references `failed/<id>.report.md`).
 
