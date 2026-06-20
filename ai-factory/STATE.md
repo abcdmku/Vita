@@ -26,8 +26,10 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P2-002 (permission-broker capability-grant decision core, R2 → reviewer-gated) building. Queue
-  empties after it → author the next portable slice.
+- P2-002 **round 2** building. Round 1 reviewer-BLOCKED (not merged): 4 security holes in the TCB
+  broker — **partial-but-typed** malformed data/network inputs could still grant (my garbage-only
+  probe missed it); an undocumented `package` alias widened the trust boundary. Re-dispatched with
+  strict shape validation (reuse the P1 validator) + adversarial tests. Queue empties after → author next.
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -63,6 +65,12 @@ now mandates fail-closed-never-throw validators to pre-empt the latter class.
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **Fail-closed must reject PARTIAL malformed input, not just garbage (P2-002 r1).** The broker
+  granted on typed-but-incomplete data/network declarations; my "wholly-garbage → denied" probe gave
+  false confidence. **Takeaway:** verify validators against partial/missing-required-field inputs;
+  validate the FULL required shape (reuse the canonical validator, not a looser local re-check); read
+  ALL fields a decision reads (no undocumented aliases at a trust boundary). 3rd reviewer-block, most
+  security-significant — strong proof the R2 gate is load-bearing.
 - **Never `&`-background a dispatch** — orphans it (no completion notification); use the tool's
   run_in_background param. (Recovered an orphaned worktree this session.)
 - **Reviewer catches fail-closed/edge-case bugs the suite misses** (P0-014 cyclic-throw, P0-012

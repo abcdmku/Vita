@@ -54,8 +54,13 @@ conventions you must follow are below.
 - Determinism and reproducibility over cleverness.
 - **Validators/guards over untrusted or `unknown` input must be fail-closed and NEVER throw** —
   handle cyclic, deeply-nested, and malformed shapes by returning a rejection, not by crashing
-  (a throw at a trust boundary is a DoS). Prove it with a malformed/cyclic regression test. (This has
-  bitten twice — see `ai-factory/STATE.md` lessons.)
+  (a throw at a trust boundary is a DoS). Prove it with a malformed/cyclic regression test.
+- **Fail-closed means rejecting PARTIAL/incomplete inputs too, not just wholly-garbage.** A typed
+  value missing required fields must be rejected, never partially honored (e.g. a policy with only
+  one of two required sides → reject, don't grant the present side). Validate the FULL required shape
+  — reuse the canonical validator (e.g. `validatePackageContract`), not a looser local re-check — and
+  read declarations ONLY from the documented typed field (no undocumented aliases at a trust
+  boundary; absent/ambiguous ⇒ deny). (This class has bitten three times — see `ai-factory/STATE.md`.)
 
 ---
 
