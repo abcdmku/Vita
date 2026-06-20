@@ -28,17 +28,21 @@ const (
 )
 
 type LinuxDiscoverer struct {
-	CPUInfoPath       string
-	MemInfoPath       string
-	SysBlockPath      string
-	SysClassNetPath   string
-	SysClassTPMPath   string
-	SysClassTPMRMPath string
-	PCIDevicesPath    string
+	roots linuxDiscoveryRoots
+}
+
+type linuxDiscoveryRoots struct {
+	procCPUInfo   string
+	procMemInfo   string
+	sysBlock      string
+	sysClassNet   string
+	sysClassTPM   string
+	sysClassTPMRM string
+	pciDevices    string
 }
 
 func NewDiscoverer() Discoverer {
-	return LinuxDiscoverer{}
+	return LinuxDiscoverer{roots: defaultLinuxDiscoveryRoots()}
 }
 
 func (d LinuxDiscoverer) Discover(ctx context.Context) (Capabilities, error) {
@@ -46,9 +50,9 @@ func (d LinuxDiscoverer) Discover(ctx context.Context) (Capabilities, error) {
 		return Capabilities{}, err
 	}
 
-	d = d.withDefaults()
+	roots := d.roots.withDefaults()
 
-	cpuInfo, err := readTextFile(ctx, d.CPUInfoPath)
+	cpuInfo, err := readTextFile(ctx, roots.procCPUInfo)
 	if err != nil {
 		return Capabilities{}, err
 	}
@@ -57,7 +61,7 @@ func (d LinuxDiscoverer) Discover(ctx context.Context) (Capabilities, error) {
 		return Capabilities{}, err
 	}
 
-	memInfo, err := readTextFile(ctx, d.MemInfoPath)
+	memInfo, err := readTextFile(ctx, roots.procMemInfo)
 	if err != nil {
 		return Capabilities{}, err
 	}
@@ -66,19 +70,19 @@ func (d LinuxDiscoverer) Discover(ctx context.Context) (Capabilities, error) {
 		return Capabilities{}, err
 	}
 
-	storage, err := discoverStorage(ctx, d.SysBlockPath)
+	storage, err := discoverStorage(ctx, roots.sysBlock)
 	if err != nil {
 		return Capabilities{}, err
 	}
-	network, err := discoverNetwork(ctx, d.SysClassNetPath)
+	network, err := discoverNetwork(ctx, roots.sysClassNet)
 	if err != nil {
 		return Capabilities{}, err
 	}
-	tpm, err := discoverTPM(ctx, d.SysClassTPMPath, d.SysClassTPMRMPath)
+	tpm, err := discoverTPM(ctx, roots.sysClassTPM, roots.sysClassTPMRM)
 	if err != nil {
 		return Capabilities{}, err
 	}
-	accelerators, err := discoverAccelerators(ctx, d.PCIDevicesPath, cpu.Arch)
+	accelerators, detectedDevices, err := discoverAccelerators(ctx, roots.pciDevices, cpu.Arch)
 	if err != nil {
 		return Capabilities{}, err
 	}
@@ -94,33 +98,51 @@ func (d LinuxDiscoverer) Discover(ctx context.Context) (Capabilities, error) {
 		Virtualization: VirtualizationCapabilities{
 			Hardware: hardwareVirtualization,
 		},
-		Accelerators: accelerators,
+		Accelerators:    accelerators,
+		DetectedDevices: detectedDevices,
 	}, nil
 }
 
-func (d LinuxDiscoverer) withDefaults() LinuxDiscoverer {
-	if d.CPUInfoPath == "" {
-		d.CPUInfoPath = defaultProcCPUInfo
+func newLinuxDiscovererForTest(roots linuxDiscoveryRoots) LinuxDiscoverer {
+	return LinuxDiscoverer{roots: roots.withDefaults()}
+}
+
+func defaultLinuxDiscoveryRoots() linuxDiscoveryRoots {
+	return linuxDiscoveryRoots{
+		procCPUInfo:   defaultProcCPUInfo,
+		procMemInfo:   defaultProcMemInfo,
+		sysBlock:      defaultSysBlock,
+		sysClassNet:   defaultSysClassNet,
+		sysClassTPM:   defaultSysClassTPM,
+		sysClassTPMRM: defaultSysClassTPMRM,
+		pciDevices:    defaultSysBusPCIDevices,
 	}
-	if d.MemInfoPath == "" {
-		d.MemInfoPath = defaultProcMemInfo
+}
+
+func (r linuxDiscoveryRoots) withDefaults() linuxDiscoveryRoots {
+	defaults := defaultLinuxDiscoveryRoots()
+	if r.procCPUInfo == "" {
+		r.procCPUInfo = defaults.procCPUInfo
 	}
-	if d.SysBlockPath == "" {
-		d.SysBlockPath = defaultSysBlock
+	if r.procMemInfo == "" {
+		r.procMemInfo = defaults.procMemInfo
 	}
-	if d.SysClassNetPath == "" {
-		d.SysClassNetPath = defaultSysClassNet
+	if r.sysBlock == "" {
+		r.sysBlock = defaults.sysBlock
 	}
-	if d.SysClassTPMPath == "" {
-		d.SysClassTPMPath = defaultSysClassTPM
+	if r.sysClassNet == "" {
+		r.sysClassNet = defaults.sysClassNet
 	}
-	if d.SysClassTPMRMPath == "" {
-		d.SysClassTPMRMPath = defaultSysClassTPMRM
+	if r.sysClassTPM == "" {
+		r.sysClassTPM = defaults.sysClassTPM
 	}
-	if d.PCIDevicesPath == "" {
-		d.PCIDevicesPath = defaultSysBusPCIDevices
+	if r.sysClassTPMRM == "" {
+		r.sysClassTPMRM = defaults.sysClassTPMRM
 	}
-	return d
+	if r.pciDevices == "" {
+		r.pciDevices = defaults.pciDevices
+	}
+	return r
 }
 
 func readTextFile(ctx context.Context, path string) (string, error) {
@@ -240,57 +262,60 @@ func discoverTPM(ctx context.Context, sysClassTPMPath string, sysClassTPMRMPath 
 	return TPMCapabilities{Present: false}, nil
 }
 
-func discoverAccelerators(ctx context.Context, pciDevicesPath string, arch string) ([]Accelerator, error) {
+func discoverAccelerators(ctx context.Context, pciDevicesPath string, arch string) ([]AcceleratorCapability, []DetectedDevice, error) {
 	entries, err := os.ReadDir(pciDevicesPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return []Accelerator{cpuAccelerator(arch)}, nil
+			return []AcceleratorCapability{cpuAccelerator(arch)}, []DetectedDevice{}, nil
 		}
-		return nil, &DiscoveryError{Source: pciDevicesPath, Err: err}
+		return nil, nil, &DiscoveryError{Source: pciDevicesPath, Err: err}
 	}
 
-	detected := map[AcceleratorKind]bool{}
+	detectedDevices := make([]DetectedDevice, 0, len(entries))
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		devicePath := filepath.Join(pciDevicesPath, entry.Name())
 		vendor := readTrimmedLower(filepath.Join(devicePath, "vendor"))
 		class := readTrimmedLower(filepath.Join(devicePath, "class"))
-		if vendor == "" || class == "" {
+		device := readTrimmedLower(filepath.Join(devicePath, "device"))
+		if vendor == "" || class == "" || device == "" {
 			continue
 		}
 
-		switch {
-		case strings.HasPrefix(class, pciClassDisplayPrefix) && vendor == "0x10de":
-			detected[AcceleratorNVIDIACUDA] = true
-		case strings.HasPrefix(class, pciClassDisplayPrefix) && vendor == "0x1002":
-			detected[AcceleratorAMDRocm] = true
-		case strings.HasPrefix(class, pciClassDisplayPrefix) && vendor == "0x8086":
-			detected[AcceleratorIntelGPU] = true
-		case strings.HasPrefix(class, pciClassProcessingPrefix) && vendor == "0x8086":
-			detected[AcceleratorIntelNPU] = true
-		case strings.HasPrefix(class, pciClassProcessingPrefix) && vendor == "0x1022":
-			detected[AcceleratorAMDNPU] = true
+		if isAcceleratorPCIDevice(vendor, class) {
+			detectedDevices = append(detectedDevices, DetectedDevice{
+				Class:    class,
+				VendorID: vendor,
+				DeviceID: device,
+			})
 		}
 	}
 
-	accelerators := make([]Accelerator, 0, len(detected)+1)
-	for _, kind := range []AcceleratorKind{
-		AcceleratorNVIDIACUDA,
-		AcceleratorIntelNPU,
-		AcceleratorAMDNPU,
-		AcceleratorAMDRocm,
-		AcceleratorIntelGPU,
-	} {
-		if !detected[kind] {
-			continue
+	sort.Slice(detectedDevices, func(i, j int) bool {
+		if detectedDevices[i].Class != detectedDevices[j].Class {
+			return detectedDevices[i].Class < detectedDevices[j].Class
 		}
-		accelerators = append(accelerators, acceleratorForKind(kind))
+		if detectedDevices[i].VendorID != detectedDevices[j].VendorID {
+			return detectedDevices[i].VendorID < detectedDevices[j].VendorID
+		}
+		return detectedDevices[i].DeviceID < detectedDevices[j].DeviceID
+	})
+
+	return []AcceleratorCapability{cpuAccelerator(arch)}, detectedDevices, nil
+}
+
+func isAcceleratorPCIDevice(vendor string, class string) bool {
+	switch {
+	case strings.HasPrefix(class, pciClassDisplayPrefix):
+		return vendor == "0x10de" || vendor == "0x1002" || vendor == "0x8086"
+	case strings.HasPrefix(class, pciClassProcessingPrefix):
+		return vendor == "0x8086" || vendor == "0x1022"
+	default:
+		return false
 	}
-	accelerators = append(accelerators, cpuAccelerator(arch))
-	return accelerators, nil
 }
 
 func readBlockSizeMiB(sizePath string) (uint64, bool) {
@@ -362,12 +387,4 @@ func readTPMVersion(versionPath string) string {
 	default:
 		return ""
 	}
-}
-
-func acceleratorForKind(kind AcceleratorKind) Accelerator {
-	accelerator := Accelerator{Kind: kind}
-	if kind == AcceleratorIntelGPU {
-		accelerator.MemoryModel = "shared"
-	}
-	return accelerator
 }

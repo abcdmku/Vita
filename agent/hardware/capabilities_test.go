@@ -209,16 +209,63 @@ func TestDiscoverReturnsPopulatedCapabilities(t *testing.T) {
 	if !hasCPUAccelerator(capabilities.Accelerators, capabilities.CPU.Arch) {
 		t.Fatalf("Accelerators = %#v, want CPU accelerator for %q", capabilities.Accelerators, capabilities.CPU.Arch)
 	}
+	for _, accelerator := range capabilities.Accelerators {
+		assertSDKValidAccelerator(t, accelerator)
+	}
 	if _, err := json.Marshal(capabilities); err != nil {
 		t.Fatalf("capabilities are not JSON serializable: %v", err)
 	}
 }
 
-func hasCPUAccelerator(accelerators []Accelerator, arch string) bool {
+func hasCPUAccelerator(accelerators []AcceleratorCapability, arch string) bool {
 	for _, accelerator := range accelerators {
 		if accelerator.Kind == AcceleratorCPU && accelerator.Architecture == arch {
 			return true
 		}
 	}
 	return false
+}
+
+func assertSDKValidAccelerator(t *testing.T, accelerator AcceleratorCapability) {
+	t.Helper()
+
+	switch accelerator.Kind {
+	case AcceleratorNVIDIACUDA:
+		if accelerator.MemoryGB == 0 || accelerator.Compute == "" {
+			t.Fatalf("CUDA accelerator missing required SDK fields: %#v", accelerator)
+		}
+		if accelerator.Generation != "" || accelerator.MemoryModel != "" || accelerator.Architecture != "" {
+			t.Fatalf("CUDA accelerator has fields outside SDK union: %#v", accelerator)
+		}
+	case AcceleratorIntelNPU, AcceleratorAMDNPU:
+		if accelerator.Generation == "" {
+			t.Fatalf("NPU accelerator missing required SDK fields: %#v", accelerator)
+		}
+		if accelerator.MemoryGB != 0 || accelerator.Compute != "" || accelerator.MemoryModel != "" || accelerator.Architecture != "" {
+			t.Fatalf("NPU accelerator has fields outside SDK union: %#v", accelerator)
+		}
+	case AcceleratorAMDRocm:
+		if accelerator.MemoryGB == 0 {
+			t.Fatalf("ROCm accelerator missing required SDK fields: %#v", accelerator)
+		}
+		if accelerator.Compute != "" || accelerator.Generation != "" || accelerator.MemoryModel != "" || accelerator.Architecture != "" {
+			t.Fatalf("ROCm accelerator has fields outside SDK union: %#v", accelerator)
+		}
+	case AcceleratorIntelGPU:
+		if accelerator.MemoryModel != "shared" && accelerator.MemoryModel != "dedicated" {
+			t.Fatalf("Intel GPU accelerator missing required SDK fields: %#v", accelerator)
+		}
+		if accelerator.MemoryGB != 0 || accelerator.Compute != "" || accelerator.Generation != "" || accelerator.Architecture != "" {
+			t.Fatalf("Intel GPU accelerator has fields outside SDK union: %#v", accelerator)
+		}
+	case AcceleratorCPU:
+		if accelerator.Architecture != "x86_64" && accelerator.Architecture != "arm64" {
+			t.Fatalf("CPU accelerator missing required SDK architecture: %#v", accelerator)
+		}
+		if accelerator.MemoryGB != 0 || accelerator.Compute != "" || accelerator.Generation != "" || accelerator.MemoryModel != "" {
+			t.Fatalf("CPU accelerator has fields outside SDK union: %#v", accelerator)
+		}
+	default:
+		t.Fatalf("unknown accelerator kind: %#v", accelerator)
+	}
 }

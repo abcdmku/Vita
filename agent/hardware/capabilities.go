@@ -9,13 +9,14 @@ import (
 )
 
 type Capabilities struct {
-	CPU            CPUCapabilities            `json:"cpu"`
-	Memory         MemoryCapabilities         `json:"memory"`
-	Storage        []StorageDevice            `json:"storage"`
-	Networking     NetworkingCapabilities     `json:"networking"`
-	TPM            TPMCapabilities            `json:"tpm"`
-	Virtualization VirtualizationCapabilities `json:"virtualization"`
-	Accelerators   []Accelerator              `json:"accelerators"`
+	CPU             CPUCapabilities            `json:"cpu"`
+	Memory          MemoryCapabilities         `json:"memory"`
+	Storage         []StorageDevice            `json:"storage"`
+	Networking      NetworkingCapabilities     `json:"networking"`
+	TPM             TPMCapabilities            `json:"tpm"`
+	Virtualization  VirtualizationCapabilities `json:"virtualization"`
+	Accelerators    []AcceleratorCapability    `json:"accelerators"`
+	DetectedDevices []DetectedDevice           `json:"detectedDevices,omitempty"`
 }
 
 type CPUCapabilities struct {
@@ -64,13 +65,21 @@ const (
 	AcceleratorCPU        AcceleratorKind = "cpu"
 )
 
-type Accelerator struct {
+type AcceleratorCapability struct {
 	Kind         AcceleratorKind `json:"kind"`
 	MemoryGB     uint64          `json:"memoryGB,omitempty"`
 	Compute      string          `json:"compute,omitempty"`
 	Generation   string          `json:"generation,omitempty"`
 	MemoryModel  string          `json:"memoryModel,omitempty"`
 	Architecture string          `json:"architecture,omitempty"`
+}
+
+type Accelerator = AcceleratorCapability
+
+type DetectedDevice struct {
+	Class    string `json:"class"`
+	VendorID string `json:"vendorID"`
+	DeviceID string `json:"deviceID"`
 }
 
 type Discoverer interface {
@@ -127,8 +136,8 @@ func normalizeArchitecture(goarch string) string {
 	}
 }
 
-func cpuAccelerator(arch string) Accelerator {
-	return Accelerator{
+func cpuAccelerator(arch string) AcceleratorCapability {
+	return AcceleratorCapability{
 		Kind:         AcceleratorCPU,
 		Architecture: arch,
 	}
