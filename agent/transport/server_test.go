@@ -100,6 +100,92 @@ func TestReadRoutesReturnExpectedJSON(t *testing.T) {
 	}
 }
 
+func TestReadReturnsRegisteredCapabilityHandleResponse(t *testing.T) {
+	events := []string{}
+	registry := mustRegistry(t, &mockReadCapability{
+		name:     "test.read",
+		response: mockReadResponse{Value: "stored-state", Count: 2},
+		events:   &events,
+	})
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.read": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/read/test.read", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	var got mockReadResponse
+	decodeResponse(t, response, &got)
+	want := mockReadResponse{Value: "stored-state", Count: 2}
+	if got != want {
+		t.Fatalf("read response = %#v, want %#v", got, want)
+	}
+	if !reflect.DeepEqual(events, []string{"handle:test.read"}) {
+		t.Fatalf("events = %v, want [handle:test.read]", events)
+	}
+}
+
+func TestReadUnknownCapabilityReturns404(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t, &mockReadCapability{name: "test.read"})})
+
+	response := perform(handler, http.MethodGet, "/read/missing", "")
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
+	}
+	var errorResponse ErrorResponse
+	decodeResponse(t, response, &errorResponse)
+	if errorResponse.Error.Code != "unknown_capability" {
+		t.Fatalf("error code = %q, want unknown_capability", errorResponse.Error.Code)
+	}
+}
+
+func TestReadHandleErrorReturnsTypedError(t *testing.T) {
+	events := []string{}
+	registry := mustRegistry(t, &mockReadCapability{
+		name:   "test.read",
+		err:    errors.New("read failed"),
+		events: &events,
+	})
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.read": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+	})
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("handler panicked: %v", recovered)
+		}
+	}()
+
+	response := perform(handler, http.MethodGet, "/read/test.read", "")
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusInternalServerError, response.Body.String())
+	}
+	var errorResponse ErrorResponse
+	decodeResponse(t, response, &errorResponse)
+	if errorResponse.Error.Code != "capability_read_failed" {
+		t.Fatalf("error code = %q, want capability_read_failed", errorResponse.Error.Code)
+	}
+	if !strings.Contains(errorResponse.Error.Message, "read failed") {
+		t.Fatalf("error message = %q, want read failure detail", errorResponse.Error.Message)
+	}
+	if !reflect.DeepEqual(events, []string{"handle:test.read"}) {
+		t.Fatalf("events = %v, want [handle:test.read]", events)
+	}
+}
+
 func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	registry := mustRegistry(t,
 		&mockTxCapability{name: backup.Name},
@@ -589,6 +675,8 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "capabilities rejects non GET", method: http.MethodPost, path: "/capabilities", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
+		{name: "read rejects non GET", method: http.MethodPost, path: "/read/test.apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
+		{name: "read base rejects non GET", method: http.MethodPost, path: "/read", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "unknown path", method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound},
 	}
 
@@ -622,6 +710,7 @@ func TestLoopbackTCPAddrGuard(t *testing.T) {
 type handlerConfig struct {
 	registry     *capabilities.Registry
 	discoverer   hardware.Discoverer
+	readRequests map[string]ReadRequestFactory
 	maxBodyBytes int64
 }
 
@@ -644,6 +733,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		Registry:        config.registry,
 		Discoverer:      discoverer,
 		RequestDecoders: map[string]RequestDecoder{"test.apply": decodeMockRequest, "test.first": decodeMockRequest, "test.second": decodeMockRequest},
+		ReadRequests:    config.readRequests,
 		MaxBodyBytes:    config.maxBodyBytes,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
@@ -706,9 +796,44 @@ func decodeMockRequest(raw json.RawMessage) (capabilities.TypedRequest, error) {
 	return DecodeJSONRequest[mockRequest](raw)
 }
 
+type mockReadRequest struct{}
+
+func (mockReadRequest) CapabilityRequest() {}
+
+type mockReadResponse struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+func (mockReadResponse) CapabilityResponse() {}
+
 type mockResponse struct{}
 
 func (mockResponse) CapabilityResponse() {}
+
+type mockReadCapability struct {
+	name     string
+	response capabilities.TypedResponse
+	err      error
+	events   *[]string
+}
+
+func (c *mockReadCapability) Name() string {
+	return c.name
+}
+
+func (c *mockReadCapability) Handle(_ context.Context, request capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+	if _, ok := request.(mockReadRequest); !ok {
+		return nil, fmt.Errorf("read request = %T, want mockReadRequest", request)
+	}
+	if c.events != nil {
+		*c.events = append(*c.events, "handle:"+c.name)
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.response, nil
+}
 
 type mockTxCapability struct {
 	name     string

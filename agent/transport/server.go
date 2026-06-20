@@ -31,12 +31,15 @@ const defaultMaxBodyBytes int64 = 1 << 20
 
 type RequestDecoder func(json.RawMessage) (capabilities.TypedRequest, error)
 
+type ReadRequestFactory func() capabilities.TypedRequest
+
 type Config struct {
 	Version         string
 	StartedAt       time.Time
 	Registry        *capabilities.Registry
 	Discoverer      hardware.Discoverer
 	RequestDecoders map[string]RequestDecoder
+	ReadRequests    map[string]ReadRequestFactory
 	HealthCheck     transaction.HealthCheck
 	MaxBodyBytes    int64
 	Now             func() time.Time
@@ -82,6 +85,7 @@ type handler struct {
 	registry        *capabilities.Registry
 	discoverer      hardware.Discoverer
 	requestDecoders map[string]RequestDecoder
+	readRequests    map[string]ReadRequestFactory
 	healthCheck     transaction.HealthCheck
 	maxBodyBytes    int64
 	now             func() time.Time
@@ -145,6 +149,14 @@ func NewHandler(config Config) (http.Handler, error) {
 		decoders[name] = decoder
 	}
 
+	readRequests := DefaultReadRequests()
+	for name, factory := range config.ReadRequests {
+		if factory == nil {
+			return nil, fmt.Errorf("read request %q is nil", name)
+		}
+		readRequests[name] = factory
+	}
+
 	names := registry.Names()
 	sort.Strings(names)
 
@@ -155,6 +167,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		registry:        registry,
 		discoverer:      discoverer,
 		requestDecoders: decoders,
+		readRequests:    readRequests,
 		healthCheck:     config.HealthCheck,
 		maxBodyBytes:    maxBodyBytes,
 		now:             now,
@@ -172,6 +185,20 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		pdssync.Name:    DecodeJSONRequest[pdssync.ApplyRequest],
 		storage.Name:    DecodeJSONRequest[storage.ApplyRequest],
 		update.Name:     DecodeJSONRequest[update.ApplyRequest],
+	}
+}
+
+func DefaultReadRequests() map[string]ReadRequestFactory {
+	return map[string]ReadRequestFactory{
+		backup.Name:     func() capabilities.TypedRequest { return backup.ReadRequest{} },
+		nodeconfig.Name: func() capabilities.TypedRequest { return nodeconfig.ReadRequest{} },
+		nodetime.Name:   func() capabilities.TypedRequest { return nodetime.ReadRequest{} },
+		hostname.Name:   func() capabilities.TypedRequest { return hostname.ReadRequest{} },
+		identity.Name:   func() capabilities.TypedRequest { return identity.ReadRequest{} },
+		network.Name:    func() capabilities.TypedRequest { return network.ReadRequest{} },
+		pdssync.Name:    func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
+		storage.Name:    func() capabilities.TypedRequest { return storage.ReadRequest{} },
+		update.Name:     func() capabilities.TypedRequest { return update.ReadRequest{} },
 	}
 }
 
@@ -203,7 +230,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleOperations(w, r)
 	case "/apply":
 		h.handleApply(w, r)
+	case "/read":
+		h.handleRead(w, r, "")
 	default:
+		if strings.HasPrefix(r.URL.Path, "/read/") {
+			h.handleRead(w, r, strings.TrimPrefix(r.URL.Path, "/read/"))
+			return
+		}
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	}
 }
@@ -254,6 +287,46 @@ func (h *handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	names := h.registry.Names()
 	sort.Strings(names)
 	writeJSON(w, http.StatusOK, OperationsResponse{Operations: names})
+}
+
+func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if name == "" || strings.Contains(name, "/") {
+		writeError(w, http.StatusNotFound, "unknown_capability", "unknown capability")
+		return
+	}
+
+	capability, ok := h.registry.Lookup(name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown_capability", fmt.Sprintf("unknown capability %q", name))
+		return
+	}
+
+	readRequest, ok := h.readRequest(name)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "unsupported_read_request", fmt.Sprintf("capability %q has no registered read request", name))
+		return
+	}
+
+	response, err := capability.Handle(r.Context(), readRequest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "capability_read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
+	factory, ok := h.readRequests[name]
+	if !ok {
+		return nil, false
+	}
+
+	request := factory()
+	return request, request != nil
 }
 
 func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
