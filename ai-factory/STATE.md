@@ -8,8 +8,7 @@
 proceeding in parallel.
 
 ## Status: RUNNING — autonomous loop active
-Workers: GPT-5.5 xhigh via Codex (`codex login`). 17 contracts merged; suites green
-(sdk 45, controller 5, manifests 4, atproto 4). Test totals grow per tick.
+Workers: GPT-5.5 xhigh via Codex (`codex login`). 18 contracts merged; suites green (sdk 45, controller 5, manifests 4, atproto 4, broker 10). Test totals grow per tick.
 
 **Operating mode: AUTO-MERGE ALL (R0–R4)** — owner override 2026-06-20. No human-approval pause;
 quality floor (independent verify + rubric + stop-conditions) still applies. Reverts on "stop
@@ -47,12 +46,12 @@ Go-agent / OS-image / lockfile path. Absent steering, the loop proceeds in id or
   — extract a single shared enum/constants module for auditability/drift.
 
 ## Reviewer gate — validated & load-bearing
-`npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked two buggy merges** that passed
-local tests: P0-012 round 1 (determinism sentinel collision) and P0-014 round 1 (guard threw on
-cyclic input — DoS at the controller boundary). Both fixed-forward and merged on round 2. AGENTS.md
-now mandates fail-closed-never-throw validators to pre-empt the latter class.
+`npm run review` (GPT-5.5 xhigh) is in active use. It has **blocked four buggy merges** that passed
+local tests: P0-012 (determinism sentinel collision), P0-014 (guard threw on cyclic input — DoS),
+and P2-002 ×2 (partial-malformed grants + alias; then method-shadowing bypass). All fixed-forward and
+merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-boundary guards.
 
-## Done (17)
+## Done (18)
 - **P0-001** plan model + canonical normalizer · **P0-002** authoring API + §8.3 example ·
   **P0-003** capabilities + accelerator selection · **P0-004** plan diff (FR-006) ·
   **P0-005** plan validation (fail-closed) · **P0-006** plan envelope (tamper-evident) ·
