@@ -4,17 +4,22 @@
 > not a log (git history + the Done list below are the log).
 
 ## Current phase
-**Phase 1 — Bootable immutable foundation** (spec §21) starting via Docker/Go. Phase 0 complete (charter + AI factory + foundations). Portable Phase 1/2 control-plane built.
-OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — needs a Linux/Go/Docker
-host the owner must opt into.**
+**Phase 1 — Bootable immutable foundation** (spec §21), actively building via Docker/Go (host Go + the
+golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
+complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
 
-## Status: RUNNING — OS build (autonomous to completion)
-Owner 2026-06-20: **"continue, don't ask again"** — run the loop continuously, no milestone pauses or
-direction asks; only stop on "stop" / a §24 stop condition. 28 contracts merged; OS path proven
-(Go agent skeleton P1-004 + capability discovery P1-005, both R3 container-tested + reviewer-gated).
-Building the agent: **P1-006 transaction engine (apply+rollback, FR-007)** dispatching, then privileged
-capability impls, then the Debian image pipeline (UKI/RAUC/dm-verity) + QEMU boot — all via Docker.
-Reviewer gate has blocked 11 buggy merges (all real). typecheck=0, Go agent green.
+## Status: RUNNING — wide parallel OS build (autonomous to completion)
+Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents to go faster"** — run the
+loop continuously with a WIDE parallel fan-out; only stop on "stop" / a §24 stop condition.
+**35 contracts merged.** Parallel mode: Opus 4.8 subagents each drive one independent contract
+(dispatch GPT-5.5 → verify → reviewer gate) concurrently; orchestrator serial-merges with a typecheck
+gate. Agent TCB merged: registry/health (P1-004), discovery (P1-005), transaction engine (P1-006),
+nodeconfig cap (P1-007), **time cap (P1-009)**, + the audited **sysdeps** syscall facade. OS/SDK merged:
+**Debian root-image scaffold (P1-011)**, **storage model (P0-019)**, **backup/recovery model (P0-020)**,
+first-party manifests (P4-001). In round-2/3 gate: P1-008 transport, P1-010 hostname, P4-002 lockfile.
+Reviewer gate has blocked **18 buggy merges (all real)** incl. a faked dependency + commit-point
+mutations. typecheck=0, agent container green. Next waves: UKI/Secure-Boot→RAUC→dm-verity→QEMU boot,
+identity/PDS, controller↔agent bridge, WASM loader.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify
