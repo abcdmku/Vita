@@ -15,6 +15,7 @@ import (
 	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
+	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/transport"
@@ -38,6 +39,7 @@ func main() {
 		pdssync.NewCapability(),
 		storage.NewCapability(),
 		nodetime.NewCapability(),
+		timesync.NewCapability(),
 		update.NewCapability(),
 	)
 	if err != nil {
