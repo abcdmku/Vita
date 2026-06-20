@@ -32,16 +32,23 @@ canonical normalizer, authoring API (defineSystem/app/backup), capabilities + ac
 gate, plan explain. All verified; the cross-cutting reconcile (P0-007) reviewer-approved.
 
 ## In flight
-- **SDK core audit** running (multi-agent workflow: 6 dimensions × adversarial verify) before we
-  build the controller on this foundation. Findings → cleanup contracts.
+- SDK hardening from the audit: P0-010 (type unification) dispatching; all three cross-cutting →
+  reviewer-gated before merge.
+
+## SDK core audit — DONE (2026-06-20)
+Multi-agent workflow (23 agents, 6 dimensions × adversarial verify) → **15 confirmed findings**
+(`ai-factory/evaluation/audits/sdk-core-2026-06-20.md`). Notable: the spec §8.3 example fails the
+SDK's own `validatePlan`; `verifyEnvelope` is a recomputable hash (not authenticity); residual
+type-divergence (DeepReadonly/DeviceSnapshot dup, §14.1 union widened). → cleanup contracts
+P0-010/011/012.
 
 ## Blocked
-- (none)
+- P0-012 (blocked on P0-010).
 
 ## Ready queue
-- (empty — audit will produce cleanup contracts; then Week-1 ADRs and the first R2 controller-API
-  skeleton, both portable. OS image / Go agent / lockfile lane need a Linux/Go/Docker host —
-  owner decision point.)
+- P0-010 (type unification), P0-011 (envelope honesty). P0-012 unblocks after P0-010.
+- Then: Week-1 ADRs (author tools/checks/adr-structure.mjs first), first R2 controller-API skeleton.
+  OS image / Go agent / lockfile lane need a Linux/Go/Docker host — owner decision point.
 
 ## Done
 - **P0-001** — SDK plan model + canonical normalizer. 4/4 tests. Commit 56d3d48.
