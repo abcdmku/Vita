@@ -77,6 +77,12 @@ conventions you must follow are below.
   zero value" — so `"quotaGiB":0` or `"allow":[]`-as-absent slip through as if unset. Use a POINTER
   (`*int64`, `*[]T`) or an explicit presence check: nil ⇒ honor the optional default; present ⇒ validate
   (reject `0`/negative/empty as required). (Recurred: P7-001 `allow`, P1-018 `quotaGiB`.)
+- **Go `encoding/json` accepts DUPLICATE object keys (last-wins) — a TCB-parser hazard.** A request like
+  `{"id":"-----BEGIN PRIVATE KEY-----","id":"rk:owner"}` validates on the clean last value while smuggling
+  the bad first value into the RAW bytes. If a capability persists/returns raw input, that leaks (§13.1)
+  or bypasses an explicit-zero check. Two defenses, apply both for stored state: (a) REJECT requests with
+  duplicate object keys before decoding; (b) persist + return the RE-SERIALIZED canonical form of the
+  VALIDATED struct, never the original raw input bytes.
 
 ### General
 - Match the style, naming, and comment density of surrounding code. Read neighboring files first.
