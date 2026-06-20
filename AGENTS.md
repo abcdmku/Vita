@@ -72,6 +72,13 @@ conventions you must follow are below.
   with the live system UNCHANGED. Never a third state (mutated-but-reported-failed). Prove the
   partial-failure case with a regression test (inject a failure at/after the effect; assert no
   untracked mutation).
+  - **Atomic file write MUST use a fresh exclusive temp, never a predictable `path+".tmp"`.** Use
+    `os.CreateTemp(targetDir, ".name-*.tmp")` (random name, O_EXCL — fails if it exists, so it can't
+    follow a pre-planted symlink/hardlink in the state dir), set restrictive mode (0600), write → `Sync`
+    → `Close`, THEN `os.Rename` (the single commit point), no fallible work after. `os.WriteFile` to a
+    fixed/predictable temp name is a TOCTOU/symlink hazard and is forbidden for TCB stores. Copy the
+    proven pattern in `agent/capabilities/nodeconfig/apply_linux.go` (`AtomicWrite`). Prove it with a
+    pre-existing-temp/symlink regression (Append/Apply fails closed, live file unchanged).
 - **Absent ≠ zero/empty for OPTIONAL fields that must reject an explicit zero/empty when present.** A
   non-pointer `int64`/`bool`/slice with `omitempty` cannot distinguish "field absent" from "explicit
   zero value" — so `"quotaGiB":0` or `"allow":[]`-as-absent slip through as if unset. Use a POINTER
