@@ -27,13 +27,17 @@ export type AcceleratorCapability =
       readonly architecture: "x86_64" | "arm64";
     };
 
+type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+
 export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
   ? (...args: Args) => Return
-  : T extends readonly (infer Item)[]
-    ? readonly DeepReadonly<Item>[]
-    : T extends object
-      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
-      : T;
+  : T extends Primitive
+    ? T
+    : T extends readonly (infer Item)[]
+      ? readonly DeepReadonly<Item>[]
+      : T extends object
+        ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+        : T;
 
 export type DeviceArchitecture = "x86_64" | "arm64";
 export type AcceleratorPreference = "npu" | "gpu" | "cpu";

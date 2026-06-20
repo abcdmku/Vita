@@ -125,11 +125,11 @@ const validContract: PackageContract = {
 test("valid complete package contract validates and yields PackageContract", () => {
   const result = validatePackageContract(validContract);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(result.errors.map((error) => `${error.path}: ${error.message}`).join("\n"));
   }
+
+  assert.equal(result.ok, true);
 
   const contract: PackageContract = result.contract;
 
@@ -142,19 +142,20 @@ test("valid complete package contract validates and yields PackageContract", () 
 });
 
 test("missing required package fields are rejected with precise paths", () => {
-  const contract = structuredClone(validContract) as Record<string, unknown>;
-
-  delete contract.version;
-  delete contract.digest;
-  delete contract.architectures;
+  const {
+    version: _version,
+    digest: _digest,
+    architectures: _architectures,
+    ...contract
+  } = structuredClone(validContract);
 
   const result = validatePackageContract(contract);
-
-  assert.equal(result.ok, false);
 
   if (result.ok) {
     assert.fail("expected missing required fields to fail validation");
   }
+
+  assert.equal(result.ok, false);
 
   assert.deepEqual(
     result.errors.map((error) => error.path).sort(),
@@ -163,24 +164,25 @@ test("missing required package fields are rejected with precise paths", () => {
 });
 
 test("inline embedded secrets and unknown package classes are rejected", () => {
-  const contract = structuredClone(validContract) as Record<string, unknown>;
-
-  contract.packageClass = "python-service";
-  contract.secrets = [
-    {
-      name: "sync-token",
-      value: "not-a-reference",
-      purpose: "Authenticate outbound sync requests.",
-    },
-  ];
+  const contract = {
+    ...structuredClone(validContract),
+    packageClass: "python-service",
+    secrets: [
+      {
+        name: "sync-token",
+        value: "not-a-reference",
+        purpose: "Authenticate outbound sync requests.",
+      },
+    ],
+  };
 
   const result = validatePackageContract(contract);
-
-  assert.equal(result.ok, false);
 
   if (result.ok) {
     assert.fail("expected embedded secret and unknown class to fail validation");
   }
+
+  assert.equal(result.ok, false);
 
   assert.equal(
     result.errors.some(
@@ -208,7 +210,7 @@ test("inline embedded secrets and unknown package classes are rejected", () => {
 });
 
 test("malformed cyclic input is rejected instead of throwing", () => {
-  const contract = structuredClone(validContract) as Record<string, unknown>;
+  const contract: Record<string, unknown> = { ...structuredClone(validContract) };
 
   contract.identity = contract;
 
@@ -216,11 +218,11 @@ test("malformed cyclic input is rejected instead of throwing", () => {
 
   const result = validatePackageContract(contract);
 
-  assert.equal(result.ok, false);
-
   if (result.ok) {
     assert.fail("expected cyclic contract to fail validation");
   }
+
+  assert.equal(result.ok, false);
 
   assert.deepEqual(result.errors, [
     {

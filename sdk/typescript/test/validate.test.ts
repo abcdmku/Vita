@@ -104,11 +104,11 @@ test("a valid least-privilege state validates to its canonical plan", () => {
 
   const result = validatePlan(state, x86Snapshot);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(`expected validation to pass: ${JSON.stringify(result.errors)}`);
   }
+
+  assert.equal(result.ok, true);
 
   assert.deepEqual(result.plan, normalize(state));
 });

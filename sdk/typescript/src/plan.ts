@@ -452,16 +452,17 @@ function canonicalJson(value: unknown): string {
 function canonicalRecord(value: Record<string, unknown>): CanonicalJsonObject {
   const canonical = canonicalize(value);
 
-  if (
-    canonical === undefined ||
-    canonical === null ||
-    typeof canonical !== "object" ||
-    Array.isArray(canonical)
-  ) {
+  if (!isCanonicalJsonRecord(canonical)) {
     throw new TypeError("Expected a canonical object.");
   }
 
   return canonical;
+}
+
+function isCanonicalJsonRecord(
+  value: CanonicalJsonValue | undefined,
+): value is CanonicalJsonObject {
+  return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function canonicalize(value: unknown): CanonicalJsonValue | undefined {

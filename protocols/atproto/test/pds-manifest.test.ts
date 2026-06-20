@@ -13,11 +13,11 @@ test("buildPdsManifest returns a valid PackageContract for a valid config", () =
   const manifest = buildPdsManifest(defaultPdsConfig);
   const result = validatePackageContract(manifest);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(result.errors.map((error) => `${error.path}: ${error.message}`).join("\n"));
   }
+
+  assert.equal(result.ok, true);
 
   assert.equal(result.contract.packageClass, "oci-service");
 });
@@ -25,11 +25,11 @@ test("buildPdsManifest returns a valid PackageContract for a valid config", () =
 test("pdsManifest default contract validates", () => {
   const result = validatePackageContract(pdsManifest);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(result.errors.map((error) => `${error.path}: ${error.message}`).join("\n"));
   }
+
+  assert.equal(result.ok, true);
 });
 
 test("PDS manifest declares ingress, architectures, and backup/restore hooks", () => {
@@ -57,11 +57,11 @@ test("invalid config produces validation failure without throwing", () => {
 
   const result = validatePackageContract(buildPdsManifest(invalidConfig));
 
-  assert.equal(result.ok, false);
-
   if (result.ok) {
     assert.fail("expected invalid PDS config to produce an invalid package contract");
   }
+
+  assert.equal(result.ok, false);
 
   assert.equal(
     result.errors.some(

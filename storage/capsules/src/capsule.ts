@@ -314,15 +314,13 @@ export function validateCapsule(value: unknown): CapsuleValidationResult {
       return { ok: false, errors };
     }
 
-    validateCapsuleShape(normalized, [], errors);
-
-    if (errors.length > 0) {
+    if (!validateCapsuleShape(normalized, [], errors)) {
       return { ok: false, errors };
     }
 
     return {
       ok: true,
-      capsule: normalized as Capsule,
+      capsule: normalized,
     };
   } catch {
     return {
@@ -337,13 +335,21 @@ export function validateCapsule(value: unknown): CapsuleValidationResult {
   }
 }
 
-function validateCapsuleShape(value: PlainObject, path: Path, errors: CapsuleValidationError[]): void {
+function validateCapsuleShape(
+  value: PlainObject,
+  path: Path,
+  errors: CapsuleValidationError[],
+): value is PlainObject & Capsule {
+  const errorStart = errors.length;
+
   rejectUnknownFields(value, TOP_LEVEL_FIELDS, path, errors);
   validateRequiredObject(value, "manifest", [...path, "manifest"], errors, validateManifest);
   validateRequiredObject(value, "runtime", [...path, "runtime"], errors, validateRuntime);
   validateRequiredObject(value, "state", [...path, "state"], errors, validateState);
   validateRequiredObject(value, "policy", [...path, "policy"], errors, validatePolicy);
   validateRequiredObject(value, "simulation", [...path, "simulation"], errors, validateSimulation);
+
+  return errors.length === errorStart;
 }
 
 function validateManifest(value: PlainObject, path: Path, errors: CapsuleValidationError[]): void {

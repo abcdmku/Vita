@@ -24,23 +24,23 @@ test("defineSystem authors receive a typed refusal when no accelerator satisfies
   });
 
   const plan = system(deviceSnapshot([]));
+  const selection = observed;
 
-  assert.equal(observed?.type, "accelerator-refusal");
-
-  if (observed?.type !== "accelerator-refusal") {
+  if (selection?.type !== "accelerator-refusal") {
     assert.fail("expected a typed accelerator refusal");
   }
 
-  assert.equal(observed.code, "ACCELERATOR_UNAVAILABLE");
-  assert.equal(observed.requireFallback, false);
-  assert.deepEqual(observed.prefer, ["npu"]);
-  assert.equal(Object.isFrozen(observed.prefer), true);
-  assert.equal(Object.isFrozen(observed.available), true);
+  assert.equal(selection.type, "accelerator-refusal");
+  assert.equal(selection.code, "ACCELERATOR_UNAVAILABLE");
+  assert.equal(selection.requireFallback, false);
+  assert.deepEqual(selection.prefer, ["npu"]);
+  assert.equal(Object.isFrozen(selection.prefer), true);
+  assert.equal(Object.isFrozen(selection.available), true);
   assert.throws(() => {
-    (observed.prefer as unknown[]).push("gpu");
+    (selection.prefer as unknown[]).push("gpu");
   }, TypeError);
   assert.throws(() => {
-    (observed.available as unknown[]).push({ kind: "cpu", architecture: "x86_64" });
+    (selection.available as unknown[]).push({ kind: "cpu", architecture: "x86_64" });
   }, TypeError);
   const acceleratorConfig = plan.apps[0]?.config?.accelerator;
   assert.equal(
@@ -68,19 +68,19 @@ test("defineSystem authors receive the declared CPU fallback when fallback is re
   });
 
   system(deviceSnapshot([]));
+  const selection = observed;
 
-  assert.equal(observed?.type, "accelerator-selection");
-
-  if (observed?.type !== "accelerator-selection") {
+  if (selection?.type !== "accelerator-selection") {
     assert.fail("expected a CPU fallback selection");
   }
 
-  assert.equal(observed.selected.kind, "cpu");
-  assert.equal(observed.selectedPreference, "cpu");
-  assert.equal(observed.fallback, true);
-  assert.equal(Object.isFrozen(observed.prefer), true);
+  assert.equal(selection.type, "accelerator-selection");
+  assert.equal(selection.selected.kind, "cpu");
+  assert.equal(selection.selectedPreference, "cpu");
+  assert.equal(selection.fallback, true);
+  assert.equal(Object.isFrozen(selection.prefer), true);
   assert.throws(() => {
-    (observed.prefer as unknown[]).push("cpu");
+    (selection.prefer as unknown[]).push("cpu");
   }, TypeError);
 });
 
@@ -99,16 +99,16 @@ test("explicitly preferred CPU selections are not marked as fallback", () => {
   });
 
   system(deviceSnapshot([{ kind: "cpu", architecture: "x86_64" }]));
+  const selection = observed;
 
-  assert.equal(observed?.type, "accelerator-selection");
-
-  if (observed?.type !== "accelerator-selection") {
+  if (selection?.type !== "accelerator-selection") {
     assert.fail("expected an explicitly preferred CPU selection");
   }
 
-  assert.equal(observed.selected.kind, "cpu");
-  assert.equal(observed.selectedPreference, "cpu");
-  assert.equal(observed.fallback, false);
+  assert.equal(selection.type, "accelerator-selection");
+  assert.equal(selection.selected.kind, "cpu");
+  assert.equal(selection.selectedPreference, "cpu");
+  assert.equal(selection.fallback, false);
 });
 
 test("accelerator selection returns a frozen clone instead of a mutable snapshot reference", () => {
@@ -125,19 +125,32 @@ test("accelerator selection returns a frozen clone instead of a mutable snapshot
   });
 
   system(snapshot);
+  const selection = observed;
 
-  assert.equal(observed?.type, "accelerator-selection");
-
-  if (observed?.type !== "accelerator-selection") {
+  if (selection?.type !== "accelerator-selection") {
     assert.fail("expected a GPU accelerator selection");
   }
 
-  assert.notEqual(observed.selected, snapshot.device.accelerators[0]);
-  assert.equal(Object.isFrozen(observed.selected), true);
+  assert.equal(selection.type, "accelerator-selection");
+  assert.notEqual(selection.selected, snapshot.device.accelerators[0]);
+  assert.equal(Object.isFrozen(selection.selected), true);
+  const selected = selection.selected;
+
+  if (selected.kind !== "amd.rocm") {
+    assert.fail(`expected AMD ROCm selection: ${JSON.stringify(selected)}`);
+  }
+
+  const mutableSelected: { memoryGB: number } = selected;
   assert.throws(() => {
-    (observed.selected as { memoryGB: number }).memoryGB = 4;
+    mutableSelected.memoryGB = 4;
   }, TypeError);
-  assert.equal(snapshot.device.accelerators[0]?.memoryGB, 16);
+  const snapshotAccelerator = snapshot.device.accelerators[0];
+
+  if (snapshotAccelerator?.kind !== "amd.rocm") {
+    assert.fail(`expected AMD ROCm fixture: ${JSON.stringify(snapshotAccelerator)}`);
+  }
+
+  assert.equal(snapshotAccelerator.memoryGB, 16);
 });
 
 test("runtime validation rejects unknown accelerator capability fields", () => {

@@ -125,10 +125,10 @@ test("storage, backup, and identity overview endpoints route through the dispatc
     backup.response.targets.every((target) => target.protectionState.isBackup),
     true,
   );
-  assert.equal(
-    backup.response.targets.some((target) => target.protectionState.protectionLevel === "mirror"),
-    false,
+  const backupTargetProtectionLevels: readonly string[] = backup.response.targets.map(
+    (target) => target.protectionState.protectionLevel,
   );
+  assert.equal(backupTargetProtectionLevels.includes("mirror"), false);
   assert.deepEqual(
     backup.response.nonBackupProtection.map((entry) => [
       entry.protectionState.protectionLevel,
@@ -227,11 +227,11 @@ test("previewPlan returns validation, diff, and explanation for a valid desired 
     assert.fail(`expected preview response: ${JSON.stringify(preview)}`);
   }
 
-  assert.equal(preview.response.ok, true);
-
   if (!preview.response.ok) {
     assert.fail(`expected plan preview to pass: ${JSON.stringify(preview.response.validation)}`);
   }
+
+  assert.equal(preview.response.ok, true);
 
   assert.equal(preview.response.validation.ok, true);
   assert.ok(preview.response.diff.changes.length > 0);

@@ -11,14 +11,18 @@ const FAKE_PRIVATE_KEY = [
   "-----END PRIVATE KEY-----",
 ].join("\n");
 
+type Mutable<T> = {
+  -readonly [Key in keyof T]: T[Key];
+};
+
 test("valid complete verified catalog entry validates and preserves trust tier", () => {
   const result = validateCatalogEntry(validCatalogEntry());
-
-  assert.equal(result.ok, true);
 
   if (!result.ok) {
     assert.fail(formatErrors(result.errors));
   }
+
+  assert.equal(result.ok, true);
 
   const entry: CatalogEntry = result.entry;
 
@@ -39,11 +43,11 @@ test("package contract reference entries validate and preserve community trust t
 
   const result = validateCatalogEntry(entry);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(formatErrors(result.errors));
   }
+
+  assert.equal(result.ok, true);
 
   assert.equal(result.entry.trustTier, "community");
 });
@@ -62,8 +66,14 @@ test("required catalog fields and trust tier are rejected with precise paths", (
     {
       path: "signatures/0/ref",
       mutate(entry) {
-        const signature = entry.signatures[0] as Record<string, unknown>;
-        signature.ref = FAKE_PRIVATE_KEY;
+        const signature = entry.signatures[0];
+
+        if (signature === undefined || typeof signature === "string") {
+          assert.fail("expected descriptor signature fixture");
+        }
+
+        const mutableSignature: Mutable<typeof signature> = signature;
+        mutableSignature.ref = FAKE_PRIVATE_KEY;
       },
     },
     {
@@ -82,7 +92,10 @@ test("required catalog fields and trust tier are rejected with precise paths", (
 
   for (let index = 0; index < cases.length; index += 1) {
     const item = cases[index];
-    assert.notEqual(item, undefined);
+
+    if (item === undefined) {
+      assert.fail("expected catalog validation case fixture");
+    }
 
     const entry = validCatalogEntry();
     item.mutate(entry);
@@ -96,8 +109,14 @@ test("required catalog fields and trust tier are rejected with precise paths", (
 test("embedded package contract validation is reused and package refs are checked", () => {
   const entry = validCatalogEntry();
   const contract = entry.package as PackageContract;
+  const secret = contract.secrets[0];
 
-  (contract.secrets[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+  if (secret === undefined) {
+    assert.fail("expected secret fixture");
+  }
+
+  const mutableSecret: Mutable<typeof secret> = secret;
+  mutableSecret.ref = FAKE_PRIVATE_KEY;
 
   const errors = reject(entry);
 

@@ -113,7 +113,7 @@ function formatNamedValue(
     return [`${indent}${key}:`, ...formatObjectEntries(value, `${indent}  `)];
   }
 
-  if (Array.isArray(value)) {
+  if (isCanonicalJsonArray(value)) {
     if (value.length === 0) {
       return [`${indent}${key}: []`];
     }
@@ -143,7 +143,7 @@ function formatArrayItems(values: readonly CanonicalJsonValue[], indent: string)
       ];
     }
 
-    if (Array.isArray(value)) {
+    if (isCanonicalJsonArray(value)) {
       if (value.length === 0) {
         return [`${indent}- []`];
       }
@@ -235,4 +235,10 @@ function compareStrings(left: string, right: string): number {
 
 function isCanonicalJsonObject(value: CanonicalJsonValue): value is CanonicalJsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCanonicalJsonArray(
+  value: CanonicalJsonValue,
+): value is readonly CanonicalJsonValue[] {
+  return Array.isArray(value);
 }

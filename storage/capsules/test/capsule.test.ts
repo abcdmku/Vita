@@ -11,21 +11,30 @@ const FAKE_PRIVATE_KEY = [
   "-----END PRIVATE KEY-----",
 ].join("\n");
 
+type Mutable<T> = {
+  -readonly [Key in keyof T]: T[Key];
+};
+
 test("valid complete capsule validates and yields Capsule", () => {
   const capsule = validCapsule();
   const result = validateCapsule(capsule);
-
-  assert.equal(result.ok, true);
 
   if (!result.ok) {
     assert.fail(formatErrors(result.errors));
   }
 
+  assert.equal(result.ok, true);
+
   const typedCapsule: Capsule = result.capsule;
+  const source = typedCapsule.runtime.typescript.source;
+
+  if (source === undefined) {
+    assert.fail("expected TypeScript source fixture");
+  }
 
   assert.equal(typedCapsule.manifest.package.identity.id, "com.vita.notes");
   assert.equal(typedCapsule.state.snapshot.architectureNeutral, true);
-  assert.equal(typedCapsule.runtime.typescript.source.ref, "artifact://vita/notes/1.2.3/source");
+  assert.equal(source.ref, "artifact://vita/notes/1.2.3/source");
 });
 
 test("missing required sections and fields are rejected with precise paths", () => {
@@ -52,38 +61,67 @@ test("embedded private keys are rejected in artifact and state ref fields", () =
     {
       path: "runtime/ociImageIndexes/0/ref",
       mutate(capsule) {
-        (capsule.runtime.ociImageIndexes[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+        const descriptor: Mutable<(typeof capsule.runtime.ociImageIndexes)[number]> = first(
+          capsule.runtime.ociImageIndexes,
+          "OCI image index",
+        );
+        descriptor.ref = FAKE_PRIVATE_KEY;
       },
     },
     {
       path: "runtime/wasmComponents/0/ref",
       mutate(capsule) {
-        (capsule.runtime.wasmComponents[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+        const descriptor: Mutable<(typeof capsule.runtime.wasmComponents)[number]> = first(
+          capsule.runtime.wasmComponents,
+          "WASM component",
+        );
+        descriptor.ref = FAKE_PRIVATE_KEY;
       },
     },
     {
       path: "runtime/typescript/source/ref",
       mutate(capsule) {
-        (capsule.runtime.typescript.source as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+        const source = capsule.runtime.typescript.source;
+
+        if (source === undefined) {
+          assert.fail("expected TypeScript source fixture");
+        }
+
+        const descriptor: Mutable<typeof source> = source;
+        descriptor.ref = FAKE_PRIVATE_KEY;
       },
     },
     {
       path: "runtime/typescript/compiled/ref",
       mutate(capsule) {
-        (capsule.runtime.typescript.compiled as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+        const compiled = capsule.runtime.typescript.compiled;
+
+        if (compiled === undefined) {
+          assert.fail("expected TypeScript compiled fixture");
+        }
+
+        const descriptor: Mutable<typeof compiled> = compiled;
+        descriptor.ref = FAKE_PRIVATE_KEY;
       },
     },
     {
       path: "state/exports/0/ref",
       mutate(capsule) {
-        (capsule.state.exports[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+        const descriptor: Mutable<(typeof capsule.state.exports)[number]> = first(
+          capsule.state.exports,
+          "state export",
+        );
+        descriptor.ref = FAKE_PRIVATE_KEY;
       },
     },
   ];
 
   for (let index = 0; index < cases.length; index += 1) {
     const item = cases[index];
-    assert.notEqual(item, undefined);
+
+    if (item === undefined) {
+      assert.fail("expected capsule validation case fixture");
+    }
 
     const capsule = validCapsule();
     item.mutate(capsule);
@@ -96,9 +134,17 @@ test("embedded private keys are rejected in artifact and state ref fields", () =
 
 test("embedded key material in package refs and signature refs is rejected", () => {
   const capsule = validCapsule();
+  const signature = first(capsule.manifest.signatures, "signature reference");
+  const secret = first(capsule.manifest.package.secrets, "package secret");
 
-  (capsule.manifest.signatures[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
-  (capsule.manifest.package.secrets[0] as Record<string, unknown>).ref = FAKE_PRIVATE_KEY;
+  if (typeof signature === "string") {
+    assert.fail("expected signature descriptor fixture");
+  }
+
+  const mutableSignature: Mutable<typeof signature> = signature;
+  const mutableSecret: Mutable<typeof secret> = secret;
+  mutableSignature.ref = FAKE_PRIVATE_KEY;
+  mutableSecret.ref = FAKE_PRIVATE_KEY;
 
   const errors = reject(capsule);
 
@@ -225,6 +271,16 @@ function paths(errors: readonly { readonly path: string }[]): string[] {
 
 function formatErrors(errors: readonly { readonly path: string; readonly message: string }[]): string {
   return errors.map((error) => `${error.path}: ${error.message}`).join("\n");
+}
+
+function first<T>(values: readonly T[], label: string): T {
+  const value = values[0];
+
+  if (value === undefined) {
+    assert.fail(`expected ${label} fixture`);
+  }
+
+  return value;
 }
 
 function validCapsule(): Capsule {

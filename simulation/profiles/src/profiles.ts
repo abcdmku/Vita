@@ -220,15 +220,13 @@ export function validateSimulationProfiles(value: unknown): SimulationProfilesVa
       return { ok: false, errors };
     }
 
-    validateProfileArray(normalized, [], errors);
-
-    if (errors.length > 0) {
+    if (!validateProfileArray(normalized, [], errors)) {
       return { ok: false, errors };
     }
 
     return {
       ok: true,
-      profiles: normalized as readonly SimulationProfile[],
+      profiles: normalized,
     };
   } catch {
     return {
@@ -247,10 +245,14 @@ function validateProfileArray(
   value: readonly Plain[],
   path: Path,
   errors: SimulationProfileValidationError[],
-): void {
+): value is readonly (Plain & SimulationProfile)[] {
+  const errorStart = errors.length;
+
   for (let index = 0; index < value.length; index += 1) {
     validateProfile(value[index], [...path, String(index)], errors);
   }
+
+  return errors.length === errorStart;
 }
 
 function validateProfile(

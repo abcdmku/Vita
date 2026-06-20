@@ -69,8 +69,9 @@ test("denies import escalation beyond destination policy", () => {
 });
 
 test("malformed, cyclic, and unknown inputs fail closed without throwing", () => {
-  const cyclic = { packageContract: validContract(), capabilities: [dataRead] };
-  cyclic.packageContract.identity = cyclic.packageContract as PackageContract["identity"];
+  const cyclicContract: Record<string, unknown> = { ...validContract() };
+  cyclicContract.identity = cyclicContract;
+  const cyclic = { packageContract: cyclicContract, capabilities: [dataRead] };
 
   for (const input of [null, "bad", cyclic]) {
     assert.doesNotThrow(() =>

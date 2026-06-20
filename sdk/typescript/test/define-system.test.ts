@@ -119,11 +119,11 @@ test("the spec-style example validates against its device snapshot", () => {
   };
   const result = validatePlan(exampleState(authorSnapshot), fixedSnapshot.device);
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(`expected example validation to pass: ${JSON.stringify(result.errors)}`);
   }
+
+  assert.equal(result.ok, true);
 });
 
 test("the snapshot passed to the author function is deeply immutable", () => {

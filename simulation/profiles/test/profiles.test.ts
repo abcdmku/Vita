@@ -14,11 +14,11 @@ import {
 test("valid profile set validates and required coverage reports missing profiles", () => {
   const result = validateSimulationProfiles(validProfileSet());
 
-  assert.equal(result.ok, true);
-
   if (!result.ok) {
     assert.fail(formatErrors(result.errors));
   }
+
+  assert.equal(result.ok, true);
 
   assert.deepEqual(profileKinds(result.profiles), Array.from(REQUIRED_PROFILES));
   assert.deepEqual(coversRequiredProfiles(result.profiles), { ok: true, missing: [] });

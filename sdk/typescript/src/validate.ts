@@ -72,7 +72,7 @@ const SNAPSHOT_CADENCES = new Set(["disabled", "hourly", "daily", "weekly"]);
 const BACKUP_TARGETS = new Set(["network", "usb"]);
 const BACKUP_SCHEDULES = new Set(["hourly", "daily", "weekly", "monthly"]);
 const DEVICE_ARCHITECTURES = new Set(["x86_64", "arm64"]);
-const ACCELERATOR_PREFERENCES = new Set(["npu", "gpu", "cpu"]);
+const ACCELERATOR_PREFERENCES = new Set<AcceleratorPreference>(["npu", "gpu", "cpu"]);
 const APP_ALLOWED_CAPABILITIES = new Set<AllowedCapability>([
   "network.public",
   "data.files.read-only",

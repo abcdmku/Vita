@@ -121,15 +121,13 @@ export function validateCatalogEntry(value: unknown): CatalogEntryValidationResu
       return { ok: false, errors };
     }
 
-    validateCatalogEntryShape(normalized, [], errors);
-
-    if (errors.length > 0) {
+    if (!validateCatalogEntryShape(normalized, [], errors)) {
       return { ok: false, errors };
     }
 
     return {
       ok: true,
-      entry: normalized as CatalogEntry,
+      entry: normalized,
     };
   } catch {
     return {
@@ -148,7 +146,9 @@ function validateCatalogEntryShape(
   value: PlainObject,
   path: Path,
   errors: CatalogEntryValidationError[],
-): void {
+): value is PlainObject & CatalogEntry {
+  const errorStart = errors.length;
+
   rejectUnknownFields(value, TOP_LEVEL_FIELDS, path, errors);
   validatePackage(value, "package", [...path, "package"], errors);
   validateRequiredObject(
@@ -170,6 +170,8 @@ function validateCatalogEntryShape(
   validateRequiredDate(value, "endOfSupport", [...path, "endOfSupport"], errors);
   validateRequiredObject(value, "digest", [...path, "digest"], errors, validateDigest);
   validateRequiredStringEnum(value, "trustTier", TRUST_TIERS, [...path, "trustTier"], errors);
+
+  return errors.length === errorStart;
 }
 
 function validatePackage(
