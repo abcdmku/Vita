@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import exampleSystem from "../../examples/system.ts";
+import exampleSystem, { exampleState } from "../../examples/system.ts";
+import { bestAvailable } from "../src/capabilities.ts";
 import { app, backup, defineSystem } from "../src/define-system.ts";
 import { normalize, planHash } from "../src/plan.ts";
+import { validatePlan } from "../src/validate.ts";
 import type {
   DataAccessGrant,
+  SystemSnapshot,
   SystemSnapshotInput,
 } from "../src/define-system.ts";
 import type { DesiredState } from "../src/plan.ts";
@@ -102,6 +105,25 @@ test("the spec-style example declares the expected apps and backup", () => {
       target: "usb",
     },
   ]);
+});
+
+test("the spec-style example validates against its device snapshot", () => {
+  const authorSnapshot: SystemSnapshot = {
+    ...fixedSnapshot,
+    device: {
+      ...fixedSnapshot.device,
+      ai: {
+        bestAvailable: (request) => bestAvailable(fixedSnapshot.device, request),
+      },
+    },
+  };
+  const result = validatePlan(exampleState(authorSnapshot), fixedSnapshot.device);
+
+  assert.equal(result.ok, true);
+
+  if (!result.ok) {
+    assert.fail(`expected example validation to pass: ${JSON.stringify(result.errors)}`);
+  }
 });
 
 test("the snapshot passed to the author function is deeply immutable", () => {

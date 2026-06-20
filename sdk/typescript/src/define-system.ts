@@ -14,6 +14,7 @@ import type {
   DesiredState,
   JsonObject,
 } from "./plan.ts";
+import type { AllowedCapability } from "./validate.ts";
 
 export type {
   AcceleratorCapability,
@@ -84,6 +85,8 @@ export interface DefinedSystem<
 }
 
 export interface AppOptions extends JsonObject {
+  readonly allowedCapabilities?: readonly AllowedCapability[];
+  readonly capabilities?: readonly AllowedCapability[];
   readonly publicAccess?: boolean;
   readonly memory?: string;
   readonly accelerator?: AcceleratorSelectionResult;

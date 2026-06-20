@@ -34,6 +34,14 @@ test("defineSystem authors receive a typed refusal when no accelerator satisfies
   assert.equal(observed.code, "ACCELERATOR_UNAVAILABLE");
   assert.equal(observed.requireFallback, false);
   assert.deepEqual(observed.prefer, ["npu"]);
+  assert.equal(Object.isFrozen(observed.prefer), true);
+  assert.equal(Object.isFrozen(observed.available), true);
+  assert.throws(() => {
+    (observed.prefer as unknown[]).push("gpu");
+  }, TypeError);
+  assert.throws(() => {
+    (observed.available as unknown[]).push({ kind: "cpu", architecture: "x86_64" });
+  }, TypeError);
   const acceleratorConfig = plan.apps[0]?.config?.accelerator;
   assert.equal(
     acceleratorConfig !== null &&
@@ -70,6 +78,10 @@ test("defineSystem authors receive the declared CPU fallback when fallback is re
   assert.equal(observed.selected.kind, "cpu");
   assert.equal(observed.selectedPreference, "cpu");
   assert.equal(observed.fallback, true);
+  assert.equal(Object.isFrozen(observed.prefer), true);
+  assert.throws(() => {
+    (observed.prefer as unknown[]).push("cpu");
+  }, TypeError);
 });
 
 test("explicitly preferred CPU selections are not marked as fallback", () => {

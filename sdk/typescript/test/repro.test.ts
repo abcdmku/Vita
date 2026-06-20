@@ -76,7 +76,7 @@ test("assertDeterministic throws with a clear message when results differ", () =
         { runs: 3 },
       );
     },
-    /Function is not deterministic: run 2 differed from run 1\.\nExpected canonical result: .*"sequence":1.*\nReceived canonical result: .*"sequence":2/s,
+    /Function is not deterministic: run 2 differed from run 1\.\nExpected canonical result: .*"sequence".*"value":"1".*\nReceived canonical result: .*"sequence".*"value":"2"/s,
   );
 });
 
@@ -93,6 +93,61 @@ test("isDeterministic returns true for deterministic functions and false for dif
       }),
       "plan",
       { runs: 3 },
+    ),
+    false,
+  );
+});
+
+test("determinism checks accept stable non-JSON primitive results", () => {
+  assert.doesNotThrow(() => {
+    assertDeterministic(() => undefined, "plan", { runs: 3 });
+  });
+  assert.equal(isDeterministic(() => undefined, "plan", { runs: 3 }), true);
+  assert.equal(isDeterministic(() => Number.NaN, "plan", { runs: 3 }), true);
+  assert.equal(isDeterministic(() => BigInt(1), "plan", { runs: 3 }), true);
+});
+
+test("determinism serialization does not collide with sentinel-shaped objects", () => {
+  assert.equal(
+    isDeterministic(
+      () => ({
+        __vitaDeterminismType: "undefined",
+      }),
+      "plan",
+      { runs: 3 },
+    ),
+    true,
+  );
+
+  let undefinedCalls = 0;
+
+  assert.equal(
+    isDeterministic(
+      () =>
+        (undefinedCalls += 1) % 2 === 0
+          ? {
+              __vitaDeterminismType: "undefined",
+            }
+          : undefined,
+      "plan",
+      { runs: 2 },
+    ),
+    false,
+  );
+
+  let bigintCalls = 0;
+
+  assert.equal(
+    isDeterministic(
+      () =>
+        (bigintCalls += 1) % 2 === 0
+          ? {
+              __vitaDeterminismType: "bigint",
+              value: "1",
+            }
+          : BigInt(1),
+      "plan",
+      { runs: 2 },
     ),
     false,
   );

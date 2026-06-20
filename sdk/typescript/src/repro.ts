@@ -2,12 +2,39 @@ export interface DeterminismOptions {
   readonly runs?: number;
 }
 
-type JsonPrimitive = string | number | boolean | null;
-type CanonicalValue = JsonPrimitive | readonly CanonicalValue[] | CanonicalRecord;
+type CanonicalValue =
+  | {
+      readonly kind: "undefined";
+    }
+  | {
+      readonly kind: "null";
+    }
+  | {
+      readonly kind: "string";
+      readonly value: string;
+    }
+  | {
+      readonly kind: "boolean";
+      readonly value: boolean;
+    }
+  | {
+      readonly kind: "number";
+      readonly value: string;
+    }
+  | {
+      readonly kind: "bigint";
+      readonly value: string;
+    }
+  | {
+      readonly kind: "array";
+      readonly items: readonly CanonicalValue[];
+    }
+  | {
+      readonly kind: "object";
+      readonly entries: readonly CanonicalEntry[];
+    };
 
-interface CanonicalRecord {
-  readonly [key: string]: CanonicalValue;
-}
+type CanonicalEntry = readonly [string, CanonicalValue];
 
 const DEFAULT_RUNS = 50;
 
@@ -66,46 +93,90 @@ function canonicalSerialize(value: unknown): string {
 }
 
 function canonicalize(value: unknown, seen: WeakSet<object>): CanonicalValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return value;
+  if (value === undefined) {
+    return {
+      kind: "undefined",
+    };
+  }
+
+  if (value === null) {
+    return {
+      kind: "null",
+    };
+  }
+
+  if (typeof value === "string") {
+    return {
+      kind: "string",
+      value,
+    };
+  }
+
+  if (typeof value === "boolean") {
+    return {
+      kind: "boolean",
+      value,
+    };
   }
 
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError("Determinism results must contain only finite numbers.");
-    }
+    return {
+      kind: "number",
+      value: serializeNumber(value),
+    };
+  }
 
-    return value;
+  if (typeof value === "bigint") {
+    return {
+      kind: "bigint",
+      value: value.toString(),
+    };
   }
 
   if (Array.isArray(value)) {
     guardAcyclic(value, seen);
 
-    const items = value.map((item) => canonicalize(item, seen));
+    const items = Array.from({ length: value.length }, (_item, index) =>
+      canonicalize(value[index], seen),
+    );
     seen.delete(value);
 
-    return items;
+    return {
+      kind: "array",
+      items,
+    };
   }
 
   if (isPlainRecord(value)) {
     guardAcyclic(value, seen);
 
-    const output: Record<string, CanonicalValue> = {};
+    const entries: CanonicalEntry[] = [];
 
     for (const key of Object.keys(value).sort(compareStrings)) {
-      const next = value[key];
-
-      if (next !== undefined) {
-        output[key] = canonicalize(next, seen);
-      }
+      entries.push([key, canonicalize(value[key], seen)]);
     }
 
     seen.delete(value);
 
-    return output;
+    return {
+      kind: "object",
+      entries,
+    };
   }
 
   throw new TypeError(`Unsupported determinism result type: ${typeof value}.`);
+}
+
+function serializeNumber(value: number): string {
+  if (Number.isNaN(value)) {
+    return "NaN";
+  }
+
+  if (Object.is(value, -0)) {
+    return "-0";
+  }
+
+  return String(value);
 }
 
 function guardAcyclic(value: object, seen: WeakSet<object>): void {

@@ -183,6 +183,69 @@ test("overprivileged states are rejected for undeclared access and unavailable a
   assert.equal(paths.includes("apps/1/config/accelerator"), true);
 });
 
+test("tampered embedded accelerator selections are rejected", () => {
+  const accelerator = bestAvailable(x86Snapshot, {
+    prefer: ["gpu"],
+    requireFallback: false,
+  });
+
+  assert.equal(accelerator.type, "accelerator-selection");
+
+  if (accelerator.type !== "accelerator-selection") {
+    assert.fail("expected a GPU accelerator selection");
+  }
+
+  const state: DesiredState = {
+    apps: [
+      {
+        id: "vision",
+        config: {
+          accelerator: {
+            ...accelerator,
+            selected: {
+              kind: "nvidia.cuda",
+              memoryGB: 24,
+              compute: "8.6",
+            },
+          },
+        },
+      },
+    ],
+  };
+
+  const paths = rejectedPaths(validatePlan(state, x86Snapshot));
+
+  assert.equal(paths.includes("apps/0/config/accelerator/selected"), true);
+});
+
+test("embedded accelerator refusals are rejected instead of accepted as requests", () => {
+  const refusal = bestAvailable(armNoAcceleratorSnapshot, {
+    prefer: ["npu"],
+    requireFallback: false,
+  });
+
+  assert.equal(refusal.type, "accelerator-refusal");
+
+  if (refusal.type !== "accelerator-refusal") {
+    assert.fail("expected an accelerator refusal");
+  }
+
+  const state: DesiredState = {
+    apps: [
+      {
+        id: "vision",
+        config: {
+          accelerator: refusal,
+        },
+      },
+    ],
+  };
+
+  const paths = rejectedPaths(validatePlan(state, armNoAcceleratorSnapshot));
+
+  assert.equal(paths.includes("apps/0/config/accelerator"), true);
+});
+
 test("fail-closed behavior rejects unknown requested capabilities", () => {
   const state: DesiredState = {
     apps: [
