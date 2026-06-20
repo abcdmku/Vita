@@ -30,7 +30,7 @@ test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floo
       rounds on TCB code).
 - [x] Agent sessions auditable — `task/<id>` branch + commit + worker report + review per task.
 - [x] Protected policies/tests unchangeable by agents — dispatch refuses protected paths; verified.
-- [x] Build inputs pinned — `tsconfig.base.json` + **`package-lock.json` (tsc 6.0.3 pinned)** +
+- [x] Build inputs pinned — `tsconfig.base.json` + **`package-lock.json` (tsc 7.0.1-rc pinned — native TS 7)** +
       determinism gate + strict typecheck lane. (Full Nix/repro-image pinning still needs a Linux host.)
 
 ## What's built (portable, all verified + type-safe)
@@ -43,7 +43,7 @@ test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floo
   caps), storage/backup/identity overview (protection-state model), `previewCapsuleImport`.
 - **Security TCB**: permission broker (default-deny, fail-closed, intrinsic-safe) — 3 reviewer rounds.
 - **Portability**: capsule format (§13) · simulation profile types (§13/§20.1).
-- **CI lanes**: `npm run typecheck` (strict tsc 6.0.3) + node-native test suites + determinism gate.
+- **CI lanes**: `npm run typecheck` (strict tsc 7.0.1-rc, native TS 7) + node-native test suites + determinism gate.
 - **Governance**: Week-1 ADRs · an AI factory that hardened itself — AGENTS.md absorbed every security
   + type-safety lesson the reviewer taught.
 
