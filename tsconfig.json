@@ -17,6 +17,7 @@
     "storage/**/*.ts",
     "simulation/**/*.ts",
     "accelerators/**/*.ts",
+    "os/**/*.ts",
     "agent/**/*.ts"
   ],
   "exclude": ["node_modules", ".vita-worktrees", "**/dist"]
