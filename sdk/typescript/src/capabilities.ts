@@ -1,31 +1,31 @@
 import type { JsonObject } from "./plan.ts";
 
 export type AcceleratorCapability =
-  | (JsonObject & {
+  | {
       readonly kind: "nvidia.cuda";
       readonly memoryGB: number;
       readonly compute: string;
-    })
-  | (JsonObject & {
+    }
+  | {
       readonly kind: "intel.npu";
       readonly generation: string;
-    })
-  | (JsonObject & {
+    }
+  | {
       readonly kind: "amd.npu";
       readonly generation: string;
-    })
-  | (JsonObject & {
+    }
+  | {
       readonly kind: "amd.rocm";
       readonly memoryGB: number;
-    })
-  | (JsonObject & {
+    }
+  | {
       readonly kind: "intel.gpu";
       readonly memoryModel: "shared" | "dedicated";
-    })
-  | (JsonObject & {
+    }
+  | {
       readonly kind: "cpu";
       readonly architecture: "x86_64" | "arm64";
-    });
+    };
 
 export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
   ? (...args: Args) => Return
@@ -78,10 +78,6 @@ export interface AcceleratorRequest {
   readonly requireFallback: AcceleratorFallback;
 }
 
-export interface BestAvailableRequest extends AcceleratorRequest {
-  readonly snapshot: DeviceSnapshot;
-}
-
 export type AcceleratorSelectionResult = AcceleratorSelection | AcceleratorRefusal;
 
 export interface AcceleratorSelection extends JsonObject {
@@ -102,23 +98,11 @@ export interface AcceleratorRefusal extends JsonObject {
   readonly available: readonly ReadonlyAcceleratorCapability[];
 }
 
-export function bestAvailable(request: BestAvailableRequest): AcceleratorSelectionResult;
 export function bestAvailable(
   snapshot: DeviceSnapshot,
   request: AcceleratorRequest,
-): AcceleratorSelectionResult;
-export function bestAvailable(
-  first: BestAvailableRequest | DeviceSnapshot,
-  second?: AcceleratorRequest,
 ): AcceleratorSelectionResult {
-  const request =
-    second === undefined
-      ? (first as BestAvailableRequest)
-      : {
-          ...second,
-          snapshot: first as DeviceSnapshot,
-        };
-  const available = availableAccelerators(request.snapshot);
+  const available = availableAccelerators(snapshot);
 
   for (const preference of request.prefer) {
     const selected = firstMatchingAccelerator(available, preference);
@@ -128,7 +112,7 @@ export function bestAvailable(
         type: "accelerator-selection",
         selected: freezeCapability(selected),
         selectedPreference: preference,
-        fallback: selected.kind === "cpu" && request.requireFallback === "cpu",
+        fallback: false,
         prefer: freezePreferences(request.prefer),
         requireFallback: request.requireFallback,
       };
@@ -138,7 +122,7 @@ export function bestAvailable(
   if (request.requireFallback === "cpu") {
     return {
       type: "accelerator-selection",
-      selected: freezeCapability(cpuFallback(request.snapshot)),
+      selected: freezeCapability(cpuFallback(snapshot)),
       selectedPreference: "cpu",
       fallback: true,
       prefer: freezePreferences(request.prefer),

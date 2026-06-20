@@ -58,8 +58,7 @@ test("AcceleratorCapability models every spec 14.1 variant", () => {
 });
 
 test("bestAvailable honors the requested npu before gpu before cpu order", () => {
-  const result = bestAvailable({
-    snapshot: x86Snapshot,
+  const result = bestAvailable(x86Snapshot, {
     prefer: ["npu", "gpu", "cpu"],
     requireFallback: "cpu",
   });
@@ -76,8 +75,7 @@ test("bestAvailable honors the requested npu before gpu before cpu order", () =>
 });
 
 test("bestAvailable returns the declared CPU fallback with no accelerators present", () => {
-  const result = bestAvailable({
-    snapshot: armSnapshot,
+  const result = bestAvailable(armSnapshot, {
     prefer: ["npu", "gpu"],
     requireFallback: "cpu",
   });
@@ -97,8 +95,7 @@ test("bestAvailable returns the declared CPU fallback with no accelerators prese
 });
 
 test("bestAvailable returns a typed refusal when a hard requirement cannot be met", () => {
-  const result = bestAvailable({
-    snapshot: x86Snapshot,
+  const result = bestAvailable(x86Snapshot, {
     prefer: ["npu"],
     requireFallback: false,
   });
@@ -109,14 +106,16 @@ test("bestAvailable returns a typed refusal when a hard requirement cannot be me
     assert.fail("expected the x86 NPU profile to satisfy the hard requirement");
   }
 
-  const missingNpuResult = bestAvailable({
-    snapshot: {
+  const missingNpuResult = bestAvailable(
+    {
       ...x86Snapshot,
       accelerators: [{ kind: "amd.rocm", memoryGB: 16 }],
     },
-    prefer: ["npu"],
-    requireFallback: false,
-  });
+    {
+      prefer: ["npu"],
+      requireFallback: false,
+    },
+  );
 
   assert.equal(missingNpuResult.type, "accelerator-refusal");
 

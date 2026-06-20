@@ -78,16 +78,16 @@ const APP_ALLOWED_CAPABILITIES = new Set<AllowedCapability>([
   "data.files.read-only",
 ]);
 
-export function validatePlan(state: DesiredState, caps: DeviceSnapshot): ValidationResult {
+export function validatePlan(state: DesiredState, snapshot: DeviceSnapshot): ValidationResult {
   const errors: ValidationError[] = [];
   const deviceErrorStart = errors.length;
 
-  validateDeviceSnapshot(caps as unknown, ["caps"], errors);
+  validateDeviceSnapshot(snapshot as unknown, ["snapshot"], errors);
   validateDesiredState(
     state as unknown,
     [],
     errors,
-    errors.length === deviceErrorStart ? caps : undefined,
+    errors.length === deviceErrorStart ? snapshot : undefined,
   );
 
   if (errors.length > 0) {
@@ -119,7 +119,7 @@ function validateDesiredState(
   value: unknown,
   path: Path,
   errors: ValidationError[],
-  caps: DeviceSnapshot | undefined,
+  device: DeviceSnapshot | undefined,
 ): void {
   if (!isRecord(value)) {
     addError(errors, path, "Expected desired state object.");
@@ -130,7 +130,7 @@ function validateDesiredState(
   validateOptionalObject(value, "identity", [...path, "identity"], errors, validateIdentity);
   validateOptionalObject(value, "storage", [...path, "storage"], errors, validateStorage);
   validateOptionalArray(value, "apps", [...path, "apps"], errors, (app, appPath) => {
-    validateApp(app, appPath, errors, caps);
+    validateApp(app, appPath, errors, device);
   });
   validateOptionalArray(value, "backups", [...path, "backups"], errors, (backup, backupPath) => {
     validateBackup(backup, backupPath, errors);
@@ -179,7 +179,7 @@ function validateApp(
   value: unknown,
   path: Path,
   errors: ValidationError[],
-  caps: DeviceSnapshot | undefined,
+  device: DeviceSnapshot | undefined,
 ): void {
   if (!isRecord(value)) {
     addError(errors, path, "Expected app object.");
@@ -192,7 +192,7 @@ function validateApp(
   validateOptionalString(value, "version", [...path, "version"], errors);
 
   if (hasDefinedProperty(value, "config")) {
-    validateAppConfig(value.config, [...path, "config"], errors, caps);
+    validateAppConfig(value.config, [...path, "config"], errors, device);
   }
 }
 
@@ -200,7 +200,7 @@ function validateAppConfig(
   value: unknown,
   path: Path,
   errors: ValidationError[],
-  caps: DeviceSnapshot | undefined,
+  device: DeviceSnapshot | undefined,
 ): void {
   if (!isRecord(value)) {
     addError(errors, path, "Expected app config object.");
@@ -242,14 +242,14 @@ function validateAppConfig(
   }
 
   if (hasDefinedProperty(value, "accelerator")) {
-    if (caps === undefined) {
+    if (device === undefined) {
       addError(
         errors,
         [...path, "accelerator"],
         "Cannot validate accelerator request against an invalid device snapshot.",
       );
     } else {
-      validateAcceleratorConfig(value.accelerator, [...path, "accelerator"], caps, errors);
+      validateAcceleratorConfig(value.accelerator, [...path, "accelerator"], device, errors);
     }
   }
 }
@@ -328,7 +328,7 @@ function validateNetworking(value: JsonRecord, path: Path, errors: ValidationErr
 function validateAcceleratorConfig(
   value: unknown,
   path: Path,
-  caps: DeviceSnapshot,
+  device: DeviceSnapshot,
   errors: ValidationError[],
 ): void {
   if (!isRecord(value)) {
@@ -337,7 +337,7 @@ function validateAcceleratorConfig(
   }
 
   if (value.type === "accelerator-selection") {
-    validateAcceleratorSelection(value, path, caps, errors);
+    validateAcceleratorSelection(value, path, device, errors);
     return;
   }
 
@@ -357,7 +357,7 @@ function validateAcceleratorConfig(
     return;
   }
 
-  const result = bestAvailable(caps, request);
+  const result = bestAvailable(device, request);
 
   if (result.type === "accelerator-refusal") {
     addError(
@@ -371,7 +371,7 @@ function validateAcceleratorConfig(
 function validateAcceleratorSelection(
   value: JsonRecord,
   path: Path,
-  caps: DeviceSnapshot,
+  device: DeviceSnapshot,
   errors: ValidationError[],
 ): void {
   const errorStart = errors.length;
@@ -399,7 +399,7 @@ function validateAcceleratorSelection(
     return;
   }
 
-  const result = bestAvailable(caps, request);
+  const result = bestAvailable(device, request);
 
   if (result.type !== "accelerator-selection") {
     addError(

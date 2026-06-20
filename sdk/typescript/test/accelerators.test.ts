@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { app, defineSystem } from "../src/define-system.ts";
+import { validatePlan } from "../src/validate.ts";
 import type {
   AcceleratorCapability,
-  AcceleratorRefusal,
-  AcceleratorSelection,
+  AcceleratorSelectionResult,
   SystemSnapshotInput,
 } from "../src/define-system.ts";
 
 test("defineSystem authors receive a typed refusal when no accelerator satisfies a hard request", () => {
-  let observed: AcceleratorSelection | AcceleratorRefusal | undefined;
+  let observed: AcceleratorSelectionResult | undefined;
   const system = defineSystem(({ device }) => {
     const selection = device.ai.bestAvailable({
       prefer: ["npu"],
@@ -46,7 +46,7 @@ test("defineSystem authors receive a typed refusal when no accelerator satisfies
 });
 
 test("defineSystem authors receive the declared CPU fallback when fallback is required", () => {
-  let observed: AcceleratorSelection | AcceleratorRefusal | undefined;
+  let observed: AcceleratorSelectionResult | undefined;
   const system = defineSystem(({ device }) => {
     const selection = device.ai.bestAvailable({
       prefer: ["npu", "gpu"],
@@ -72,9 +72,36 @@ test("defineSystem authors receive the declared CPU fallback when fallback is re
   assert.equal(observed.fallback, true);
 });
 
+test("explicitly preferred CPU selections are not marked as fallback", () => {
+  let observed: AcceleratorSelectionResult | undefined;
+  const system = defineSystem(({ device }) => {
+    const selection = device.ai.bestAvailable({
+      prefer: ["cpu", "gpu"],
+      requireFallback: "cpu",
+    });
+    observed = selection;
+
+    return {
+      apps: [app("local-search", { accelerator: selection })],
+    };
+  });
+
+  system(deviceSnapshot([{ kind: "cpu", architecture: "x86_64" }]));
+
+  assert.equal(observed?.type, "accelerator-selection");
+
+  if (observed?.type !== "accelerator-selection") {
+    assert.fail("expected an explicitly preferred CPU selection");
+  }
+
+  assert.equal(observed.selected.kind, "cpu");
+  assert.equal(observed.selectedPreference, "cpu");
+  assert.equal(observed.fallback, false);
+});
+
 test("accelerator selection returns a frozen clone instead of a mutable snapshot reference", () => {
   const snapshot = deviceSnapshot([{ kind: "amd.rocm", memoryGB: 16 }]);
-  let observed: AcceleratorSelection | AcceleratorRefusal | undefined;
+  let observed: AcceleratorSelectionResult | undefined;
   const system = defineSystem(({ device }) => {
     const selection = device.ai.bestAvailable({
       prefer: ["gpu"],
@@ -99,6 +126,32 @@ test("accelerator selection returns a frozen clone instead of a mutable snapshot
     (observed.selected as { memoryGB: number }).memoryGB = 4;
   }, TypeError);
   assert.equal(snapshot.device.accelerators[0]?.memoryGB, 16);
+});
+
+test("runtime validation rejects unknown accelerator capability fields", () => {
+  const result = validatePlan(
+    {
+      apps: [app("local-search")],
+    },
+    deviceSnapshot([
+      {
+        kind: "cpu",
+        architecture: "x86_64",
+        extraField: true,
+      } as unknown as AcceleratorCapability,
+    ]).device,
+  );
+
+  assert.equal(result.ok, false);
+
+  if (result.ok) {
+    assert.fail("expected unknown accelerator fields to fail validation");
+  }
+
+  assert.deepEqual(
+    result.errors.map((error) => `${error.path}: ${error.message}`),
+    ["snapshot/accelerators/0/extraField: Unknown field."],
+  );
 });
 
 function deviceSnapshot(accelerators: readonly AcceleratorCapability[]): SystemSnapshotInput {

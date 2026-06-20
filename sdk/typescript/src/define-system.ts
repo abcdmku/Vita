@@ -2,9 +2,9 @@ import { bestAvailable as selectBestAvailable } from "./capabilities.ts";
 import { normalize } from "./plan.ts";
 import type {
   AcceleratorRequest,
-  AcceleratorRefusal,
-  AcceleratorSelection,
-  DeviceSnapshot as AcceleratorDeviceSnapshot,
+  AcceleratorSelectionResult,
+  DeepReadonly,
+  DeviceSnapshot,
 } from "./capabilities.ts";
 import type {
   BackupSchedule,
@@ -23,33 +23,20 @@ export type {
   AcceleratorRefusal,
   AcceleratorSelection,
   AcceleratorSelectionResult,
-  DeviceSnapshot as AcceleratorDeviceSnapshot,
+  DeepReadonly,
+  DeviceSnapshot,
   ReadonlyAcceleratorCapability,
 } from "./capabilities.ts";
 
-export type DeepReadonly<T> = T extends (...args: infer Args) => infer Return
-  ? (...args: Args) => Return
-  : T extends readonly (infer Item)[]
-    ? readonly DeepReadonly<Item>[]
-    : T extends object
-      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
-      : T;
-
 export interface DeviceAiSnapshot {
-  readonly bestAvailable: (
-    request: AcceleratorRequest,
-  ) => AcceleratorSelection | AcceleratorRefusal;
+  readonly bestAvailable: (request: AcceleratorRequest) => AcceleratorSelectionResult;
 }
 
-export type DeviceSnapshotInput = AcceleratorDeviceSnapshot & {
+export type DeviceSnapshotInput = DeviceSnapshot & {
   readonly ai?: Partial<DeviceAiSnapshot>;
 };
 
-export type DeviceSnapshot = AcceleratorDeviceSnapshot & {
-  readonly ai: DeviceAiSnapshot;
-};
-
-type AuthorDevice<TDevice extends object> = TDevice extends AcceleratorDeviceSnapshot
+type AuthorDevice<TDevice extends object> = TDevice extends DeviceSnapshot
   ? Omit<TDevice, "ai"> & { readonly ai: DeviceAiSnapshot }
   : TDevice;
 
@@ -99,7 +86,7 @@ export interface DefinedSystem<
 export interface AppOptions extends JsonObject {
   readonly publicAccess?: boolean;
   readonly memory?: string;
-  readonly accelerator?: AcceleratorSelection | AcceleratorRefusal;
+  readonly accelerator?: AcceleratorSelectionResult;
   readonly dataAccess?: readonly DataAccessGrant[];
 }
 
@@ -204,10 +191,10 @@ function authorDevice<TDevice extends object>(device: TDevice): AuthorDevice<TDe
 
   const existingAi = objectProperty(device, "ai");
   const aiBase = isObject(existingAi) ? existingAi : {};
-  let snapshotForSelection: AcceleratorDeviceSnapshot = device;
+  let snapshotForSelection: DeviceSnapshot = device;
   const ai: DeviceAiSnapshot = {
     ...aiBase,
-    bestAvailable(request: AcceleratorRequest): AcceleratorSelection | AcceleratorRefusal {
+    bestAvailable(request: AcceleratorRequest): AcceleratorSelectionResult {
       return selectBestAvailable(snapshotForSelection, request);
     },
   };
@@ -216,12 +203,12 @@ function authorDevice<TDevice extends object>(device: TDevice): AuthorDevice<TDe
     ai,
   };
 
-  snapshotForSelection = deviceWithAi as AcceleratorDeviceSnapshot;
+  snapshotForSelection = deviceWithAi as DeviceSnapshot;
 
   return deviceWithAi as AuthorDevice<TDevice>;
 }
 
-function isAcceleratorDeviceSnapshot(device: object): device is AcceleratorDeviceSnapshot {
+function isAcceleratorDeviceSnapshot(device: object): device is DeviceSnapshot {
   const memoryGB = objectProperty(device, "memoryGB");
   const architecture = objectProperty(device, "architecture");
   const accelerators = objectProperty(device, "accelerators");
