@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +79,10 @@ type ResultError struct {
 
 type OperationsResponse struct {
 	Operations []string `json:"operations"`
+}
+
+type stateCapabilityError struct {
+	Error string `json:"error"`
 }
 
 type handler struct {
@@ -234,6 +239,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleCapabilities(w, r)
 	case "/operations":
 		h.handleOperations(w, r)
+	case "/state":
+		h.handleState(w, r)
 	case "/apply":
 		h.handleApply(w, r)
 	case "/read":
@@ -305,24 +312,93 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 		return
 	}
 
+	response, readErr := h.readCapability(r.Context(), name)
+	if readErr != nil {
+		writeRequestError(w, readErr)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *handler) readCapability(ctx context.Context, name string) (capabilities.TypedResponse, *requestError) {
 	capability, ok := h.registry.Lookup(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "unknown_capability", fmt.Sprintf("unknown capability %q", name))
-		return
+		return nil, &requestError{
+			status:  http.StatusNotFound,
+			code:    "unknown_capability",
+			message: fmt.Sprintf("unknown capability %q", name),
+		}
 	}
 
 	readRequest, ok := h.readRequest(name)
 	if !ok {
-		writeError(w, http.StatusInternalServerError, "unsupported_read_request", fmt.Sprintf("capability %q has no registered read request", name))
+		return nil, &requestError{
+			status:  http.StatusInternalServerError,
+			code:    "unsupported_read_request",
+			message: fmt.Sprintf("capability %q has no registered read request", name),
+		}
+	}
+
+	response, err := capability.Handle(ctx, readRequest)
+	if err != nil {
+		return nil, &requestError{
+			status:  http.StatusInternalServerError,
+			code:    "capability_read_failed",
+			message: err.Error(),
+		}
+	}
+	return response, nil
+}
+
+func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
-	response, err := capability.Handle(r.Context(), readRequest)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "capability_read_failed", err.Error())
-		return
+	var body bytes.Buffer
+	body.WriteString(`{"capabilities":{`)
+	for i, name := range h.capabilityNames {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		key, err := json.Marshal(name)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(key)
+		body.WriteByte(':')
+
+		raw, readErr := h.readCapabilityJSON(r.Context(), name)
+		if readErr != nil {
+			raw, err = encodeJSONValue(stateCapabilityError{Error: readErr.code})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+				return
+			}
+		}
+		body.Write(raw)
 	}
-	writeJSON(w, http.StatusOK, response)
+	body.WriteString("}}\n")
+
+	writeRawJSON(w, http.StatusOK, body.Bytes())
+}
+
+func (h *handler) readCapabilityJSON(ctx context.Context, name string) ([]byte, *requestError) {
+	response, readErr := h.readCapability(ctx, name)
+	if readErr != nil {
+		return nil, readErr
+	}
+	raw, err := encodeJSONValue(response)
+	if err != nil {
+		return nil, &requestError{
+			status:  http.StatusInternalServerError,
+			code:    "capability_read_failed",
+			message: "capability response could not be encoded",
+		}
+	}
+	return raw, nil
 }
 
 func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
@@ -599,6 +675,20 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeRawJSON(w http.ResponseWriter, statusCode int, payload []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(payload)
+}
+
+func encodeJSONValue(payload interface{}) ([]byte, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(body.Bytes(), []byte("\n")), nil
 }
 
 func cloneStrings(in []string) []string {

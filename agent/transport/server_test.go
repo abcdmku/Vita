@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -187,6 +188,146 @@ func TestReadHandleErrorReturnsTypedError(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, []string{"handle:test.read"}) {
 		t.Fatalf("events = %v, want [handle:test.read]", events)
+	}
+}
+
+func TestStateReturnsAllRegisteredCapabilitiesSortedAndReadIdentical(t *testing.T) {
+	registrations := []struct {
+		name    string
+		ordinal int
+	}{
+		{name: update.Name, ordinal: 11},
+		{name: timesync.Name, ordinal: 10},
+		{name: nodetime.Name, ordinal: 9},
+		{name: storage.Name, ordinal: 8},
+		{name: pdssync.Name, ordinal: 7},
+		{name: nodeconfig.Name, ordinal: 6},
+		{name: network.Name, ordinal: 5},
+		{name: identity.Name, ordinal: 4},
+		{name: hostname.Name, ordinal: 3},
+		{name: capsule.Name, ordinal: 2},
+		{name: backup.Name, ordinal: 1},
+	}
+	registered := make([]capabilities.Capability, 0, len(registrations))
+	for _, registration := range registrations {
+		registered = append(registered, &stateReadCapability{
+			name: registration.name,
+			response: stateReadResponse{
+				Name:    registration.name,
+				Ordinal: registration.ordinal,
+			},
+		})
+	}
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t, registered...)})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+
+	wantNames := registeredCapabilityNames()
+	assertCapabilityKeyOrder(t, response.Body.String(), wantNames)
+
+	var got stateResponse
+	decodeResponse(t, response, &got)
+	if len(got.Capabilities) != len(wantNames) {
+		t.Fatalf("capabilities count = %d, want %d; capabilities=%v", len(got.Capabilities), len(wantNames), got.Capabilities)
+	}
+
+	for _, name := range wantNames {
+		gotRaw, ok := got.Capabilities[name]
+		if !ok {
+			t.Fatalf("state missing capability %q", name)
+		}
+
+		readResponse := perform(handler, http.MethodGet, "/read/"+name, "")
+		if readResponse.Code != http.StatusOK {
+			t.Fatalf("%s read status code = %d, want %d; body=%s", name, readResponse.Code, http.StatusOK, readResponse.Body.String())
+		}
+		wantRaw := bytes.TrimSuffix(readResponse.Body.Bytes(), []byte("\n"))
+		if !bytes.Equal(gotRaw, wantRaw) {
+			t.Fatalf("%s state raw = %s, want read raw = %s", name, gotRaw, wantRaw)
+		}
+	}
+}
+
+func TestStateIsolatesReadErrorWithoutLeakingInternals(t *testing.T) {
+	events := []string{}
+	registry := mustRegistry(t,
+		&stateReadCapability{
+			name:     "test.good",
+			response: stateReadResponse{Name: "test.good", Ordinal: 1},
+			events:   &events,
+		},
+		&stateReadCapability{
+			name:   "test.bad",
+			err:    errors.New("open /secret/private.json: token denied"),
+			events: &events,
+		},
+	)
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.bad":  func() capabilities.TypedRequest { return mockReadRequest{} },
+			"test.good": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got stateResponse
+	decodeResponse(t, response, &got)
+
+	goodRead := perform(handler, http.MethodGet, "/read/test.good", "")
+	if goodRead.Code != http.StatusOK {
+		t.Fatalf("good read status code = %d, want %d; body=%s", goodRead.Code, http.StatusOK, goodRead.Body.String())
+	}
+	if !bytes.Equal(got.Capabilities["test.good"], bytes.TrimSuffix(goodRead.Body.Bytes(), []byte("\n"))) {
+		t.Fatalf("good state raw = %s, want read raw = %s", got.Capabilities["test.good"], bytes.TrimSuffix(goodRead.Body.Bytes(), []byte("\n")))
+	}
+
+	var bad stateCapabilityError
+	if err := json.Unmarshal(got.Capabilities["test.bad"], &bad); err != nil {
+		t.Fatalf("bad capability entry is not typed error JSON: %v; raw=%s", err, got.Capabilities["test.bad"])
+	}
+	if bad.Error != "capability_read_failed" {
+		t.Fatalf("bad error = %q, want capability_read_failed", bad.Error)
+	}
+	for _, disallowed := range []string{"secret", "token", "private"} {
+		if strings.Contains(strings.ToLower(response.Body.String()), disallowed) {
+			t.Fatalf("state response leaked %q: %s", disallowed, response.Body.String())
+		}
+	}
+	wantEvents := []string{"handle:test.bad", "handle:test.good", "handle:test.good"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestStateDoesNotApplyOrMutateRegisteredTxCapabilities(t *testing.T) {
+	events := []string{}
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply", events: &events})
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.apply": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want no Apply calls", events)
 	}
 }
 
@@ -790,6 +931,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "health rejects non GET", method: http.MethodPost, path: "/healthz", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "capabilities rejects non GET", method: http.MethodPost, path: "/capabilities", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
+		{name: "state rejects non GET", method: http.MethodPost, path: "/state", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "read rejects non GET", method: http.MethodPost, path: "/read/test.apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "read base rejects non GET", method: http.MethodPost, path: "/read", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
@@ -916,6 +1058,38 @@ type mockReadRequest struct{}
 
 func (mockReadRequest) CapabilityRequest() {}
 
+type stateResponse struct {
+	Capabilities map[string]json.RawMessage `json:"capabilities"`
+}
+
+type stateReadResponse struct {
+	Name    string `json:"name"`
+	Ordinal int    `json:"ordinal"`
+}
+
+func (stateReadResponse) CapabilityResponse() {}
+
+type stateReadCapability struct {
+	name     string
+	response capabilities.TypedResponse
+	err      error
+	events   *[]string
+}
+
+func (c *stateReadCapability) Name() string {
+	return c.name
+}
+
+func (c *stateReadCapability) Handle(context.Context, capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+	if c.events != nil {
+		*c.events = append(*c.events, "handle:"+c.name)
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.response, nil
+}
+
 type mockReadResponse struct {
 	Value string `json:"value"`
 	Count int    `json:"count"`
@@ -1035,6 +1209,30 @@ func mustRegistry(t *testing.T, registered ...capabilities.Capability) *capabili
 		t.Fatalf("NewRegistry returned error: %v", err)
 	}
 	return registry
+}
+
+func registeredCapabilityNames() []string {
+	return []string{backup.Name, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
+}
+
+func assertCapabilityKeyOrder(t *testing.T, body string, names []string) {
+	t.Helper()
+
+	lastIndex := -1
+	for _, name := range names {
+		key, err := json.Marshal(name)
+		if err != nil {
+			t.Fatalf("failed to marshal capability name %q: %v", name, err)
+		}
+		index := strings.Index(body, string(key)+":")
+		if index < 0 {
+			t.Fatalf("response missing capability key %q: %s", name, body)
+		}
+		if index <= lastIndex {
+			t.Fatalf("capability key %q index = %d, want after %d; body=%s", name, index, lastIndex, body)
+		}
+		lastIndex = index
+	}
 }
 
 func capsuleRegistry(capsules []capsule.CapsuleEntry) capsule.Registry {
