@@ -37,9 +37,10 @@ the cross-cutting ones reviewer-approved; one reviewer-blocked a buggy merge →
 foundation to build the controller on.
 
 ## In flight
-- P2-001 (controller API skeleton — **first real R2**) building → reviewer-gated. P0-013 ADRs merged.
-- Queue empties after P2-001 → author portable work next: permission-broker stubs (R2),
-  package-contract schema (packages/, R1/R2), atproto manifest types (R1), isCanonicalPlan DRY (R1).
+- P0-014 (shared isCanonicalPlan — DRY across envelope + controller; cross-cutting → reviewer-gated)
+  dispatching. P1-001 (package contract schema, §9.2) queued. **First R2 (P2-001) passed the gate.**
+- Deferred (P2-001 reviewer notes, folded into P0-014/later): controller `currentPlan` cast →
+  isCanonicalPlan (P0-014); `previewPlan` could reuse `validation.plan` instead of re-normalizing.
 
 ## Reviewer-gate follow-ups (deferred)
 - (P0-011) `verifyEnvelope` structural check duplicates plan-shape knowledge from plan.ts/validate.ts
@@ -81,6 +82,10 @@ P0-010/011/012.
   Reviewer-approved. Commit e4531be.
 - **P0-012** — fix §8.3 example to validate + coverage gaps + collision-free repro. 42/42.
   Reviewer-approved (round 2; round 1 reviewer-blocked a determinism bug). Commit c75a2d8.
+- **P0-013** — Week-1 ADRs (Debian/Go/Deno/Btrfs-LUKS/RAUC/package-isolation). adr-check passes.
+  Commit 125a7ce.
+- **P2-001** — controller API skeleton (getOverview/getNodeHealth/previewPlan via SDK), FR-008.
+  4/4. **First R2 — reviewer-approved.** Commit 760690d.
 - **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
   reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
