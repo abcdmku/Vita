@@ -67,7 +67,15 @@ conventions you must follow are below.
   untrusted input to plain trusted data first** using intrinsic-safe reads (`Array.isArray`, index
   access, `Object.hasOwn`, `Reflect.ownKeys`, `Array.prototype.X.call(plainArr, …)`), reject exotic
   shapes, THEN decide over the plain data. Prove it with a method-shadowing / hostile-iterator
-  regression test. (This class has bitten repeatedly — see `ai-factory/STATE.md`.)
+  regression test.
+- **Snapshot untrusted input ONCE; reject accessor properties; never re-read across decisions.** This
+  applies at EVERY level — including the top-level params object, not just nested fields. A plain
+  object with **getter/accessor properties** can return different values on each read (TOCTOU): the
+  value you validated is not the value you then act on. Reject accessor properties
+  (`Object.getOwnPropertyDescriptor(o,k)` must be a data descriptor — no `get`/`set`), and pass the
+  trusted plain snapshot forward; never read the same untrusted field twice for two decisions. Also
+  reject exotic prototype-bearing objects (`new Date()`/`new Map()`/`Proxy`) where a plain object is
+  required. (This whole class has bitten repeatedly — see `ai-factory/STATE.md`.)
 
 ---
 

@@ -25,8 +25,10 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P1-003 (package catalog entry types + fail-closed validator §9.2/§9.3, R1) dispatching.
-  P2-005 (controller capsule-import preview — validity+migration+sim+grant readiness, R2) queued.
+- P2-005 **round 2** building. Round 1 (8th block): TOCTOU at the top-level params object — accessor
+  (getter) properties accepted, so capsule/policy could return different values across the validate vs
+  grant reads. Re-dispatched: snapshot input once, reject accessor properties at every level. Also fix
+  migration-readiness over-report for arch-neutral x86-only OCI. P1-003 catalog merged (23 done).
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -68,6 +70,13 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **TOCTOU via accessor properties at the trust boundary (P2-005 r1).** A plain params object with
+  GETTER props returns different values per read — validate one value, act on another. **Fix:** snapshot
+  untrusted input to plain data ONCE (reject accessor descriptors at EVERY level incl. top-level params),
+  never re-read across decisions. Now in AGENTS.md. 8th block.
+- **Improved contracts → first-round approve (P1-003).** Pre-specifying BOTH the fail-closed checklist
+  AND domain semantics (§13.1/§9.3) up front landed a security validator clean in 1 round (vs P6-001 2
+  rounds). §18.5 process-improvement win.
 - **Fail-closed probes must include EXOTIC objects too (P2-004 r1).** A param guard accepted
   `new Date()`/`new Map()`/prototype-bearing objects as "valid empty params". My probe used a plain
   `{}` and missed it. **Standard probe set now:** garbage, partial, cyclic, method-shadowed, hostile
