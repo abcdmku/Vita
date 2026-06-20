@@ -72,6 +72,11 @@ conventions you must follow are below.
   with the live system UNCHANGED. Never a third state (mutated-but-reported-failed). Prove the
   partial-failure case with a regression test (inject a failure at/after the effect; assert no
   untracked mutation).
+- **Absent ≠ zero/empty for OPTIONAL fields that must reject an explicit zero/empty when present.** A
+  non-pointer `int64`/`bool`/slice with `omitempty` cannot distinguish "field absent" from "explicit
+  zero value" — so `"quotaGiB":0` or `"allow":[]`-as-absent slip through as if unset. Use a POINTER
+  (`*int64`, `*[]T`) or an explicit presence check: nil ⇒ honor the optional default; present ⇒ validate
+  (reject `0`/negative/empty as required). (Recurred: P7-001 `allow`, P1-018 `quotaGiB`.)
 
 ### General
 - Match the style, naming, and comment density of surrounding code. Read neighboring files first.
