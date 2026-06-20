@@ -26,31 +26,34 @@ xhigh review (`npm run review -- <id>`) to return `approve` before merge. R0/R1 
       build lane still TODO.
 
 ## In flight
-- P0-007 (reconcile SDK accelerator model) ready; dispatching next.
+- P0-005 (plan validation) dispatching next.
 
 ## Blocked
 - (none)
 
 ## Ready queue
-- P0-005 (plan validation), P0-006 (plan envelope), P0-007 (reconcile accelerators).
+- P0-005 (plan validation), P0-006 (plan envelope).
 
 ## Done
-- **P0-001** — SDK plan model + canonical normalizer (`sdk/typescript`). 4/4 tests. Commit 56d3d48.
+- **P0-001** — SDK plan model + canonical normalizer. 4/4 tests. Commit 56d3d48.
 - **P0-002** — defineSystem/app/backup authoring API + example `system.ts`. 5/5 tests. Commit 2f23bfa.
-- **P0-003** — capability snapshot + accelerator selection (CPU fallback). 4/4 tests. (Reviewer later
-  flagged it diverges from P0-002's accel model + a readonly leak → fix-forward as P0-007.)
-- **P0-004** — plan diff engine (structured + human-readable, FR-006). 4/4; SDK regression 17/17.
-  Commit d23f2e7.
+- **P0-003** — capability snapshot + accelerator selection. 4/4 tests. (Reviewer flagged divergence
+  + readonly leak → fixed by P0-007.)
+- **P0-004** — plan diff engine (FR-006). 4/4; SDK regression 17/17. Commit d23f2e7.
+- **P0-007** — reconcile accelerator model + close readonly leak. 20/20 SDK tests. **First full
+  reviewer-gate cycle on a real merge: review → VERDICT approve → integrate.** Commit 2b8fda7.
 
-## Reviewer gate — VALIDATED
-`npm run review` (GPT-5.5 xhigh) works end-to-end. First real run (on P0-003) returned
-`VERDICT: revise` with two correct blocking findings (accel-model fragmentation + readonly leak).
-Recorded in `P0-003.review.md`. R2+ merges will be gated on this; R1 fix-forward.
+## Reviewer gate — VALIDATED & in use
+`npm run review` (GPT-5.5 xhigh) works end-to-end. P0-003 review → `revise` (2 correct findings,
+fixed by P0-007). P0-007 review → `approve` (cross-cutting + modified a test, so gated before merge).
+R2+ merges require `approve`; R1 may be reviewed at orchestrator discretion (cross-cutting/test edits).
+Non-blocking notes to revisit: (a) `AcceleratorCapability` is widened with `JsonObject &` beyond the
+closed spec §14.1 union — confirm intended; (b) add a direct assertion that `refusal.available` is
+frozen.
 
 ## Next up
-- P0-007 reconcile accelerators (fixes reviewer findings) → then P0-006 (independent), P0-005
-  (validation, builds on reconciled accel model).
-- Reproducible-build / lockfile lane (closes last Phase-0 exit gate).
+- P0-005 (plan validation) → P0-006 (plan envelope).
+- Reproducible-build / lockfile lane (closes last Phase-0 exit gate — build inputs pinned).
 - Week-1 ADRs (Debian, Go, Deno, Btrfs, RAUC, package isolation); Go agent skeleton via Docker (draft).
 
 ## Lessons (most recent first)
