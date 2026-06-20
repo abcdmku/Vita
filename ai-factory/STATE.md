@@ -9,12 +9,11 @@ OS-layer work (Phase 1 bootable image, Go agent, RAUC, QEMU) is **deferred — n
 host the owner must opt into.**
 
 ## Status: RUNNING — OS build path (owner chose "set up Docker", 2026-06-20)
-26 portable contracts merged (typecheck=0, 112 tests). Now opening the deferred OS layers. Toolchain
-setup in progress: **Docker Desktop booting** (Linux engine for Debian image / RAUC / QEMU) + **Go**
-installing (native, for the agent's portable logic + cross-compile). First OS target: **Go system
-agent skeleton + health endpoint** (spec §25 Week 2, §7.1, §19 `agent/`) — narrow typed capabilities,
-fail-closed dispatch; then capability discovery (FR-004), then the image pipeline (Debian/UKI/RAUC/
-dm-verity) and QEMU boot in Docker. Go-agent is R3 (privileged TCB) → reviewer-gated, extra scrutiny.
+26 portable contracts merged (typecheck=0, 112 tests). Now opening the deferred OS layers. Toolchain READY + validated: **Go 1.26.4** (native + golang:1.26 container) and **Docker** (Debian 13
+trixie + Linux engine). Go builds run in the container via `tools/build/go-in-docker.mjs`. First OS
+contract **P1-004 (Go system agent skeleton + health endpoint)** dispatching — R3 (privileged TCB) →
+reviewer-gated, extra scrutiny (the reviewer must find no arbitrary-execution path). Then capability
+discovery (FR-004), then the image pipeline (Debian/UKI/RAUC/dm-verity) + QEMU boot in Docker.
 
 **Operating mode (still in effect): AUTO-MERGE ALL (R0–R4)** + **R2/R3/R4 (and cross-cutting/
 test-modifying R1) reviewer gate** (`npm run review` must approve). Quality floor: independent verify

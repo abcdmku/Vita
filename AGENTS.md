@@ -49,9 +49,14 @@ conventions you must follow are below.
 
 ### Go (the system agent — R3, expect heavy review)
 - Idiomatic Go, `go vet` + static analysis clean, static builds where practical (spec §5).
+- **Build/test in the pinned Linux container** (the host has no Go on the dispatch PATH; Linux is the
+  target): `node tools/build/go-in-docker.mjs --dir agent <go args>` — e.g. `… vet ./...` and
+  `… test ./...`. Run both clean before claiming done. Go 1.26 (golang:1.26 image, spec §5 baseline).
 - The agent exposes **narrow typed capabilities** and rejects arbitrary commands (spec §3.4, §7.1).
-  Never add a capability that runs shell/arbitrary input. Never widen the privileged surface beyond
-  what the contract specifies.
+  **Never** run a shell, `os/exec` attacker/plan-controlled input, eval arbitrary commands, or widen
+  the privileged surface beyond the contract. Capabilities are a CLOSED typed set; unknown/unregistered
+  requests are rejected (fail-closed). Linux-syscall-specific impls go behind `//go:build linux` build
+  tags with portable interfaces, so the skeleton compiles/tests in the container.
 
 ### General
 - Match the style, naming, and comment density of surrounding code. Read neighboring files first.

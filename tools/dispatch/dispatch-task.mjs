@@ -83,6 +83,17 @@ console.log(`\nDispatching ${id} → ${MODEL} (effort=${EFFORT}) in worktree ${w
 // positional arg) so the command line contains no untrusted content — safe under shell:true. The
 // `-c` values are bare (no inner quotes): Codex treats unparseable TOML as a literal string.
 const isWin = process.platform === "win32";
+
+// Child env for the worker + acceptance. Make native Go available (the host install postdates the
+// dispatch shell snapshot, so `go` isn't on PATH otherwise); Docker is already on PATH. Go contracts
+// build canonically in the golang Linux container (tools/build/go-in-docker.mjs); native Go just lets
+// the worker iterate fast on portable Go logic.
+const childEnv = { ...process.env };
+const goBin = isWin ? "C:\\Program Files\\Go\\bin" : "/usr/local/go/bin";
+if (existsSync(join(goBin, isWin ? "go.exe" : "go"))) {
+  childEnv.PATH = goBin + (isWin ? ";" : ":") + (childEnv.PATH || childEnv.Path || "");
+}
+
 const run = spawnSync(
   isWin ? "codex.cmd" : "codex",
   [
@@ -98,6 +109,7 @@ const run = spawnSync(
   {
     cwd: wt,
     input: prompt,
+    env: childEnv,
     encoding: "utf8",
     stdio: ["pipe", "inherit", "inherit"],
     shell: isWin,
@@ -130,6 +142,7 @@ if (hasChanges) {
 console.log(`\nRunning acceptance:  ${c.acceptance_command}\n`);
 const acc = spawnSync(c.acceptance_command, {
   cwd: wt,
+  env: childEnv,
   shell: true,
   encoding: "utf8",
   stdio: "inherit",
