@@ -112,6 +112,11 @@ conventions you must follow are below.
   trusted plain snapshot forward; never read the same untrusted field twice for two decisions. Also
   reject exotic prototype-bearing objects (`new Date()`/`new Map()`/`Proxy`) where a plain object is
   required. (This whole class has bitten repeatedly — see `ai-factory/STATE.md`.)
+  - **Composing functions: the OUTER envelope is its OWN trust boundary.** If your function takes
+    `{ a, b }` and forwards `a`/`b` to sub-validators that each `safeNormalize`, that does NOT protect
+    the outer object — an accessor/symbol/unknown field on the TOP-LEVEL params still slips through.
+    Run the WHOLE input through `safeNormalize` FIRST and reject unknown top-level keys, THEN read the
+    normalized fields and pass them on. Never hand-roll a partial "is it a plain object" envelope check.
 
 ---
 
