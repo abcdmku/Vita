@@ -25,10 +25,9 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P2-005 **round 3** building. TOCTOU fixed (r2 ✓). Remaining (9th block): migration readiness used
-  neutralRuntime OR declared-arch — an x86-only TS/WASM capsule previewed arm64-migratable. Round 3:
-  require declared-arch(targetArch) AND runtime-ready. Plus API de-dup. Deferred follow-up: extract a
-  shared safe-normalize util (controller snapshotter duplicates capsule/sim/broker normalization).
+- P0-015 (shared **safeNormalize** primitive — the canonical intrinsic-safe untrusted-input
+  normalizer every validator should import; correct-by-construction trust boundaries) dispatching →
+  reviewer-gated. Queue empties after → adopt it across existing validators + more controller/runtime.
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -51,7 +50,7 @@ local tests: P0-012 (determinism sentinel collision), P0-014 (guard threw on cyc
 and P2-002 ×2 (partial-malformed grants + alias; then method-shadowing bypass). All fixed-forward and
 merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-boundary guards.
 
-## Done (22)
+## Done (24)
 - **P0-001** plan model + canonical normalizer · **P0-002** authoring API + §8.3 example ·
   **P0-003** capabilities + accelerator selection · **P0-004** plan diff (FR-006) ·
   **P0-005** plan validation (fail-closed) · **P0-006** plan envelope (tamper-evident) ·
@@ -65,6 +64,7 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 - **P2-002** permission-broker decision core — **TCB R2** ✓rev (3 rounds; default-deny, fail-closed, intrinsic-safe).
 - **P2-003** controller app endpoints — install-preview shows granted/denied caps via broker (FR-010, §28.5) ✓rev r2.
 - **P2-004** controller storage/backup/identity overview (protection-state model, §11 roles) ✓rev r2 · **P6-002** simulation profile types + validator (§13/§20.1).
+- **P1-003** package catalog entry + validator (§9.2/§9.3) ✓rev (1st-round) · **P2-005** capsule-import preview — validity+migration+sim+grant (FR-020/021) ✓rev r3.
 - **P1-002** PDS manifest · **P6-001** capsule manifest types + fail-closed validator (§13) ✓rev r2.
 
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
