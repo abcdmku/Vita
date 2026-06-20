@@ -25,8 +25,9 @@ R1) require an independent GPT-5.5 review (`npm run review -- <id>`) returning `
       dependency lockfile/Nix lane still needs a toolchain host.
 
 ## In flight
-- P6-001 (capsule manifest types §13, R1 — pre-hardened with the full fail-closed checklist)
-  building. P2-003 (controller app endpoints) merged. Queue empties after P6-001 → author next.
+- P6-001 **round 2** building. Round 1: pre-hardening eliminated ALL fail-closed findings (✓ the
+  checklist works), but the reviewer caught §13.1 SEMANTIC gaps — embedded material allowed in `ref`
+  fields (secrets-as-references not enforced) + empty signatures accepted. Re-dispatched. (6th block.)
 
 ## Owner steering welcome
 Portable surface is broad. Areas the loop can deepen: **controller** (more endpoints),
@@ -66,6 +67,11 @@ merged. AGENTS.md now mandates fail-closed-never-throw + intrinsic-safe trust-bo
 Full audit: `ai-factory/evaluation/audits/sdk-core-2026-06-20.md`. (✓rev = reviewer-approved.)
 
 ## Lessons (most recent first)
+- **Pre-hardening pre-empts fail-closed, not domain semantics (P6-001).** Loading the full
+  fail-closed checklist into the contract made the worker nail every adversarial-input class first try,
+  but the reviewer still caught spec-§13.1 correctness gaps (embedded secrets in ref fields; empty
+  signatures). **Takeaway:** pre-harden the mechanical class (fail-closed/intrinsic-safe) up front;
+  the gate stays essential for domain/spec-semantic correctness which can't be fully pre-listed.
 - **Trust-boundary fail-closed has many shapes (P2-003 r1).** Beyond garbage/partial/method-shadowing:
   a throwing PROXY getter (`.length`) crashes an unguarded reader, and "no denials" wrongly reads as
   success for a zero-capability app under a malformed policy. **Takeaway:** wrap the WHOLE boundary
