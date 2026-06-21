@@ -7,8 +7,11 @@ export const meta = {
   ],
 }
 
+// NOTE: the `args` global does NOT thread reliably when this file is invoked via {scriptPath}.
+// To reuse: COPY this body into an inline Workflow `script` and hardcode `A = {cap, branch, ...}` directly,
+// OR set the consts below. (Proven: the first services probe ran inline with everything hardcoded.)
 // args = { cap, opName, branch, agentDir, manifestFiles:[...], conformanceFiles:[...], realEntrypoint }
-const A = args || {}
+const A = (typeof args !== 'undefined' && args) ? args : {}
 const cap = A.cap, branch = A.branch, agentDir = A.agentDir || `agent/capabilities/${cap}`
 const manifestFiles = (A.manifestFiles || []).join('\n  ')
 const conformanceFiles = (A.conformanceFiles || []).join('\n  ')
