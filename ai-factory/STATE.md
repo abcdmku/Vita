@@ -49,12 +49,14 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   evaluator → P2-030 apply orchestration). **Migration:** P9-007 (hostname) + P9-008 (the FOUNDATIONAL
   full-request/object-dialect correction + node.config; 9 rounds — surfaced the full-request model, a
   Go/TS verification gap, and an unbounded-dup-key-scan DoS now bounded) faithfully migrated; default
-  registry = {hostname.set, node.config}. **timesync + services MIGRATED.** Registry now = 4 caps
-  {hostname.set, node.config, time.sync, services.config}. P9-013 also landed the widely-shared `uniqueBy:[field]`
-  array primitive (dedup by a named sub-field — the agent dedups services by name, not whole object) +
-  `export *`'d the generated manifests so future caps auto-register. **In flight: P9-014 (rfc3339Instant +
-  time.set, WAVE 0a).**
-  **119 contracts merged. Reviewer gate has blocked 66 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  registry = {hostname.set, node.config}. **timesync + services + time.set MIGRATED.** Registry now = 5 caps
+  {hostname.set, node.config, services.config, time.set, time.sync}. P9-013 landed the widely-shared
+  `uniqueBy:[field]` primitive + `export *`'d the generated manifests (future caps auto-register). **P9-014
+  (WAVE 0a) DONE: `rfc3339Instant` mirrors `time.Parse(time.RFC3339)` EXACTLY — incl. precise digit-width
+  (rejects `1x:02:03`), offset bound hr≤24/min≤60 (ground-truth Go), and RAW-TOKEN validation matching
+  `time.Time.UnmarshalJSON`'s no-unescape (Go issue 47353; escaped timestamps reject). 4 rounds, all
+  ground-truth-verified.** Next: WAVE 0b/0c (cidrLiteral, sriIntegrity) + WAVE 1 string substrate.
+  **120 contracts merged. Reviewer gate has blocked 67 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
