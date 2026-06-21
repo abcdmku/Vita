@@ -14,6 +14,7 @@ type structuredFormatVector struct {
 
 var structuredStringFormats = []string{
 	"posixUsername",
+	"posixAccountName",
 	"groupName",
 	"systemdUnitName",
 	"absolutePath",
@@ -89,7 +90,7 @@ func TestStructuredFormatsComposeWithMaxLengthAndNoInlineSecrets(t *testing.T) {
 	field = posixNoInlineSecretsManifest.Fields["value"]
 	field.NoInlineSecrets = true
 	posixNoInlineSecretsManifest.Fields["value"] = field
-	if err := Validate(posixNoInlineSecretsManifest, structuredRequestValueJSON(t, "x-----begin")); err == nil {
+	if err := Validate(posixNoInlineSecretsManifest, structuredRequestValueJSON(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")); err == nil {
 		t.Fatal("Validate returned nil error for posixUsername with inline secret material")
 	}
 

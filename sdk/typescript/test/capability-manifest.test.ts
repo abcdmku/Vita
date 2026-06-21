@@ -258,6 +258,9 @@ test("integer fields use JS float64 JSON number semantics", () => {
 
   assert.equal(underflow.value.count, 0);
   assert.deepEqual(rejectedPaths(validate(JSON.parse('{"count":1e400}'))), [""]);
+  assert.equal(validate('{"count":0}').ok, true);
+  assert.deepEqual(rejectedPaths(validate('{"count":0.0}')), ["count"]);
+  assert.deepEqual(rejectedPaths(validate('{"count":0e0}')), ["count"]);
 });
 
 test("dialect cross-field rules reject each violation", () => {

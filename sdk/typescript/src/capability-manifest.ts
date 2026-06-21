@@ -8,7 +8,7 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * that needs a different invariant requires a governance-reviewed dialect extension,
  * not an embedded expression language.
  *
- * String formats are a closed, governed set. `posixUsername`, `groupName`,
+ * String formats are a closed, governed set. `posixUsername`, `posixAccountName`, `groupName`,
  * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
  * `capsuleVersion`, `sriIntegrity`, `bundleRefString`, and
  * `bundleVersionString` are structured capability-agent parity formats.
@@ -30,6 +30,7 @@ export type StringFieldFormat =
   | "ipLiteral"
   | "hostnameOrIp"
   | "posixUsername"
+  | "posixAccountName"
   | "groupName"
   | "systemdUnitName"
   | "absolutePath"
@@ -47,6 +48,7 @@ export interface StringFieldSchema {
   readonly maxBytes?: number;
   readonly minLength?: number;
   readonly enum?: readonly string[];
+  readonly notInEnum?: readonly string[];
   readonly lowercase?: boolean;
   readonly noControlChars?: boolean;
   readonly noInlineCapsuleMaterial?: boolean;
@@ -77,6 +79,7 @@ export interface ArrayFieldSchema {
   readonly minItems?: number;
   readonly maxItems?: number;
   readonly uniqueItems?: boolean;
+  readonly dedupItems?: boolean;
   readonly uniqueBy?: readonly string[];
 }
 
@@ -210,6 +213,7 @@ interface CompiledStringFieldSchema {
   maxBytes?: number;
   minLength?: number;
   enumValues?: ReadonlySet<string>;
+  notInEnumValues?: ReadonlySet<string>;
   lowercase: boolean;
   noControlChars: boolean;
   noInlineCapsuleMaterial: boolean;
@@ -237,6 +241,7 @@ interface CompiledArrayFieldSchema {
   minItems?: number;
   maxItems?: number;
   uniqueItems: boolean;
+  dedupItems: boolean;
   uniqueBy?: readonly string[];
 }
 
@@ -264,6 +269,7 @@ type RawCapabilityRequestParseResult =
       readonly ok: true;
       readonly value: PlainJson;
       readonly rawStringTokens: ReadonlyMap<string, string>;
+      readonly rawNumberTokens: ReadonlyMap<string, string>;
     }
   | {
       readonly ok: false;
@@ -274,6 +280,7 @@ interface RawJsonScanner {
   readonly text: string;
   index: number;
   duplicateKey: boolean;
+  readonly rawNumberTokens: Map<string, string>;
   readonly rawStringTokens: Map<string, string>;
 }
 
@@ -298,6 +305,7 @@ const STRING_SCHEMA_FIELDS = new Set([
   "maxBytes",
   "maxLength",
   "minLength",
+  "notInEnum",
   "forbiddenSchemePrefix",
   "noInlineCapsuleMaterial",
   "noControlChars",
@@ -312,6 +320,7 @@ const INTEGER_SCHEMA_FIELDS = new Set(["maximum", "minimum", "required", "type"]
 const BOOLEAN_SCHEMA_FIELDS = new Set(["required", "type"]);
 const ARRAY_SCHEMA_FIELDS = new Set([
   "items",
+  "dedupItems",
   "maxItems",
   "minItems",
   "required",
@@ -373,6 +382,7 @@ export function compileCapabilityValidator(manifest: CapabilityManifest): Capabi
     try {
       let normalizedValue: PlainJson;
       let rawStringTokens: ReadonlyMap<string, string> | undefined;
+      let rawNumberTokens: ReadonlyMap<string, string> | undefined;
 
       if (typeof input === "string") {
         const parsed = parseRawCapabilityRequest(input);
@@ -388,6 +398,7 @@ export function compileCapabilityValidator(manifest: CapabilityManifest): Capabi
 
         normalizedValue = parsed.value;
         rawStringTokens = parsed.rawStringTokens;
+        rawNumberTokens = parsed.rawNumberTokens;
       } else {
         const normalized = safeNormalize(input);
 
@@ -403,7 +414,7 @@ export function compileCapabilityValidator(manifest: CapabilityManifest): Capabi
         normalizedValue = normalized.value;
       }
 
-      const value = validateInput(normalizedValue, compiled.value, rawStringTokens);
+      const value = validateInput(normalizedValue, compiled.value, rawStringTokens, rawNumberTokens);
 
       if (!value.ok) {
         return reject(value.rejections);
@@ -673,6 +684,7 @@ function parseStringFieldSchema(
     errors,
   );
   const enumValues = readOptionalStringEnum(value, "enum", [...path, "enum"], errors);
+  const notInEnumValues = readOptionalStringEnum(value, "notInEnum", [...path, "notInEnum"], errors);
   const lowercaseValue = readOptionalBoolean(value, "lowercase", [...path, "lowercase"], errors);
   const noControlCharsValue = readOptionalBoolean(
     value,
@@ -735,6 +747,7 @@ function parseStringFieldSchema(
     maxBytes?: number;
     minLength?: number;
     enum?: readonly string[];
+    notInEnum?: readonly string[];
     lowercase?: boolean;
     noControlChars?: boolean;
     noInlineCapsuleMaterial?: boolean;
@@ -770,6 +783,10 @@ function parseStringFieldSchema(
   if (enumValues !== undefined) {
     compiled.enumValues = new Set(enumValues);
     manifest.enum = Object.freeze([...enumValues]);
+  }
+  if (notInEnumValues !== undefined) {
+    compiled.notInEnumValues = new Set(notInEnumValues);
+    manifest.notInEnum = Object.freeze([...notInEnumValues]);
   }
   if (lowercaseValue !== undefined) {
     manifest.lowercase = lowercaseValue;
@@ -919,6 +936,8 @@ function parseArrayFieldSchema(
   );
   const uniqueItemsValue = readOptionalBoolean(value, "uniqueItems", [...path, "uniqueItems"], errors);
   const uniqueItems = uniqueItemsValue ?? false;
+  const dedupItemsValue = readOptionalBoolean(value, "dedupItems", [...path, "dedupItems"], errors);
+  const dedupItems = dedupItemsValue ?? false;
   const uniqueBy = readOptionalUniqueBy(value, "uniqueBy", [...path, "uniqueBy"], errors);
 
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems) {
@@ -937,6 +956,7 @@ function parseArrayFieldSchema(
     items: items.compiled,
     required,
     type: "array",
+    dedupItems,
     uniqueItems,
   };
   const manifest: {
@@ -945,6 +965,7 @@ function parseArrayFieldSchema(
     items: FieldSchema;
     minItems?: number;
     maxItems?: number;
+    dedupItems?: boolean;
     uniqueItems?: boolean;
     uniqueBy?: readonly string[];
   } = {
@@ -963,6 +984,9 @@ function parseArrayFieldSchema(
   }
   if (uniqueItemsValue !== undefined) {
     manifest.uniqueItems = uniqueItemsValue;
+  }
+  if (dedupItemsValue !== undefined) {
+    manifest.dedupItems = dedupItemsValue;
   }
   if (uniqueBy !== undefined) {
     compiled.uniqueBy = uniqueBy;
@@ -1153,6 +1177,7 @@ function parseRawCapabilityRequest(raw: string): RawCapabilityRequestParseResult
   const scanner: RawJsonScanner = {
     duplicateKey: false,
     index: 0,
+    rawNumberTokens: new Map<string, string>(),
     rawStringTokens: new Map<string, string>(),
     text: raw,
   };
@@ -1175,6 +1200,7 @@ function parseRawCapabilityRequest(raw: string): RawCapabilityRequestParseResult
 
   return {
     ok: true,
+    rawNumberTokens: new Map(scanner.rawNumberTokens),
     rawStringTokens: new Map(scanner.rawStringTokens),
     value,
   };
@@ -1211,7 +1237,7 @@ function scanRawJsonValue(scanner: RawJsonScanner, path: Path): RawJsonValue {
     return consumeRawJsonLiteral(scanner, "null") ? null : INVALID_RAW_JSON;
   }
 
-  return scanRawJsonNumber(scanner);
+  return scanRawJsonNumber(scanner, path);
 }
 
 function scanRawJsonObject(scanner: RawJsonScanner, path: Path): RawJsonValue {
@@ -1357,7 +1383,7 @@ function consumeRawJsonString(scanner: RawJsonScanner): RawJsonStringToken | und
   return undefined;
 }
 
-function scanRawJsonNumber(scanner: RawJsonScanner): RawJsonValue {
+function scanRawJsonNumber(scanner: RawJsonScanner, path: Path): RawJsonValue {
   const start = scanner.index;
 
   while (scanner.index < scanner.text.length) {
@@ -1388,6 +1414,7 @@ function scanRawJsonNumber(scanner: RawJsonScanner): RawJsonValue {
       return INVALID_RAW_JSON;
     }
 
+    scanner.rawNumberTokens.set(formatPath(path), scanner.text.slice(start, scanner.index));
     return parsed;
   } catch {
     return INVALID_RAW_JSON;
@@ -1441,6 +1468,7 @@ function validateInput(
   value: PlainJson,
   manifest: CompiledManifest,
   rawStringTokens: ReadonlyMap<string, string> | undefined,
+  rawNumberTokens: ReadonlyMap<string, string> | undefined,
 ):
   | {
       readonly ok: true;
@@ -1480,7 +1508,14 @@ function validateInput(
       continue;
     }
 
-    const result = validateField(value[fieldName], schema, [fieldName], errors, rawStringTokens);
+    const result = validateField(
+      value[fieldName],
+      schema,
+      [fieldName],
+      errors,
+      rawStringTokens,
+      rawNumberTokens,
+    );
 
     if (result.ok) {
       Object.defineProperty(output, fieldName, {
@@ -1514,6 +1549,7 @@ function validateField(
   path: Path,
   errors: CapabilityRejection[],
   rawStringTokens: ReadonlyMap<string, string> | undefined,
+  rawNumberTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (value === undefined) {
     addError(errors, path, "Required field is missing.");
@@ -1524,13 +1560,13 @@ function validateField(
     case "string":
       return validateStringField(value, schema, path, errors, rawStringTokens);
     case "integer":
-      return validateIntegerField(value, schema, path, errors);
+      return validateIntegerField(value, schema, path, errors, rawNumberTokens);
     case "boolean":
       return validateBooleanField(value, path, errors);
     case "array":
-      return validateArrayField(value, schema, path, errors, rawStringTokens);
+      return validateArrayField(value, schema, path, errors, rawStringTokens, rawNumberTokens);
     case "object":
-      return validateObjectField(value, schema, path, errors, rawStringTokens);
+      return validateObjectField(value, schema, path, errors, rawStringTokens, rawNumberTokens);
   }
 }
 
@@ -1600,6 +1636,10 @@ function validateStringField(
     addError(errors, path, "String is not in the allowed enum.");
   }
 
+  if (schema.notInEnumValues !== undefined && schema.notInEnumValues.has(normalized)) {
+    addError(errors, path, "String is in the blocked enum.");
+  }
+
   if (errors.length > errorStart) {
     return { ok: false };
   }
@@ -1615,6 +1655,7 @@ function validateIntegerField(
   schema: CompiledIntegerFieldSchema,
   path: Path,
   errors: CapabilityRejection[],
+  rawNumberTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     addError(errors, path, "Expected safe integer.");
@@ -1622,6 +1663,11 @@ function validateIntegerField(
   }
 
   const errorStart = errors.length;
+  const rawToken = rawNumberTokens?.get(formatPath(path));
+
+  if (rawToken !== undefined && !isRawIntegerLiteral(rawToken)) {
+    addError(errors, path, "Expected integer JSON literal.");
+  }
 
   if (schema.minimum !== undefined && value < schema.minimum) {
     addError(errors, path, "Integer is below minimum.");
@@ -1663,6 +1709,7 @@ function validateArrayField(
   path: Path,
   errors: CapabilityRejection[],
   rawStringTokens: ReadonlyMap<string, string> | undefined,
+  rawNumberTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (!Array.isArray(value)) {
     addError(errors, path, "Expected array.");
@@ -1681,11 +1728,12 @@ function validateArrayField(
 
   const output: CapabilityValue[] = [];
   const seenItems = new Map<string, number>();
+  const seenDedupItems = new Map<string, number>();
   const seenUniqueBy = new Map<string, number>();
 
   for (let index = 0; index < value.length; index += 1) {
     const itemPath = [...path, String(index)];
-    const result = validateField(value[index], schema.items, itemPath, errors, rawStringTokens);
+    const result = validateField(value[index], schema.items, itemPath, errors, rawStringTokens, rawNumberTokens);
 
     if (!result.ok) {
       continue;
@@ -1706,22 +1754,40 @@ function validateArrayField(
       }
     }
 
-    if (schema.uniqueBy !== undefined) {
-      const key = uniqueByValueKey(result.value, schema.uniqueBy);
+    if (schema.dedupItems) {
+      const key = uniqueValueKey(result.value);
 
-      if (key === undefined) {
+      if (seenDedupItems.has(key)) {
+        continue;
+      }
+
+      seenDedupItems.set(key, index);
+    }
+
+    if (schema.uniqueBy !== undefined) {
+      const keys = uniqueByValueKeys(result.value, schema.uniqueBy);
+
+      if (keys === undefined) {
         addError(errors, itemPath, "uniqueBy requires object array items with all key fields present.");
       } else {
-        const previousIndex = seenUniqueBy.get(key);
+        for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+          const key = keys[keyIndex];
 
-        if (previousIndex !== undefined) {
-          addError(
-            errors,
-            itemPath,
-            `Duplicate array item key also appears at ${formatPath([...path, String(previousIndex)])}.`,
-          );
-        } else {
-          seenUniqueBy.set(key, index);
+          if (key === undefined) {
+            continue;
+          }
+
+          const previousIndex = seenUniqueBy.get(key);
+
+          if (previousIndex !== undefined) {
+            addError(
+              errors,
+              itemPath,
+              `Duplicate array item key also appears at ${formatPath([...path, String(previousIndex)])}.`,
+            );
+          } else {
+            seenUniqueBy.set(key, index);
+          }
         }
       }
     }
@@ -1745,6 +1811,7 @@ function validateObjectField(
   path: Path,
   errors: CapabilityRejection[],
   rawStringTokens: ReadonlyMap<string, string> | undefined,
+  rawNumberTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (!isRecord(value)) {
     addError(errors, path, "Expected object.");
@@ -1777,7 +1844,14 @@ function validateObjectField(
       continue;
     }
 
-    const result = validateField(value[fieldName], field, [...path, fieldName], errors, rawStringTokens);
+    const result = validateField(
+      value[fieldName],
+      field,
+      [...path, fieldName],
+      errors,
+      rawStringTokens,
+      rawNumberTokens,
+    );
 
     if (result.ok) {
       Object.defineProperty(output, fieldName, {
@@ -2175,6 +2249,7 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "ipLiteral" ||
     value === "hostnameOrIp" ||
     value === "posixUsername" ||
+    value === "posixAccountName" ||
     value === "groupName" ||
     value === "systemdUnitName" ||
     value === "absolutePath" ||
@@ -2209,6 +2284,7 @@ function normalizeStringFormat(
       return isAgentHostname(value) ? asciiLowercase(value) : undefined;
     }
     case "posixUsername":
+    case "posixAccountName":
     case "groupName":
       return isPOSIXName(value) ? value : undefined;
     case "systemdUnitName":
@@ -2796,7 +2872,35 @@ function isPOSIXName(value: string): boolean {
     }
   }
 
-  return true;
+  return !containsInlineKeyMaterial(value);
+}
+
+function containsInlineKeyMaterial(value: string): boolean {
+  const lower = asciiLowercase(value);
+
+  return containsDataURLPattern(lower) || containsPEMBlockPattern(lower) || containsLongBase64Run(value);
+}
+
+function containsDataURLPattern(value: string): boolean {
+  for (let start = value.indexOf("data:"); start !== -1; start = value.indexOf("data:", start + 1)) {
+    if (start === 0 || !isAsciiRegexWordCode(value.charCodeAt(start - 1))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function containsPEMBlockPattern(value: string): boolean {
+  for (let start = value.indexOf("-----begin"); start !== -1; start = value.indexOf("-----begin", start + 1)) {
+    const afterIndex = start + "-----begin".length;
+
+    if (afterIndex >= value.length || !isAsciiRegexWordCode(value.charCodeAt(afterIndex))) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 const SYSTEMD_UNIT_SUFFIXES = Object.freeze([
@@ -3918,7 +4022,31 @@ function uniqueValueKey(value: CapabilityValue): string {
   return `${typeof value}:${String(value)}`;
 }
 
-function uniqueByValueKey(value: CapabilityValue, uniqueBy: readonly string[]): string | undefined {
+function isRawIntegerLiteral(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  let index = 0;
+
+  if (value.charCodeAt(0) === 45) {
+    index = 1;
+  }
+
+  if (index >= value.length) {
+    return false;
+  }
+
+  for (; index < value.length; index += 1) {
+    if (!isAsciiDigitCode(value.charCodeAt(index))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function uniqueByValueKeys(value: CapabilityValue, uniqueBy: readonly string[]): readonly string[] | undefined {
   if (!isCapabilityObject(value)) {
     return undefined;
   }
@@ -3941,7 +4069,7 @@ function uniqueByValueKey(value: CapabilityValue, uniqueBy: readonly string[]): 
     parts.push(`${fieldName}:${uniqueValueKey(item)}`);
   }
 
-  return `o:{${parts.join(",")}}`;
+  return Object.freeze(parts);
 }
 
 function isRecord(value: PlainJson | undefined): value is JsonRecord {

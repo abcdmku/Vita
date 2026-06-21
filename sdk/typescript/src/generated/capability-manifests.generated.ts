@@ -1,6 +1,88 @@
-// DO NOT EDIT — generated from schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
+
+export const ACCOUNTS_MANIFEST = Object.freeze({
+  capability: "accounts.config",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        accounts: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              enabled: Object.freeze({
+                required: true,
+                type: "boolean",
+              }),
+              groups: Object.freeze({
+                items: Object.freeze({
+                  format: "groupName",
+                  required: true,
+                  type: "string",
+                  notInEnum: Object.freeze([
+                    "admin",
+                    "root",
+                    "sudo",
+                    "wheel",
+                  ]),
+                }),
+                required: true,
+                type: "array",
+                dedupItems: true,
+              }),
+              name: Object.freeze({
+                format: "posixAccountName",
+                required: true,
+                type: "string",
+              }),
+              primaryGroup: Object.freeze({
+                format: "groupName",
+                required: true,
+                type: "string",
+                notInEnum: Object.freeze([
+                  "admin",
+                  "root",
+                  "sudo",
+                  "wheel",
+                ]),
+              }),
+              shell: Object.freeze({
+                required: true,
+                type: "string",
+                enum: Object.freeze([
+                  "/bin/bash",
+                  "/bin/sh",
+                  "/usr/bin/bash",
+                  "/usr/bin/zsh",
+                  "/usr/sbin/nologin",
+                  "/bin/false",
+                ]),
+              }),
+              uid: Object.freeze({
+                required: true,
+                type: "integer",
+                maximum: 60000,
+                minimum: 1000,
+              }),
+            }),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+          uniqueBy: Object.freeze([
+            "name",
+            "uid",
+          ]),
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
 
 export const CAPSULE_MANIFEST = Object.freeze({
   capability: "capsule.registry",
@@ -243,6 +325,7 @@ export const UPDATE_MANIFEST = Object.freeze({
 }) satisfies CapabilityManifest;
 
 export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
+  "accounts.config": ACCOUNTS_MANIFEST,
   "capsule.registry": CAPSULE_MANIFEST,
   "hostname.set": HOSTNAME_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,

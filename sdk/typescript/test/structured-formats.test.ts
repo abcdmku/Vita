@@ -24,6 +24,7 @@ const CORPUS_PATH = resolve(
 );
 const STRUCTURED_FORMATS = Object.freeze([
   "posixUsername",
+  "posixAccountName",
   "groupName",
   "systemdUnitName",
   "absolutePath",
@@ -37,6 +38,7 @@ const STRUCTURED_FORMATS = Object.freeze([
 type StructuredStringFieldFormat = Extract<
   StringFieldFormat,
   | "posixUsername"
+  | "posixAccountName"
   | "groupName"
   | "systemdUnitName"
   | "absolutePath"
@@ -165,7 +167,10 @@ test("structured formats compose with maxLength and noInlineSecrets", () => {
     crossFieldRules: Object.freeze([]),
   } satisfies CapabilityManifest);
 
-  assert.deepEqual(rejectedPaths(validatePOSIXNoInlineSecrets({ value: "x-----begin" })), ["value"]);
+  assert.deepEqual(
+    rejectedPaths(validatePOSIXNoInlineSecrets({ value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })),
+    ["value"],
+  );
 
   const validateCapsuleMaterial = compileCapabilityValidator({
     capability: "test.no-inline-capsule-material",
@@ -264,6 +269,7 @@ function readStructuredFormatCorpus(): StructuredFormatCorpus {
     bundleRefString: readRequiredVectorArray(corpus, "bundleRefString"),
     bundleVersionString: readRequiredVectorArray(corpus, "bundleVersionString"),
     groupName: readRequiredVectorArray(corpus, "groupName"),
+    posixAccountName: readRequiredVectorArray(corpus, "posixAccountName"),
     posixUsername: readRequiredVectorArray(corpus, "posixUsername"),
     sriIntegrity: readRequiredVectorArray(corpus, "sriIntegrity"),
     systemdUnitName: readRequiredVectorArray(corpus, "systemdUnitName"),

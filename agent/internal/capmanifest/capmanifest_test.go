@@ -281,7 +281,7 @@ func TestValidateTimesyncCorpus(t *testing.T) {
 	}
 }
 
-func TestValidateIntegerUsesJSFloat64JSONSemantics(t *testing.T) {
+func TestValidateIntegerRequiresRawIntegerLiteral(t *testing.T) {
 	manifest := Manifest{
 		Capability: "demo.integer",
 		Version:    1,
@@ -296,8 +296,14 @@ func TestValidateIntegerUsesJSFloat64JSONSemantics(t *testing.T) {
 		CrossFieldRules: []CrossFieldRule{},
 	}
 
-	if err := Validate(manifest, []byte(`{"count":1e-1000}`)); err != nil {
-		t.Fatalf("Validate underflow returned error: %v", err)
+	if err := Validate(manifest, []byte(`{"count":0}`)); err != nil {
+		t.Fatalf("Validate integer literal returned error: %v", err)
+	}
+	if err := Validate(manifest, []byte(`{"count":0.0}`)); err == nil {
+		t.Fatal("Validate decimal integer returned nil error, want rejection")
+	}
+	if err := Validate(manifest, []byte(`{"count":0e0}`)); err == nil {
+		t.Fatal("Validate exponent integer returned nil error, want rejection")
 	}
 	if err := Validate(manifest, []byte(`{"count":1e400}`)); err == nil {
 		t.Fatal("Validate overflow returned nil error, want rejection")

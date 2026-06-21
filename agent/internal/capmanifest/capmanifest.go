@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -37,6 +36,7 @@ type FieldSchema struct {
 	MaxBytes                *int64
 	MinLength               *int64
 	Enum                    []string
+	NotInEnum               []string
 	Lowercase               bool
 	NoControlChars          bool
 	NoInlineCapsuleMaterial bool
@@ -52,6 +52,7 @@ type FieldSchema struct {
 	MinItems                *int64
 	MaxItems                *int64
 	UniqueItems             bool
+	DedupItems              bool
 	UniqueBy                []string
 	Fields                  map[string]FieldSchema
 	CrossFieldRules         []CrossFieldRule
@@ -84,6 +85,7 @@ type compiledField struct {
 	maxBytes                *int64
 	minLength               *int64
 	enumValues              map[string]struct{}
+	notInEnumValues         map[string]struct{}
 	lowercase               bool
 	noControlChars          bool
 	noInlineCapsuleMaterial bool
@@ -97,6 +99,7 @@ type compiledField struct {
 	minItems                *int64
 	maxItems                *int64
 	uniqueItems             bool
+	dedupItems              bool
 	uniqueBy                []string
 	fields                  map[string]compiledField
 	fieldNames              []string
@@ -122,6 +125,7 @@ var (
 		"maxBytes":                {},
 		"maxLength":               {},
 		"minLength":               {},
+		"notInEnum":               {},
 		"forbiddenSchemePrefix":   {},
 		"noInlineCapsuleMaterial": {},
 		"noControlChars":          {},
@@ -144,6 +148,7 @@ var (
 	}
 	arraySchemaFields = map[string]struct{}{
 		"items":       {},
+		"dedupItems":  {},
 		"maxItems":    {},
 		"minItems":    {},
 		"required":    {},
@@ -383,6 +388,10 @@ func parseStringFieldSchema(object jsonObject, required bool, path string) (Fiel
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	notInEnumValues, err := optionalStringEnum(object, "notInEnum", joinPath(path, "notInEnum"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 	lowercase, err := optionalBool(object, "lowercase", joinPath(path, "lowercase"))
 	if err != nil {
 		return FieldSchema{}, err
@@ -423,6 +432,7 @@ func parseStringFieldSchema(object jsonObject, required bool, path string) (Fiel
 		MaxBytes:                maxBytes,
 		MinLength:               minLength,
 		Enum:                    enumValues,
+		NotInEnum:               notInEnumValues,
 		Lowercase:               lowercase,
 		NoControlChars:          noControlChars,
 		NoInlineCapsuleMaterial: noInlineCapsuleMaterial,
@@ -499,6 +509,10 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	dedupItems, err := optionalBool(object, "dedupItems", joinPath(path, "dedupItems"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 	uniqueBy, err := optionalUniqueBy(object, "uniqueBy", joinPath(path, "uniqueBy"))
 	if err != nil {
 		return FieldSchema{}, err
@@ -514,6 +528,7 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 		MinItems:    minItems,
 		MaxItems:    maxItems,
 		UniqueItems: uniqueItems,
+		DedupItems:  dedupItems,
 		UniqueBy:    uniqueBy,
 	}, nil
 }
@@ -684,7 +699,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -704,6 +719,10 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 	if err != nil {
 		return compiledField{}, err
 	}
+	notInEnumValues, err := compileStringEnum(field.NotInEnum, joinPath(path, "notInEnum"))
+	if err != nil {
+		return compiledField{}, err
+	}
 	minLength := cloneInt64Pointer(field.MinLength)
 	if field.NonEmpty && (minLength == nil || *minLength < 1) {
 		minLength = newInt64Pointer(1)
@@ -716,6 +735,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 		maxBytes:                cloneInt64Pointer(field.MaxBytes),
 		minLength:               minLength,
 		enumValues:              enumValues,
+		notInEnumValues:         notInEnumValues,
 		lowercase:               field.Lowercase,
 		noControlChars:          field.NoControlChars,
 		noInlineCapsuleMaterial: field.NoInlineCapsuleMaterial,
@@ -727,7 +747,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -749,7 +769,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -760,7 +780,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -796,12 +816,13 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 		minItems:    cloneInt64Pointer(field.MinItems),
 		maxItems:    cloneInt64Pointer(field.MaxItems),
 		uniqueItems: field.UniqueItems,
+		dedupItems:  field.DedupItems,
 		uniqueBy:    cloneStrings(field.UniqueBy),
 	}, nil
 }
 
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -914,6 +935,11 @@ func validateStringField(value jsonValue, field compiledField, path string) (cap
 			return nil, pathError(path, "string is not in the allowed enum")
 		}
 	}
+	if field.notInEnumValues != nil {
+		if _, blocked := field.notInEnumValues[normalized]; blocked {
+			return nil, pathError(path, "string is in the blocked enum")
+		}
+	}
 	return normalized, nil
 }
 
@@ -922,17 +948,17 @@ func validateIntegerField(value jsonValue, field compiledField, path string) (ca
 	if !ok {
 		return nil, pathError(path, "expected safe integer")
 	}
-	parsed, err := parseJSONFloat64(number)
-	if err != nil || !isSafeInteger(parsed) {
+	parsed, err := parseJSONSafeInteger(number)
+	if err != nil {
 		return nil, pathError(path, "expected safe integer")
 	}
-	if field.minimum != nil && parsed < float64(*field.minimum) {
+	if field.minimum != nil && parsed < *field.minimum {
 		return nil, pathError(path, "integer is below minimum")
 	}
-	if field.maximum != nil && parsed > float64(*field.maximum) {
+	if field.maximum != nil && parsed > *field.maximum {
 		return nil, pathError(path, "integer is above maximum")
 	}
-	return parsed, nil
+	return float64(parsed), nil
 }
 
 func validateBooleanField(value jsonValue, path string) (capabilityValue, error) {
@@ -960,6 +986,7 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 
 	output := make(capabilityArray, 0, len(array))
 	seenItems := map[string]int{}
+	seenDedupItems := map[string]int{}
 	seenUniqueBy := map[string]int{}
 	for index, item := range array {
 		itemPath := joinPath(path, strconv.Itoa(index))
@@ -974,15 +1001,24 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 			}
 			seenItems[key] = index
 		}
+		if field.dedupItems {
+			key := uniqueValueKey(normalized)
+			if _, ok := seenDedupItems[key]; ok {
+				continue
+			}
+			seenDedupItems[key] = index
+		}
 		if len(field.uniqueBy) > 0 {
-			key, err := uniqueByValueKey(normalized, field.uniqueBy, itemPath)
+			keys, err := uniqueByValueKeys(normalized, field.uniqueBy, itemPath)
 			if err != nil {
 				return nil, err
 			}
-			if previous, ok := seenUniqueBy[key]; ok {
-				return nil, pathError(itemPath, fmt.Sprintf("duplicate array item key also appears at %s", joinPath(path, strconv.Itoa(previous))))
+			for _, key := range keys {
+				if previous, ok := seenUniqueBy[key]; ok {
+					return nil, pathError(itemPath, fmt.Sprintf("duplicate array item key also appears at %s", joinPath(path, strconv.Itoa(previous))))
+				}
+				seenUniqueBy[key] = index
 			}
-			seenUniqueBy[key] = index
 		}
 		output = append(output, normalized)
 	}
@@ -1284,11 +1320,11 @@ func readSafeInteger(value jsonValue, path string, minimum int64, maximum int64)
 	if !ok {
 		return 0, pathError(path, "expected safe integer within bounds")
 	}
-	parsed, err := parseJSONFloat64(number)
-	if err != nil || !isSafeInteger(parsed) || parsed < float64(minimum) || parsed > float64(maximum) {
+	parsed, err := parseJSONSafeInteger(number)
+	if err != nil || parsed < minimum || parsed > maximum {
 		return 0, pathError(path, "expected safe integer within bounds")
 	}
-	return int64(parsed), nil
+	return parsed, nil
 }
 
 func optionalStringEnum(object jsonObject, key string, path string) ([]string, error) {
@@ -1391,24 +1427,38 @@ func compileStringEnum(values []string, path string) (map[string]struct{}, error
 	return seen, nil
 }
 
-func parseJSONFloat64(number json.Number) (float64, error) {
-	value, err := strconv.ParseFloat(number.String(), 64)
-	if err == nil {
-		return value, nil
+func parseJSONSafeInteger(number json.Number) (int64, error) {
+	raw := number.String()
+	if !isJSONIntegerLiteral(raw) {
+		return 0, fmt.Errorf("not an integer literal")
 	}
-
-	var numberError *strconv.NumError
-	if errors.As(err, &numberError) && numberError.Err == strconv.ErrRange {
-		return value, nil
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
 	}
-	return 0, err
+	if parsed < -maxSafeInteger || parsed > maxSafeInteger {
+		return 0, fmt.Errorf("integer outside safe range")
+	}
+	return parsed, nil
 }
 
-func isSafeInteger(value float64) bool {
-	return !math.IsNaN(value) &&
-		!math.IsInf(value, 0) &&
-		math.Trunc(value) == value &&
-		math.Abs(value) <= maxSafeInteger
+func isJSONIntegerLiteral(value string) bool {
+	if value == "" {
+		return false
+	}
+	start := 0
+	if value[0] == '-' {
+		start = 1
+	}
+	if start >= len(value) {
+		return false
+	}
+	for index := start; index < len(value); index++ {
+		if !isASCIIDigit(value[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeStringFormat(value string, format string, rawToken ...string) (string, bool) {
@@ -1433,7 +1483,7 @@ func normalizeStringFormat(value string, format string, rawToken ...string) (str
 			return strings.ToLower(value), true
 		}
 		return "", false
-	case "posixUsername", "groupName":
+	case "posixUsername", "posixAccountName", "groupName":
 		if isPOSIXName(value) {
 			return value, true
 		}
@@ -1497,6 +1547,7 @@ func isKnownStringFormat(format string) bool {
 		format == "ipLiteral" ||
 		format == "hostnameOrIp" ||
 		format == "posixUsername" ||
+		format == "posixAccountName" ||
 		format == "groupName" ||
 		format == "systemdUnitName" ||
 		format == "absolutePath" ||
@@ -1689,7 +1740,33 @@ func isPOSIXName(value string) bool {
 			return false
 		}
 	}
-	return true
+	return !containsInlineKeyMaterial(value)
+}
+
+func containsInlineKeyMaterial(value string) bool {
+	lower := asciiLowercase(value)
+	return containsDataURLPattern(lower) ||
+		containsPEMBlockPattern(lower) ||
+		containsLongBase64Run(value)
+}
+
+func containsDataURLPattern(value string) bool {
+	for start := strings.Index(value, "data:"); start != -1; start = nextStringIndex(value, "data:", start+1) {
+		if start == 0 || !isASCIIRegexWord(value[start-1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPEMBlockPattern(value string) bool {
+	for start := strings.Index(value, "-----begin"); start != -1; start = nextStringIndex(value, "-----begin", start+1) {
+		afterIndex := start + len("-----begin")
+		if afterIndex >= len(value) || !isASCIIRegexWord(value[afterIndex]) {
+			return true
+		}
+	}
+	return false
 }
 
 const maxSystemdUnitNameLength = 256
@@ -2239,21 +2316,21 @@ func uniqueValueKey(value capabilityValue) string {
 	}
 }
 
-func uniqueByValueKey(value capabilityValue, uniqueBy []string, path string) (string, error) {
+func uniqueByValueKeys(value capabilityValue, uniqueBy []string, path string) ([]string, error) {
 	object, ok := value.(capabilityObject)
 	if !ok {
-		return "", pathError(path, "uniqueBy requires object array items with all key fields present")
+		return nil, pathError(path, "uniqueBy requires object array items with all key fields present")
 	}
 
 	parts := make([]string, 0, len(uniqueBy))
 	for _, fieldName := range uniqueBy {
 		item, ok := object[fieldName]
 		if !ok {
-			return "", pathError(path, "uniqueBy requires object array items with all key fields present")
+			return nil, pathError(path, "uniqueBy requires object array items with all key fields present")
 		}
 		parts = append(parts, fieldName+":"+uniqueValueKey(item))
 	}
-	return "o:{" + strings.Join(parts, ",") + "}", nil
+	return parts, nil
 }
 
 func isASCIIAlphaNumeric(char byte) bool {

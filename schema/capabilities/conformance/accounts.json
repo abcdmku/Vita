@@ -1,0 +1,726 @@
+[
+  {
+    "name": "empty accounts accepts",
+    "request": {
+      "desired": {
+        "accounts": []
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "single enabled account accepts",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["users", "video"],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "disabled nologin account accepts",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "_service",
+            "uid": 1001,
+            "primaryGroup": "service-users",
+            "groups": [],
+            "shell": "/usr/sbin/nologin",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "max uid and false shell accepts",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "maxuser",
+            "uid": 60000,
+            "primaryGroup": "users",
+            "groups": ["users"],
+            "shell": "/bin/false",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "multiple accounts accepts",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["users"],
+            "shell": "/bin/sh",
+            "enabled": true
+          },
+          {
+            "name": "bob_2",
+            "uid": 1002,
+            "primaryGroup": "staff-users",
+            "groups": ["staff-users", "audio"],
+            "shell": "/usr/bin/zsh",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "duplicate groups dedupe keep first accepts",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["users", "video", "users", "video", "audio"],
+            "shell": "/usr/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept",
+    "normalized": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["users", "video", "audio"],
+            "shell": "/usr/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "desired must be object rejects",
+    "request": {
+      "desired": []
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent accounts rejects",
+    "request": {
+      "desired": {}
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts"
+  },
+  {
+    "name": "null accounts rejects",
+    "request": {
+      "desired": {
+        "accounts": null
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts"
+  },
+  {
+    "name": "accounts must be array rejects",
+    "request": {
+      "desired": {
+        "accounts": "alice"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts"
+  },
+  {
+    "name": "null account entry rejects",
+    "request": {
+      "desired": {
+        "accounts": [null]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0"
+  },
+  {
+    "name": "absent account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "account name must be string rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": 42,
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "uppercase account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "Alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "too long account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "leading digit account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "1alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "inline pem account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "x-----begin",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/name"
+  },
+  {
+    "name": "absent uid rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid string rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": "1000",
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid below minimum rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 999,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid above maximum rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 60001,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid decimal minimum rejects",
+    "request": "{\"desired\":{\"accounts\":[{\"name\":\"alice\",\"uid\":1000.0,\"primaryGroup\":\"users\",\"groups\":[],\"shell\":\"/bin/bash\",\"enabled\":true}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid exponent minimum rejects",
+    "request": "{\"desired\":{\"accounts\":[{\"name\":\"alice\",\"uid\":1e3,\"primaryGroup\":\"users\",\"groups\":[],\"shell\":\"/bin/bash\",\"enabled\":true}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid decimal exponent rejects",
+    "request": "{\"desired\":{\"accounts\":[{\"name\":\"alice\",\"uid\":1.0e3,\"primaryGroup\":\"users\",\"groups\":[],\"shell\":\"/bin/bash\",\"enabled\":true}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "uid decimal maximum rejects",
+    "request": "{\"desired\":{\"accounts\":[{\"name\":\"alice\",\"uid\":60000.0,\"primaryGroup\":\"users\",\"groups\":[],\"shell\":\"/bin/bash\",\"enabled\":true}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/uid"
+  },
+  {
+    "name": "absent primary group rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/primaryGroup"
+  },
+  {
+    "name": "privileged primary group rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "wheel",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/primaryGroup"
+  },
+  {
+    "name": "bad primary group rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "Users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/primaryGroup"
+  },
+  {
+    "name": "absent groups rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/groups"
+  },
+  {
+    "name": "null groups rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": null,
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/groups"
+  },
+  {
+    "name": "groups must be array rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": "users",
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/groups"
+  },
+  {
+    "name": "privileged group member rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["sudo"],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/groups/0"
+  },
+  {
+    "name": "bad group member rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": ["Users"],
+            "shell": "/bin/bash",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/groups/0"
+  },
+  {
+    "name": "unlisted shell rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/zsh",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/shell"
+  },
+  {
+    "name": "absent enabled rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/enabled"
+  },
+  {
+    "name": "null enabled rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": null
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/enabled"
+  },
+  {
+    "name": "enabled must be boolean rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": "true"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/enabled"
+  },
+  {
+    "name": "duplicate account name rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          },
+          {
+            "name": "alice",
+            "uid": 1001,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/sh",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/1"
+  },
+  {
+    "name": "duplicate uid rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true
+          },
+          {
+            "name": "bob",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/sh",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/1"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "accounts": []
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "accounts": [],
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown account key rejects",
+    "request": {
+      "desired": {
+        "accounts": [
+          {
+            "name": "alice",
+            "uid": 1000,
+            "primaryGroup": "users",
+            "groups": [],
+            "shell": "/bin/bash",
+            "enabled": true,
+            "home": "/home/alice"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/accounts/0/home"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"accounts\":[]},\"desired\":{\"accounts\":[]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate account JSON key rejects",
+    "request": "{\"desired\":{\"accounts\":[{\"name\":\"alice\",\"name\":\"bob\",\"uid\":1000,\"primaryGroup\":\"users\",\"groups\":[],\"shell\":\"/bin/bash\",\"enabled\":true}]}}",
+    "expect": "reject"
+  }
+]

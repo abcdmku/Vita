@@ -1,0 +1,68 @@
+{
+  "capability": "accounts.config",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "accounts": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "enabled": {
+                "required": true,
+                "type": "boolean"
+              },
+              "groups": {
+                "items": {
+                  "format": "groupName",
+                  "notInEnum": ["admin", "root", "sudo", "wheel"],
+                  "required": true,
+                  "type": "string"
+                },
+                "required": true,
+                "type": "array",
+                "dedupItems": true
+              },
+              "name": {
+                "format": "posixAccountName",
+                "required": true,
+                "type": "string"
+              },
+              "primaryGroup": {
+                "format": "groupName",
+                "notInEnum": ["admin", "root", "sudo", "wheel"],
+                "required": true,
+                "type": "string"
+              },
+              "shell": {
+                "enum": [
+                  "/bin/bash",
+                  "/bin/sh",
+                  "/usr/bin/bash",
+                  "/usr/bin/zsh",
+                  "/usr/sbin/nologin",
+                  "/bin/false"
+                ],
+                "required": true,
+                "type": "string"
+              },
+              "uid": {
+                "maximum": 60000,
+                "minimum": 1000,
+                "required": true,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true,
+          "type": "array",
+          "uniqueBy": ["name", "uid"]
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

@@ -13,6 +13,25 @@
     { "name": "hyphen first rejects", "value": "-alice", "expect": "reject" },
     { "name": "dot rejects", "value": "bad.name", "expect": "reject" },
     { "name": "space rejects", "value": "bad name", "expect": "reject" },
+    { "name": "inline pem marker rejects", "value": "x-----begin", "expect": "reject" },
+    { "name": "non ascii rejects", "value": "\u00e9clair", "expect": "reject" },
+    { "name": "too long rejects", "value": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "expect": "reject" }
+  ],
+  "posixAccountName": [
+    { "name": "single letter accepts", "value": "a", "expect": "accept" },
+    { "name": "underscore first accepts", "value": "_", "expect": "accept" },
+    { "name": "lowercase name accepts", "value": "alice", "expect": "accept" },
+    { "name": "digits after first accept", "value": "user1", "expect": "accept" },
+    { "name": "underscore and hyphen accept", "value": "user_1-name", "expect": "accept" },
+    { "name": "special object key accepts", "value": "__proto__", "expect": "accept" },
+    { "name": "max length accepts", "value": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "expect": "accept" },
+    { "name": "empty rejects", "value": "", "expect": "reject" },
+    { "name": "uppercase first rejects", "value": "Alice", "expect": "reject" },
+    { "name": "digit first rejects", "value": "1alice", "expect": "reject" },
+    { "name": "hyphen first rejects", "value": "-alice", "expect": "reject" },
+    { "name": "dot rejects", "value": "bad.name", "expect": "reject" },
+    { "name": "space rejects", "value": "bad name", "expect": "reject" },
+    { "name": "inline pem marker rejects", "value": "x-----begin", "expect": "reject" },
     { "name": "non ascii rejects", "value": "\u00e9clair", "expect": "reject" },
     { "name": "too long rejects", "value": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "expect": "reject" }
   ],
@@ -29,6 +48,7 @@
     { "name": "dot rejects", "value": "bad.group", "expect": "reject" },
     { "name": "space rejects", "value": "bad group", "expect": "reject" },
     { "name": "slash rejects", "value": "bad/group", "expect": "reject" },
+    { "name": "inline pem marker rejects", "value": "x-----begin", "expect": "reject" },
     { "name": "non ascii rejects", "value": "gr\u00fcppe", "expect": "reject" },
     { "name": "too long rejects", "value": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "expect": "reject" }
   ],

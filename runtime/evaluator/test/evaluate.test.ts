@@ -215,6 +215,54 @@ test("valid update.plan request evaluates to one operation", () => {
   });
 });
 
+test("valid accounts.config request evaluates to one normalized operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "accounts.config": {
+        desired: {
+          accounts: [
+            {
+              name: "alice",
+              uid: 1000,
+              primaryGroup: "users",
+              groups: ["users", "video", "users"],
+              shell: "/bin/bash",
+              enabled: true,
+            },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "accounts.config",
+        request: {
+          desired: {
+            accounts: [
+              {
+                name: "alice",
+                uid: 1000,
+                primaryGroup: "users",
+                groups: ["users", "video"],
+                shell: "/bin/bash",
+                enabled: true,
+              },
+            ],
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {
