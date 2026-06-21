@@ -1,0 +1,438 @@
+[
+  {
+    "name": "valid plc repo and base32 CID accepts",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid did web repo and base58 CID accepts",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 43,
+        "repoHead": "zb2rhWiDP1AniBy1G9qyG6vkxz6obAgCuB5o4RTyRfW8efaxf"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "uppercase base32 CID accepts",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 44,
+        "repoHead": "BAFKREIABAIBQIBIGA4EASCQLBQGQ4DYQCEJBGFAVCYLRQGI2DMOB2HQ7EA"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "cursor zero accepts",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 0,
+        "repoHead": "bafkreigh2akiscaildcvwcuzjdfu7kdc32gndn2r2hkoqefj7yppz364gu"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "cursor max safe integer accepts",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 9007199254740991,
+        "repoHead": "bafkreigh2akiscaildcvwcuzjdfu7kdc32gndn2r2hkoqefj7yppz364gu"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "cursor decimal integer token accepts",
+    "request": "{\"desired\":{\"repo\":\"did:plc:ewvi7nxzyoun6zhxrhs64oiz\",\"cursor\":1000.0,\"repoHead\":\"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy\"}}",
+    "expect": "accept",
+    "normalized": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 1000,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    }
+  },
+  {
+    "name": "cursor exponent integer token accepts",
+    "request": "{\"desired\":{\"repo\":\"did:web:alice.example.com\",\"cursor\":1e3,\"repoHead\":\"zb2rhWiDP1AniBy1G9qyG6vkxz6obAgCuB5o4RTyRfW8efaxf\"}}",
+    "expect": "accept",
+    "normalized": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 1000,
+        "repoHead": "zb2rhWiDP1AniBy1G9qyG6vkxz6obAgCuB5o4RTyRfW8efaxf"
+      }
+    }
+  },
+  {
+    "name": "digest length one CID accepts",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 45,
+        "repoHead": "bafkreanl"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "digest length 128 CID accepts",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 46,
+        "repoHead": "bafkrfaabaaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypsaijcemsckjrhfausukzmfuxc6mbrgiztinjwg44dsor3hq6t4p2aifbegrcfizduqskkjnge2tspkbiveu2ukvlfowczljnvyxk6l5qgcytdmrswmz3infvgw3dnnzxxa4lson2hk5txpb4xu634pv7h6"
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "bad repo kind rejects",
+    "request": {
+      "desired": {
+        "repo": "did:key:z6mnot-supported",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repo"
+  },
+  {
+    "name": "bad did plc character rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:abcdefghijklmnopqrstuvw0",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repo"
+  },
+  {
+    "name": "bad multibase prefix rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "cafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "base32 bad alphabet character rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafkrei0baibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7ea"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "base58 bad alphabet character rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "zb2rhWiDP1AniBy1G9qyG6vkxz6obAgCuB5o4RTyRfW8efax0"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "wrong CID version rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "babkreiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7ea"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "zero codec rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "baeabeiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7ea"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "zero hash code rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafkqaiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7ea"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "digest length zero rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "bafkreaa"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "digest length 129 rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafkrfaibaaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypsaijcemsckjrhfausukzmfuxc6mbrgiztinjwg44dsor3hq6t4p2aifbegrcfizduqskkjnge2tspkbiveu2ukvlfowczljnvyxk6l5qgcytdmrswmz3infvgw3dnnzxxa4lson2hk5txpb4xu634pv7h6aa"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "total length short rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "bafkreiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "total length extra rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafkreiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7eaaa"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "non canonical base32 trailing bits reject",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "bafkreiabaibqibiga4eascqlbqgq4dyqcejbgfavcylrqgi2dmob2hq7eb"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "CID over max length rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "CID with control character rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy\u0001"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "CID with surrounding whitespace rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": " bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "cursor negative rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": -1,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/cursor"
+  },
+  {
+    "name": "cursor above max rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 9007199254740992,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/cursor"
+  },
+  {
+    "name": "cursor fractional token rejects",
+    "request": "{\"desired\":{\"repo\":\"did:plc:ewvi7nxzyoun6zhxrhs64oiz\",\"cursor\":1000.5,\"repoHead\":\"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy\"}}",
+    "expect": "reject",
+    "rejectCode": "desired/cursor"
+  },
+  {
+    "name": "cursor infinity string rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": "Infinity",
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/cursor"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent repo rejects",
+    "request": {
+      "desired": {
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repo"
+  },
+  {
+    "name": "absent cursor rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/cursor"
+  },
+  {
+    "name": "absent repoHead rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/repoHead"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "secret top level key rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"
+      },
+      "signing-key": "inline"
+    },
+    "expect": "reject",
+    "rejectCode": "signing-key"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "repo": "did:web:alice.example.com",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy",
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "secret desired key rejects",
+    "request": {
+      "desired": {
+        "repo": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "cursor": 42,
+        "repoHead": "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy",
+        "private_key": "inline"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/private_key"
+  },
+  {
+    "name": "duplicate top level key rejects",
+    "request": "{\"desired\":{\"repo\":\"did:plc:ewvi7nxzyoun6zhxrhs64oiz\",\"cursor\":42,\"repoHead\":\"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy\"},\"desired\":{\"repo\":\"did:web:alice.example.com\",\"cursor\":43,\"repoHead\":\"bafkreigh2akiscaildcvwcuzjdfu7kdc32gndn2r2hkoqefj7yppz364gu\"}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate desired key rejects",
+    "request": "{\"desired\":{\"repo\":\"did:plc:ewvi7nxzyoun6zhxrhs64oiz\",\"cursor\":1,\"cursor\":42,\"repoHead\":\"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy\"}}",
+    "expect": "reject"
+  }
+]

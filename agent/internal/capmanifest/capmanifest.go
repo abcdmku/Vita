@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -22,11 +24,12 @@ const (
 )
 
 type Manifest struct {
-	Capability      string
-	Version         int
-	DefaultRegistry *bool
-	Fields          map[string]FieldSchema
-	CrossFieldRules []CrossFieldRule
+	Capability            string
+	Version               int
+	DefaultRegistry       *bool
+	SecretKeyNameDenylist bool
+	Fields                map[string]FieldSchema
+	CrossFieldRules       []CrossFieldRule
 }
 
 type FieldSchema struct {
@@ -50,6 +53,7 @@ type FieldSchema struct {
 	Minimum                  *int64
 	Maximum                  *int64
 	SentinelValues           []int64
+	AcceptIntegerValuedFloat bool
 	Items                    *FieldSchema
 	MinItems                 *int64
 	MaxItems                 *int64
@@ -61,6 +65,7 @@ type FieldSchema struct {
 	UniqueByWhenEnum         *UniqueByWhenEnumRule
 	Fields                   map[string]FieldSchema
 	CrossFieldRules          []CrossFieldRule
+	SecretKeyNameDenylist    bool
 	// NullAsAbsent: on an OPTIONAL string/integer field, an explicit JSON null is treated as ABSENT
 	// (skipped, not type-checked, not counted by exactlyOneOf). Mirrors the agent's omitempty pointer
 	// fields (e.g. backup Schedule.Cron *string), where encoding/json decodes null→nil→absent. Opt-in.
@@ -106,9 +111,10 @@ type jsonString struct {
 }
 
 type compiledManifest struct {
-	fieldNames      []string
-	fields          map[string]compiledField
-	crossFieldRules []CrossFieldRule
+	fieldNames            []string
+	fields                map[string]compiledField
+	crossFieldRules       []CrossFieldRule
+	secretKeyNameDenylist bool
 }
 
 type compiledField struct {
@@ -130,6 +136,7 @@ type compiledField struct {
 	minimum                  *int64
 	maximum                  *int64
 	sentinelValues           map[int64]struct{}
+	acceptIntegerValuedFloat bool
 	items                    *compiledField
 	minItems                 *int64
 	maxItems                 *int64
@@ -142,6 +149,7 @@ type compiledField struct {
 	fields                   map[string]compiledField
 	fieldNames               []string
 	crossFieldRules          []CrossFieldRule
+	secretKeyNameDenylist    bool
 	nullAsAbsent             bool
 }
 
@@ -163,11 +171,12 @@ type capabilityObject map[string]capabilityValue
 
 var (
 	manifestFields = map[string]struct{}{
-		"capability":      {},
-		"crossFieldRules": {},
-		"defaultRegistry": {},
-		"fields":          {},
-		"version":         {},
+		"capability":            {},
+		"crossFieldRules":       {},
+		"defaultRegistry":       {},
+		"fields":                {},
+		"secretKeyNameDenylist": {},
+		"version":               {},
 	}
 	stringSchemaFields = map[string]struct{}{
 		"enum":                     {},
@@ -190,12 +199,13 @@ var (
 		"type":                     {},
 	}
 	integerSchemaFields = map[string]struct{}{
-		"maximum":        {},
-		"minimum":        {},
-		"nullAsAbsent":   {},
-		"required":       {},
-		"sentinelValues": {},
-		"type":           {},
+		"acceptIntegerValuedFloat": {},
+		"maximum":                  {},
+		"minimum":                  {},
+		"nullAsAbsent":             {},
+		"required":                 {},
+		"sentinelValues":           {},
+		"type":                     {},
 	}
 	booleanSchemaFields = map[string]struct{}{
 		"required": {},
@@ -215,10 +225,11 @@ var (
 		"uniqueItems":         {},
 	}
 	objectSchemaFields = map[string]struct{}{
-		"crossFieldRules": {},
-		"fields":          {},
-		"required":        {},
-		"type":            {},
+		"crossFieldRules":       {},
+		"fields":                {},
+		"required":              {},
+		"secretKeyNameDenylist": {},
+		"type":                  {},
 	}
 	crossFieldRuleFields = map[string]struct{}{
 		"control":   {},
@@ -286,6 +297,11 @@ func Validate(manifest Manifest, requestJSON []byte) (err error) {
 	for _, name := range compiled.fieldNames {
 		allowed[name] = struct{}{}
 	}
+	if compiled.secretKeyNameDenylist {
+		if err := rejectSecretKeyNames(request, ""); err != nil {
+			return err
+		}
+	}
 	if err := rejectUnknownFields(request, allowed, ""); err != nil {
 		return err
 	}
@@ -350,6 +366,10 @@ func parseManifest(value jsonValue) (Manifest, error) {
 		}
 		defaultRegistry = boolPointer(false)
 	}
+	secretKeyNameDenylist, err := optionalBool(object, "secretKeyNameDenylist", "secretKeyNameDenylist")
+	if err != nil {
+		return Manifest{}, err
+	}
 
 	fieldsValue, ok := object["fields"]
 	if !ok {
@@ -378,11 +398,12 @@ func parseManifest(value jsonValue) (Manifest, error) {
 	}
 
 	return Manifest{
-		Capability:      capability,
-		Version:         supportedManifestVersion,
-		DefaultRegistry: defaultRegistry,
-		Fields:          fields,
-		CrossFieldRules: rules,
+		Capability:            capability,
+		Version:               supportedManifestVersion,
+		DefaultRegistry:       defaultRegistry,
+		SecretKeyNameDenylist: secretKeyNameDenylist,
+		Fields:                fields,
+		CrossFieldRules:       rules,
 	}, nil
 }
 
@@ -552,6 +573,10 @@ func parseIntegerFieldSchema(object jsonObject, required bool, path string) (Fie
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	acceptIntegerValuedFloat, err := optionalBool(object, "acceptIntegerValuedFloat", joinPath(path, "acceptIntegerValuedFloat"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 	nullAsAbsent, err := optionalBool(object, "nullAsAbsent", joinPath(path, "nullAsAbsent"))
 	if err != nil {
 		return FieldSchema{}, err
@@ -561,12 +586,13 @@ func parseIntegerFieldSchema(object jsonObject, required bool, path string) (Fie
 	}
 
 	return FieldSchema{
-		Type:           "integer",
-		Required:       required,
-		Minimum:        minimum,
-		Maximum:        maximum,
-		SentinelValues: sentinelValues,
-		NullAsAbsent:   nullAsAbsent,
+		Type:                     "integer",
+		Required:                 required,
+		Minimum:                  minimum,
+		Maximum:                  maximum,
+		SentinelValues:           sentinelValues,
+		AcceptIntegerValuedFloat: acceptIntegerValuedFloat,
+		NullAsAbsent:             nullAsAbsent,
 	}, nil
 }
 
@@ -809,12 +835,17 @@ func parseObjectFieldSchema(object jsonObject, required bool, path string) (Fiel
 			return FieldSchema{}, err
 		}
 	}
+	secretKeyNameDenylist, err := optionalBool(object, "secretKeyNameDenylist", joinPath(path, "secretKeyNameDenylist"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 
 	return FieldSchema{
-		Type:            "object",
-		Required:        required,
-		Fields:          fields,
-		CrossFieldRules: rules,
+		Type:                  "object",
+		Required:              required,
+		Fields:                fields,
+		CrossFieldRules:       rules,
+		SecretKeyNameDenylist: secretKeyNameDenylist,
 	}, nil
 }
 
@@ -1144,9 +1175,10 @@ func compileManifest(manifest Manifest) (compiledManifest, error) {
 	}
 
 	return compiledManifest{
-		fieldNames:      fieldNames,
-		fields:          fields,
-		crossFieldRules: append([]CrossFieldRule(nil), manifest.CrossFieldRules...),
+		fieldNames:            fieldNames,
+		fields:                fields,
+		crossFieldRules:       append([]CrossFieldRule(nil), manifest.CrossFieldRules...),
+		secretKeyNameDenylist: manifest.SecretKeyNameDenylist,
 	}, nil
 }
 
@@ -1286,7 +1318,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.AcceptIntegerValuedFloat || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil || field.SecretKeyNameDenylist {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -1336,7 +1368,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil || field.SecretKeyNameDenylist {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -1354,17 +1386,18 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 	}
 
 	return compiledField{
-		fieldType:      "integer",
-		required:       field.Required,
-		minimum:        cloneInt64Pointer(field.Minimum),
-		maximum:        cloneInt64Pointer(field.Maximum),
-		sentinelValues: sentinelValues,
-		nullAsAbsent:   field.NullAsAbsent,
+		fieldType:                "integer",
+		required:                 field.Required,
+		minimum:                  cloneInt64Pointer(field.Minimum),
+		maximum:                  cloneInt64Pointer(field.Maximum),
+		sentinelValues:           sentinelValues,
+		acceptIntegerValuedFloat: field.AcceptIntegerValuedFloat,
+		nullAsAbsent:             field.NullAsAbsent,
 	}, nil
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil || field.NullAsAbsent {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.AcceptIntegerValuedFloat || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil || field.SecretKeyNameDenylist || field.NullAsAbsent {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -1375,7 +1408,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Fields != nil || field.CrossFieldRules != nil || field.NullAsAbsent {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.AcceptIntegerValuedFloat || field.Fields != nil || field.CrossFieldRules != nil || field.SecretKeyNameDenylist || field.NullAsAbsent {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -1482,7 +1515,7 @@ func compileUniqueByWhenEnumRule(rule *UniqueByWhenEnumRule, items FieldSchema, 
 }
 
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.NullAsAbsent {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.AcceptIntegerValuedFloat || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.NullAsAbsent {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -1515,11 +1548,12 @@ func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen ma
 	}
 
 	return compiledField{
-		fieldType:       "object",
-		required:        field.Required,
-		fieldNames:      fieldNames,
-		fields:          fields,
-		crossFieldRules: append([]CrossFieldRule(nil), field.CrossFieldRules...),
+		fieldType:             "object",
+		required:              field.Required,
+		fieldNames:            fieldNames,
+		fields:                fields,
+		crossFieldRules:       append([]CrossFieldRule(nil), field.CrossFieldRules...),
+		secretKeyNameDenylist: field.SecretKeyNameDenylist,
 	}, nil
 }
 
@@ -1612,7 +1646,13 @@ func validateIntegerField(value jsonValue, field compiledField, path string) (ca
 	if !ok {
 		return nil, pathError(path, "expected safe integer")
 	}
-	parsed, err := parseJSONSafeInteger(number)
+	var parsed int64
+	var err error
+	if field.acceptIntegerValuedFloat {
+		parsed, err = parseJSONFloat64Integer(number)
+	} else {
+		parsed, err = parseJSONSafeInteger(number)
+	}
 	if err != nil {
 		return nil, pathError(path, "expected safe integer")
 	}
@@ -1775,6 +1815,11 @@ func validateObjectField(value jsonValue, field compiledField, path string) (cap
 	allowed := make(map[string]struct{}, len(field.fieldNames))
 	for _, name := range field.fieldNames {
 		allowed[name] = struct{}{}
+	}
+	if field.secretKeyNameDenylist {
+		if err := rejectSecretKeyNames(object, path); err != nil {
+			return nil, err
+		}
 	}
 	if err := rejectUnknownFields(object, allowed, path); err != nil {
 		return nil, err
@@ -2062,6 +2107,21 @@ func rejectUnknownFields(object jsonObject, allowed map[string]struct{}, path st
 	return nil
 }
 
+func rejectSecretKeyNames(object jsonObject, path string) error {
+	names := make([]string, 0, len(object))
+	for name := range object {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if isSecretFieldName(name) {
+			return pathError(joinPath(path, name), "inline key material is not allowed")
+		}
+	}
+	return nil
+}
+
 func requiredString(object jsonObject, key string, path string) (string, error) {
 	value, ok := object[key]
 	if !ok {
@@ -2304,6 +2364,19 @@ func parseJSONSafeInteger(number json.Number) (int64, error) {
 	return parsed, nil
 }
 
+func parseJSONFloat64Integer(number json.Number) (int64, error) {
+	value, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil ||
+		math.IsInf(value, 0) ||
+		math.IsNaN(value) ||
+		math.Trunc(value) != value ||
+		value < -maxSafeInteger ||
+		value > maxSafeInteger {
+		return 0, fmt.Errorf("not a float64 integer")
+	}
+	return int64(value), nil
+}
+
 func isJSONIntegerLiteral(value string) bool {
 	if value == "" {
 		return false
@@ -2341,6 +2414,11 @@ func normalizeStringFormat(value string, format string, rawToken ...string) (str
 		return canonicalizeCIDRLiteral(value)
 	case "networkInterfaceName":
 		if isNetworkInterfaceName(value) {
+			return value, true
+		}
+		return "", false
+	case "cidV1Multibase":
+		if isCIDV1Multibase(value) {
 			return value, true
 		}
 		return "", false
@@ -2457,7 +2535,8 @@ func isKnownStringFormat(format string) bool {
 		format == "backupRef" ||
 		format == "cron5OrMacro" ||
 		format == "cidrLiteral" ||
-		format == "networkInterfaceName"
+		format == "networkInterfaceName" ||
+		format == "cidV1Multibase"
 }
 
 func isCapsuleID(value string) bool {
@@ -2509,15 +2588,188 @@ func isBundleVersionString(value string) bool {
 const (
 	didPlcPrefix          = "did:plc:"
 	didWebPrefix          = "did:web:"
+	maxCIDLength          = 512
 	maxAtprotoHandleBytes = 253
 	maxDIDBytes           = 2048
 	maxKeyReferenceBytes  = 2048
+	cidVersion            = 1
+	maxDigestBytes        = 128
+	base32LowerAlphabet   = "abcdefghijklmnopqrstuvwxyz234567"
+	base58BTCAlphabet     = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 )
 
 var inlineReferenceSchemes = map[string]struct{}{
 	"data":    {},
 	"inline":  {},
 	"literal": {},
+}
+
+var secretFieldNameTokens = map[string]struct{}{
+	"apikey":      {},
+	"key":         {},
+	"keymaterial": {},
+	"mnemonic":    {},
+	"passphrase":  {},
+	"pem":         {},
+	"privatekey":  {},
+	"recoverykey": {},
+	"rotationkey": {},
+	"seed":        {},
+	"seedphrase":  {},
+	"secret":      {},
+	"signingkey":  {},
+}
+
+func isCIDV1Multibase(value string) bool {
+	if value == "" ||
+		len(value) > maxCIDLength ||
+		value != strings.TrimSpace(value) ||
+		containsControlCharacter(value) {
+		return false
+	}
+
+	bytes, ok := decodeMultibase(value)
+	if !ok {
+		return false
+	}
+	return isCIDV1Bytes(bytes)
+}
+
+func decodeMultibase(value string) ([]byte, bool) {
+	prefix := value[0]
+	encoded := value[1:]
+	if encoded == "" {
+		return nil, false
+	}
+
+	switch prefix {
+	case 'b':
+		if encoded != strings.ToLower(encoded) {
+			return nil, false
+		}
+		return decodeBase32(encoded)
+	case 'B':
+		if encoded != strings.ToUpper(encoded) {
+			return nil, false
+		}
+		return decodeBase32(strings.ToLower(encoded))
+	case 'z':
+		return decodeBase58BTC(encoded)
+	default:
+		return nil, false
+	}
+}
+
+func decodeBase32(value string) ([]byte, bool) {
+	buffer := uint32(0)
+	bits := 0
+	out := make([]byte, 0, len(value)*5/8)
+
+	for i := 0; i < len(value); i++ {
+		digit := strings.IndexByte(base32LowerAlphabet, value[i])
+		if digit < 0 {
+			return nil, false
+		}
+
+		buffer = (buffer << 5) | uint32(digit)
+		bits += 5
+
+		for bits >= 8 {
+			bits -= 8
+			out = append(out, byte((buffer>>bits)&0xff))
+			if bits == 0 {
+				buffer = 0
+			} else {
+				buffer &= (1 << bits) - 1
+			}
+		}
+	}
+
+	if bits > 0 && buffer != 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+func decodeBase58BTC(value string) ([]byte, bool) {
+	decoded := big.NewInt(0)
+	base := big.NewInt(58)
+	for i := 0; i < len(value); i++ {
+		digit := strings.IndexByte(base58BTCAlphabet, value[i])
+		if digit < 0 {
+			return nil, false
+		}
+		decoded.Mul(decoded, base)
+		decoded.Add(decoded, big.NewInt(int64(digit)))
+	}
+
+	out := decoded.Bytes()
+	leadingZeros := 0
+	for leadingZeros < len(value) && value[leadingZeros] == '1' {
+		leadingZeros++
+	}
+	if leadingZeros > 0 {
+		out = append(make([]byte, leadingZeros), out...)
+	}
+	return out, true
+}
+
+func isCIDV1Bytes(bytes []byte) bool {
+	version, next, ok := readVarint(bytes, 0)
+	if !ok || version != cidVersion {
+		return false
+	}
+
+	codec, next, ok := readVarint(bytes, next)
+	if !ok || codec == 0 {
+		return false
+	}
+
+	hashCode, next, ok := readVarint(bytes, next)
+	if !ok || hashCode == 0 {
+		return false
+	}
+
+	digestSize, next, ok := readVarint(bytes, next)
+	if !ok || digestSize == 0 || digestSize > maxDigestBytes {
+		return false
+	}
+	return next+int(digestSize) == len(bytes)
+}
+
+func readVarint(bytes []byte, offset int) (uint64, int, bool) {
+	if offset < 0 || offset >= len(bytes) {
+		return 0, 0, false
+	}
+
+	var value uint64
+	var shift uint
+	for i := offset; i < len(bytes); i++ {
+		current := bytes[i]
+		part := uint64(current & 0x7f)
+		if shift >= 64 || (part<<shift)>>shift != part {
+			return 0, 0, false
+		}
+		value |= part << shift
+
+		if current < 0x80 {
+			size := i - offset + 1
+			if size > 1 {
+				minShift := uint(7 * (size - 1))
+				if minShift >= 64 || value < (uint64(1)<<minShift) {
+					return 0, 0, false
+				}
+			}
+			return value, i + 1, true
+		}
+
+		shift += 7
+		if shift > 63 {
+			return 0, 0, false
+		}
+	}
+
+	return 0, 0, false
 }
 
 func isSupportedDID(value string) bool {
@@ -3015,6 +3267,12 @@ func isPOSIXName(value string) bool {
 		}
 	}
 	return !containsInlineKeyMaterial(value)
+}
+
+func isSecretFieldName(value string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(value))
+	_, ok := secretFieldNameTokens[normalized]
+	return ok
 }
 
 func containsInlineKeyMaterial(value string) bool {

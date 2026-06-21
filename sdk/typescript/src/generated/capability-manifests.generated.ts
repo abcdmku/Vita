@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/backup.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/storage.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/backup.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/pdssync.json, schema/capabilities/services.json, schema/capabilities/storage.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -395,6 +395,39 @@ export const NODE_CONFIG_MANIFEST = Object.freeze({
   crossFieldRules: Object.freeze([]),
 }) satisfies CapabilityManifest;
 
+export const PDSSYNC_MANIFEST = Object.freeze({
+  capability: "pds.sync-state",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        cursor: Object.freeze({
+          required: true,
+          type: "integer",
+          acceptIntegerValuedFloat: true,
+          maximum: 9007199254740991,
+          minimum: 0,
+        }),
+        repo: Object.freeze({
+          format: "didPlcOrWeb",
+          required: true,
+          type: "string",
+        }),
+        repoHead: Object.freeze({
+          format: "cidV1Multibase",
+          required: true,
+          type: "string",
+        }),
+      }),
+      required: true,
+      type: "object",
+      secretKeyNameDenylist: true,
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+  secretKeyNameDenylist: true,
+}) satisfies CapabilityManifest;
+
 export const SERVICES_MANIFEST = Object.freeze({
   capability: "services.config",
   version: 1,
@@ -624,6 +657,7 @@ export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "identity.attestation": IDENTITY_MANIFEST,
   "network.policy": NETWORK_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
+  "pds.sync-state": PDSSYNC_MANIFEST,
   "services.config": SERVICES_MANIFEST,
   "storage.layout": STORAGE_MANIFEST,
   "time.set": TIME_MANIFEST,

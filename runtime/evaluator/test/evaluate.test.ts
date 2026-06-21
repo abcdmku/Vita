@@ -303,6 +303,40 @@ test("valid identity.attestation request evaluates to one operation", () => {
   });
 });
 
+test("valid pds.sync-state request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "pds.sync-state": {
+        desired: {
+          repo: "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+          cursor: 42,
+          repoHead: "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy",
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "pds.sync-state",
+        request: {
+          desired: {
+            repo: "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+            cursor: 42,
+            repoHead: "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy",
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("valid network.policy request evaluates to one canonical operation", () => {
   const result = evaluateNodeConfig(
     {

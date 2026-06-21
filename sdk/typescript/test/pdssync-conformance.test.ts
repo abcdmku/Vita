@@ -1,0 +1,238 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  compileCapabilityValidator,
+  loadCapabilityManifest,
+} from "../src/capability-manifest.ts";
+import type {
+  CapabilityManifest,
+  CapabilityValidationResult,
+} from "../src/capability-manifest.ts";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const MANIFEST_PATH = resolve(REPO_ROOT, "schema", "capabilities", "pdssync.json");
+const CORPUS_PATH = resolve(
+  REPO_ROOT,
+  "schema",
+  "capabilities",
+  "conformance",
+  "pdssync.json",
+);
+const PDSSYNC_MANIFEST = readPDSSyncManifest();
+const validatePDSSync = compileCapabilityValidator(PDSSYNC_MANIFEST);
+
+type Expectation = "accept" | "reject";
+
+interface ConformanceVector {
+  readonly name: string;
+  readonly request: unknown;
+  readonly expect: Expectation;
+  readonly rejectCode?: string;
+  readonly normalized?: unknown;
+}
+
+test("pdssync conformance corpus matches the TS validator", () => {
+  const vectors = readConformanceCorpus();
+
+  assert.ok(vectors.length >= 26, "pdssync conformance corpus must have at least 26 vectors");
+
+  for (let index = 0; index < vectors.length; index += 1) {
+    const vector = vectors[index];
+
+    if (vector === undefined) {
+      assert.fail("expected conformance vector");
+    }
+
+    const result = validatePDSSync(vector.request);
+
+    if (vector.expect === "accept") {
+      if (!result.ok) {
+        assert.fail(`${vector.name}: expected accept, got ${formatRejections(result)}`);
+      }
+      if (vector.normalized !== undefined) {
+        assert.deepEqual(result.value, vector.normalized, vector.name);
+      }
+      continue;
+    }
+
+    if (result.ok) {
+      assert.fail(`${vector.name}: expected reject, got ${JSON.stringify(result.value)}`);
+    }
+
+    if (vector.rejectCode !== undefined) {
+      assert.equal(
+        result.rejections.some((rejection) => rejection.path === vector.rejectCode),
+        true,
+        `${vector.name}: expected rejection at ${vector.rejectCode}, got ${formatRejections(result)}`,
+      );
+    }
+  }
+});
+
+test("pdssync manifest loads cidV1Multibase and cursor float64-integer mode", () => {
+  assert.equal(PDSSYNC_MANIFEST.secretKeyNameDenylist, true);
+
+  const desired = PDSSYNC_MANIFEST.fields.desired;
+
+  if (desired === undefined || desired.type !== "object") {
+    assert.fail("pdssync desired field must be an object");
+  }
+
+  assert.equal(desired.secretKeyNameDenylist, true);
+
+  const cursor = desired.fields.cursor;
+  const repoHead = desired.fields.repoHead;
+
+  if (cursor === undefined || cursor.type !== "integer") {
+    assert.fail("pdssync cursor field must be an integer");
+  }
+  if (repoHead === undefined || repoHead.type !== "string") {
+    assert.fail("pdssync repoHead field must be a string");
+  }
+
+  assert.equal(cursor.acceptIntegerValuedFloat, true);
+  assert.equal(repoHead.format, "cidV1Multibase");
+});
+
+function readPDSSyncManifest(): CapabilityManifest {
+  const raw = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as unknown;
+  const loaded = loadCapabilityManifest(raw);
+
+  if (!loaded.ok) {
+    assert.fail(`pdssync manifest failed to load: ${loaded.reason}`);
+  }
+
+  assert.equal(loaded.manifest.capability, "pds.sync-state");
+  return loaded.manifest;
+}
+
+function readConformanceCorpus(): readonly ConformanceVector[] {
+  const raw = JSON.parse(readFileSync(CORPUS_PATH, "utf8")) as unknown;
+
+  if (!Array.isArray(raw)) {
+    assert.fail("pdssync conformance corpus must be an array");
+  }
+
+  const vectors: ConformanceVector[] = [];
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const item = raw[index];
+
+    if (!isRecord(item)) {
+      assert.fail(`pdssync conformance vector ${index} must be an object`);
+    }
+
+    assertAllowedKeys(item, ["expect", "name", "normalized", "rejectCode", "request"], `vector ${index}`);
+
+    const rejectCode = readOptionalString(item, "rejectCode", `vector ${index}.rejectCode`);
+    const normalized = readOptionalProperty(item, "normalized");
+
+    vectors.push({
+      expect: readExpectation(item, "expect", `vector ${index}.expect`),
+      name: readRequiredString(item, "name", `vector ${index}.name`),
+      request: readRequiredProperty(item, "request", `vector ${index}.request`),
+      ...(rejectCode === undefined ? {} : { rejectCode }),
+      ...(normalized === undefined ? {} : { normalized }),
+    });
+  }
+
+  return Object.freeze(vectors);
+}
+
+function readRequiredProperty(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  path: string,
+): unknown {
+  if (!Object.hasOwn(record, key)) {
+    assert.fail(`${path} is required`);
+  }
+
+  return record[key];
+}
+
+function readOptionalProperty(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function readRequiredString(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  path: string,
+): string {
+  const value = readRequiredProperty(record, key, path);
+
+  if (typeof value !== "string") {
+    assert.fail(`${path} must be a string`);
+  }
+
+  return value;
+}
+
+function readOptionalString(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  path: string,
+): string | undefined {
+  if (!Object.hasOwn(record, key)) {
+    return undefined;
+  }
+
+  const value = record[key];
+
+  if (typeof value !== "string") {
+    assert.fail(`${path} must be a string when present`);
+  }
+
+  return value;
+}
+
+function readExpectation(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  path: string,
+): Expectation {
+  const value = readRequiredString(record, key, path);
+
+  if (value !== "accept" && value !== "reject") {
+    assert.fail(`${path} must be accept or reject`);
+  }
+
+  return value;
+}
+
+function assertAllowedKeys(
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  path: string,
+): void {
+  const allowedSet = new Set(allowed);
+  const keys = Object.keys(record);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key !== undefined && !allowedSet.has(key)) {
+      assert.fail(`${path}.${key} is not a supported pdssync conformance field`);
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatRejections(result: CapabilityValidationResult): string {
+  if (result.ok) {
+    return JSON.stringify(result.value);
+  }
+
+  return JSON.stringify(result.rejections);
+}

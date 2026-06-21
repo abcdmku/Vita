@@ -1,0 +1,32 @@
+{
+  "capability": "pds.sync-state",
+  "version": 1,
+  "secretKeyNameDenylist": true,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "secretKeyNameDenylist": true,
+      "fields": {
+        "repo": {
+          "format": "didPlcOrWeb",
+          "required": true,
+          "type": "string"
+        },
+        "cursor": {
+          "acceptIntegerValuedFloat": true,
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "required": true,
+          "type": "integer"
+        },
+        "repoHead": {
+          "format": "cidV1Multibase",
+          "required": true,
+          "type": "string"
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

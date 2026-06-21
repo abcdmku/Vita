@@ -12,7 +12,7 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
  * `capsuleVersion`, `sriIntegrity`, `bundleRefString`, and
  * `bundleVersionString`, `didPlcOrWeb`, `atprotoHandle`, `keyReference`,
- * `cidrLiteral`, and `networkInterfaceName`
+ * `cidrLiteral`, `networkInterfaceName`, and `cidV1Multibase`
  * are structured capability-agent parity formats.
  * `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
@@ -48,7 +48,8 @@ export type StringFieldFormat =
   | "backupRef"
   | "cron5OrMacro"
   | "cidrLiteral"
-  | "networkInterfaceName";
+  | "networkInterfaceName"
+  | "cidV1Multibase";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -81,6 +82,7 @@ export interface IntegerFieldSchema {
   readonly minimum?: number;
   readonly maximum?: number;
   readonly sentinelValues?: readonly number[];
+  readonly acceptIntegerValuedFloat?: boolean;
   // See StringFieldSchema.nullAsAbsent — mirrors an agent omitempty pointer (e.g. `*int64`).
   readonly nullAsAbsent?: boolean;
 }
@@ -138,6 +140,7 @@ export interface ObjectFieldSchema {
   readonly required: boolean;
   readonly fields: Readonly<Record<string, FieldSchema>>;
   readonly crossFieldRules?: readonly CrossFieldRule[];
+  readonly secretKeyNameDenylist?: boolean;
 }
 
 export type FieldSchema =
@@ -185,6 +188,7 @@ export interface CapabilityManifest {
   readonly capability: string;
   readonly version?: 1;
   readonly defaultRegistry?: false;
+  readonly secretKeyNameDenylist?: boolean;
   readonly fields: Readonly<Record<string, FieldSchema>>;
   readonly crossFieldRules: readonly CrossFieldRule[];
 }
@@ -248,6 +252,7 @@ interface CompiledManifest {
   readonly fields: ReadonlyMap<string, CompiledFieldSchema>;
   readonly fieldNames: readonly string[];
   readonly crossFieldRules: readonly CrossFieldRule[];
+  readonly secretKeyNameDenylist: boolean;
 }
 
 interface ParsedManifest {
@@ -302,6 +307,7 @@ interface CompiledIntegerFieldSchema {
   minimum?: number;
   maximum?: number;
   sentinelValues?: ReadonlySet<number>;
+  acceptIntegerValuedFloat: boolean;
   nullAsAbsent: boolean;
 }
 
@@ -346,6 +352,7 @@ interface CompiledObjectFieldSchema {
   fields: ReadonlyMap<string, CompiledFieldSchema>;
   fieldNames: readonly string[];
   crossFieldRules: readonly CrossFieldRule[];
+  secretKeyNameDenylist: boolean;
 }
 
 type FieldValidationResult =
@@ -391,6 +398,7 @@ const MANIFEST_FIELDS = new Set([
   "crossFieldRules",
   "defaultRegistry",
   "fields",
+  "secretKeyNameDenylist",
   "version",
 ]);
 const STRING_SCHEMA_FIELDS = new Set([
@@ -414,6 +422,7 @@ const STRING_SCHEMA_FIELDS = new Set([
   "type",
 ]);
 const INTEGER_SCHEMA_FIELDS = new Set([
+  "acceptIntegerValuedFloat",
   "maximum",
   "minimum",
   "nullAsAbsent",
@@ -435,7 +444,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "uniqueByWhenEnum",
   "uniqueItems",
 ]);
-const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
+const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "secretKeyNameDenylist", "type"]);
 const CROSS_FIELD_RULE_FIELDS = new Set([
   "control",
   "enumField",
@@ -467,19 +476,36 @@ export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResu
 
     const manifest = Object.freeze(
       parsed.manifest.defaultRegistry === undefined
-        ? {
-            capability: parsed.manifest.capability,
-            version: SUPPORTED_MANIFEST_VERSION,
-            fields: parsed.manifest.fields,
-            crossFieldRules: parsed.manifest.crossFieldRules,
-          }
-        : {
-            capability: parsed.manifest.capability,
-            version: SUPPORTED_MANIFEST_VERSION,
-            defaultRegistry: parsed.manifest.defaultRegistry,
-            fields: parsed.manifest.fields,
-            crossFieldRules: parsed.manifest.crossFieldRules,
-          },
+        ? parsed.manifest.secretKeyNameDenylist === undefined
+          ? {
+              capability: parsed.manifest.capability,
+              version: SUPPORTED_MANIFEST_VERSION,
+              fields: parsed.manifest.fields,
+              crossFieldRules: parsed.manifest.crossFieldRules,
+            }
+          : {
+              capability: parsed.manifest.capability,
+              version: SUPPORTED_MANIFEST_VERSION,
+              secretKeyNameDenylist: parsed.manifest.secretKeyNameDenylist,
+              fields: parsed.manifest.fields,
+              crossFieldRules: parsed.manifest.crossFieldRules,
+            }
+        : parsed.manifest.secretKeyNameDenylist === undefined
+          ? {
+              capability: parsed.manifest.capability,
+              version: SUPPORTED_MANIFEST_VERSION,
+              defaultRegistry: parsed.manifest.defaultRegistry,
+              fields: parsed.manifest.fields,
+              crossFieldRules: parsed.manifest.crossFieldRules,
+            }
+          : {
+              capability: parsed.manifest.capability,
+              version: SUPPORTED_MANIFEST_VERSION,
+              defaultRegistry: parsed.manifest.defaultRegistry,
+              secretKeyNameDenylist: parsed.manifest.secretKeyNameDenylist,
+              fields: parsed.manifest.fields,
+              crossFieldRules: parsed.manifest.crossFieldRules,
+            },
     ) satisfies LoadedCapabilityManifest;
 
     return {
@@ -615,6 +641,12 @@ function parseManifest(
     [...path, "defaultRegistry"],
     errors,
   );
+  const secretKeyNameDenylist = readOptionalBoolean(
+    value,
+    "secretKeyNameDenylist",
+    [...path, "secretKeyNameDenylist"],
+    errors,
+  );
   const fieldsValue = readRequiredProperty(value, "fields", [...path, "fields"], errors);
   const rulesValue = readRequiredProperty(value, "crossFieldRules", [...path, "crossFieldRules"], errors);
 
@@ -641,41 +673,37 @@ function parseManifest(
     return undefined;
   }
 
-  const manifest = Object.freeze(
-    version === undefined
-      ? defaultRegistry === undefined
-        ? {
-            capability,
-            crossFieldRules,
-            fields: fields.manifest,
-          }
-        : {
-            capability,
-            defaultRegistry,
-            crossFieldRules,
-            fields: fields.manifest,
-          }
-      : defaultRegistry === undefined
-        ? {
-            capability,
-            version,
-            crossFieldRules,
-            fields: fields.manifest,
-          }
-        : {
-            capability,
-            version,
-            defaultRegistry,
-            crossFieldRules,
-            fields: fields.manifest,
-          },
-  );
+  const manifestValue: {
+    capability: string;
+    version?: 1;
+    defaultRegistry?: false;
+    secretKeyNameDenylist?: boolean;
+    fields: Readonly<Record<string, FieldSchema>>;
+    crossFieldRules: readonly CrossFieldRule[];
+  } = {
+    capability,
+    crossFieldRules,
+    fields: fields.manifest,
+  };
+
+  if (version !== undefined) {
+    manifestValue.version = version;
+  }
+  if (defaultRegistry !== undefined) {
+    manifestValue.defaultRegistry = defaultRegistry;
+  }
+  if (secretKeyNameDenylist !== undefined) {
+    manifestValue.secretKeyNameDenylist = secretKeyNameDenylist;
+  }
+
+  const manifest = Object.freeze(manifestValue);
 
   const compiled = Object.freeze({
     capability,
     crossFieldRules,
     fieldNames: fields.fieldNames,
     fields: fields.compiled,
+    secretKeyNameDenylist: secretKeyNameDenylist ?? false,
   });
 
   return {
@@ -996,6 +1024,12 @@ function parseIntegerFieldSchema(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
+  const acceptIntegerValuedFloatValue = readOptionalBoolean(
+    value,
+    "acceptIntegerValuedFloat",
+    [...path, "acceptIntegerValuedFloat"],
+    errors,
+  );
   const nullAsAbsentValue = readOptionalBoolean(
     value,
     "nullAsAbsent",
@@ -1012,6 +1046,7 @@ function parseIntegerFieldSchema(
   }
 
   const compiled: CompiledIntegerFieldSchema = {
+    acceptIntegerValuedFloat: acceptIntegerValuedFloatValue ?? false,
     nullAsAbsent: nullAsAbsentValue ?? false,
     required,
     type: "integer",
@@ -1022,6 +1057,7 @@ function parseIntegerFieldSchema(
     minimum?: number;
     maximum?: number;
     sentinelValues?: readonly number[];
+    acceptIntegerValuedFloat?: boolean;
     nullAsAbsent?: boolean;
   } = {
     required,
@@ -1039,6 +1075,9 @@ function parseIntegerFieldSchema(
   if (sentinelValues !== undefined) {
     compiled.sentinelValues = new Set(sentinelValues);
     manifest.sentinelValues = sentinelValues;
+  }
+  if (acceptIntegerValuedFloatValue !== undefined) {
+    manifest.acceptIntegerValuedFloat = acceptIntegerValuedFloatValue;
   }
   if (nullAsAbsentValue !== undefined) {
     manifest.nullAsAbsent = nullAsAbsentValue;
@@ -1482,6 +1521,12 @@ function parseObjectFieldSchema(
           fields?.compiled,
           errors,
         );
+  const secretKeyNameDenylistValue = readOptionalBoolean(
+    value,
+    "secretKeyNameDenylist",
+    [...path, "secretKeyNameDenylist"],
+    errors,
+  );
 
   if (errors.length > errorStart || fields === undefined || crossFieldRules === undefined) {
     return undefined;
@@ -1492,26 +1537,31 @@ function parseObjectFieldSchema(
     fieldNames: fields.fieldNames,
     fields: fields.compiled,
     required,
+    secretKeyNameDenylist: secretKeyNameDenylistValue ?? false,
     type: "object",
   };
-  const manifest = Object.freeze(
-    crossFieldRulesValue === undefined
-      ? {
-          fields: fields.manifest,
-          required,
-          type: "object",
-        }
-      : {
-          crossFieldRules,
-          fields: fields.manifest,
-          required,
-          type: "object",
-        },
-  ) satisfies ObjectFieldSchema;
+  const manifest: {
+    type: "object";
+    required: boolean;
+    fields: Readonly<Record<string, FieldSchema>>;
+    crossFieldRules?: readonly CrossFieldRule[];
+    secretKeyNameDenylist?: boolean;
+  } = {
+    fields: fields.manifest,
+    required,
+    type: "object",
+  };
+
+  if (crossFieldRulesValue !== undefined) {
+    manifest.crossFieldRules = crossFieldRules;
+  }
+  if (secretKeyNameDenylistValue !== undefined) {
+    manifest.secretKeyNameDenylist = secretKeyNameDenylistValue;
+  }
 
   return {
     compiled,
-    manifest,
+    manifest: Object.freeze(manifest),
   };
 }
 
@@ -2251,8 +2301,14 @@ function validateInput(
 
   const errors: CapabilityRejection[] = [];
   const output: Record<string, CapabilityValue> = {};
+  const allowed = new Set(manifest.fieldNames);
 
-  rejectUnknownFields(value, new Set(manifest.fieldNames), [], errors);
+  if (manifest.secretKeyNameDenylist) {
+    rejectSecretKeyNames(value, [], errors);
+    rejectUnknownNonSecretFields(value, allowed, [], errors);
+  } else {
+    rejectUnknownFields(value, allowed, [], errors);
+  }
 
   for (let index = 0; index < manifest.fieldNames.length; index += 1) {
     const fieldName = manifest.fieldNames[index];
@@ -2452,7 +2508,7 @@ function validateIntegerField(
   const errorStart = errors.length;
   const rawToken = rawNumberTokens?.get(formatPath(path));
 
-  if (rawToken !== undefined && !isRawIntegerLiteral(rawToken)) {
+  if (!schema.acceptIntegerValuedFloat && rawToken !== undefined && !isRawIntegerLiteral(rawToken)) {
     addError(errors, path, "Expected integer JSON literal.");
   }
 
@@ -2734,8 +2790,14 @@ function validateObjectField(
 
   const errorStart = errors.length;
   const output: Record<string, CapabilityValue> = {};
+  const allowed = new Set(schema.fieldNames);
 
-  rejectUnknownFields(value, new Set(schema.fieldNames), path, errors);
+  if (schema.secretKeyNameDenylist) {
+    rejectSecretKeyNames(value, path, errors);
+    rejectUnknownNonSecretFields(value, allowed, path, errors);
+  } else {
+    rejectUnknownFields(value, allowed, path, errors);
+  }
 
   for (let index = 0; index < schema.fieldNames.length; index += 1) {
     const fieldName = schema.fieldNames[index];
@@ -3283,6 +3345,39 @@ function rejectUnknownFields(
   }
 }
 
+function rejectUnknownNonSecretFields(
+  value: JsonRecord,
+  allowed: ReadonlySet<string>,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  const keys = Object.keys(value).sort(compareStrings);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key !== undefined && !allowed.has(key) && !isSecretFieldName(key)) {
+      addError(errors, [...path, key], "Unknown field.");
+    }
+  }
+}
+
+function rejectSecretKeyNames(
+  value: JsonRecord,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  const keys = Object.keys(value).sort(compareStrings);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key !== undefined && isSecretFieldName(key)) {
+      addError(errors, [...path, key], "Inline key material is not allowed.");
+    }
+  }
+}
+
 function isStringFieldFormat(value: string): value is StringFieldFormat {
   return (
     value === "hostnameRFC1123" ||
@@ -3306,7 +3401,8 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "backupRef" ||
     value === "cron5OrMacro" ||
     value === "cidrLiteral" ||
-    value === "networkInterfaceName"
+    value === "networkInterfaceName" ||
+    value === "cidV1Multibase"
   );
 }
 
@@ -3326,6 +3422,8 @@ function normalizeStringFormat(
       return canonicalizeCIDRLiteral(value);
     case "networkInterfaceName":
       return isNetworkInterfaceName(value) ? value : undefined;
+    case "cidV1Multibase":
+      return isCIDV1Multibase(value) ? value : undefined;
     case "hostnameOrIp": {
       const ip = canonicalizeIPLiteral(value);
 
@@ -3696,12 +3794,219 @@ function isBundleVersionString(value: string): boolean {
   return true;
 }
 
+const MAX_CID_BYTES = 512;
+const CID_VERSION = 1n;
+const MAX_MULTIHASH_DIGEST_BYTES = 128n;
+const BASE32_LOWER_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+const BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function isCIDV1Multibase(value: string): boolean {
+  if (
+    value.length === 0 ||
+    utf8ByteLength(value) > MAX_CID_BYTES ||
+    goTrimSpace(value) !== value ||
+    containsControlCharacter(value)
+  ) {
+    return false;
+  }
+
+  const bytes = decodeMultibase(value);
+
+  return bytes !== undefined && isCIDV1Bytes(bytes);
+}
+
+function decodeMultibase(value: string): readonly number[] | undefined {
+  const prefix = value.charAt(0);
+  const encoded = value.slice(1);
+
+  if (encoded.length === 0) {
+    return undefined;
+  }
+
+  switch (prefix) {
+    case "b":
+      if (encoded !== encoded.toLowerCase()) {
+        return undefined;
+      }
+      return decodeBase32(encoded);
+    case "B":
+      if (encoded !== encoded.toUpperCase()) {
+        return undefined;
+      }
+      return decodeBase32(encoded.toLowerCase());
+    case "z":
+      return decodeBase58BTC(encoded);
+    default:
+      return undefined;
+  }
+}
+
+function decodeBase32(value: string): readonly number[] | undefined {
+  let buffer = 0;
+  let bits = 0;
+  const output: number[] = [];
+
+  for (let index = 0; index < value.length; index += 1) {
+    const digit = BASE32_LOWER_ALPHABET.indexOf(value.charAt(index));
+
+    if (digit < 0) {
+      return undefined;
+    }
+
+    buffer = (buffer << 5) | digit;
+    bits += 5;
+
+    while (bits >= 8) {
+      bits -= 8;
+      output.push((buffer >> bits) & 0xff);
+      if (bits === 0) {
+        buffer = 0;
+      } else {
+        buffer &= (1 << bits) - 1;
+      }
+    }
+  }
+
+  if (bits > 0 && buffer !== 0) {
+    return undefined;
+  }
+
+  return Object.freeze(output);
+}
+
+function decodeBase58BTC(value: string): readonly number[] | undefined {
+  let decoded = 0n;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const digit = BASE58BTC_ALPHABET.indexOf(value.charAt(index));
+
+    if (digit < 0) {
+      return undefined;
+    }
+
+    decoded = decoded * 58n + BigInt(digit);
+  }
+
+  const output: number[] = [];
+
+  while (decoded > 0n) {
+    output.unshift(Number(decoded & 0xffn));
+    decoded >>= 8n;
+  }
+
+  for (let index = 0; index < value.length && value.charAt(index) === "1"; index += 1) {
+    output.unshift(0);
+  }
+
+  return Object.freeze(output);
+}
+
+function isCIDV1Bytes(bytes: readonly number[]): boolean {
+  const version = readCIDVarint(bytes, 0);
+
+  if (version === undefined || version.value !== CID_VERSION) {
+    return false;
+  }
+
+  const codec = readCIDVarint(bytes, version.next);
+
+  if (codec === undefined || codec.value === 0n) {
+    return false;
+  }
+
+  const hashCode = readCIDVarint(bytes, codec.next);
+
+  if (hashCode === undefined || hashCode.value === 0n) {
+    return false;
+  }
+
+  const digestSize = readCIDVarint(bytes, hashCode.next);
+
+  if (
+    digestSize === undefined ||
+    digestSize.value === 0n ||
+    digestSize.value > MAX_MULTIHASH_DIGEST_BYTES
+  ) {
+    return false;
+  }
+
+  return digestSize.next + Number(digestSize.value) === bytes.length;
+}
+
+function readCIDVarint(
+  bytes: readonly number[],
+  offset: number,
+): { readonly value: bigint; readonly next: number } | undefined {
+  if (offset < 0 || offset >= bytes.length) {
+    return undefined;
+  }
+
+  let value = 0n;
+  let shift = 0;
+
+  for (let index = offset; index < bytes.length; index += 1) {
+    const current = bytes[index];
+
+    if (current === undefined) {
+      return undefined;
+    }
+
+    const part = BigInt(current & 0x7f);
+
+    if (shift >= 64 || part >= (1n << BigInt(64 - shift))) {
+      return undefined;
+    }
+
+    value |= part << BigInt(shift);
+
+    if (current < 0x80) {
+      const size = index - offset + 1;
+
+      if (size > 1) {
+        const minShift = 7 * (size - 1);
+
+        if (minShift >= 64 || value < (1n << BigInt(minShift))) {
+          return undefined;
+        }
+      }
+
+      return {
+        next: index + 1,
+        value,
+      };
+    }
+
+    shift += 7;
+
+    if (shift > 63) {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
 const DID_PLC_PREFIX = "did:plc:";
 const DID_WEB_PREFIX = "did:web:";
 const MAX_ATPROTO_HANDLE_BYTES = 253;
 const MAX_DID_BYTES = 2048;
 const MAX_KEY_REFERENCE_BYTES = 2048;
 const INLINE_REFERENCE_SCHEMES = Object.freeze(["data", "inline", "literal"]);
+const SECRET_FIELD_NAME_TOKENS = new Set([
+  "apikey",
+  "key",
+  "keymaterial",
+  "mnemonic",
+  "passphrase",
+  "pem",
+  "privatekey",
+  "recoverykey",
+  "rotationkey",
+  "seed",
+  "seedphrase",
+  "secret",
+  "signingkey",
+]);
 
 function isSupportedDID(value: string): boolean {
   if (utf8ByteLength(value) > MAX_DID_BYTES || goTrimSpace(value) !== value) {
@@ -3868,6 +4173,10 @@ function isKeyReference(value: string): boolean {
     utf8ByteLength(value) <= MAX_KEY_REFERENCE_BYTES &&
     isReferenceSyntax(value)
   );
+}
+
+function isSecretFieldName(value: string): boolean {
+  return SECRET_FIELD_NAME_TOKENS.has(value.replaceAll("-", "").replaceAll("_", "").toLowerCase());
 }
 
 function isReferenceSyntax(value: string): boolean {
