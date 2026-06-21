@@ -45,6 +45,8 @@ export type StringFieldFormat =
   | "didPlcOrWeb"
   | "atprotoHandle"
   | "keyReference"
+  | "backupRef"
+  | "cron5OrMacro"
   | "cidrLiteral"
   | "networkInterfaceName";
 
@@ -66,6 +68,11 @@ export interface StringFieldSchema {
   readonly trimmed?: boolean;
   readonly forbiddenSchemePrefix?: boolean;
   readonly format?: StringFieldFormat;
+  // When true on an OPTIONAL field, an explicit JSON `null` is treated as ABSENT (skipped, not
+  // type-checked, and not counted by exactlyOneOf). Mirrors the agent's omitempty pointer fields
+  // (e.g. backup `Schedule.Cron *string`), where encoding/json decodes `null`→nil→absent. Opt-in;
+  // default off, so manifests without it are unaffected.
+  readonly nullAsAbsent?: boolean;
 }
 
 export interface IntegerFieldSchema {
@@ -74,6 +81,8 @@ export interface IntegerFieldSchema {
   readonly minimum?: number;
   readonly maximum?: number;
   readonly sentinelValues?: readonly number[];
+  // See StringFieldSchema.nullAsAbsent — mirrors an agent omitempty pointer (e.g. `*int64`).
+  readonly nullAsAbsent?: boolean;
 }
 
 export interface BooleanFieldSchema {
@@ -123,6 +132,10 @@ export type CrossFieldRule =
       readonly integer: string;
       readonly target: string;
       readonly sentinel: number;
+    }
+  | {
+      readonly type: "exactlyOneOf";
+      readonly fields: readonly string[];
     };
 
 export interface CapabilityManifest {
@@ -237,6 +250,7 @@ interface CompiledStringFieldSchema {
   noInlineMaterial: boolean;
   forbiddenSchemePrefix: boolean;
   trimmed: boolean;
+  nullAsAbsent: boolean;
 }
 
 interface CompiledIntegerFieldSchema {
@@ -245,6 +259,7 @@ interface CompiledIntegerFieldSchema {
   minimum?: number;
   maximum?: number;
   sentinelValues?: ReadonlySet<number>;
+  nullAsAbsent: boolean;
 }
 
 interface CompiledBooleanFieldSchema {
@@ -331,11 +346,19 @@ const STRING_SCHEMA_FIELDS = new Set([
   "noInlineMaterial",
   "noInlineSecrets",
   "nonEmpty",
+  "nullAsAbsent",
   "required",
   "trimmed",
   "type",
 ]);
-const INTEGER_SCHEMA_FIELDS = new Set(["maximum", "minimum", "required", "sentinelValues", "type"]);
+const INTEGER_SCHEMA_FIELDS = new Set([
+  "maximum",
+  "minimum",
+  "nullAsAbsent",
+  "required",
+  "sentinelValues",
+  "type",
+]);
 const BOOLEAN_SCHEMA_FIELDS = new Set(["required", "type"]);
 const ARRAY_SCHEMA_FIELDS = new Set([
   "items",
@@ -348,7 +371,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "uniqueItems",
 ]);
 const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
-const CROSS_FIELD_RULE_FIELDS = new Set(["control", "integer", "sentinel", "target", "type"]);
+const CROSS_FIELD_RULE_FIELDS = new Set(["control", "fields", "integer", "sentinel", "target", "type"]);
 export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResult {
   try {
     const normalized = safeNormalize(raw);
@@ -743,6 +766,12 @@ function parseStringFieldSchema(
     [...path, "forbiddenSchemePrefix"],
     errors,
   );
+  const nullAsAbsentValue = readOptionalBoolean(
+    value,
+    "nullAsAbsent",
+    [...path, "nullAsAbsent"],
+    errors,
+  );
   const lowercase = lowercaseValue ?? false;
   const noControlChars = noControlCharsValue ?? false;
   const noInlineCapsuleMaterial = noInlineCapsuleMaterialValue ?? false;
@@ -750,6 +779,7 @@ function parseStringFieldSchema(
   const noInlineMaterial = (noInlineMaterialValue ?? false) || (noInlineSecretsValue ?? false);
   const forbiddenSchemePrefix = forbiddenSchemePrefixValue ?? false;
   const trimmed = trimmedValue ?? false;
+  const nullAsAbsent = nullAsAbsentValue ?? false;
   const effectiveMinLength = nonEmptyValue === true && (minLength === undefined || minLength < 1) ? 1 : minLength;
 
   if (errors.length > errorStart) {
@@ -763,6 +793,7 @@ function parseStringFieldSchema(
     noInlineIdentityMaterial,
     noInlineMaterial,
     forbiddenSchemePrefix,
+    nullAsAbsent,
     required,
     trimmed,
     type: "string",
@@ -784,6 +815,7 @@ function parseStringFieldSchema(
     nonEmpty?: boolean;
     trimmed?: boolean;
     forbiddenSchemePrefix?: boolean;
+    nullAsAbsent?: boolean;
     format?: StringFieldFormat;
   } = {
     required,
@@ -843,6 +875,9 @@ function parseStringFieldSchema(
   if (forbiddenSchemePrefixValue !== undefined) {
     manifest.forbiddenSchemePrefix = forbiddenSchemePrefixValue;
   }
+  if (nullAsAbsentValue !== undefined) {
+    manifest.nullAsAbsent = nullAsAbsentValue;
+  }
 
   return {
     compiled,
@@ -883,6 +918,12 @@ function parseIntegerFieldSchema(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
+  const nullAsAbsentValue = readOptionalBoolean(
+    value,
+    "nullAsAbsent",
+    [...path, "nullAsAbsent"],
+    errors,
+  );
 
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
     addError(errors, path, "minimum must be less than or equal to maximum.");
@@ -893,6 +934,7 @@ function parseIntegerFieldSchema(
   }
 
   const compiled: CompiledIntegerFieldSchema = {
+    nullAsAbsent: nullAsAbsentValue ?? false,
     required,
     type: "integer",
   };
@@ -902,6 +944,7 @@ function parseIntegerFieldSchema(
     minimum?: number;
     maximum?: number;
     sentinelValues?: readonly number[];
+    nullAsAbsent?: boolean;
   } = {
     required,
     type: "integer",
@@ -918,6 +961,9 @@ function parseIntegerFieldSchema(
   if (sentinelValues !== undefined) {
     compiled.sentinelValues = new Set(sentinelValues);
     manifest.sentinelValues = sentinelValues;
+  }
+  if (nullAsAbsentValue !== undefined) {
+    manifest.nullAsAbsent = nullAsAbsentValue;
   }
 
   return {
@@ -1175,8 +1221,8 @@ function parseCrossFieldRule(
   rejectUnknownFields(value, CROSS_FIELD_RULE_FIELDS, path, errors);
 
   const typeValue = readRequiredString(value, "type", [...path, "type"], errors);
-  const control = readRequiredString(value, "control", [...path, "control"], errors);
-  const target = readRequiredString(value, "target", [...path, "target"], errors);
+  const control = readOptionalString(value, "control", [...path, "control"], errors);
+  const target = readOptionalString(value, "target", [...path, "target"], errors);
   const integer = readOptionalString(value, "integer", [...path, "integer"], errors);
   const sentinel = readOptionalSafeInteger(
     value,
@@ -1186,18 +1232,58 @@ function parseCrossFieldRule(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
+  const exactlyOneOfFields = readOptionalCrossFieldFieldList(value, "fields", [...path, "fields"], errors);
+  const hasControl = hasOwn(value, "control");
+  const hasTarget = hasOwn(value, "target");
+  const hasFields = hasOwn(value, "fields");
 
-  if (errors.length > errorStart || typeValue === undefined || control === undefined || target === undefined) {
+  if (errors.length > errorStart || typeValue === undefined) {
+    return undefined;
+  }
+
+  if (typeValue !== "exactlyOneOf" && hasFields) {
+    addError(errors, [...path, "fields"], "fields is not supported by this cross-field rule.");
     return undefined;
   }
 
   switch (typeValue) {
-    case "requireNonEmptyArrayWhenTrue": {
+    case "exactlyOneOf": {
+      if (hasControl) {
+        addError(errors, [...path, "control"], "control is not supported by this cross-field rule.");
+      }
+      if (hasTarget) {
+        addError(errors, [...path, "target"], "target is not supported by this cross-field rule.");
+      }
       if (integer !== undefined) {
         addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
       }
       if (sentinel !== undefined) {
         addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      validateExactlyOneOfFields(fields, exactlyOneOfFields, [...path, "fields"], errors);
+      if (errors.length > errorStart || exactlyOneOfFields === undefined) {
+        return undefined;
+      }
+      return Object.freeze({
+        fields: exactlyOneOfFields,
+        type: "exactlyOneOf",
+      });
+    }
+    case "requireNonEmptyArrayWhenTrue": {
+      if (control === undefined) {
+        addError(errors, [...path, "control"], "Expected non-empty string.");
+      }
+      if (target === undefined) {
+        addError(errors, [...path, "target"], "Expected non-empty string.");
+      }
+      if (integer !== undefined) {
+        addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
+      }
+      if (sentinel !== undefined) {
+        addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      if (control === undefined || target === undefined) {
+        return undefined;
       }
       validateBooleanControlField(fields, control, [...path, "control"], errors);
       validateArrayTargetField(fields, target, [...path, "target"], errors);
@@ -1211,11 +1297,20 @@ function parseCrossFieldRule(
       });
     }
     case "requireEmptyArrayWhenFalse": {
+      if (control === undefined) {
+        addError(errors, [...path, "control"], "Expected non-empty string.");
+      }
+      if (target === undefined) {
+        addError(errors, [...path, "target"], "Expected non-empty string.");
+      }
       if (integer !== undefined) {
         addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
       }
       if (sentinel !== undefined) {
         addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      if (control === undefined || target === undefined) {
+        return undefined;
       }
       validateBooleanControlField(fields, control, [...path, "control"], errors);
       validateArrayTargetField(fields, target, [...path, "target"], errors);
@@ -1229,11 +1324,20 @@ function parseCrossFieldRule(
       });
     }
     case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue": {
+      if (control === undefined) {
+        addError(errors, [...path, "control"], "Expected non-empty string.");
+      }
+      if (target === undefined) {
+        addError(errors, [...path, "target"], "Expected non-empty string.");
+      }
       if (integer === undefined) {
         addError(errors, [...path, "integer"], "integer field is required for this cross-field rule.");
       }
       if (sentinel === undefined) {
         addError(errors, [...path, "sentinel"], "sentinel is required for this cross-field rule.");
+      }
+      if (control === undefined || target === undefined) {
+        return undefined;
       }
       validateBooleanControlField(fields, control, [...path, "control"], errors);
       validateIntegerRuleField(fields, integer, [...path, "integer"], errors);
@@ -1252,6 +1356,91 @@ function parseCrossFieldRule(
     default:
       addError(errors, [...path, "type"], "Unknown cross-field rule type.");
       return undefined;
+  }
+}
+
+function readOptionalCrossFieldFieldList(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): readonly string[] | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  const child = value[key];
+
+  if (!Array.isArray(child) || child.length === 0) {
+    addError(errors, path, "Expected non-empty cross-field field array.");
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const values: string[] = [];
+  const errorStart = errors.length;
+
+  for (let index = 0; index < child.length; index += 1) {
+    const item = child[index];
+
+    if (typeof item !== "string" || item.length === 0) {
+      addError(errors, [...path, String(index)], "Expected non-empty cross-field field name.");
+      continue;
+    }
+
+    if (seen.has(item)) {
+      addError(errors, [...path, String(index)], "Duplicate cross-field field name.");
+      continue;
+    }
+
+    seen.add(item);
+    values.push(item);
+  }
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze(values);
+}
+
+function validateExactlyOneOfFields(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  names: readonly string[] | undefined,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (names === undefined) {
+    addError(errors, path, "Expected non-empty cross-field field array.");
+    return;
+  }
+
+  if (names.length < 2) {
+    addError(errors, path, "exactlyOneOf requires at least two fields.");
+    return;
+  }
+
+  if (fields === undefined) {
+    return;
+  }
+
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index];
+
+    if (name === undefined) {
+      continue;
+    }
+
+    const field = fields.get(name);
+
+    if (field === undefined) {
+      addError(errors, [...path, String(index)], "exactlyOneOf field must reference a sibling field.");
+      continue;
+    }
+
+    if (field.required) {
+      addError(errors, [...path, String(index)], "exactlyOneOf field must reference an optional field.");
+    }
   }
 }
 
@@ -1658,6 +1847,10 @@ function validateInput(
       continue;
     }
 
+    if (fieldNullCountsAsAbsent(schema, value[fieldName])) {
+      continue;
+    }
+
     const result = validateField(
       value[fieldName],
       schema,
@@ -1691,6 +1884,18 @@ function validateInput(
     ok: true,
     value: Object.freeze(output),
   };
+}
+
+// An OPTIONAL field carrying nullAsAbsent treats an explicit JSON `null` exactly like a missing
+// key: skipped, not type-checked, and not counted by exactlyOneOf. This mirrors the agent's
+// omitempty pointer fields, where encoding/json decodes a present `null` to nil ⇒ absent. Only
+// string/integer compiled schemas carry the flag (it is opt-in and parsed only for those types).
+function fieldNullCountsAsAbsent(schema: CompiledFieldSchema, raw: PlainJson | undefined): boolean {
+  if (raw !== null || schema.required) {
+    return false;
+  }
+
+  return (schema.type === "string" || schema.type === "integer") && schema.nullAsAbsent;
 }
 
 function validateField(
@@ -2002,6 +2207,10 @@ function validateObjectField(
       continue;
     }
 
+    if (fieldNullCountsAsAbsent(field, value[fieldName])) {
+      continue;
+    }
+
     const result = validateField(
       value[fieldName],
       field,
@@ -2051,6 +2260,22 @@ function applyCrossFieldRules(
     }
 
     switch (rule.type) {
+      case "exactlyOneOf": {
+        let present = 0;
+
+        for (let fieldIndex = 0; fieldIndex < rule.fields.length; fieldIndex += 1) {
+          const name = rule.fields[fieldIndex];
+
+          if (name !== undefined && hasOwn(value, name)) {
+            present += 1;
+          }
+        }
+
+        if (present !== 1) {
+          addError(errors, path, `exactly one of ${rule.fields.join(", ")} must be set.`);
+        }
+        break;
+      }
       case "requireNonEmptyArrayWhenTrue": {
         const control = value[rule.control];
         const target = value[rule.target];
@@ -2495,6 +2720,8 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "didPlcOrWeb" ||
     value === "atprotoHandle" ||
     value === "keyReference" ||
+    value === "backupRef" ||
+    value === "cron5OrMacro" ||
     value === "cidrLiteral" ||
     value === "networkInterfaceName"
   );
@@ -2551,6 +2778,10 @@ function normalizeStringFormat(
       return isDomainHandle(value) ? value : undefined;
     case "keyReference":
       return isKeyReference(value) ? value : undefined;
+    case "backupRef":
+      return isBackupRef(value) ? value : undefined;
+    case "cron5OrMacro":
+      return isCron5OrMacro(value) ? value : undefined;
   }
 }
 
@@ -3152,6 +3383,288 @@ function isInlineReferenceScheme(value: string): boolean {
   }
 
   return false;
+}
+
+const MAX_BACKUP_REF_BYTES = 2048;
+const BACKUP_REFERENCE_FORBIDDEN_CHARS = " \t\r\n<>{}`\"'";
+
+// isBackupRef mirrors agent/capabilities/backup.validateRef + validReferenceSyntax exactly: empty
+// values, inline secret material (the backup SECRET scanner), values longer than 2048 bytes, and
+// non-opaque/non-scheme references are rejected. backup's opaque pattern is its OWN {2,159} variant.
+function isBackupRef(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !containsInlineBackupMaterial(value) &&
+    utf8ByteLength(value) <= MAX_BACKUP_REF_BYTES &&
+    isBackupReferenceSyntax(value)
+  );
+}
+
+function isBackupReferenceSyntax(value: string): boolean {
+  if (goTrimSpace(value) !== value || containsAnyChar(value, BACKUP_REFERENCE_FORBIDDEN_CHARS)) {
+    return false;
+  }
+
+  if (hasInlineReferenceScheme(value)) {
+    return false;
+  }
+
+  const separator = value.indexOf("://");
+
+  if (separator === -1) {
+    return isBackupOpaqueRef(value);
+  }
+
+  if (separator <= 0 || separator === value.length - 3) {
+    return false;
+  }
+
+  const scheme = goSimpleLowercase(value.slice(0, separator));
+  const body = value.slice(separator + 3);
+
+  return isReferenceScheme(scheme) && !isInlineReferenceScheme(scheme) && body.length > 0;
+}
+
+// isBackupOpaqueRef mirrors backup.opaqueRefPattern `^[A-Za-z0-9][A-Za-z0-9._:@-]{2,159}$`: a
+// leading alphanumeric followed by 2..159 of `[A-Za-z0-9._:@-]` (total length 3..160). Byte length
+// equals JS string length here because every accepted character is a single ASCII code unit.
+function isBackupOpaqueRef(value: string): boolean {
+  if (value.length < 3 || value.length > 160 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (
+      !isAsciiAlphaNumericCode(code) &&
+      code !== 46 &&
+      code !== 95 &&
+      code !== 58 &&
+      code !== 64 &&
+      code !== 45
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// containsInlineBackupMaterial mirrors backup.containsInlineSecretMaterial: control characters plus
+// the capsule scanner (the `-----BEGIN` substring, the privateKey/secretAssignment/seed regex
+// families, and the long hex / long base64 runs encode the identical regex set).
+function containsInlineBackupMaterial(value: string): boolean {
+  return containsControlCharacter(value) || containsInlineCapsuleMaterial(value);
+}
+
+const BACKUP_CRON_MACROS = Object.freeze(["@hourly", "@daily", "@weekly", "@monthly"]);
+const BACKUP_CRON_FIELD_BOUNDS = Object.freeze([
+  Object.freeze({ min: 0, max: 59 }),
+  Object.freeze({ min: 0, max: 23 }),
+  Object.freeze({ min: 1, max: 31 }),
+  Object.freeze({ min: 1, max: 12 }),
+  Object.freeze({ min: 0, max: 7 }),
+]) satisfies readonly { readonly min: number; readonly max: number }[];
+
+// isCron5OrMacro mirrors backup.validCronSchedule exactly: a supported macro, or 5 whitespace-
+// separated fields with comma-lists, `A-B` ranges and `/step` steps validated per position bounds.
+function isCron5OrMacro(value: string): boolean {
+  if (value.length === 0 || goTrimSpace(value) !== value || containsInlineBackupMaterial(value)) {
+    return false;
+  }
+
+  for (let index = 0; index < BACKUP_CRON_MACROS.length; index += 1) {
+    if (value === BACKUP_CRON_MACROS[index]) {
+      return true;
+    }
+  }
+
+  const fields = splitGoFields(value);
+
+  if (fields.length !== BACKUP_CRON_FIELD_BOUNDS.length) {
+    return false;
+  }
+
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    const bounds = BACKUP_CRON_FIELD_BOUNDS[index];
+
+    if (field === undefined || bounds === undefined || !validBackupCronField(field, bounds)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function validBackupCronField(field: string, bounds: { readonly min: number; readonly max: number }): boolean {
+  if (field.length === 0) {
+    return false;
+  }
+
+  const parts = field.split(",");
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+
+    if (part === undefined || !validBackupCronPart(part, bounds)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function validBackupCronPart(part: string, bounds: { readonly min: number; readonly max: number }): boolean {
+  if (part.length === 0) {
+    return false;
+  }
+
+  let base = part;
+
+  if (part.includes("/")) {
+    const pieces = part.split("/");
+    const head = pieces[0];
+    const stepToken = pieces[1];
+
+    if (pieces.length !== 2 || head === undefined || stepToken === undefined || head === "" || stepToken === "") {
+      return false;
+    }
+
+    const step = parseGoAtoi(stepToken);
+
+    if (step === undefined || step < 1 || step > bounds.max) {
+      return false;
+    }
+
+    base = head;
+  }
+
+  if (base === "*") {
+    return true;
+  }
+
+  if (base.includes("-")) {
+    const pieces = base.split("-");
+
+    if (pieces.length !== 2) {
+      return false;
+    }
+
+    const start = parseBackupCronNumber(pieces[0] ?? "", bounds);
+
+    if (start === undefined) {
+      return false;
+    }
+
+    const end = parseBackupCronNumber(pieces[1] ?? "", bounds);
+
+    return end !== undefined && start <= end;
+  }
+
+  return parseBackupCronNumber(base, bounds) !== undefined;
+}
+
+function parseBackupCronNumber(
+  value: string,
+  bounds: { readonly min: number; readonly max: number },
+): number | undefined {
+  const parsed = parseGoAtoi(value);
+
+  if (parsed === undefined || parsed < bounds.min || parsed > bounds.max) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+// splitGoFields mirrors strings.Fields: split on runs of ASCII regex whitespace, dropping empties.
+// The cron scanner already rejects inline material/control characters, so the relevant whitespace
+// set matches the agent's strings.Fields behavior on cron expressions.
+function splitGoFields(value: string): string[] {
+  const fields: string[] = [];
+  let index = 0;
+
+  while (index < value.length) {
+    while (index < value.length && isGoFieldWhitespaceCode(value.charCodeAt(index))) {
+      index += 1;
+    }
+
+    if (index >= value.length) {
+      break;
+    }
+
+    const start = index;
+
+    while (index < value.length && !isGoFieldWhitespaceCode(value.charCodeAt(index))) {
+      index += 1;
+    }
+
+    fields.push(value.slice(start, index));
+  }
+
+  return fields;
+}
+
+// isGoFieldWhitespaceCode mirrors Go's unicode.IsSpace (used by strings.Fields) exactly so cron
+// field splitting matches the agent for every whitespace separator, not just ASCII ones.
+function isGoFieldWhitespaceCode(code: number): boolean {
+  return (
+    code === 0x09 ||
+    code === 0x0a ||
+    code === 0x0b ||
+    code === 0x0c ||
+    code === 0x0d ||
+    code === 0x20 ||
+    code === 0x85 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000
+  );
+}
+
+// parseGoAtoi mirrors strconv.Atoi for the values cron fields can contain: an optional leading
+// sign followed by ASCII digits. Anything else (including empty, whitespace, or non-digits) fails.
+function parseGoAtoi(value: string): number | undefined {
+  if (value.length === 0) {
+    return undefined;
+  }
+
+  let start = 0;
+  let sign = 1;
+
+  const first = value.charCodeAt(0);
+
+  if (first === 43) {
+    start = 1;
+  } else if (first === 45) {
+    start = 1;
+    sign = -1;
+  }
+
+  if (start >= value.length) {
+    return undefined;
+  }
+
+  let result = 0;
+
+  for (let index = start; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isAsciiDigitCode(code)) {
+      return undefined;
+    }
+
+    result = result * 10 + (code - 48);
+  }
+
+  return sign * result;
 }
 
 function isAllAsciiDigits(value: string): boolean {

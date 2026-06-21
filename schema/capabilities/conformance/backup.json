@@ -1,0 +1,637 @@
+[
+  {
+    "name": "valid cron only accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "0 3 * * *" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "keystore://vault/owner" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid cron macro accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid cron range list step accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "0,30 0-23/2 1-31 1,6,12 0-7" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid interval only accepts",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": 3600 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 1, "maxAgeDays": 1 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "schedule both modes rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily", "intervalSeconds": 3600 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule"
+  },
+  {
+    "name": "schedule neither mode rejects",
+    "request": {
+      "desired": {
+        "schedule": {},
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule"
+  },
+  {
+    "name": "bad cron field count rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "0 3 * *" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "cron minute out of range rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "60 3 * * *" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "cron dow 7 accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "0 0 * * 7" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "cron dow 8 out of range rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "0 0 * * 8" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "cron step zero rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "*/0 * * * *" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "cron unknown macro rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@yearly" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "cron leading whitespace rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": " 0 3 * * *" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/cron"
+  },
+  {
+    "name": "interval minimum one accepts",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": 1 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "interval zero rejects",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": 0 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/intervalSeconds"
+  },
+  {
+    "name": "interval maximum accepts",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": 31536000 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "interval over maximum rejects",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": 31536001 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/intervalSeconds"
+  },
+  {
+    "name": "interval float literal rejects",
+    "request": "{\"desired\":{\"schedule\":{\"intervalSeconds\":3600.0},\"targets\":[{\"id\":\"rk:primary\"}],\"retention\":{\"count\":7,\"maxAgeDays\":30},\"recoveryKeyRef\":{\"id\":\"rk:owner\",\"handle\":\"rk:handle\"}}}",
+    "expect": "reject",
+    "rejectCode": "desired/schedule/intervalSeconds"
+  },
+  {
+    "name": "count exponent literal rejects",
+    "request": "{\"desired\":{\"schedule\":{\"cron\":\"@daily\"},\"targets\":[{\"id\":\"rk:primary\"}],\"retention\":{\"count\":7e0,\"maxAgeDays\":30},\"recoveryKeyRef\":{\"id\":\"rk:owner\",\"handle\":\"rk:handle\"}}}",
+    "expect": "reject",
+    "rejectCode": "desired/retention/count"
+  },
+  {
+    "name": "retention bounds minimum accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 1, "maxAgeDays": 1 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "retention bounds maximum accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 1000, "maxAgeDays": 3650 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "retention count zero rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 0, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/retention/count"
+  },
+  {
+    "name": "retention count over maximum rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 1001, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/retention/count"
+  },
+  {
+    "name": "retention count absent rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/retention/count"
+  },
+  {
+    "name": "retention maxAgeDays over maximum rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 3651 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/retention/maxAgeDays"
+  },
+  {
+    "name": "retention maxAgeDays absent rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/retention/maxAgeDays"
+  },
+  {
+    "name": "targets empty rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets"
+  },
+  {
+    "name": "targets opaque min three accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "ab1" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "targets opaque two too short rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "ab" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets/0/id"
+  },
+  {
+    "name": "targets scheme uri accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "s3://bucket/path" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "targets duplicate id rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }, { "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets/1"
+  },
+  {
+    "name": "targets inline data scheme rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "data:abc" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets/0/id"
+  },
+  {
+    "name": "recoveryKeyRef keyStoreRef absent accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "recoveryKeyRef keyStoreRef present accepts",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle", "keyStoreRef": "keystore://vault/main" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "recoveryKeyRef keyStoreRef invalid rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle", "keyStoreRef": "ab" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/keyStoreRef"
+  },
+  {
+    "name": "recoveryKeyRef id absent rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/id"
+  },
+  {
+    "name": "recoveryKeyRef id pem inline secret rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "-----BEGIN PRIVATE KEY-----", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/id"
+  },
+  {
+    "name": "recoveryKeyRef handle private key phrase rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "my private key here" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/handle"
+  },
+  {
+    "name": "recoveryKeyRef handle seed run rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "abandon ability able about above absent absorb abstract absurd abuse access accident" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/handle"
+  },
+  {
+    "name": "recoveryKeyRef id secret assignment rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "password=hunter2", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/recoveryKeyRef/id"
+  },
+  {
+    "name": "schedule absent rejects",
+    "request": {
+      "desired": {
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule"
+  },
+  {
+    "name": "desired absent rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown schedule key rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily", "extra": true },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/extra"
+  },
+  {
+    "name": "unknown target key rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary", "extra": true }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets/0/extra"
+  },
+  {
+    "name": "interval wrong type rejects",
+    "request": {
+      "desired": {
+        "schedule": { "intervalSeconds": "3600" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/schedule/intervalSeconds"
+  },
+  {
+    "name": "targets not array rejects",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": {},
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targets"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"schedule\":{\"cron\":\"@daily\"},\"targets\":[{\"id\":\"rk:primary\"}],\"retention\":{\"count\":7,\"maxAgeDays\":30},\"recoveryKeyRef\":{\"id\":\"rk:owner\",\"handle\":\"rk:handle\"}},\"desired\":{\"schedule\":{\"cron\":\"@daily\"},\"targets\":[{\"id\":\"rk:primary\"}],\"retention\":{\"count\":7,\"maxAgeDays\":30},\"recoveryKeyRef\":{\"id\":\"rk:owner\",\"handle\":\"rk:handle\"}}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate schedule JSON key rejects",
+    "request": "{\"desired\":{\"schedule\":{\"cron\":\"@daily\",\"cron\":\"@weekly\"},\"targets\":[{\"id\":\"rk:primary\"}],\"retention\":{\"count\":7,\"maxAgeDays\":30},\"recoveryKeyRef\":{\"id\":\"rk:owner\",\"handle\":\"rk:handle\"}}}",
+    "expect": "reject"
+  },
+  {
+    "name": "schedule cron null with interval set accepts (null pointer is absent)",
+    "request": {
+      "desired": {
+        "schedule": { "cron": null, "intervalSeconds": 3600 },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "schedule interval null with cron set accepts (null pointer is absent)",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily", "intervalSeconds": null },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "recoveryKeyRef keyStoreRef null accepts (null pointer is absent)",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "rk:primary" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle", "keyStoreRef": null }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "target id with long-s accepts (Go RE2 (?i) does not fold U+017F, manifest=agent)",
+    "request": {
+      "desired": {
+        "schedule": { "cron": "@daily" },
+        "targets": [{ "id": "s3://x/ſecret=y" }],
+        "retention": { "count": 7, "maxAgeDays": 30 },
+        "recoveryKeyRef": { "id": "rk:owner", "handle": "rk:handle" }
+      }
+    },
+    "expect": "accept"
+  }
+]

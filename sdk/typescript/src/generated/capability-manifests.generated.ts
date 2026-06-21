@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/backup.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -74,6 +74,107 @@ export const ACCOUNTS_MANIFEST = Object.freeze({
           uniqueBy: Object.freeze([
             "name",
             "uid",
+          ]),
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
+
+export const BACKUP_MANIFEST = Object.freeze({
+  capability: "backup.policy",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        recoveryKeyRef: Object.freeze({
+          fields: Object.freeze({
+            handle: Object.freeze({
+              format: "backupRef",
+              required: true,
+              type: "string",
+            }),
+            id: Object.freeze({
+              format: "backupRef",
+              required: true,
+              type: "string",
+            }),
+            keyStoreRef: Object.freeze({
+              format: "backupRef",
+              required: false,
+              type: "string",
+              nullAsAbsent: true,
+            }),
+          }),
+          required: true,
+          type: "object",
+        }),
+        retention: Object.freeze({
+          fields: Object.freeze({
+            count: Object.freeze({
+              required: true,
+              type: "integer",
+              maximum: 1000,
+              minimum: 1,
+            }),
+            maxAgeDays: Object.freeze({
+              required: true,
+              type: "integer",
+              maximum: 3650,
+              minimum: 1,
+            }),
+          }),
+          required: true,
+          type: "object",
+        }),
+        schedule: Object.freeze({
+          fields: Object.freeze({
+            cron: Object.freeze({
+              format: "cron5OrMacro",
+              required: false,
+              type: "string",
+              nullAsAbsent: true,
+            }),
+            intervalSeconds: Object.freeze({
+              required: false,
+              type: "integer",
+              maximum: 31536000,
+              minimum: 1,
+              nullAsAbsent: true,
+            }),
+          }),
+          crossFieldRules: Object.freeze([
+            Object.freeze({
+              fields: Object.freeze([
+                "cron",
+                "intervalSeconds",
+              ]),
+              type: "exactlyOneOf",
+            }),
+          ]),
+          required: true,
+          type: "object",
+        }),
+        targets: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              id: Object.freeze({
+                format: "backupRef",
+                required: true,
+                type: "string",
+              }),
+            }),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+          minItems: 1,
+          uniqueBy: Object.freeze([
+            "id",
           ]),
         }),
       }),
@@ -432,6 +533,7 @@ export const UPDATE_MANIFEST = Object.freeze({
 
 export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "accounts.config": ACCOUNTS_MANIFEST,
+  "backup.policy": BACKUP_MANIFEST,
   "capsule.registry": CAPSULE_MANIFEST,
   "hostname.set": HOSTNAME_MANIFEST,
   "identity.attestation": IDENTITY_MANIFEST,

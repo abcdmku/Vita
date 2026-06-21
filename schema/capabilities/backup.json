@@ -1,0 +1,95 @@
+{
+  "capability": "backup.policy",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "schedule": {
+          "required": true,
+          "type": "object",
+          "fields": {
+            "cron": {
+              "format": "cron5OrMacro",
+              "nullAsAbsent": true,
+              "required": false,
+              "type": "string"
+            },
+            "intervalSeconds": {
+              "maximum": 31536000,
+              "minimum": 1,
+              "nullAsAbsent": true,
+              "required": false,
+              "type": "integer"
+            }
+          },
+          "crossFieldRules": [
+            {
+              "type": "exactlyOneOf",
+              "fields": ["cron", "intervalSeconds"]
+            }
+          ]
+        },
+        "targets": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "id": {
+                "format": "backupRef",
+                "required": true,
+                "type": "string"
+              }
+            }
+          },
+          "minItems": 1,
+          "required": true,
+          "type": "array",
+          "uniqueBy": ["id"]
+        },
+        "retention": {
+          "required": true,
+          "type": "object",
+          "fields": {
+            "count": {
+              "maximum": 1000,
+              "minimum": 1,
+              "required": true,
+              "type": "integer"
+            },
+            "maxAgeDays": {
+              "maximum": 3650,
+              "minimum": 1,
+              "required": true,
+              "type": "integer"
+            }
+          }
+        },
+        "recoveryKeyRef": {
+          "required": true,
+          "type": "object",
+          "fields": {
+            "id": {
+              "format": "backupRef",
+              "required": true,
+              "type": "string"
+            },
+            "handle": {
+              "format": "backupRef",
+              "required": true,
+              "type": "string"
+            },
+            "keyStoreRef": {
+              "format": "backupRef",
+              "nullAsAbsent": true,
+              "required": false,
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

@@ -347,6 +347,88 @@ test("valid network.policy request evaluates to one canonical operation", () => 
   });
 });
 
+test("valid backup.policy request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "backup.policy": {
+        desired: {
+          schedule: {
+            cron: "0 3 * * *",
+          },
+          targets: [{ id: "rk:primary" }],
+          retention: {
+            count: 7,
+            maxAgeDays: 30,
+          },
+          recoveryKeyRef: {
+            id: "rk:owner",
+            handle: "keystore://vault/owner",
+          },
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "backup.policy",
+        request: {
+          desired: {
+            schedule: {
+              cron: "0 3 * * *",
+            },
+            targets: [{ id: "rk:primary" }],
+            retention: {
+              count: 7,
+              maxAgeDays: 30,
+            },
+            recoveryKeyRef: {
+              id: "rk:owner",
+              handle: "keystore://vault/owner",
+            },
+          },
+        },
+      },
+    ],
+  });
+});
+
+test("backup.policy request with both schedule modes rejects", () => {
+  const result = evaluateNodeConfig(
+    {
+      "backup.policy": {
+        desired: {
+          schedule: {
+            cron: "0 3 * * *",
+            intervalSeconds: 3600,
+          },
+          targets: [{ id: "rk:primary" }],
+          retention: {
+            count: 7,
+            maxAgeDays: 30,
+          },
+          recoveryKeyRef: {
+            id: "rk:owner",
+            handle: "rk:handle",
+          },
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), [
+    "backup.policy/desired/schedule",
+  ]);
+});
+
 test("wide open network.policy request rejects without unsafeWideOpen", () => {
   const result = evaluateNodeConfig(
     {
