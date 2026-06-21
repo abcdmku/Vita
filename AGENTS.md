@@ -84,6 +84,18 @@ conventions you must follow are below.
   zero value" — so `"quotaGiB":0` or `"allow":[]`-as-absent slip through as if unset. Use a POINTER
   (`*int64`, `*[]T`) or an explicit presence check: nil ⇒ honor the optional default; present ⇒ validate
   (reject `0`/negative/empty as required). (Recurred: P7-001 `allow`, P1-018 `quotaGiB`.)
+- **Capability manifests (ADR 0007) must match the agent validator EXACTLY — neither stricter NOR looser.**
+  A manifest (`schema/capabilities/*.json`) + its conformance corpus must mirror the cap's real Go
+  validator (the manifest models the FULL `{"desired":{…}}` request the agent decodes; the conformance test
+  runs vectors through BOTH the manifest validator AND `transport.DecodeJSONRequest[<cap>.ApplyRequest]` +
+  `Validate()`, asserting agreement). DERIVE every rule from the agent validator — do NOT add "reasonable"
+  extra checks the agent lacks: a `noInlineSecrets`, a `maxLength`/length cap, a printable-ASCII restriction,
+  or a tighter charset/format that the agent does NOT enforce makes the manifest STRICTER ⇒ it rejects input
+  the agent accepts ⇒ `manifest≢agent` ⇒ preview≠apply. (Recurred: P9-012 `absolutePath` added 4096/ASCII
+  bounds the storage validator lacks; P9-011 added `noInlineSecrets` to timesync `servers` the agent lacks.)
+  The conformance corpus encodes the AGENT's accept/reject, never a guess — and NEVER delete a vector that
+  would expose a disagreement. If you think the agent SHOULD be stricter (a real §13.1/security gap), HARDEN
+  THE AGENT first in a deliberate change, then the manifest follows — don't silently diverge.
 - **Go `encoding/json` accepts DUPLICATE object keys (last-wins) — a TCB-parser hazard.** A request like
   `{"id":"-----BEGIN PRIVATE KEY-----","id":"rk:owner"}` validates on the clean last value while smuggling
   the bad first value into the RAW bytes. If a capability persists/returns raw input, that leaks (§13.1)
