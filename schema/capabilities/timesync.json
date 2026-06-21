@@ -1,37 +1,40 @@
 {
   "capability": "time.sync",
   "version": 1,
-  "defaultRegistry": false,
   "fields": {
-    "enabled": {
+    "desired": {
       "required": true,
-      "type": "boolean"
-    },
-    "servers": {
-      "items": {
-        "format": "hostnameRFC1123",
-        "lowercase": true,
-        "maxLength": 253,
-        "noInlineSecrets": true,
-        "required": true,
-        "type": "string"
+      "type": "object",
+      "fields": {
+        "enabled": {
+          "required": true,
+          "type": "boolean"
+        },
+        "servers": {
+          "items": {
+            "format": "hostnameOrIp",
+            "required": true,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "required": true,
+          "type": "array",
+          "uniqueItems": true
+        }
       },
-      "maxItems": 8,
-      "required": true,
-      "type": "array",
-      "uniqueItems": true
+      "crossFieldRules": [
+        {
+          "control": "enabled",
+          "target": "servers",
+          "type": "requireNonEmptyArrayWhenTrue"
+        },
+        {
+          "control": "enabled",
+          "target": "servers",
+          "type": "requireEmptyArrayWhenFalse"
+        }
+      ]
     }
   },
-  "crossFieldRules": [
-    {
-      "control": "enabled",
-      "target": "servers",
-      "type": "requireNonEmptyArrayWhenTrue"
-    },
-    {
-      "control": "enabled",
-      "target": "servers",
-      "type": "requireEmptyArrayWhenFalse"
-    }
-  ]
+  "crossFieldRules": []
 }

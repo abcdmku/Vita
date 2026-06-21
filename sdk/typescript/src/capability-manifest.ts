@@ -67,6 +67,7 @@ export interface ObjectFieldSchema {
   readonly type: "object";
   readonly required: boolean;
   readonly fields: Readonly<Record<string, FieldSchema>>;
+  readonly crossFieldRules?: readonly CrossFieldRule[];
 }
 
 export type FieldSchema =
@@ -222,6 +223,7 @@ interface CompiledObjectFieldSchema {
   required: boolean;
   fields: ReadonlyMap<string, CompiledFieldSchema>;
   fieldNames: readonly string[];
+  crossFieldRules: readonly CrossFieldRule[];
 }
 
 type FieldValidationResult =
@@ -260,7 +262,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "type",
   "uniqueItems",
 ]);
-const OBJECT_SCHEMA_FIELDS = new Set(["fields", "required", "type"]);
+const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
 const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
 const DATA_URL_PATTERN = /data:/iu;
 const PEM_BLOCK_PATTERN = /-----BEGIN/iu;
@@ -816,22 +818,42 @@ function parseObjectFieldSchema(
     fieldsValue === undefined
       ? undefined
       : parseManifestFields(fieldsValue, [...path, "fields"], errors);
+  const crossFieldRulesValue = hasOwn(value, "crossFieldRules") ? value.crossFieldRules : undefined;
+  const crossFieldRules =
+    crossFieldRulesValue === undefined
+      ? Object.freeze([])
+      : parseCrossFieldRules(
+          crossFieldRulesValue,
+          [...path, "crossFieldRules"],
+          fields?.compiled,
+          errors,
+        );
 
-  if (errors.length > errorStart || fields === undefined) {
+  if (errors.length > errorStart || fields === undefined || crossFieldRules === undefined) {
     return undefined;
   }
 
   const compiled: CompiledObjectFieldSchema = {
+    crossFieldRules,
     fieldNames: fields.fieldNames,
     fields: fields.compiled,
     required,
     type: "object",
   };
-  const manifest = Object.freeze({
-    fields: fields.manifest,
-    required,
-    type: "object",
-  } satisfies ObjectFieldSchema);
+  const manifest = Object.freeze(
+    crossFieldRulesValue === undefined
+      ? {
+          fields: fields.manifest,
+          required,
+          type: "object",
+        }
+      : {
+          crossFieldRules,
+          fields: fields.manifest,
+          required,
+          type: "object",
+        },
+  ) satisfies ObjectFieldSchema;
 
   return {
     compiled,
@@ -980,7 +1002,7 @@ function validateInput(value: PlainJson, manifest: CompiledManifest):
     return reject(errors);
   }
 
-  applyCrossFieldRules(output, manifest.crossFieldRules, errors);
+  applyCrossFieldRules(output, manifest.crossFieldRules, [], errors);
 
   if (errors.length > 0) {
     return reject(errors);
@@ -1228,6 +1250,12 @@ function validateObjectField(
     return { ok: false };
   }
 
+  applyCrossFieldRules(output, schema.crossFieldRules, path, errors);
+
+  if (errors.length > errorStart) {
+    return { ok: false };
+  }
+
   return {
     ok: true,
     value: Object.freeze(output),
@@ -1237,6 +1265,7 @@ function validateObjectField(
 function applyCrossFieldRules(
   value: CapabilityRecord,
   rules: readonly CrossFieldRule[],
+  path: Path,
   errors: CapabilityRejection[],
 ): void {
   for (let index = 0; index < rules.length; index += 1) {
@@ -1247,7 +1276,7 @@ function applyCrossFieldRules(
     }
 
     if (!hasOwn(value, rule.control) || !hasOwn(value, rule.target)) {
-      addError(errors, [rule.target], "Cross-field rule references invalid fields.");
+      addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
       continue;
     }
 
@@ -1255,19 +1284,27 @@ function applyCrossFieldRules(
     const target = value[rule.target];
 
     if (typeof control !== "boolean" || !Array.isArray(target)) {
-      addError(errors, [rule.target], "Cross-field rule references invalid fields.");
+      addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
       continue;
     }
 
     switch (rule.type) {
       case "requireNonEmptyArrayWhenTrue":
         if (control && target.length === 0) {
-          addError(errors, [rule.target], `${rule.target} must be non-empty when ${rule.control} is true.`);
+          addError(
+            errors,
+            [...path, rule.target],
+            `${rule.target} must be non-empty when ${rule.control} is true.`,
+          );
         }
         break;
       case "requireEmptyArrayWhenFalse":
         if (!control && target.length !== 0) {
-          addError(errors, [rule.target], `${rule.target} must be empty when ${rule.control} is false.`);
+          addError(
+            errors,
+            [...path, rule.target],
+            `${rule.target} must be empty when ${rule.control} is false.`,
+          );
         }
         break;
     }
@@ -1584,7 +1621,7 @@ function normalizeStringFormat(value: string, format: StringFieldFormat): string
         return ip;
       }
 
-      return isHostnameRFC1123(value) ? value : undefined;
+      return isAgentHostname(value) ? asciiLowercase(value) : undefined;
     }
     case "posixUsername":
     case "groupName":
@@ -2193,6 +2230,74 @@ function repeatNumber(value: number, count: number): readonly number[] {
 function containsChar(value: string, code: number): boolean {
   for (let index = 0; index < value.length; index += 1) {
     if (value.charCodeAt(index) === code) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isAgentHostname(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 253 ||
+    value !== value.trim() ||
+    value.endsWith(".") ||
+    containsConsecutiveDots(value) ||
+    containsAnyChar(value, ":/?#[]@") ||
+    containsControlCharacter(value)
+  ) {
+    return false;
+  }
+
+  const labels = value.split(".");
+
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+
+    if (label === undefined || !isAgentHostnameLabel(label)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isAgentHostnameLabel(value: string): boolean {
+  if (value.length === 0 || value.length > 63) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (index === 0 || index === value.length - 1) {
+      if (!isAsciiAlphaNumericCode(code)) {
+        return false;
+      }
+    } else if (!isAsciiAlphaNumericCode(code) && code !== 45) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function containsAnyChar(value: string, chars: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (chars.includes(value.charAt(index))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (code <= 31 || code === 127) {
       return true;
     }
   }

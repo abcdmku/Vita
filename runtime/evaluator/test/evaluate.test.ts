@@ -73,6 +73,38 @@ test("valid hostname config evaluates to one canonical operation", () => {
   });
 });
 
+test("valid time.sync request evaluates to one canonical operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "time.sync": {
+        desired: {
+          enabled: true,
+          servers: ["Pool.NTP.Org", "2001:0db8::1"],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "time.sync",
+        request: {
+          desired: {
+            enabled: true,
+            servers: ["pool.ntp.org", "2001:db8::1"],
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {

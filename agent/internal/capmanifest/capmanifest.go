@@ -43,6 +43,7 @@ type FieldSchema struct {
 	MaxItems        *int64
 	UniqueItems     bool
 	Fields          map[string]FieldSchema
+	CrossFieldRules []CrossFieldRule
 }
 
 type CrossFieldRule struct {
@@ -77,6 +78,7 @@ type compiledField struct {
 	uniqueItems     bool
 	fields          map[string]compiledField
 	fieldNames      []string
+	crossFieldRules []CrossFieldRule
 }
 
 type capabilityValue interface{}
@@ -119,9 +121,10 @@ var (
 		"uniqueItems": {},
 	}
 	objectSchemaFields = map[string]struct{}{
-		"fields":   {},
-		"required": {},
-		"type":     {},
+		"crossFieldRules": {},
+		"fields":          {},
+		"required":        {},
+		"type":            {},
 	}
 	crossFieldRuleFields = map[string]struct{}{
 		"control": {},
@@ -192,7 +195,7 @@ func Validate(manifest Manifest, requestJSON []byte) (err error) {
 		output[name] = normalized
 	}
 
-	return applyCrossFieldRules(output, compiled.crossFieldRules)
+	return applyCrossFieldRules(output, compiled.crossFieldRules, "")
 }
 
 func parseManifest(value jsonValue) (Manifest, error) {
@@ -454,10 +457,23 @@ func parseObjectFieldSchema(object jsonObject, required bool, path string) (Fiel
 		return FieldSchema{}, err
 	}
 
+	var rules []CrossFieldRule
+	if rulesValue, ok := object["crossFieldRules"]; ok {
+		rulesArray, ok := rulesValue.(jsonArray)
+		if !ok {
+			return FieldSchema{}, pathError(joinPath(path, "crossFieldRules"), "expected cross-field rules array")
+		}
+		rules, err = parseCrossFieldRules(rulesArray, fields, joinPath(path, "crossFieldRules"))
+		if err != nil {
+			return FieldSchema{}, err
+		}
+	}
+
 	return FieldSchema{
-		Type:     "object",
-		Required: required,
-		Fields:   fields,
+		Type:            "object",
+		Required:        required,
+		Fields:          fields,
+		CrossFieldRules: rules,
 	}, nil
 }
 
@@ -589,7 +605,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -616,7 +632,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -638,7 +654,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -649,7 +665,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -711,11 +727,27 @@ func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen ma
 		fields[name] = compiled
 	}
 
+	for index, rule := range field.CrossFieldRules {
+		rulePath := joinPath(joinPath(path, "crossFieldRules"), strconv.Itoa(index))
+		if rule.Type != "requireNonEmptyArrayWhenTrue" && rule.Type != "requireEmptyArrayWhenFalse" {
+			return compiledField{}, pathError(joinPath(rulePath, "type"), "unknown cross-field rule type")
+		}
+		controlField, ok := fields[rule.Control]
+		if !ok || controlField.fieldType != "boolean" {
+			return compiledField{}, pathError(joinPath(rulePath, "control"), "control field must reference a boolean field")
+		}
+		targetField, ok := fields[rule.Target]
+		if !ok || targetField.fieldType != "array" {
+			return compiledField{}, pathError(joinPath(rulePath, "target"), "target field must reference an array field")
+		}
+	}
+
 	return compiledField{
-		fieldType:  "object",
-		required:   field.Required,
-		fieldNames: fieldNames,
-		fields:     fields,
+		fieldType:       "object",
+		required:        field.Required,
+		fieldNames:      fieldNames,
+		fields:          fields,
+		crossFieldRules: append([]CrossFieldRule(nil), field.CrossFieldRules...),
 	}, nil
 }
 
@@ -860,36 +892,40 @@ func validateObjectField(value jsonValue, field compiledField, path string) (cap
 		}
 		output[name] = normalized
 	}
+	if err := applyCrossFieldRules(output, field.crossFieldRules, path); err != nil {
+		return nil, err
+	}
 	return output, nil
 }
 
-func applyCrossFieldRules(value map[string]capabilityValue, rules []CrossFieldRule) error {
+func applyCrossFieldRules(value map[string]capabilityValue, rules []CrossFieldRule, path string) error {
 	for _, rule := range rules {
 		controlValue, hasControl := value[rule.Control]
 		targetValue, hasTarget := value[rule.Target]
+		targetPath := joinPath(path, rule.Target)
 		if !hasControl || !hasTarget {
-			return pathError(rule.Target, "cross-field rule references invalid fields")
+			return pathError(targetPath, "cross-field rule references invalid fields")
 		}
 		control, ok := controlValue.(bool)
 		if !ok {
-			return pathError(rule.Target, "cross-field rule references invalid fields")
+			return pathError(targetPath, "cross-field rule references invalid fields")
 		}
 		target, ok := targetValue.(capabilityArray)
 		if !ok {
-			return pathError(rule.Target, "cross-field rule references invalid fields")
+			return pathError(targetPath, "cross-field rule references invalid fields")
 		}
 
 		switch rule.Type {
 		case "requireNonEmptyArrayWhenTrue":
 			if control && len(target) == 0 {
-				return pathError(rule.Target, fmt.Sprintf("%s must be non-empty when %s is true", rule.Target, rule.Control))
+				return pathError(targetPath, fmt.Sprintf("%s must be non-empty when %s is true", rule.Target, rule.Control))
 			}
 		case "requireEmptyArrayWhenFalse":
 			if !control && len(target) != 0 {
-				return pathError(rule.Target, fmt.Sprintf("%s must be empty when %s is false", rule.Target, rule.Control))
+				return pathError(targetPath, fmt.Sprintf("%s must be empty when %s is false", rule.Target, rule.Control))
 			}
 		default:
-			return pathError(rule.Target, "unknown cross-field rule type")
+			return pathError(targetPath, "unknown cross-field rule type")
 		}
 	}
 	return nil
@@ -1169,8 +1205,8 @@ func normalizeStringFormat(value string, format string) (string, bool) {
 		if ip, ok := canonicalizeIPLiteral(value); ok {
 			return ip, true
 		}
-		if isHostnameRFC1123(value) {
-			return value, true
+		if isAgentHostname(value) {
+			return strings.ToLower(value), true
 		}
 		return "", false
 	case "posixUsername", "groupName":
@@ -1460,6 +1496,53 @@ func canonicalizeIPLiteral(value string) (string, bool) {
 	}
 
 	return addr.String(), true
+}
+
+func isAgentHostname(value string) bool {
+	if value == "" ||
+		len(value) > 253 ||
+		value != strings.TrimSpace(value) ||
+		strings.HasSuffix(value, ".") ||
+		strings.Contains(value, "..") ||
+		strings.ContainsAny(value, ":/?#[]@") ||
+		containsControlCharacter(value) {
+		return false
+	}
+
+	labels := strings.Split(value, ".")
+	for _, label := range labels {
+		if !isAgentHostnameLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAgentHostnameLabel(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if index == 0 || index == len(value)-1 {
+			if !isASCIIAlphaNumeric(char) {
+				return false
+			}
+		} else if !isASCIIAlphaNumeric(char) && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func containsControlCharacter(value string) bool {
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char <= 0x1f || char == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func isHostnameRFC1123(value string) bool {

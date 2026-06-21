@@ -30,34 +30,46 @@
     "hostnameOrIp": { "expect": "accept", "canonical": "1.2.3.4" }
   },
   {
-    "name": "ipv4 leading zero first octet rejects",
+    "name": "ipv4 leading zero first octet falls back to hostname",
     "value": "01.2.3.4",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "reject" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "01.2.3.4" }
   },
   {
-    "name": "ipv4 leading zero middle octet rejects",
+    "name": "ipv4 leading zero middle octet falls back to hostname",
     "value": "1.02.3.4",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "reject" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "1.02.3.4" }
   },
   {
-    "name": "ipv4 leading zero last octet rejects",
+    "name": "ipv4 leading zero last octet falls back to hostname",
     "value": "1.2.3.004",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "reject" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "1.2.3.004" }
   },
   {
-    "name": "ipv4 octet above range rejects",
+    "name": "ipv4 octet above range falls back to hostname",
     "value": "256.0.0.1",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "reject" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "256.0.0.1" }
   },
   {
-    "name": "ipv4 numeric dotted quad with bad last octet rejects",
+    "name": "ipv4 first octet above range falls back to hostname",
+    "value": "256.1.1.1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "256.1.1.1" }
+  },
+  {
+    "name": "ipv4 numeric dotted quad with bad last octet falls back to hostname",
     "value": "1.2.3.999",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "reject" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "1.2.3.999" }
+  },
+  {
+    "name": "ipv4 all octets above range falls back to hostname",
+    "value": "999.999.999.999",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "999.999.999.999" }
   },
   {
     "name": "ipv4 empty octet rejects",
@@ -354,10 +366,10 @@
     "hostnameOrIp": { "expect": "accept", "canonical": "pool.ntp.org" }
   },
   {
-    "name": "hostname branch uppercase accepts without lowercase option",
+    "name": "hostname branch uppercase lowercases",
     "value": "Example.COM",
     "ipLiteral": { "expect": "reject" },
-    "hostnameOrIp": { "expect": "accept", "canonical": "Example.COM" }
+    "hostnameOrIp": { "expect": "accept", "canonical": "example.com" }
   },
   {
     "name": "hostname branch single label accepts",

@@ -3,11 +3,16 @@ package capmanifest
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/timesync"
+	"github.com/vita/agent/transport"
 )
 
 type timesyncConformanceVector struct {
@@ -33,22 +38,13 @@ func TestTimesyncConformanceCorpus(t *testing.T) {
 		vector := vector
 		t.Run(vector.Name, func(t *testing.T) {
 			request := conformanceRequestBytes(t, vector.Request)
-			err := Validate(manifest, request)
+			manifestErr := Validate(manifest, request)
+			agentErr := validateTimesyncAgentRequest(request)
 
-			switch vector.Expect {
-			case "accept":
-				if err != nil {
-					t.Fatalf("Validate returned error, want accept: %v", err)
-				}
-			case "reject":
-				if err == nil {
-					t.Fatal("Validate returned nil error, want rejection")
-				}
-				if vector.RejectCode != "" && !strings.Contains(err.Error(), vector.RejectCode) {
-					t.Fatalf("Validate rejection = %q, want code/path %q", err.Error(), vector.RejectCode)
-				}
-			default:
-				t.Fatalf("expect = %q, want accept or reject", vector.Expect)
+			assertTimesyncExpectedDecision(t, vector, "manifest", manifestErr)
+			assertTimesyncExpectedDecision(t, vector, "agent", agentErr)
+			if (manifestErr == nil) != (agentErr == nil) {
+				t.Fatalf("manifest/agent disagreement: manifest err=%v, agent err=%v", manifestErr, agentErr)
 			}
 		})
 	}
@@ -76,6 +72,41 @@ func loadTimesyncConformanceCorpus(t *testing.T) []timesyncConformanceVector {
 	}
 
 	return vectors
+}
+
+func assertTimesyncExpectedDecision(t *testing.T, vector timesyncConformanceVector, validator string, err error) {
+	t.Helper()
+
+	switch vector.Expect {
+	case "accept":
+		if err != nil {
+			t.Fatalf("%s returned error, want accept: %v", validator, err)
+		}
+	case "reject":
+		if err == nil {
+			t.Fatalf("%s returned nil error, want rejection", validator)
+		}
+		if validator == "manifest" && vector.RejectCode != "" && !strings.Contains(err.Error(), vector.RejectCode) {
+			t.Fatalf("%s rejection = %q, want code/path %q", validator, err.Error(), vector.RejectCode)
+		}
+	default:
+		t.Fatalf("expect = %q, want accept or reject", vector.Expect)
+	}
+}
+
+func validateTimesyncAgentRequest(raw []byte) error {
+	request, err := transport.DecodeJSONRequest[timesync.ApplyRequest](json.RawMessage(raw))
+	if err != nil {
+		return err
+	}
+	validator, ok := request.(interface {
+		capabilities.TypedRequest
+		Validate() error
+	})
+	if !ok {
+		return fmt.Errorf("timesync request %T cannot be validated", request)
+	}
+	return validator.Validate()
 }
 
 func conformanceRequestBytes(t *testing.T, request json.RawMessage) []byte {

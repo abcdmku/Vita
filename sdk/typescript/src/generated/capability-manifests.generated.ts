@@ -49,43 +49,47 @@ export const NODE_CONFIG_MANIFEST = Object.freeze({
 export const TIMESYNC_MANIFEST = Object.freeze({
   capability: "time.sync",
   version: 1,
-  defaultRegistry: false,
   fields: Object.freeze({
-    enabled: Object.freeze({
-      required: true,
-      type: "boolean",
-    }),
-    servers: Object.freeze({
-      items: Object.freeze({
-        format: "hostnameRFC1123",
-        lowercase: true,
-        maxLength: 253,
-        noInlineSecrets: true,
-        required: true,
-        type: "string",
+    desired: Object.freeze({
+      fields: Object.freeze({
+        enabled: Object.freeze({
+          required: true,
+          type: "boolean",
+        }),
+        servers: Object.freeze({
+          items: Object.freeze({
+            format: "hostnameOrIp",
+            required: true,
+            type: "string",
+          }),
+          required: true,
+          type: "array",
+          maxItems: 8,
+          uniqueItems: true,
+        }),
       }),
+      crossFieldRules: Object.freeze([
+        Object.freeze({
+          type: "requireNonEmptyArrayWhenTrue",
+          control: "enabled",
+          target: "servers",
+        }),
+        Object.freeze({
+          type: "requireEmptyArrayWhenFalse",
+          control: "enabled",
+          target: "servers",
+        }),
+      ]),
       required: true,
-      type: "array",
-      maxItems: 8,
-      uniqueItems: true,
+      type: "object",
     }),
   }),
-  crossFieldRules: Object.freeze([
-    Object.freeze({
-      type: "requireNonEmptyArrayWhenTrue",
-      control: "enabled",
-      target: "servers",
-    }),
-    Object.freeze({
-      type: "requireEmptyArrayWhenFalse",
-      control: "enabled",
-      target: "servers",
-    }),
-  ]),
+  crossFieldRules: Object.freeze([]),
 }) satisfies CapabilityManifest;
 
 export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "hostname.set": HOSTNAME_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
+  "time.sync": TIMESYNC_MANIFEST,
 }) satisfies Readonly<Record<string, CapabilityManifest>>;
 

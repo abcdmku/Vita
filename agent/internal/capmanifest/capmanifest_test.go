@@ -12,18 +12,24 @@ func TestLoadManifestAcceptsTimesyncJSON(t *testing.T) {
 	if manifest.Capability != "time.sync" {
 		t.Fatalf("Capability = %q, want time.sync", manifest.Capability)
 	}
-	servers := manifest.Fields["servers"]
+	desired := manifest.Fields["desired"]
+	if desired.Type != "object" || desired.Fields == nil {
+		t.Fatalf("desired field = %#v, want object with fields", desired)
+	}
+	if len(desired.CrossFieldRules) != 2 {
+		t.Fatalf("desired cross-field rules = %#v, want two rules", desired.CrossFieldRules)
+	}
+	servers := desired.Fields["servers"]
 	if servers.Type != "array" || servers.Items == nil {
 		t.Fatalf("servers field = %#v, want array with items", servers)
 	}
 	items := servers.Items
 	if items.Type != "string" ||
-		items.Format != "hostnameRFC1123" ||
-		items.MaxLength == nil ||
-		*items.MaxLength != 253 ||
-		!items.Lowercase ||
-		!items.NoInlineSecrets {
-		t.Fatalf("servers item schema = %#v, want named hostname format", items)
+		items.Format != "hostnameOrIp" ||
+		items.MaxLength != nil ||
+		items.Lowercase ||
+		items.NoInlineSecrets {
+		t.Fatalf("servers item schema = %#v, want hostnameOrIp format without extra string constraints", items)
 	}
 }
 
@@ -111,15 +117,28 @@ func TestValidateTimesyncCorpus(t *testing.T) {
 		{
 			name: "enabled hostnames",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"pool.ntp.org", "time.cloudflare.com"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"pool.ntp.org", "time.cloudflare.com"},
+				},
+			}),
+		},
+		{
+			name: "enabled IPs",
+			raw: requestJSON(t, map[string]any{
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"10.0.0.1", "::1", "1.2.3.999"},
+				},
 			}),
 		},
 		{
 			name: "disabled empty",
 			raw: requestJSON(t, map[string]any{
-				"enabled": false,
-				"servers": []string{},
+				"desired": map[string]any{
+					"enabled": false,
+					"servers": []string{},
+				},
 			}),
 		},
 	}
@@ -139,101 +158,118 @@ func TestValidateTimesyncCorpus(t *testing.T) {
 		{
 			name: "enabled empty",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{},
+				},
 			}),
 		},
 		{
 			name: "disabled non-empty",
 			raw: requestJSON(t, map[string]any{
-				"enabled": false,
-				"servers": []string{"pool.ntp.org"},
+				"desired": map[string]any{
+					"enabled": false,
+					"servers": []string{"pool.ntp.org"},
+				},
 			}),
 		},
 		{
 			name: "bad hostname",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"bad_host"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"bad_host"},
+				},
 			}),
 		},
 		{
 			name: "too long hostname",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{tooLongHostname},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{tooLongHostname},
+				},
 			}),
 		},
 		{
-			name: "IPv4 form",
+			name: "malformed IPv6 literal",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"10.0.0.1"},
-			}),
-		},
-		{
-			name: "IPv6 literal",
-			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"::1"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"2001:db8::g"},
+				},
 			}),
 		},
 		{
 			name: "case-insensitive duplicate",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"A.ORG", "a.org"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"A.ORG", "a.org"},
+				},
 			}),
 		},
 		{
 			name: "absent enabled",
 			raw: requestJSON(t, map[string]any{
-				"servers": []string{},
+				"desired": map[string]any{
+					"servers": []string{},
+				},
 			}),
 		},
 		{
 			name: "unknown key",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"extra":   true,
-				"servers": []string{"pool.ntp.org"},
+				"desired": map[string]any{
+					"enabled": true,
+					"extra":   true,
+					"servers": []string{"pool.ntp.org"},
+				},
 			}),
 		},
 		{
 			name: "duplicate JSON key",
-			raw:  []byte(`{"enabled":true,"enabled":false,"servers":[]}`),
+			raw:  []byte(`{"desired":{"enabled":true,"enabled":false,"servers":[]}}`),
 		},
 		{
-			name: "inline secret",
+			name: "inline key marker",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"pool." + strings.Repeat("A", 48) + ".org"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"-----BEGIN PRIVATE KEY-----"},
+				},
 			}),
 		},
 		{
 			name: "trailing newline",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"host\n"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"host\n"},
+				},
 			}),
 		},
 		{
 			name: "Kelvin sign case-folding bypass",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"K.example"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"K.example"},
+				},
 			}),
 		},
 		{
 			name: "dotted I case-folding bypass",
 			raw: requestJSON(t, map[string]any{
-				"enabled": true,
-				"servers": []string{"İ.example"},
+				"desired": map[string]any{
+					"enabled": true,
+					"servers": []string{"İ.example"},
+				},
 			}),
 		},
 		{
 			name: "truncated",
-			raw:  []byte(`{"enabled":true,"servers":`),
+			raw:  []byte(`{"desired":{"enabled":true,"servers":`),
 		},
 	}
 	for _, tt := range rejectCases {
@@ -356,35 +392,39 @@ const timesyncManifestJSON = `{
   "capability": "time.sync",
   "version": 1,
   "fields": {
-    "enabled": {
+    "desired": {
       "required": true,
-      "type": "boolean"
-    },
-    "servers": {
-      "items": {
-        "format": "hostnameRFC1123",
-        "lowercase": true,
-        "maxLength": 253,
-        "noInlineSecrets": true,
-        "required": true,
-        "type": "string"
+      "type": "object",
+      "fields": {
+        "enabled": {
+          "required": true,
+          "type": "boolean"
+        },
+        "servers": {
+          "items": {
+            "format": "hostnameOrIp",
+            "required": true,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "required": true,
+          "type": "array",
+          "uniqueItems": true
+        }
       },
-      "maxItems": 8,
-      "required": true,
-      "type": "array",
-      "uniqueItems": true
+      "crossFieldRules": [
+        {
+          "control": "enabled",
+          "target": "servers",
+          "type": "requireNonEmptyArrayWhenTrue"
+        },
+        {
+          "control": "enabled",
+          "target": "servers",
+          "type": "requireEmptyArrayWhenFalse"
+        }
+      ]
     }
   },
-  "crossFieldRules": [
-    {
-      "control": "enabled",
-      "target": "servers",
-      "type": "requireNonEmptyArrayWhenTrue"
-    },
-    {
-      "control": "enabled",
-      "target": "servers",
-      "type": "requireEmptyArrayWhenFalse"
-    }
-  ]
+  "crossFieldRules": []
 }`

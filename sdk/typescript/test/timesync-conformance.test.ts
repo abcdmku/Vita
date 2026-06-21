@@ -9,6 +9,7 @@ import {
   compileCapabilityValidator,
 } from "../src/capability-manifest.ts";
 import type { CapabilityValidationResult } from "../src/capability-manifest.ts";
+import { parseConformanceRequest } from "./conformance-request.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const CORPUS_PATH = resolve(
@@ -41,7 +42,16 @@ test("timesync conformance corpus matches the TS validator", () => {
       assert.fail("expected conformance vector");
     }
 
-    const result = validateTimesync(vector.request);
+    const parsed = parseConformanceRequest(vector.request);
+
+    if (!parsed.ok) {
+      if (vector.expect === "accept") {
+        assert.fail(`${vector.name}: expected accept, raw request rejected: ${parsed.reason}`);
+      }
+      continue;
+    }
+
+    const result = validateTimesync(parsed.value);
 
     if (vector.expect === "accept") {
       if (!result.ok) {

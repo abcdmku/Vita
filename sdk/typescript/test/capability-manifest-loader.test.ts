@@ -22,20 +22,33 @@ test("loads timesync JSON and matches the committed generated export", () => {
   const manifest = loadTimesyncManifest();
 
   assert.deepEqual(manifest, TIMESYNC_MANIFEST);
-  assert.equal(manifest.defaultRegistry, false);
-  assert.equal(Object.isFrozen(TIMESYNC_MANIFEST.fields.enabled), true);
-  assert.equal(Object.isFrozen(TIMESYNC_MANIFEST.fields.servers), true);
+  assert.equal(Object.hasOwn(manifest, "defaultRegistry"), false);
+  assert.equal(Object.isFrozen(TIMESYNC_MANIFEST.fields.desired), true);
 
-  const servers = TIMESYNC_MANIFEST.fields.servers;
+  const desired = TIMESYNC_MANIFEST.fields.desired;
+
+  if (desired === undefined || desired.type !== "object") {
+    assert.fail("expected desired to be an object field");
+  }
+
+  assert.equal(Object.isFrozen(desired.fields.servers), true);
+
+  const servers = desired.fields.servers;
 
   if (servers === undefined || servers.type !== "array") {
-    assert.fail("expected servers to be an array field");
+    assert.fail("expected desired.servers to be an array field");
   }
 
   assert.equal(Object.isFrozen(servers.items), true);
 
-  for (let index = 0; index < TIMESYNC_MANIFEST.crossFieldRules.length; index += 1) {
-    const rule = TIMESYNC_MANIFEST.crossFieldRules[index];
+  const rules = desired.crossFieldRules;
+
+  if (rules === undefined) {
+    assert.fail("expected desired cross-field rules");
+  }
+
+  for (let index = 0; index < rules.length; index += 1) {
+    const rule = rules[index];
 
     if (rule === undefined) {
       assert.fail("expected cross-field rule");
@@ -45,7 +58,7 @@ test("loads timesync JSON and matches the committed generated export", () => {
   }
 });
 
-test("loaded timesync manifest validates the unchanged P9-002 corpus", () => {
+test("loaded timesync manifest validates the migrated full-request corpus", () => {
   const loadedValidator = compileCapabilityValidator(loadTimesyncManifest());
   const generatedValidator = compileCapabilityValidator(TIMESYNC_MANIFEST);
   const cases: readonly {
@@ -57,108 +70,129 @@ test("loaded timesync manifest validates the unchanged P9-002 corpus", () => {
     {
       expectedOk: true,
       input: {
-        enabled: true,
-        servers: ["pool.ntp.org", "time.cloudflare.com"],
+        desired: {
+          enabled: true,
+          servers: ["pool.ntp.org", "time.cloudflare.com"],
+        },
       },
       name: "hostnames accept",
     },
     {
       expectedOk: true,
       input: {
-        enabled: false,
-        servers: [],
+        desired: {
+          enabled: false,
+          servers: [],
+        },
       },
       name: "disabled with absent servers effect",
     },
     {
-      expectedOk: false,
-      expectedPaths: ["servers/0"],
+      expectedOk: true,
       input: {
-        enabled: true,
-        servers: ["10.0.0.1"],
+        desired: {
+          enabled: true,
+          servers: ["10.0.0.1"],
+        },
       },
-      name: "IPv4 literals reject",
+      name: "IPv4 literals accept",
+    },
+    {
+      expectedOk: true,
+      input: {
+        desired: {
+          enabled: true,
+          servers: ["::1"],
+        },
+      },
+      name: "IPv6 literals accept",
     },
     {
       expectedOk: false,
-      expectedPaths: ["servers/0"],
+      expectedPaths: ["desired/servers/0"],
       input: {
-        enabled: true,
-        servers: ["::1"],
-      },
-      name: "IPv6 literals reject",
-    },
-    {
-      expectedOk: false,
-      expectedPaths: ["servers/0"],
-      input: {
-        enabled: true,
-        servers: ["host\n"],
+        desired: {
+          enabled: true,
+          servers: ["host\n"],
+        },
       },
       name: "trailing newline rejects",
     },
     {
       expectedOk: false,
-      expectedPaths: ["servers/0"],
+      expectedPaths: ["desired/servers/0"],
       input: {
-        enabled: true,
+        desired: {
+          enabled: true,
         servers: ["K.example"],
+        },
       },
       name: "Unicode case-folding hostname rejects",
     },
     {
       expectedOk: false,
-      expectedPaths: ["servers"],
+      expectedPaths: ["desired/servers"],
       input: {
-        enabled: true,
-        servers: [],
+        desired: {
+          enabled: true,
+          servers: [],
+        },
       },
       name: "enabled requires non-empty servers",
     },
     {
       expectedOk: false,
-      expectedPaths: ["servers"],
+      expectedPaths: ["desired/servers"],
       input: {
-        enabled: false,
-        servers: ["pool.ntp.org"],
+        desired: {
+          enabled: false,
+          servers: ["pool.ntp.org"],
+        },
       },
       name: "disabled requires empty servers",
     },
     {
       expectedOk: false,
-      expectedPaths: ["servers/1"],
+      expectedPaths: ["desired/servers/1"],
       input: {
-        enabled: true,
-        servers: ["A.ORG", "a.org"],
+        desired: {
+          enabled: true,
+          servers: ["A.ORG", "a.org"],
+        },
       },
       name: "case-insensitive server dedupe",
     },
     {
       expectedOk: false,
-      expectedPaths: ["enabled"],
+      expectedPaths: ["desired/enabled"],
       input: {
-        servers: [],
+        desired: {
+          servers: [],
+        },
       },
       name: "absent enabled rejects",
     },
     {
       expectedOk: false,
-      expectedPaths: ["extra"],
+      expectedPaths: ["desired/extra"],
       input: {
-        enabled: false,
-        extra: true,
-        servers: [],
+        desired: {
+          enabled: false,
+          extra: true,
+          servers: [],
+        },
       },
       name: "unknown input key rejects",
     },
     {
-      expectedOk: false,
-      expectedPaths: ["servers/0"],
+      expectedOk: true,
       input: {
-        enabled: true,
-        servers: [`pool.${"A".repeat(48)}.org`],
+        desired: {
+          enabled: true,
+          servers: [`pool.${"A".repeat(48)}.org`],
+        },
       },
-      name: "inline secret rejects",
+      name: "base64ish hostname accepts",
     },
   ];
 
@@ -180,8 +214,10 @@ test("loaded timesync manifest validates the unchanged P9-002 corpus", () => {
   }
 
   const canonical = loadedValidator({
-    enabled: true,
-    servers: ["A.ORG"],
+    desired: {
+      enabled: true,
+      servers: ["A.ORG"],
+    },
   });
 
   if (!canonical.ok) {
@@ -189,8 +225,10 @@ test("loaded timesync manifest validates the unchanged P9-002 corpus", () => {
   }
 
   assert.deepEqual(canonical.value, {
-    enabled: true,
-    servers: ["a.org"],
+    desired: {
+      enabled: true,
+      servers: ["a.org"],
+    },
   });
 });
 

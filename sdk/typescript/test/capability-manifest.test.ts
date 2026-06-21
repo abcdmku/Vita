@@ -16,8 +16,10 @@ const validateNodeConfig = compileCapabilityValidator(NODE_CONFIG_MANIFEST);
 
 test("TIMESYNC manifest accepts valid enabled hostname config", () => {
   const result = validateTimesync({
-    enabled: true,
-    servers: ["pool.ntp.org", "time.cloudflare.com"],
+    desired: {
+      enabled: true,
+      servers: ["pool.ntp.org", "time.cloudflare.com"],
+    },
   });
 
   if (!result.ok) {
@@ -25,35 +27,59 @@ test("TIMESYNC manifest accepts valid enabled hostname config", () => {
   }
 
   assert.deepEqual(result.value, {
-    enabled: true,
-    servers: ["pool.ntp.org", "time.cloudflare.com"],
+    desired: {
+      enabled: true,
+      servers: ["pool.ntp.org", "time.cloudflare.com"],
+    },
   });
 });
 
 test("TIMESYNC cross-field rules enforce enabled and servers together", () => {
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: true, servers: [] })),
-    ["servers"],
+    rejectedPaths(validateTimesync({ desired: { enabled: true, servers: [] } })),
+    ["desired/servers"],
   );
 
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: false, servers: ["pool.ntp.org"] })),
-    ["servers"],
+    rejectedPaths(validateTimesync({ desired: { enabled: false, servers: ["pool.ntp.org"] } })),
+    ["desired/servers"],
   );
 
-  const disabled = validateTimesync({ enabled: false, servers: [] });
+  const disabled = validateTimesync({ desired: { enabled: false, servers: [] } });
 
   if (!disabled.ok) {
     assert.fail(`expected disabled empty-server config to validate: ${JSON.stringify(disabled.rejections)}`);
   }
 
   assert.deepEqual(disabled.value, {
-    enabled: false,
-    servers: [],
+    desired: {
+      enabled: false,
+      servers: [],
+    },
   });
 });
 
-test("TIMESYNC rejects malformed hostnames and out-of-scope IP literals", () => {
+test("TIMESYNC accepts IP literals and numeric dotted hostnames", () => {
+  const result = validateTimesync({
+    desired: {
+      enabled: true,
+      servers: ["10.0.0.1", "::1", "1.2.3.999", "256.1.1.1"],
+    },
+  });
+
+  if (!result.ok) {
+    assert.fail(`expected IP servers to validate: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.value, {
+    desired: {
+      enabled: true,
+      servers: ["10.0.0.1", "::1", "1.2.3.999", "256.1.1.1"],
+    },
+  });
+});
+
+test("TIMESYNC rejects malformed hostnames and malformed IP literals", () => {
   const tooLongHostname = Array.from({ length: 128 }, () => "a").join(".");
 
   for (const server of [
@@ -61,53 +87,55 @@ test("TIMESYNC rejects malformed hostnames and out-of-scope IP literals", () => 
     "bad_host",
     "-bad.example",
     "bad-.example",
-    "10.0.0.1",
-    "::1",
+    "2001:db8::g",
+    "[::1]",
     "host\n",
     "K.example",
     "İ.example",
   ]) {
     assert.deepEqual(
-      rejectedPaths(validateTimesync({ enabled: true, servers: [server] })),
-      ["servers/0"],
+      rejectedPaths(validateTimesync({ desired: { enabled: true, servers: [server] } })),
+      ["desired/servers/0"],
       `${server} must reject`,
     );
   }
 
   assert.equal(
-    rejectedPaths(validateTimesync({ enabled: true, servers: [tooLongHostname] })).includes("servers/0"),
+    rejectedPaths(validateTimesync({ desired: { enabled: true, servers: [tooLongHostname] } })).includes("desired/servers/0"),
     true,
     "hostname over 253 chars must reject",
   );
 });
 
 test("TIMESYNC lowercases hosts before return and case-insensitive uniqueness", () => {
-  const canonical = validateTimesync({ enabled: true, servers: ["A.ORG"] });
+  const canonical = validateTimesync({ desired: { enabled: true, servers: ["A.ORG"] } });
 
   if (!canonical.ok) {
     assert.fail(`expected uppercase hostname to validate: ${JSON.stringify(canonical.rejections)}`);
   }
 
   assert.deepEqual(canonical.value, {
-    enabled: true,
-    servers: ["a.org"],
+    desired: {
+      enabled: true,
+      servers: ["a.org"],
+    },
   });
 
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: true, servers: ["A.ORG", "a.org"] })),
-    ["servers/1"],
+    rejectedPaths(validateTimesync({ desired: { enabled: true, servers: ["A.ORG", "a.org"] } })),
+    ["desired/servers/1"],
   );
 });
 
 test("TIMESYNC rejects absent required fields and unknown keys", () => {
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ servers: [] })),
-    ["enabled"],
+    rejectedPaths(validateTimesync({ desired: { servers: [] } })),
+    ["desired/enabled"],
   );
 
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: false, servers: [], extra: true })),
-    ["extra"],
+    rejectedPaths(validateTimesync({ desired: { enabled: false, servers: [], extra: true } })),
+    ["desired/extra"],
   );
 });
 
@@ -140,14 +168,26 @@ test("object fields validate nested full-request shape", () => {
   );
 });
 
-test("TIMESYNC rejects inline key material", () => {
+test("TIMESYNC accepts base64ish but valid hostname", () => {
+  const result = validateTimesync({
+    desired: {
+      enabled: true,
+      servers: [`pool.${"A".repeat(48)}.org`],
+    },
+  });
+
+  if (!result.ok) {
+    assert.fail(`expected base64ish hostname to validate: ${JSON.stringify(result.rejections)}`);
+  }
+});
+
+test("TIMESYNC rejects inline key markers as malformed hostnames", () => {
   for (const server of [
     "-----BEGIN PRIVATE KEY-----",
     "pool.ntp.orgdata:text/plain,SGVsbG8=",
-    `pool.${"A".repeat(48)}.org`,
   ]) {
     assert.equal(
-      rejectedPaths(validateTimesync({ enabled: true, servers: [server] })).includes("servers/0"),
+      rejectedPaths(validateTimesync({ desired: { enabled: true, servers: [server] } })).includes("desired/servers/0"),
       true,
       `${server} must reject`,
     );
@@ -238,12 +278,15 @@ test("dialect cross-field rules reject each violation", () => {
 });
 
 test("hostile input fails closed without invoking accessors", () => {
-  const hostile: Record<string, unknown> = {
+  const hostileDesired: Record<string, unknown> = {
     servers: [],
+  };
+  const hostile: Record<string, unknown> = {
+    desired: hostileDesired,
   };
   let getterReads = 0;
 
-  Object.defineProperty(hostile, "enabled", {
+  Object.defineProperty(hostileDesired, "enabled", {
     enumerable: true,
     get() {
       getterReads += 1;
@@ -260,8 +303,10 @@ test("hostile input fails closed without invoking accessors", () => {
 
 test("cyclic and method-shadowing inputs fail closed", () => {
   const cyclic: Record<string, unknown> = {
-    enabled: true,
-    servers: ["pool.ntp.org"],
+    desired: {
+      enabled: true,
+      servers: ["pool.ntp.org"],
+    },
   };
   cyclic.self = cyclic;
 
@@ -269,9 +314,11 @@ test("cyclic and method-shadowing inputs fail closed", () => {
     assert.equal(validateTimesync(cyclic).ok, false);
     assert.equal(
       validateTimesync({
-        enabled: true,
-        servers: ["pool.ntp.org"],
-        hasOwnProperty: "shadowed",
+        desired: {
+          enabled: true,
+          servers: ["pool.ntp.org"],
+          hasOwnProperty: "shadowed",
+        },
       }).ok,
       false,
     );
