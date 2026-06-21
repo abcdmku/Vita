@@ -63,7 +63,19 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   `containsInlineServiceMaterial` (no word-run) vs backup/identity `containsInlineSecretMaterial` (+seedWords
   + `openssh\s+`/literal age); the SECRET variant is deferred to WAVE 4 (AGENTS trap 1+8). Next: migrate a cap
   end-to-end (capsule — uses uniqueBy+substrate, needs sriIntegrity/capsuleId/capsuleVersion/forbiddenSchemePrefix).
-  **121 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-016 (capsule.registry) MIGRATED — 6th cap** (registry = 6: capsule.registry, hostname.set, node.config,
+  services.config, time.set, time.sync). Built REUSABLE `sriIntegrity` (sha256/384/512 + base64 std/raw) +
+  `forbiddenSchemePrefix` + `capsuleId`/`capsuleVersion` + the CAPSULE secret scanner (==backup; identity
+  differs), validated by the real `DecodeJSONRequest[capsule.ApplyRequest]` conformance. Next: update.plan or
+  backup (both now have sriIntegrity + forbiddenSchemePrefix).
+  **PROBE RELIABILITY (verification meta-lesson):** the adversarial `migration-probe` is RELIABLE for
+  STRUCTURAL findings (it caught the self-referential harness, services dup-name LOOSER, the
+  `[-_\s]?`-whitespace scanner gap — all real) but UNRELIABLE for TOOLCHAIN-BEHAVIOR claims (it has no Go): it
+  FALSELY claimed Go bounds the RFC3339 offset (real Go rejects `+25:00` — actually it does, probe wrong other
+  way) and that Go rejects non-canonical SRI base64 `B=` (real Go `StdEncoding` is LENIENT — both accept). RULE:
+  treat any probe claim about what a stdlib/toolchain DOES as a HYPOTHESIS → confirm with a ground-truth
+  Go-in-Docker run; trust its CODE-STRUCTURE findings. (2 real, 2 false toolchain claims so far.)
+  **122 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
