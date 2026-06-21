@@ -1,0 +1,16 @@
+{
+  "capability": "hostname.set",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "string",
+      "format": "hostnameRFC1123",
+      "maxLength": 63,
+      "lowercaseOnly": true,
+      "singleLabel": true,
+      "rejectAllNumeric": true
+    }
+  },
+  "crossFieldRules": []
+}

@@ -1,0 +1,169 @@
+[
+  {
+    "name": "single lowercase letter accepts",
+    "request": {
+      "desired": "a"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "lowercase with hyphen accepts",
+    "request": {
+      "desired": "vita-node"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "lowercase with digits accepts",
+    "request": {
+      "desired": "vita-node-7"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "interior numeric hyphen accepts",
+    "request": {
+      "desired": "a-1"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "max length label accepts",
+    "request": {
+      "desired": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "empty desired rejects",
+    "request": {
+      "desired": ""
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "non string desired rejects",
+    "request": {
+      "desired": 7
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "too long label rejects",
+    "request": {
+      "desired": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "uppercase desired rejects",
+    "request": {
+      "desired": "Vita-node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "leading hyphen rejects",
+    "request": {
+      "desired": "-vita-node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "trailing hyphen rejects",
+    "request": {
+      "desired": "vita-node-"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "underscore rejects",
+    "request": {
+      "desired": "vita_node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "fqdn rejects",
+    "request": {
+      "desired": "vita.node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "IPv4 form rejects",
+    "request": {
+      "desired": "10.0.0.1"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "all numeric rejects",
+    "request": {
+      "desired": "12345"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "control char rejects",
+    "request": {
+      "desired": "vita\nnode"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "non ascii rejects",
+    "request": {
+      "desired": "vit\u00e1-node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "space rejects",
+    "request": {
+      "desired": "vita node"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "unknown key rejects",
+    "request": {
+      "desired": "vita-node",
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "duplicate JSON key with invalid final value rejects",
+    "request": "{\"desired\":\"vita-node\",\"desired\":\"bad_host\"}",
+    "expect": "reject"
+  }
+]
