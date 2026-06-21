@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/timesync.json
+// DO NOT EDIT — generated from schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/timesync.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -36,6 +36,42 @@ export const NODE_CONFIG_MANIFEST = Object.freeze({
           enum: Object.freeze([
             "disabled",
             "enabled",
+          ]),
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
+
+export const SERVICES_MANIFEST = Object.freeze({
+  capability: "services.config",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        services: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              enabled: Object.freeze({
+                required: true,
+                type: "boolean",
+              }),
+              name: Object.freeze({
+                format: "systemdUnitName",
+                required: true,
+                type: "string",
+              }),
+            }),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+          uniqueBy: Object.freeze([
+            "name",
           ]),
         }),
       }),
@@ -90,6 +126,7 @@ export const TIMESYNC_MANIFEST = Object.freeze({
 export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "hostname.set": HOSTNAME_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
+  "services.config": SERVICES_MANIFEST,
   "time.sync": TIMESYNC_MANIFEST,
 }) satisfies Readonly<Record<string, CapabilityManifest>>;
 
