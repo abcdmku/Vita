@@ -235,6 +235,22 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 (safeNormalize retrofit — see Lessons).
 
 
+## 🎉 ADR-0007 MIGRATION COMPLETE (2026-06-21): ALL 13 CAPABILITIES MIGRATED.
+The config→plan→apply evaluator now covers the ENTIRE capability surface — whole-node apply is fully
+manifest-driven. Registry (13): hostname.set, node.config, time.sync, services.config, time.set,
+capsule.registry, update.plan, accounts.config, identity.attestation, network.policy, backup.policy,
+storage.layout, pds.sync-state. Each is a language-neutral JSON manifest (`schema/capabilities/*.json`) +
+its conformance corpus proven BYTE-FAITHFUL to the Go agent validator via the cross-language dual oracle
+(`*_conformance_test.go` runs every vector through BOTH the manifest AND the real
+`transport.DecodeJSONRequest[<cap>.ApplyRequest]+Validate()`, fatal on disagreement). **76 real bugs gated.**
+The dialect now has ~22 formats (ipLiteral, hostnameOrIp, posix/group/systemd/absolutePath, rfc3339Instant,
+cidrLiteral, sriIntegrity, didPlcOrWeb, atprotoHandle, keyReference, networkInterfaceName, capsuleId/Version,
+bundleRef/Version, cron5OrMacro, cidV1Multibase) + ~14 primitives (uniqueBy/multi-key/filtered, notInEnum,
+dedupItems, exactlyOneOf, nullAsAbsent, the string substrate, integer-literal+sentinel+float64-Trunc modes,
+cross-field rules incl. enum-conditional-presence/singleton/required-coverage/wide-open-guard). The hardest
+parity work (the §8.2 feasibility wall) is DONE. **NEXT FRONTIER: the bootable signed image (P1-017 + real
+mkosi/dm-verity/RAUC build) — BLOCKED on a privileged Linux build host (owner-gated).**
+
 ## ✅ CODEX RESTORED (owner 2026-06-21: "codex is reset you can use it again") — outage was ~21:24 UTC.
 Back to Codex: `npm run dispatch` (builder) + `npm run review` (R3 gate). The Opus-builder + Opus-probe flow
 held the floor during the gap (network P9-020, backup P9-021 both Opus-built/gated; storage P9-022
