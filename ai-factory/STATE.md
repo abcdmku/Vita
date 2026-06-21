@@ -156,6 +156,15 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 
 
 ## Lessons (most recent first)
+- **NEVER prefix a contract-revision commit with `git reset --hard main` — it reverts the just-made edit
+  before `git add`.** P9-014 rounds 2-3: my commit command began with `git reset -q --hard main` (habit, to
+  clean the verify tree), which discarded the uncommitted contract edit, so the worker rebuilt from the CLEAN
+  contract and never saw the raw-token/digit-width findings (round-2 fixed digit-width only by luck on a
+  fresh build). `dispatch` passes NO prior-review feedback to the worker — the CONTRACT is the only channel,
+  so a reverted edit = a lost finding. RULE: commit contract edits with `git add <contract> && git commit`
+  and NO preceding reset; do verification-tree cleanup with `git checkout main -- agent sdk schema && git
+  clean -fdq agent sdk schema` (scoped — never `reset --hard` while an uncommitted ai-factory edit is
+  pending). Confirm post-commit with `git show main:<contract> | grep <finding-keyword>`.
 - **NEVER run two dialect-touching contracts in parallel — serialize them.** P9-011 (timesync + nested
   cross-field) and P9-012 (structured formats) BOTH modified the dialect (`capmanifest.go` +
   `capability-manifest.ts`) from the same pre-base. P9-012 merged first; P9-011's branch was then STALE
