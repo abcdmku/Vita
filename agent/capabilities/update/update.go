@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -57,6 +58,17 @@ type ApplyRequest struct {
 }
 
 func (ApplyRequest) CapabilityRequest() {}
+
+func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
+	type applyRequestJSON ApplyRequest
+	var decoded applyRequestJSON
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
+		return err
+	}
+
+	*r = ApplyRequest(decoded)
+	return nil
+}
 
 func (r ApplyRequest) Validate() error {
 	return validatePlan(r.Desired)
@@ -380,18 +392,8 @@ func parsePlan(raw []byte) (Plan, error) {
 		return Plan{}, &ParseError{Reason: "empty update plan"}
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-
 	var plan Plan
-	if err := decoder.Decode(&plan); err != nil {
-		return Plan{}, &ParseError{Reason: err.Error()}
-	}
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return Plan{}, &ParseError{Reason: "body must contain exactly one JSON value"}
-		}
+	if err := jsonsafe.DecodeStrict(raw, &plan); err != nil {
 		return Plan{}, &ParseError{Reason: err.Error()}
 	}
 

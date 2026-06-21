@@ -3,20 +3,16 @@ package nodeconfig
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
 const (
-	Name                = "node.config"
-	maxRequestJSONDepth = 1000
-	maxRequestJSONNodes = 1000000
+	Name = "node.config"
 )
 
 type Mode string
@@ -39,13 +35,9 @@ type Config struct {
 }
 
 func (c *Config) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
-		return &InvalidRequestError{Reason: err.Error()}
-	}
-
 	type configJSON Config
 	var decoded configJSON
-	if err := decodeStrictJSON(raw, &decoded); err != nil {
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
 
@@ -66,13 +58,9 @@ type ApplyRequest struct {
 func (ApplyRequest) CapabilityRequest() {}
 
 func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
-		return &InvalidRequestError{Reason: err.Error()}
-	}
-
 	type applyRequestJSON ApplyRequest
 	var decoded applyRequestJSON
-	if err := decodeStrictJSON(raw, &decoded); err != nil {
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
 
@@ -296,104 +284,6 @@ func parseConfig(raw []byte) (Config, error) {
 	}
 
 	return config, nil
-}
-
-func rejectDuplicateObjectKeys(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	nodes := 0
-	if err := scanJSONValue(decoder, 0, &nodes); err != nil {
-		return err
-	}
-	if token, err := decoder.Token(); err != io.EOF {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("body must contain exactly one JSON value before %v", token)
-	}
-	return nil
-}
-
-func scanJSONValue(decoder *json.Decoder, depth int, nodes *int) error {
-	if depth > maxRequestJSONDepth {
-		return errors.New("JSON depth budget exceeded")
-	}
-	if *nodes >= maxRequestJSONNodes {
-		return errors.New("JSON node budget exceeded")
-	}
-	*nodes++
-
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-
-	switch delim {
-	case '{':
-		seen := map[string]struct{}{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object key must be a string")
-			}
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := scanJSONValue(decoder, depth+1, nodes); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim('}') {
-			return fmt.Errorf("object closed with %v", endToken)
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanJSONValue(decoder, depth+1, nodes); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim(']') {
-			return fmt.Errorf("array closed with %v", endToken)
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %v", delim)
-	}
-
-	return nil
-}
-
-func decodeStrictJSON(raw []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errors.New("body must contain exactly one JSON value")
-		}
-		return err
-	}
-	return nil
 }
 
 func cloneSnapshot(snapshot configSnapshot) configSnapshot {

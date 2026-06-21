@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -100,6 +101,17 @@ type ApplyRequest struct {
 }
 
 func (ApplyRequest) CapabilityRequest() {}
+
+func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
+	type applyRequestJSON ApplyRequest
+	var decoded applyRequestJSON
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
+		return err
+	}
+
+	*r = ApplyRequest(decoded)
+	return nil
+}
 
 func (r ApplyRequest) Validate() error {
 	return validateAttestation(r.Desired)

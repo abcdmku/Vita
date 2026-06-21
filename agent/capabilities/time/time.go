@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -24,6 +25,17 @@ type ApplyRequest struct {
 }
 
 func (ApplyRequest) CapabilityRequest() {}
+
+func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
+	type applyRequestJSON ApplyRequest
+	var decoded applyRequestJSON
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
+		return err
+	}
+
+	*r = ApplyRequest(decoded)
+	return nil
+}
 
 // Validate is the transport's pre-transaction request check (P1-008). It enforces only STATIC
 // validity; the ±maxClockSkew drift bound is a runtime property enforced in Apply against the live

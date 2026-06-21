@@ -265,7 +265,7 @@ func TestDecodeRejectsExcessiveNestingWithInvalidRequestError(t *testing.T) {
 		t.Fatalf("Validate valid request returned error: %v", err)
 	}
 
-	depth := maxRequestJSONDepth + 2
+	depth := 1102
 	deepArrays := strings.Repeat("[", depth) + "null" + strings.Repeat("]", depth)
 	deepEnvelope := []byte(`{"desired":` + deepArrays + `}`)
 	assertInvalidRequestDecodeError(t, deepEnvelope, "JSON depth budget exceeded")

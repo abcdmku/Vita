@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -56,6 +57,17 @@ type ApplyRequest struct {
 }
 
 func (ApplyRequest) CapabilityRequest() {}
+
+func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
+	type applyRequestJSON ApplyRequest
+	var decoded applyRequestJSON
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
+		return err
+	}
+
+	*r = ApplyRequest(decoded)
+	return nil
+}
 
 func (r ApplyRequest) Validate() error {
 	if r.Desired == nil {
@@ -421,18 +433,8 @@ func parseLayout(raw []byte) (Layout, error) {
 		return Layout{}, &ParseError{Reason: "empty storage layout"}
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-
 	var layout Layout
-	if err := decoder.Decode(&layout); err != nil {
-		return Layout{}, &ParseError{Reason: err.Error()}
-	}
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return Layout{}, &ParseError{Reason: "body must contain exactly one JSON value"}
-		}
+	if err := jsonsafe.DecodeStrict(raw, &layout); err != nil {
 		return Layout{}, &ParseError{Reason: err.Error()}
 	}
 

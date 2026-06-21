@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -43,13 +44,9 @@ func (p Policy) Validate() error {
 }
 
 func (p *Policy) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
-		return &InvalidRequestError{Reason: err.Error()}
-	}
-
 	type policyJSON Policy
 	var decoded policyJSON
-	if err := decodeStrictJSON(raw, &decoded); err != nil {
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
 		return err
 	}
 	*p = Policy(decoded)
@@ -89,13 +86,9 @@ type ApplyRequest struct {
 func (ApplyRequest) CapabilityRequest() {}
 
 func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
-		return &InvalidRequestError{Reason: err.Error()}
-	}
-
 	type applyRequestJSON ApplyRequest
 	var decoded applyRequestJSON
-	if err := decodeStrictJSON(raw, &decoded); err != nil {
+	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
 		return err
 	}
 	*r = ApplyRequest(decoded)
@@ -644,12 +637,8 @@ func parsePolicy(raw []byte) (Policy, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return Policy{}, &ParseError{Reason: "empty backup policy"}
 	}
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
-		return Policy{}, &ParseError{Reason: err.Error()}
-	}
-
 	var policy Policy
-	if err := decodeStrictJSON(raw, &policy); err != nil {
+	if err := jsonsafe.DecodeStrict(raw, &policy); err != nil {
 		return Policy{}, &ParseError{Reason: err.Error()}
 	}
 
@@ -658,95 +647,6 @@ func parsePolicy(raw []byte) (Policy, error) {
 		return Policy{}, err
 	}
 	return normalized, nil
-}
-
-func decodeStrictJSON(raw []byte, target interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errors.New("body must contain exactly one JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func rejectDuplicateObjectKeys(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := scanJSONValue(decoder); err != nil {
-		return err
-	}
-	if token, err := decoder.Token(); err != io.EOF {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("body must contain exactly one JSON value before %v", token)
-	}
-	return nil
-}
-
-func scanJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-
-	switch delim {
-	case '{':
-		seen := map[string]struct{}{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return fmt.Errorf("object key must be a string")
-			}
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim('}') {
-			return fmt.Errorf("object closed with %v", endToken)
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim(']') {
-			return fmt.Errorf("array closed with %v", endToken)
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %v", delim)
-	}
-
-	return nil
 }
 
 func clonePolicy(policy Policy) Policy {

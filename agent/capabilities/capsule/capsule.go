@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
 
@@ -49,7 +50,7 @@ func (e CapsuleEntry) Validate() error {
 }
 
 func (e *CapsuleEntry) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
 
@@ -102,7 +103,7 @@ func (r Registry) Validate() error {
 }
 
 func (r *Registry) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
 
@@ -149,7 +150,7 @@ type ApplyRequest struct {
 func (ApplyRequest) CapabilityRequest() {}
 
 func (r *ApplyRequest) UnmarshalJSON(raw []byte) error {
-	if err := rejectDuplicateObjectKeys(raw); err != nil {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
 
@@ -616,78 +617,6 @@ func parseRegistry(raw []byte) (Registry, error) {
 		return Registry{}, err
 	}
 	return normalized, nil
-}
-
-func rejectDuplicateObjectKeys(raw []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := scanJSONValue(decoder); err != nil {
-		return err
-	}
-	if token, err := decoder.Token(); err != io.EOF {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("body must contain exactly one JSON value before %v", token)
-	}
-	return nil
-}
-
-func scanJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-
-	switch delim {
-	case '{':
-		seen := map[string]struct{}{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object key must be a string")
-			}
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim('}') {
-			return fmt.Errorf("object closed with %v", endToken)
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		endToken, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if endToken != json.Delim(']') {
-			return fmt.Errorf("array closed with %v", endToken)
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %v", delim)
-	}
-
-	return nil
 }
 
 func decodeObject(raw []byte) (map[string]json.RawMessage, error) {
