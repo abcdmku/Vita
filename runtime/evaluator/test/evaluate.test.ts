@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { evaluateNodeConfig } from "../src/evaluate.ts";
 import {
-  TIMESYNC_MANIFEST,
+  defaultCapabilityRegistry,
 } from "../../../sdk/typescript/src/capability-manifest.ts";
 import type {
   CapabilityManifest,
@@ -13,14 +13,12 @@ import type {
   EvaluationResult,
 } from "../src/evaluate.ts";
 
-const REGISTRY: CapabilityManifestRegistry = new Map<string, CapabilityManifest>([
-  ["timesync", TIMESYNC_MANIFEST],
-]);
+const REGISTRY = defaultCapabilityRegistry();
 
 test("valid timesync config evaluates to one canonical operation", () => {
   const result = evaluateNodeConfig(
     {
-      timesync: {
+      "time.sync": {
         enabled: true,
         servers: ["POOL.NTP.ORG"],
       },
@@ -35,10 +33,36 @@ test("valid timesync config evaluates to one canonical operation", () => {
   assert.deepEqual(result.plan, {
     operations: [
       {
-        capability: "timesync",
+        capability: "time.sync",
         request: {
           enabled: true,
           servers: ["pool.ntp.org"],
+        },
+      },
+    ],
+  });
+});
+
+test("valid hostname config evaluates to one canonical operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "hostname.set",
+        request: {
+          desired: "vita-node-7",
         },
       },
     ],
@@ -62,7 +86,7 @@ test("unknown capability rejects at evaluation", () => {
 test("invalid timesync request rejects the whole evaluation without a partial plan", () => {
   const result = evaluateNodeConfig(
     {
-      timesync: {
+      "time.sync": {
         enabled: true,
         servers: [],
       },
@@ -71,17 +95,17 @@ test("invalid timesync request rejects the whole evaluation without a partial pl
   );
 
   assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
-  assert.deepEqual(result.rejections.map((rejection) => rejection.path), ["timesync/servers"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), ["time.sync/servers"]);
   assert.equal(Object.hasOwn(result, "plan"), false);
 });
 
 test("multi-capability configs emit sorted byte-identical plans", () => {
   const registry: CapabilityManifestRegistry = new Map<string, CapabilityManifest>([
-    ["timesync", TIMESYNC_MANIFEST],
+    ...defaultCapabilityRegistry(),
     ["alpha", ALPHA_MANIFEST],
   ]);
   const input = {
-    timesync: {
+    "time.sync": {
       enabled: true,
       servers: ["time.cloudflare.com"],
     },
@@ -102,7 +126,7 @@ test("multi-capability configs emit sorted byte-identical plans", () => {
 
   assert.deepEqual(
     first.plan.operations.map((operation) => operation.capability),
-    ["alpha", "timesync"],
+    ["alpha", "time.sync"],
   );
   assert.equal(JSON.stringify(first.plan), JSON.stringify(second.plan));
 });
@@ -119,7 +143,7 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
   const hostile: Record<string, unknown> = {};
   let getterReads = 0;
 
-  Object.defineProperty(hostile, "timesync", {
+  Object.defineProperty(hostile, "time.sync", {
     enumerable: true,
     get() {
       getterReads += 1;
@@ -128,7 +152,7 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
   });
 
   const cyclic: Record<string, unknown> = {
-    timesync: {
+    "time.sync": {
       enabled: true,
       servers: ["pool.ntp.org"],
     },
@@ -153,7 +177,7 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
     assertRejected(
       evaluateNodeConfig(
         {
-          timesync: {
+          "time.sync": {
             enabled: true,
             servers: hostileServers,
           },

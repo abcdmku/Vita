@@ -162,8 +162,8 @@
     "rejectCode": "extra"
   },
   {
-    "name": "duplicate JSON key with invalid final value rejects",
-    "request": "{\"desired\":\"vita-node\",\"desired\":\"bad_host\"}",
+    "name": "duplicate JSON key with valid final value rejects",
+    "request": "{\"desired\":\"bad_host\",\"desired\":\"vita-node\"}",
     "expect": "reject"
   }
 ]

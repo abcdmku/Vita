@@ -302,7 +302,7 @@ func parseStringFieldSchema(object jsonObject, required bool, path string) (Fiel
 	if err != nil {
 		return FieldSchema{}, err
 	}
-	if hasFormat && format != "hostnameRFC1123" {
+	if hasFormat && !isKnownStringFormat(format) {
 		return FieldSchema{}, pathError(joinPath(path, "format"), "unknown string format")
 	}
 
@@ -538,7 +538,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
 		return compiledField{}, pathError(joinPath(path, "maxLength"), "expected safe integer within bounds")
 	}
-	if field.Format != "" && field.Format != "hostnameRFC1123" {
+	if field.Format != "" && !isKnownStringFormat(field.Format) {
 		return compiledField{}, pathError(joinPath(path, "format"), "unknown string format")
 	}
 
@@ -1023,9 +1023,15 @@ func validateStringFormat(value string, format string) bool {
 	switch format {
 	case "hostnameRFC1123":
 		return isHostnameRFC1123(value)
+	case "hostnameLabel":
+		return isHostnameLabel(value)
 	default:
 		return false
 	}
+}
+
+func isKnownStringFormat(format string) bool {
+	return format == "hostnameRFC1123" || format == "hostnameLabel"
 }
 
 func isHostnameRFC1123(value string) bool {
@@ -1071,6 +1077,30 @@ func isAllNumericDottedQuad(labels []string) bool {
 		}
 	}
 	return true
+}
+
+func isHostnameLabel(value string) bool {
+	if value == "" || len(value) > 63 {
+		return false
+	}
+	if value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+
+	allNumeric := true
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		switch {
+		case char >= 'a' && char <= 'z':
+			allNumeric = false
+		case char >= '0' && char <= '9':
+		case char == '-':
+			allNumeric = false
+		default:
+			return false
+		}
+	}
+	return !allNumeric
 }
 
 func containsInlineSecretMaterial(value string) bool {

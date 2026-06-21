@@ -5,11 +5,8 @@
     "desired": {
       "required": true,
       "type": "string",
-      "format": "hostnameRFC1123",
-      "maxLength": 63,
-      "lowercaseOnly": true,
-      "singleLabel": true,
-      "rejectAllNumeric": true
+      "format": "hostnameLabel",
+      "maxLength": 63
     }
   },
   "crossFieldRules": []

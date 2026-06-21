@@ -1,4 +1,5 @@
 import { safeNormalize } from "./safe-normalize.ts";
+import { DEFAULT_CAPABILITY_MANIFESTS } from "./generated/capability-manifests.generated.ts";
 import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
 
 /**
@@ -15,9 +16,12 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  *
  * The lowercase primitive is ASCII-only by contract: A-Z map to a-z and every other
  * code point is left unchanged. That avoids JS/Go Unicode case-folding drift.
+ *
+ * Default registry keys are the agent operation names carried in each manifest's
+ * `capability` field, for example `time.sync` and `hostname.set`.
  */
 
-export type StringFieldFormat = "hostnameRFC1123";
+export type StringFieldFormat = "hostnameRFC1123" | "hostnameLabel";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -114,7 +118,13 @@ export type CapabilityValidationResult =
 
 export type CapabilityValidator = (input: unknown) => CapabilityValidationResult;
 
-export { TIMESYNC_MANIFEST } from "./generated/capability-manifests.generated.ts";
+export type CapabilityManifestRegistry = ReadonlyMap<string, CapabilityManifest>;
+
+export {
+  DEFAULT_CAPABILITY_MANIFESTS,
+  HOSTNAME_MANIFEST,
+  TIMESYNC_MANIFEST,
+} from "./generated/capability-manifests.generated.ts";
 
 type JsonRecord = PlainJsonObject;
 type Path = readonly string[];
@@ -283,6 +293,10 @@ export function compileCapabilityValidator(manifest: CapabilityManifest): Capabi
       return reject([{ message: "Capability manifest validation failed.", path: "" }]);
     }
   };
+}
+
+export function defaultCapabilityRegistry(): CapabilityManifestRegistry {
+  return new Map(Object.entries(DEFAULT_CAPABILITY_MANIFESTS));
 }
 
 function compileManifest(input: unknown):
@@ -1346,13 +1360,15 @@ function containsInlineSecretMaterial(value: string): boolean {
 }
 
 function isStringFieldFormat(value: string): value is StringFieldFormat {
-  return value === "hostnameRFC1123";
+  return value === "hostnameRFC1123" || value === "hostnameLabel";
 }
 
 function validateStringFormat(value: string, format: StringFieldFormat): boolean {
   switch (format) {
     case "hostnameRFC1123":
       return isHostnameRFC1123(value);
+    case "hostnameLabel":
+      return isHostnameLabel(value);
   }
 }
 
@@ -1412,6 +1428,34 @@ function isAllNumericDottedQuad(labels: readonly string[]): boolean {
   }
 
   return true;
+}
+
+function isHostnameLabel(value: string): boolean {
+  if (value.length === 0 || value.length > 63) {
+    return false;
+  }
+
+  if (value.charCodeAt(0) === 45 || value.charCodeAt(value.length - 1) === 45) {
+    return false;
+  }
+
+  let allNumeric = true;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (code >= 97 && code <= 122) {
+      allNumeric = false;
+    } else if (code >= 48 && code <= 57) {
+      continue;
+    } else if (code === 45) {
+      allNumeric = false;
+    } else {
+      return false;
+    }
+  }
+
+  return !allNumeric;
 }
 
 function asciiLowercase(value: string): string {

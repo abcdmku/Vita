@@ -2,6 +2,7 @@ package hostname
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -261,6 +262,17 @@ func TestApplyAcceptsValidDNSLabelBoundaries(t *testing.T) {
 				t.Fatalf("hostname after Apply = %q, want %q", host.current, tt.desired)
 			}
 		})
+	}
+}
+
+func TestApplyRequestJSONRejectsDuplicateDesiredWithValidFinalValue(t *testing.T) {
+	var request ApplyRequest
+	err := json.Unmarshal([]byte(`{"desired":"bad_host","desired":"vita-node"}`), &request)
+	if err == nil {
+		t.Fatal("Unmarshal returned nil, want duplicate-key rejection")
+	}
+	if !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("Unmarshal error = %v, want duplicate-key rejection", err)
 	}
 }
 

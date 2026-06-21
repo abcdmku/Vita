@@ -63,6 +63,11 @@ export async function generateCapabilityManifestsSource() {
     );
   }
 
+  lines.push(
+    `export const DEFAULT_CAPABILITY_MANIFESTS = ${formatDefaultManifestRegistry(manifests)} satisfies Readonly<Record<string, CapabilityManifest>>;`,
+    "",
+  );
+
   return `${lines.join("\n")}\n`;
 }
 
@@ -169,6 +174,22 @@ function constantNameForManifest(fileName) {
   }
 
   return `${normalized.toUpperCase()}_MANIFEST`;
+}
+
+function formatDefaultManifestRegistry(manifests) {
+  const entries = [...manifests].sort((left, right) =>
+    compareStrings(left.value.capability, right.value.capability)
+  );
+
+  if (entries.length === 0) {
+    return "Object.freeze({})";
+  }
+
+  const lines = entries.map((manifest) =>
+    `  ${JSON.stringify(manifest.value.capability)}: ${manifest.constantName},`
+  );
+
+  return `Object.freeze({\n${lines.join("\n")}\n})`;
 }
 
 function compareManifestKeys(left, right) {
