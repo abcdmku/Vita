@@ -1,0 +1,410 @@
+[
+  {
+    "name": "ipv4 unspecified",
+    "value": "0.0.0.0",
+    "ipLiteral": { "expect": "accept", "canonical": "0.0.0.0" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "0.0.0.0" }
+  },
+  {
+    "name": "ipv4 loopback",
+    "value": "127.0.0.1",
+    "ipLiteral": { "expect": "accept", "canonical": "127.0.0.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "127.0.0.1" }
+  },
+  {
+    "name": "ipv4 private",
+    "value": "192.168.1.1",
+    "ipLiteral": { "expect": "accept", "canonical": "192.168.1.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "192.168.1.1" }
+  },
+  {
+    "name": "ipv4 broadcast",
+    "value": "255.255.255.255",
+    "ipLiteral": { "expect": "accept", "canonical": "255.255.255.255" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "255.255.255.255" }
+  },
+  {
+    "name": "ipv4 low octets",
+    "value": "1.2.3.4",
+    "ipLiteral": { "expect": "accept", "canonical": "1.2.3.4" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "1.2.3.4" }
+  },
+  {
+    "name": "ipv4 leading zero first octet rejects",
+    "value": "01.2.3.4",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 leading zero middle octet rejects",
+    "value": "1.02.3.4",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 leading zero last octet rejects",
+    "value": "1.2.3.004",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 octet above range rejects",
+    "value": "256.0.0.1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 numeric dotted quad with bad last octet rejects",
+    "value": "1.2.3.999",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 empty octet rejects",
+    "value": "1..2.3",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 signed octet rejects",
+    "value": "1.2.3.-4",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 trailing newline rejects",
+    "value": "1.2.3.4\n",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv4 leading space rejects",
+    "value": " 1.2.3.4",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 unspecified compresses all zeros",
+    "value": "0:0:0:0:0:0:0:0",
+    "ipLiteral": { "expect": "accept", "canonical": "::" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::" }
+  },
+  {
+    "name": "ipv6 canonical unspecified",
+    "value": "::",
+    "ipLiteral": { "expect": "accept", "canonical": "::" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::" }
+  },
+  {
+    "name": "ipv6 loopback full",
+    "value": "0:0:0:0:0:0:0:1",
+    "ipLiteral": { "expect": "accept", "canonical": "::1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::1" }
+  },
+  {
+    "name": "ipv6 loopback compressed",
+    "value": "::1",
+    "ipLiteral": { "expect": "accept", "canonical": "::1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::1" }
+  },
+  {
+    "name": "ipv6 zero padded documentation address",
+    "value": "2001:0db8:0000:0000:0000:0000:0000:0001",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::1" }
+  },
+  {
+    "name": "ipv6 canonical documentation address",
+    "value": "2001:db8::1",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::1" }
+  },
+  {
+    "name": "ipv6 leftmost zero-run tie",
+    "value": "2001:db8:0:0:1:0:0:1",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::1:0:0:1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::1:0:0:1" }
+  },
+  {
+    "name": "ipv6 single zero group is not compressed",
+    "value": "2001:db8:0:1:1:1:1:1",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8:0:1:1:1:1:1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8:0:1:1:1:1:1" }
+  },
+  {
+    "name": "ipv6 longest interior run",
+    "value": "2001:db8:0:0:0:1:0:0",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::1:0:0" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::1:0:0" }
+  },
+  {
+    "name": "ipv6 longest trailing run",
+    "value": "2001:db8:0:0:1:0:0:0",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8:0:0:1::" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8:0:0:1::" }
+  },
+  {
+    "name": "ipv6 uppercase and padded groups",
+    "value": "FE80:0000:0000:0000:0202:B3FF:FE1E:8329",
+    "ipLiteral": { "expect": "accept", "canonical": "fe80::202:b3ff:fe1e:8329" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "fe80::202:b3ff:fe1e:8329" }
+  },
+  {
+    "name": "ipv6 all f groups lowercases",
+    "value": "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF",
+    "ipLiteral": { "expect": "accept", "canonical": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" }
+  },
+  {
+    "name": "ipv6 trailing compression",
+    "value": "2001:db8::",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::" }
+  },
+  {
+    "name": "ipv6 leading compression with two nonzero groups",
+    "value": "::2001:db8",
+    "ipLiteral": { "expect": "accept", "canonical": "::2001:db8" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::2001:db8" }
+  },
+  {
+    "name": "ipv6 mapped dotted tail",
+    "value": "::ffff:192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "::ffff:192.0.2.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::ffff:192.0.2.1" }
+  },
+  {
+    "name": "ipv6 mapped uppercase ffff",
+    "value": "::FFFF:192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "::ffff:192.0.2.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::ffff:192.0.2.1" }
+  },
+  {
+    "name": "ipv6 mapped full zero prefix",
+    "value": "0:0:0:0:0:ffff:192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "::ffff:192.0.2.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::ffff:192.0.2.1" }
+  },
+  {
+    "name": "ipv6 mapped hex tail renders dotted",
+    "value": "::ffff:c000:0201",
+    "ipLiteral": { "expect": "accept", "canonical": "::ffff:192.0.2.1" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::ffff:192.0.2.1" }
+  },
+  {
+    "name": "ipv6 compatible dotted tail renders hex",
+    "value": "::192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "::c000:201" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::c000:201" }
+  },
+  {
+    "name": "ipv6 translated prefix dotted tail renders hex",
+    "value": "64:ff9b::192.0.2.33",
+    "ipLiteral": { "expect": "accept", "canonical": "64:ff9b::c000:221" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "64:ff9b::c000:221" }
+  },
+  {
+    "name": "ipv6 documentation dotted tail renders hex",
+    "value": "2001:db8::192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::c000:201" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::c000:201" }
+  },
+  {
+    "name": "ipv6 documentation full dotted tail renders hex",
+    "value": "2001:db8:0:0:0:0:192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "2001:db8::c000:201" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "2001:db8::c000:201" }
+  },
+  {
+    "name": "ipv6 nonmapped ffff dotted tail renders hex",
+    "value": "::ffff:0:192.0.2.1",
+    "ipLiteral": { "expect": "accept", "canonical": "::ffff:0:c000:201" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "::ffff:0:c000:201" }
+  },
+  {
+    "name": "ipv6 triple colon rejects",
+    "value": "2001:db8:::1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 two compression runs rejects",
+    "value": "2001::db8::1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 too many full groups rejects",
+    "value": "2001:db8:0:0:0:0:0:0:1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 too few groups without compression rejects",
+    "value": "2001:db8:0:0:0:0:0",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 bad hex character rejects",
+    "value": "2001:db8::g",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 oversized group rejects",
+    "value": "2001:db8::00000",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 zone id rejects",
+    "value": "fe80::1%eth0",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 brackets reject",
+    "value": "[::1]",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 single colon rejects",
+    "value": ":",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 only triple colon rejects",
+    "value": ":::",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 bad octet rejects",
+    "value": "2001:db8::192.0.2.999",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 leading zero rejects",
+    "value": "2001:db8::192.168.001.1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 short rejects",
+    "value": "2001:db8::1.2.3",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 too long rejects",
+    "value": "2001:db8::1.2.3.4.5",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 before compression rejects",
+    "value": "2001:db8:192.0.2.1::1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 group too long before compression rejects",
+    "value": "12345::",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 trailing single colon rejects",
+    "value": "1:2:3:4:5:6:7:8:",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 leading single colon rejects",
+    "value": ":1:2:3:4:5:6:7:8",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 nine groups rejects",
+    "value": "1:2:3:4:5:6:7:8:9",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 seven groups rejects",
+    "value": "1:2:3:4:5:6:7",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "ipv6 embedded ipv4 makes nine groups rejects",
+    "value": "1:2:3:4:5:6:7:192.0.2.1",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname branch fqdn accepts",
+    "value": "pool.ntp.org",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "pool.ntp.org" }
+  },
+  {
+    "name": "hostname branch uppercase accepts without lowercase option",
+    "value": "Example.COM",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "Example.COM" }
+  },
+  {
+    "name": "hostname branch single label accepts",
+    "value": "localhost",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "localhost" }
+  },
+  {
+    "name": "hostname branch hyphenated accepts",
+    "value": "time-server-1.example",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "accept", "canonical": "time-server-1.example" }
+  },
+  {
+    "name": "hostname underscore rejects",
+    "value": "bad_host",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname leading hyphen rejects",
+    "value": "-bad.example",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname trailing hyphen rejects",
+    "value": "bad-.example",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname space rejects",
+    "value": "bad host",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname newline rejects",
+    "value": "host\n",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  },
+  {
+    "name": "hostname too long label rejects",
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+    "ipLiteral": { "expect": "reject" },
+    "hostnameOrIp": { "expect": "reject" }
+  }
+]

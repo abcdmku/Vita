@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -743,13 +744,18 @@ func validateStringField(value jsonValue, field compiledField, path string) (cap
 	if field.noInlineSecrets && containsInlineSecretMaterial(raw) {
 		return nil, pathError(path, "inline secret material is not allowed")
 	}
-	if field.format != "" && !validateStringFormat(raw, field.format) {
-		return nil, pathError(path, "string does not match required format")
-	}
 
 	normalized := raw
+	if field.format != "" {
+		formatted, ok := normalizeStringFormat(raw, field.format)
+		if !ok {
+			return nil, pathError(path, "string does not match required format")
+		}
+		normalized = formatted
+	}
+
 	if field.lowercase {
-		normalized = asciiLowercase(raw)
+		normalized = asciiLowercase(normalized)
 	}
 	if field.maxLength != nil && utf16CodeUnitLength(normalized) > *field.maxLength {
 		return nil, pathError(path, "string exceeds maxLength")
@@ -1145,19 +1151,51 @@ func isSafeInteger(value float64) bool {
 		math.Abs(value) <= maxSafeInteger
 }
 
-func validateStringFormat(value string, format string) bool {
+func normalizeStringFormat(value string, format string) (string, bool) {
 	switch format {
 	case "hostnameRFC1123":
-		return isHostnameRFC1123(value)
+		if isHostnameRFC1123(value) {
+			return value, true
+		}
+		return "", false
 	case "hostnameLabel":
-		return isHostnameLabel(value)
+		if isHostnameLabel(value) {
+			return value, true
+		}
+		return "", false
+	case "ipLiteral":
+		return canonicalizeIPLiteral(value)
+	case "hostnameOrIp":
+		if ip, ok := canonicalizeIPLiteral(value); ok {
+			return ip, true
+		}
+		if isHostnameRFC1123(value) {
+			return value, true
+		}
+		return "", false
 	default:
-		return false
+		return "", false
 	}
 }
 
 func isKnownStringFormat(format string) bool {
-	return format == "hostnameRFC1123" || format == "hostnameLabel"
+	return format == "hostnameRFC1123" ||
+		format == "hostnameLabel" ||
+		format == "ipLiteral" ||
+		format == "hostnameOrIp"
+}
+
+func canonicalizeIPLiteral(value string) (string, bool) {
+	if value == "" || strings.Contains(value, "%") {
+		return "", false
+	}
+
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return "", false
+	}
+
+	return addr.String(), true
 }
 
 func isHostnameRFC1123(value string) bool {

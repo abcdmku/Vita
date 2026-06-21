@@ -8,11 +8,10 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * that needs a different invariant requires a governance-reviewed dialect extension,
  * not an embedded expression language.
  *
- * TIMESYNC server validation in this PoC is intentionally hostname-only. The agent
- * capability also accepts IP literals, but IP parsing and canonical dedupe are the
- * format-canonicalization surface ADR 0007 says must be generated/shared rather than
- * hand-written twice. This file therefore rejects IP literals and does not implement
- * IPv4 or IPv6 parsing.
+ * String formats are a closed, governed set. `ipLiteral` and `hostnameOrIp`
+ * are parity-safe only because schema/capabilities/formats/ip-conformance.json
+ * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
+ * validator in agent/internal/capmanifest.
  *
  * The lowercase primitive is ASCII-only by contract: A-Z map to a-z and every other
  * code point is left unchanged. That avoids JS/Go Unicode case-folding drift.
@@ -21,7 +20,7 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * `capability` field, for example `node.config` and `hostname.set`.
  */
 
-export type StringFieldFormat = "hostnameRFC1123" | "hostnameLabel";
+export type StringFieldFormat = "hostnameRFC1123" | "hostnameLabel" | "ipLiteral" | "hostnameOrIp";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -1025,11 +1024,21 @@ function validateStringField(
     addError(errors, path, "Inline secret material is not allowed.");
   }
 
-  if (schema.format !== undefined && !validateStringFormat(value, schema.format)) {
-    addError(errors, path, "String does not match required format.");
+  let normalized = value;
+
+  if (schema.format !== undefined) {
+    const formatted = normalizeStringFormat(value, schema.format);
+
+    if (formatted === undefined) {
+      addError(errors, path, "String does not match required format.");
+    } else {
+      normalized = formatted;
+    }
   }
 
-  const normalized = schema.lowercase ? asciiLowercase(value) : value;
+  if (schema.lowercase) {
+    normalized = asciiLowercase(normalized);
+  }
 
   if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
     addError(errors, path, "String exceeds maxLength.");
@@ -1538,16 +1547,332 @@ function containsInlineSecretMaterial(value: string): boolean {
 }
 
 function isStringFieldFormat(value: string): value is StringFieldFormat {
-  return value === "hostnameRFC1123" || value === "hostnameLabel";
+  return (
+    value === "hostnameRFC1123" ||
+    value === "hostnameLabel" ||
+    value === "ipLiteral" ||
+    value === "hostnameOrIp"
+  );
 }
 
-function validateStringFormat(value: string, format: StringFieldFormat): boolean {
+function normalizeStringFormat(value: string, format: StringFieldFormat): string | undefined {
   switch (format) {
     case "hostnameRFC1123":
-      return isHostnameRFC1123(value);
+      return isHostnameRFC1123(value) ? value : undefined;
     case "hostnameLabel":
-      return isHostnameLabel(value);
+      return isHostnameLabel(value) ? value : undefined;
+    case "ipLiteral":
+      return canonicalizeIPLiteral(value);
+    case "hostnameOrIp": {
+      const ip = canonicalizeIPLiteral(value);
+
+      if (ip !== undefined) {
+        return ip;
+      }
+
+      return isHostnameRFC1123(value) ? value : undefined;
+    }
   }
+}
+
+function canonicalizeIPLiteral(value: string): string | undefined {
+  if (value.length === 0 || containsChar(value, 37)) {
+    return undefined;
+  }
+
+  const ipv4 = parseIPv4Literal(value);
+
+  if (ipv4 !== undefined) {
+    return formatIPv4Octets(ipv4);
+  }
+
+  return canonicalizeIPv6Literal(value);
+}
+
+function parseIPv4Literal(value: string): readonly [number, number, number, number] | undefined {
+  const parts = value.split(".");
+
+  if (parts.length !== 4) {
+    return undefined;
+  }
+
+  const octets: number[] = [];
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+
+    if (part === undefined) {
+      return undefined;
+    }
+
+    const octet = parseIPv4Octet(part);
+
+    if (octet === undefined) {
+      return undefined;
+    }
+
+    octets.push(octet);
+  }
+
+  const first = octets[0];
+  const second = octets[1];
+  const third = octets[2];
+  const fourth = octets[3];
+
+  if (first === undefined || second === undefined || third === undefined || fourth === undefined) {
+    return undefined;
+  }
+
+  return [first, second, third, fourth];
+}
+
+function parseIPv4Octet(value: string): number | undefined {
+  if (value.length === 0 || (value.length > 1 && value.charCodeAt(0) === 48)) {
+    return undefined;
+  }
+
+  let parsed = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (code < 48 || code > 57) {
+      return undefined;
+    }
+
+    parsed = parsed * 10 + code - 48;
+
+    if (parsed > 255) {
+      return undefined;
+    }
+  }
+
+  return parsed;
+}
+
+function canonicalizeIPv6Literal(value: string): string | undefined {
+  if (!containsChar(value, 58)) {
+    return undefined;
+  }
+
+  const doubleColon = value.indexOf("::");
+
+  if (doubleColon !== -1 && value.indexOf("::", doubleColon + 2) !== -1) {
+    return undefined;
+  }
+
+  if (doubleColon === -1) {
+    const groups = parseIPv6GroupSequence(value, true);
+
+    return groups !== undefined && groups.length === 8 ? formatIPv6Groups(groups) : undefined;
+  }
+
+  const left = parseIPv6GroupSequence(value.slice(0, doubleColon), false);
+  const right = parseIPv6GroupSequence(value.slice(doubleColon + 2), true);
+
+  if (left === undefined || right === undefined || left.length + right.length >= 8) {
+    return undefined;
+  }
+
+  const groups = [
+    ...left,
+    ...repeatNumber(0, 8 - left.length - right.length),
+    ...right,
+  ];
+
+  return groups.length === 8 ? formatIPv6Groups(groups) : undefined;
+}
+
+function parseIPv6GroupSequence(value: string, allowEmbeddedIPv4Tail: boolean): readonly number[] | undefined {
+  if (value.length === 0) {
+    return Object.freeze([]);
+  }
+
+  const tokens = value.split(":");
+  const groups: number[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+
+    if (token === undefined || token.length === 0) {
+      return undefined;
+    }
+
+    if (containsChar(token, 46)) {
+      if (!allowEmbeddedIPv4Tail || index !== tokens.length - 1) {
+        return undefined;
+      }
+
+      const octets = parseIPv4Literal(token);
+
+      if (octets === undefined) {
+        return undefined;
+      }
+
+      groups.push(octets[0] * 256 + octets[1], octets[2] * 256 + octets[3]);
+      continue;
+    }
+
+    const group = parseIPv6HexGroup(token);
+
+    if (group === undefined) {
+      return undefined;
+    }
+
+    groups.push(group);
+  }
+
+  return Object.freeze(groups);
+}
+
+function parseIPv6HexGroup(value: string): number | undefined {
+  if (value.length === 0 || value.length > 4) {
+    return undefined;
+  }
+
+  let parsed = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const digit = parseHexDigit(value.charCodeAt(index));
+
+    if (digit === undefined) {
+      return undefined;
+    }
+
+    parsed = parsed * 16 + digit;
+  }
+
+  return parsed;
+}
+
+function parseHexDigit(code: number): number | undefined {
+  if (code >= 48 && code <= 57) {
+    return code - 48;
+  }
+
+  if (code >= 65 && code <= 70) {
+    return code - 55;
+  }
+
+  if (code >= 97 && code <= 102) {
+    return code - 87;
+  }
+
+  return undefined;
+}
+
+function formatIPv6Groups(groups: readonly number[]): string {
+  if (isIPv4MappedIPv6(groups)) {
+    const sixth = groups[6];
+    const seventh = groups[7];
+
+    if (sixth === undefined || seventh === undefined) {
+      return groups.map(formatIPv6Group).join(":");
+    }
+
+    return `::ffff:${formatIPv4Octets([
+      Math.floor(sixth / 256),
+      sixth % 256,
+      Math.floor(seventh / 256),
+      seventh % 256,
+    ])}`;
+  }
+
+  const run = findBestIPv6ZeroRun(groups);
+
+  if (run === undefined) {
+    return groups.map(formatIPv6Group).join(":");
+  }
+
+  const before = groups.slice(0, run.start).map(formatIPv6Group).join(":");
+  const after = groups.slice(run.start + run.length).map(formatIPv6Group).join(":");
+
+  if (before.length === 0 && after.length === 0) {
+    return "::";
+  }
+
+  if (before.length === 0) {
+    return `::${after}`;
+  }
+
+  if (after.length === 0) {
+    return `${before}::`;
+  }
+
+  return `${before}::${after}`;
+}
+
+function isIPv4MappedIPv6(groups: readonly number[]): boolean {
+  return (
+    groups.length === 8 &&
+    groups[0] === 0 &&
+    groups[1] === 0 &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0xffff
+  );
+}
+
+function findBestIPv6ZeroRun(
+  groups: readonly number[],
+): { readonly start: number; readonly length: number } | undefined {
+  let bestStart = -1;
+  let bestLength = 0;
+  let currentStart = -1;
+  let currentLength = 0;
+
+  for (let index = 0; index <= groups.length; index += 1) {
+    const group = groups[index];
+
+    if (group === 0) {
+      if (currentStart === -1) {
+        currentStart = index;
+        currentLength = 0;
+      }
+
+      currentLength += 1;
+      continue;
+    }
+
+    if (currentLength >= 2 && currentLength > bestLength) {
+      bestStart = currentStart;
+      bestLength = currentLength;
+    }
+
+    currentStart = -1;
+    currentLength = 0;
+  }
+
+  return bestStart === -1 ? undefined : { length: bestLength, start: bestStart };
+}
+
+function formatIPv6Group(value: number): string {
+  return value.toString(16);
+}
+
+function formatIPv4Octets(octets: readonly [number, number, number, number]): string {
+  return `${octets[0]}.${octets[1]}.${octets[2]}.${octets[3]}`;
+}
+
+function repeatNumber(value: number, count: number): readonly number[] {
+  const output: number[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    output.push(value);
+  }
+
+  return Object.freeze(output);
+}
+
+function containsChar(value: string, code: number): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === code) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isHostnameRFC1123(value: string): boolean {

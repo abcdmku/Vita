@@ -99,15 +99,24 @@ func conformanceRequestBytes(t *testing.T, request json.RawMessage) []byte {
 func readRepoFile(t *testing.T, pathElements ...string) []byte {
 	t.Helper()
 
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	var candidates [][]string
+	if _, currentFile, _, ok := runtime.Caller(0); ok {
+		candidates = append(candidates, append([]string{filepath.Dir(currentFile), "..", "..", ".."}, pathElements...))
+	}
+	if workingDirectory, err := os.Getwd(); err == nil {
+		candidates = append(candidates, append([]string{workingDirectory, "..", "..", ".."}, pathElements...))
 	}
 
-	elements := append([]string{filepath.Dir(currentFile), "..", "..", ".."}, pathElements...)
-	raw, err := os.ReadFile(filepath.Clean(filepath.Join(elements...)))
-	if err != nil {
-		t.Fatalf("os.ReadFile failed: %v", err)
+	var readErrors []string
+	for _, candidate := range candidates {
+		raw, err := os.ReadFile(filepath.Clean(filepath.Join(candidate...)))
+		if err == nil {
+			return raw
+		}
+
+		readErrors = append(readErrors, err.Error())
 	}
-	return raw
+
+	t.Fatalf("os.ReadFile failed: %s", strings.Join(readErrors, "; "))
+	return nil
 }
