@@ -30,11 +30,21 @@ const STRUCTURED_FORMATS = Object.freeze([
   "capsuleId",
   "capsuleVersion",
   "sriIntegrity",
+  "bundleRefString",
+  "bundleVersionString",
 ] satisfies readonly StructuredStringFieldFormat[]);
 
 type StructuredStringFieldFormat = Extract<
   StringFieldFormat,
-  "posixUsername" | "groupName" | "systemdUnitName" | "absolutePath" | "capsuleId" | "capsuleVersion" | "sriIntegrity"
+  | "posixUsername"
+  | "groupName"
+  | "systemdUnitName"
+  | "absolutePath"
+  | "capsuleId"
+  | "capsuleVersion"
+  | "sriIntegrity"
+  | "bundleRefString"
+  | "bundleVersionString"
 >;
 type Expectation = "accept" | "reject";
 
@@ -251,6 +261,8 @@ function readStructuredFormatCorpus(): StructuredFormatCorpus {
     absolutePath: readRequiredVectorArray(corpus, "absolutePath"),
     capsuleId: readRequiredVectorArray(corpus, "capsuleId"),
     capsuleVersion: readRequiredVectorArray(corpus, "capsuleVersion"),
+    bundleRefString: readRequiredVectorArray(corpus, "bundleRefString"),
+    bundleVersionString: readRequiredVectorArray(corpus, "bundleVersionString"),
     groupName: readRequiredVectorArray(corpus, "groupName"),
     posixUsername: readRequiredVectorArray(corpus, "posixUsername"),
     sriIntegrity: readRequiredVectorArray(corpus, "sriIntegrity"),

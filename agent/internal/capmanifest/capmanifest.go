@@ -1476,6 +1476,16 @@ func normalizeStringFormat(value string, format string, rawToken ...string) (str
 			return value, true
 		}
 		return "", false
+	case "bundleRefString":
+		if isBundleRefString(value) {
+			return value, true
+		}
+		return "", false
+	case "bundleVersionString":
+		if isBundleVersionString(value) {
+			return value, true
+		}
+		return "", false
 	default:
 		return "", false
 	}
@@ -1493,7 +1503,9 @@ func isKnownStringFormat(format string) bool {
 		format == "rfc3339Instant" ||
 		format == "capsuleId" ||
 		format == "capsuleVersion" ||
-		format == "sriIntegrity"
+		format == "sriIntegrity" ||
+		format == "bundleRefString" ||
+		format == "bundleVersionString"
 }
 
 func isCapsuleID(value string) bool {
@@ -1516,6 +1528,30 @@ func isCapsuleVersion(value string) bool {
 		return false
 	}
 	return isCapsuleVersionPattern(value)
+}
+
+func isBundleRefString(value string) bool {
+	if value == "" || len(value) > 256 || !isASCIIAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if !isBundleRefChar(value[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBundleVersionString(value string) bool {
+	if value == "" || len(value) > 128 || !isASCIIAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if !isBundleVersionChar(value[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func isReverseDNSCapsuleID(value string) bool {
@@ -2269,6 +2305,14 @@ func isOpaqueCapsuleIDChar(char byte) bool {
 }
 
 func isCapsuleVersionChar(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == '.' || char == '+' || char == '_' || char == '-'
+}
+
+func isBundleRefChar(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == '.' || char == '_' || char == ':' || char == '@' || char == '/' || char == '-'
+}
+
+func isBundleVersionChar(char byte) bool {
 	return isASCIIAlphaNumeric(char) || char == '.' || char == '+' || char == '_' || char == '-'
 }
 

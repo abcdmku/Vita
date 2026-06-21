@@ -1,0 +1,486 @@
+[
+  {
+    "name": "slot a accepts with padded sha256",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates:@stable/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "slot b accepts with raw sha256 and benign separators",
+    "request": {
+      "desired": {
+        "targetSlot": "b",
+        "bundle": {
+          "ref": "mirror:@release/path/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "version": "Release_2026"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha384 integrity accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/sha384.rauc",
+          "integrity": "sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "version": "2026.06.21"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha512 padded integrity accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "b",
+        "bundle": {
+          "ref": "updates/sha512-padded.rauc",
+          "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+          "version": "2.0.0"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha512 raw integrity accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/sha512-raw.rauc",
+          "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "version": "2.0.1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "ref length 255 accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "ref length 256 accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "b",
+        "bundle": {
+          "ref": "raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "version length 127 accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/version-127.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "v111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "version length 128 accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "b",
+        "bundle": {
+          "ref": "updates/version-128.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "v1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "long base64-looking version accepts",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/base64-version.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "bad slot rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "c",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targetSlot"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "desired must be object rejects",
+    "request": {
+      "desired": []
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent targetSlot rejects",
+    "request": {
+      "desired": {
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/targetSlot"
+  },
+  {
+    "name": "absent bundle rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle"
+  },
+  {
+    "name": "bundle must be object rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": "updates/vita.rauc"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle"
+  },
+  {
+    "name": "absent ref rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "absent integrity rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/integrity"
+  },
+  {
+    "name": "absent version rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/version"
+  },
+  {
+    "name": "ref length 257 rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "data scheme ref rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "data:abc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "inline scheme ref rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "inline:abc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "literal scheme ref rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "literal:abc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "ref with disallowed plus rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates+vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/ref"
+  },
+  {
+    "name": "unsupported SRI algorithm rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/integrity"
+  },
+  {
+    "name": "sha256 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAA",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/integrity"
+  },
+  {
+    "name": "sha384 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/integrity"
+  },
+  {
+    "name": "sha512 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "version": "1.2.3"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/integrity"
+  },
+  {
+    "name": "version length 129 rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/version-129.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "v11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/version"
+  },
+  {
+    "name": "version leading dot rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": ".1"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/version"
+  },
+  {
+    "name": "version with colon rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "data:1"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/version"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        }
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3"
+        },
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown bundle key rejects",
+    "request": {
+      "desired": {
+        "targetSlot": "a",
+        "bundle": {
+          "ref": "updates/vita.rauc",
+          "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "version": "1.2.3",
+          "size": 123
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/bundle/size"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"targetSlot\":\"a\",\"bundle\":{\"ref\":\"updates/vita.rauc\",\"integrity\":\"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"version\":\"1.2.3\"}},\"desired\":{\"targetSlot\":\"b\",\"bundle\":{\"ref\":\"updates/vita.rauc\",\"integrity\":\"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"version\":\"1.2.3\"}}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate bundle ref JSON key rejects",
+    "request": "{\"desired\":{\"targetSlot\":\"a\",\"bundle\":{\"ref\":\"data:abc\",\"ref\":\"updates/vita.rauc\",\"integrity\":\"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"version\":\"1.2.3\"}}}",
+    "expect": "reject"
+  }
+]

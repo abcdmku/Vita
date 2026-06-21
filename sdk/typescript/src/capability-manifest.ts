@@ -10,8 +10,9 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  *
  * String formats are a closed, governed set. `posixUsername`, `groupName`,
  * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
- * `capsuleVersion`, and `sriIntegrity` are structured capability-agent
- * parity formats. `ipLiteral` and `hostnameOrIp`
+ * `capsuleVersion`, `sriIntegrity`, `bundleRefString`, and
+ * `bundleVersionString` are structured capability-agent parity formats.
+ * `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
  * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
  * validator in agent/internal/capmanifest.
@@ -35,7 +36,9 @@ export type StringFieldFormat =
   | "rfc3339Instant"
   | "capsuleId"
   | "capsuleVersion"
-  | "sriIntegrity";
+  | "sriIntegrity"
+  | "bundleRefString"
+  | "bundleVersionString";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -2178,7 +2181,9 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "rfc3339Instant" ||
     value === "capsuleId" ||
     value === "capsuleVersion" ||
-    value === "sriIntegrity"
+    value === "sriIntegrity" ||
+    value === "bundleRefString" ||
+    value === "bundleVersionString"
   );
 }
 
@@ -2218,6 +2223,10 @@ function normalizeStringFormat(
       return isCapsuleVersion(value) ? value : undefined;
     case "sriIntegrity":
       return isValidSRI(value) ? value : undefined;
+    case "bundleRefString":
+      return isBundleRefString(value) ? value : undefined;
+    case "bundleVersionString":
+      return isBundleVersionString(value) ? value : undefined;
   }
 }
 
@@ -2515,6 +2524,38 @@ function isCapsuleVersion(value: string): boolean {
   }
 
   return isCapsuleVersionPattern(value);
+}
+
+function isBundleRefString(value: string): boolean {
+  if (value.length === 0 || value.length > 256 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isBundleRefCode(code)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isBundleVersionString(value: string): boolean {
+  if (value.length === 0 || value.length > 128 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isBundleVersionCode(code)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function isReverseDNSCapsuleID(value: string): boolean {
@@ -3829,6 +3870,14 @@ function isOpaqueCapsuleIDCode(code: number): boolean {
 }
 
 function isCapsuleVersionCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 46 || code === 43 || code === 95 || code === 45;
+}
+
+function isBundleRefCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 46 || code === 95 || code === 58 || code === 64 || code === 47 || code === 45;
+}
+
+function isBundleVersionCode(code: number): boolean {
   return isAsciiAlphaNumericCode(code) || code === 46 || code === 43 || code === 95 || code === 45;
 }
 

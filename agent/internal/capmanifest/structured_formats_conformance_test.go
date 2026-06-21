@@ -20,6 +20,8 @@ var structuredStringFormats = []string{
 	"capsuleId",
 	"capsuleVersion",
 	"sriIntegrity",
+	"bundleRefString",
+	"bundleVersionString",
 }
 
 func TestStructuredFormatConformanceCorpus(t *testing.T) {

@@ -314,6 +314,11 @@ func readRepoFile(t *testing.T, pathElements ...string) []byte {
 	if workingDirectory, err := os.Getwd(); err == nil {
 		candidates = append(candidates, append([]string{workingDirectory, "..", "..", ".."}, pathElements...))
 	}
+	for _, envName := range []string{"VITA_REPO_ROOT", "GIT_CONFIG_VALUE_0"} {
+		if repoRoot := os.Getenv(envName); repoRoot != "" {
+			candidates = append(candidates, append([]string{repoRoot}, pathElements...))
+		}
+	}
 
 	var readErrors []string
 	for _, candidate := range candidates {

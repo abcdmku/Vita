@@ -175,6 +175,46 @@ test("valid capsule.registry request evaluates to one operation", () => {
   });
 });
 
+test("valid update.plan request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "update.plan": {
+        desired: {
+          targetSlot: "b",
+          bundle: {
+            ref: "updates:@stable/vita.rauc",
+            integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            version: "1.2.3",
+          },
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "update.plan",
+        request: {
+          desired: {
+            targetSlot: "b",
+            bundle: {
+              ref: "updates:@stable/vita.rauc",
+              integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+              version: "1.2.3",
+            },
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {

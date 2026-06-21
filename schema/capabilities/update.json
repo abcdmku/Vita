@@ -1,0 +1,42 @@
+{
+  "capability": "update.plan",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "targetSlot": {
+          "required": true,
+          "type": "string",
+          "enum": ["a", "b"]
+        },
+        "bundle": {
+          "required": true,
+          "type": "object",
+          "fields": {
+            "ref": {
+              "format": "bundleRefString",
+              "forbiddenSchemePrefix": true,
+              "maxBytes": 256,
+              "required": true,
+              "type": "string"
+            },
+            "integrity": {
+              "format": "sriIntegrity",
+              "required": true,
+              "type": "string"
+            },
+            "version": {
+              "format": "bundleVersionString",
+              "maxBytes": 128,
+              "required": true,
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}
