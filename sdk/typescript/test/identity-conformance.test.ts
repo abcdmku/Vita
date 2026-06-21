@@ -183,8 +183,12 @@ test("identity formats load from manifest JSON", () => {
   }
 });
 
-test("keyReference scheme lowercasing matches Go strings.ToLower over BMP", () => {
+test("keyReference scheme lowercasing matches Go strings.ToLower over BMP", (t) => {
   const goAccepted = readGoAcceptedOneRuneSchemes();
+  if (goAccepted === null) {
+    t.skip("native `go` not on PATH (container/CI only) — Go conformance lane covers parity");
+    return;
+  }
   const validate = compileCapabilityValidator(singleValueFormatManifest("keyReference"));
 
   for (let codePoint = 0; codePoint <= 0xffff; codePoint += 1) {
@@ -194,7 +198,7 @@ test("keyReference scheme lowercasing matches Go strings.ToLower over BMP", () =
 
     const value = `${String.fromCodePoint(codePoint)}://ref`;
     const result = validate({ value });
-    const expected = goAccepted.has(codePoint);
+    const expected: boolean = goAccepted.has(codePoint);
 
     assert.equal(
       result.ok,
@@ -344,7 +348,7 @@ function assertFormatDecision(
   }
 }
 
-function readGoAcceptedOneRuneSchemes(): ReadonlySet<number> {
+function readGoAcceptedOneRuneSchemes(): ReadonlySet<number> | null {
   const directory = mkdtempSync(join(tmpdir(), "vita-identity-go-lower-"));
   const sourcePath = join(directory, "main.go");
 
@@ -407,6 +411,14 @@ func main() {
     }
 
     return values;
+  } catch (error) {
+    // Native `go` is container/CI-only; on a dev host without it the BMP parity
+    // fuzz is skipped (the Go conformance lane still covers parity). Re-throw any
+    // other failure so a real go error is not silently swallowed.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
