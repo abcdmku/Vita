@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -56,6 +57,10 @@ type CrossFieldRule struct {
 type jsonValue interface{}
 type jsonObject map[string]jsonValue
 type jsonArray []jsonValue
+type jsonString struct {
+	value    string
+	rawToken string
+}
 
 type compiledManifest struct {
 	fieldNames      []string
@@ -784,17 +789,17 @@ func validateField(value jsonValue, field compiledField, path string) (capabilit
 }
 
 func validateStringField(value jsonValue, field compiledField, path string) (capabilityValue, error) {
-	raw, ok := value.(string)
+	raw, ok := asJSONString(value)
 	if !ok {
 		return nil, pathError(path, "expected string")
 	}
-	if field.noInlineSecrets && containsInlineSecretMaterial(raw) {
+	if field.noInlineSecrets && containsInlineSecretMaterial(raw.value) {
 		return nil, pathError(path, "inline secret material is not allowed")
 	}
 
-	normalized := raw
+	normalized := raw.value
 	if field.format != "" {
-		formatted, ok := normalizeStringFormat(raw, field.format)
+		formatted, ok := normalizeStringFormat(raw.value, field.format, raw.rawToken)
 		if !ok {
 			return nil, pathError(path, "string does not match required format")
 		}
@@ -965,7 +970,7 @@ func decodeJSON(raw []byte) (jsonValue, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	nodes := 0
-	value, err := parseJSONValue(decoder, 0, &nodes)
+	value, err := parseJSONValue(decoder, raw, 0, &nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +983,7 @@ func decodeJSON(raw []byte) (jsonValue, error) {
 	return value, nil
 }
 
-func parseJSONValue(decoder *json.Decoder, depth int, nodes *int) (jsonValue, error) {
+func parseJSONValue(decoder *json.Decoder, raw []byte, depth int, nodes *int) (jsonValue, error) {
 	if depth > maxJSONDepth {
 		return nil, errors.New("JSON depth budget exceeded")
 	}
@@ -1011,7 +1016,7 @@ func parseJSONValue(decoder *json.Decoder, depth int, nodes *int) (jsonValue, er
 					return nil, fmt.Errorf("duplicate JSON object key %q", key)
 				}
 				seen[key] = struct{}{}
-				child, err := parseJSONValue(decoder, depth+1, nodes)
+				child, err := parseJSONValue(decoder, raw, depth+1, nodes)
 				if err != nil {
 					return nil, err
 				}
@@ -1028,7 +1033,7 @@ func parseJSONValue(decoder *json.Decoder, depth int, nodes *int) (jsonValue, er
 		case '[':
 			array := jsonArray{}
 			for decoder.More() {
-				child, err := parseJSONValue(decoder, depth+1, nodes)
+				child, err := parseJSONValue(decoder, raw, depth+1, nodes)
 				if err != nil {
 					return nil, err
 				}
@@ -1047,10 +1052,50 @@ func parseJSONValue(decoder *json.Decoder, depth int, nodes *int) (jsonValue, er
 		}
 	case nil:
 		return nil, nil
-	case string, bool, json.Number:
+	case string:
+		rawToken, err := rawJSONStringToken(raw, decoder.InputOffset())
+		if err != nil {
+			return nil, err
+		}
+		return jsonString{value: value, rawToken: rawToken}, nil
+	case bool, json.Number:
 		return value, nil
 	default:
 		return nil, fmt.Errorf("unsupported JSON token %T", token)
+	}
+}
+
+func rawJSONStringToken(raw []byte, endOffset int64) (string, error) {
+	end := int(endOffset)
+	if end < 2 || end > len(raw) || raw[end-1] != '"' {
+		return "", errors.New("string token offset is invalid")
+	}
+
+	for start := end - 2; start >= 0; start-- {
+		if raw[start] != '"' {
+			continue
+		}
+
+		backslashes := 0
+		for index := start - 1; index >= 0 && raw[index] == '\\'; index-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return string(raw[start+1 : end-1]), nil
+		}
+	}
+
+	return "", errors.New("string token start not found")
+}
+
+func asJSONString(value jsonValue) (jsonString, bool) {
+	switch typed := value.(type) {
+	case jsonString:
+		return typed, true
+	case string:
+		return jsonString{value: typed, rawToken: typed}, true
+	default:
+		return jsonString{}, false
 	}
 }
 
@@ -1074,11 +1119,11 @@ func requiredString(object jsonObject, key string, path string) (string, error) 
 	if !ok {
 		return "", pathError(path, "required field is missing")
 	}
-	stringValue, ok := value.(string)
+	stringValue, ok := asJSONString(value)
 	if !ok {
 		return "", pathError(path, "expected string")
 	}
-	return stringValue, nil
+	return stringValue.value, nil
 }
 
 func optionalString(object jsonObject, key string, path string) (string, error) {
@@ -1086,11 +1131,11 @@ func optionalString(object jsonObject, key string, path string) (string, error) 
 	if !ok {
 		return "", nil
 	}
-	stringValue, ok := value.(string)
+	stringValue, ok := asJSONString(value)
 	if !ok {
 		return "", pathError(path, "expected string")
 	}
-	return stringValue, nil
+	return stringValue.value, nil
 }
 
 func requiredBool(object jsonObject, key string, path string) (bool, error) {
@@ -1162,15 +1207,15 @@ func optionalStringEnum(object jsonObject, key string, path string) ([]string, e
 	seen := map[string]struct{}{}
 	values := make([]string, 0, len(array))
 	for index, item := range array {
-		stringValue, ok := item.(string)
+		stringValue, ok := asJSONString(item)
 		if !ok {
 			return nil, pathError(joinPath(path, strconv.Itoa(index)), "expected string enum value")
 		}
-		if _, exists := seen[stringValue]; exists {
+		if _, exists := seen[stringValue.value]; exists {
 			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate enum value")
 		}
-		seen[stringValue] = struct{}{}
-		values = append(values, stringValue)
+		seen[stringValue.value] = struct{}{}
+		values = append(values, stringValue.value)
 	}
 	return values, nil
 }
@@ -1188,15 +1233,15 @@ func optionalUniqueBy(object jsonObject, key string, path string) ([]string, err
 	seen := map[string]struct{}{}
 	values := make([]string, 0, len(array))
 	for index, item := range array {
-		stringValue, ok := item.(string)
-		if !ok || stringValue == "" {
+		stringValue, ok := asJSONString(item)
+		if !ok || stringValue.value == "" {
 			return nil, pathError(joinPath(path, strconv.Itoa(index)), "expected non-empty uniqueBy field name")
 		}
-		if _, exists := seen[stringValue]; exists {
+		if _, exists := seen[stringValue.value]; exists {
 			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate uniqueBy field name")
 		}
-		seen[stringValue] = struct{}{}
-		values = append(values, stringValue)
+		seen[stringValue.value] = struct{}{}
+		values = append(values, stringValue.value)
 	}
 	return values, nil
 }
@@ -1269,7 +1314,7 @@ func isSafeInteger(value float64) bool {
 		math.Abs(value) <= maxSafeInteger
 }
 
-func normalizeStringFormat(value string, format string) (string, bool) {
+func normalizeStringFormat(value string, format string, rawToken ...string) (string, bool) {
 	switch format {
 	case "hostnameRFC1123":
 		if isHostnameRFC1123(value) {
@@ -1306,6 +1351,19 @@ func normalizeStringFormat(value string, format string) (string, bool) {
 			return value, true
 		}
 		return "", false
+	case "rfc3339Instant":
+		token := value
+		if len(rawToken) > 0 {
+			token = rawToken[0]
+		}
+		if strings.Contains(token, "\\") {
+			return "", false
+		}
+		parsed, err := time.Parse(time.RFC3339, token)
+		if err != nil || parsed.IsZero() {
+			return "", false
+		}
+		return value, true
 	default:
 		return "", false
 	}
@@ -1319,7 +1377,8 @@ func isKnownStringFormat(format string) bool {
 		format == "posixUsername" ||
 		format == "groupName" ||
 		format == "systemdUnitName" ||
-		format == "absolutePath"
+		format == "absolutePath" ||
+		format == "rfc3339Instant"
 }
 
 func isPOSIXName(value string) bool {

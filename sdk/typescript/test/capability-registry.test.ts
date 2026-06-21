@@ -10,6 +10,7 @@ import {
   HOSTNAME_MANIFEST,
   NODE_CONFIG_MANIFEST,
   SERVICES_MANIFEST,
+  TIME_MANIFEST,
   TIMESYNC_MANIFEST,
   defaultCapabilityRegistry,
 } from "../src/capability-manifest.ts";
@@ -30,11 +31,13 @@ test("default capability manifests are keyed by agent operation names", () => {
     "hostname.set",
     "node.config",
     "services.config",
+    "time.set",
     "time.sync",
   ]);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["hostname.set"], HOSTNAME_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["node.config"], NODE_CONFIG_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["services.config"], SERVICES_MANIFEST);
+  assert.equal(DEFAULT_CAPABILITY_MANIFESTS["time.set"], TIME_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["time.sync"], TIMESYNC_MANIFEST);
   assert.equal(Object.hasOwn(TIMESYNC_MANIFEST, "defaultRegistry"), false);
   assert.equal(Object.isFrozen(DEFAULT_CAPABILITY_MANIFESTS["hostname.set"]?.fields.desired), true);
@@ -46,8 +49,9 @@ test("defaultCapabilityRegistry exposes every generated manifest", () => {
   assert.equal(registry.get("hostname.set"), HOSTNAME_MANIFEST);
   assert.equal(registry.get("node.config"), NODE_CONFIG_MANIFEST);
   assert.equal(registry.get("services.config"), SERVICES_MANIFEST);
+  assert.equal(registry.get("time.set"), TIME_MANIFEST);
   assert.equal(registry.get("time.sync"), TIMESYNC_MANIFEST);
-  assert.equal(registry.size, 4);
+  assert.equal(registry.size, 5);
 });
 
 test("generated capability manifests are fresh", () => {

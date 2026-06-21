@@ -9,7 +9,7 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * not an embedded expression language.
  *
  * String formats are a closed, governed set. `posixUsername`, `groupName`,
- * `systemdUnitName`, and `absolutePath` are structured capability-agent
+ * `systemdUnitName`, `absolutePath`, and `rfc3339Instant` are structured capability-agent
  * parity formats. `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
  * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
@@ -30,7 +30,8 @@ export type StringFieldFormat =
   | "posixUsername"
   | "groupName"
   | "systemdUnitName"
-  | "absolutePath";
+  | "absolutePath"
+  | "rfc3339Instant";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -235,7 +236,33 @@ type FieldValidationResult =
       readonly ok: false;
     };
 
+type RawJsonValue = PlainJson | typeof INVALID_RAW_JSON;
+
+type RawCapabilityRequestParseResult =
+  | {
+      readonly ok: true;
+      readonly value: PlainJson;
+      readonly rawStringTokens: ReadonlyMap<string, string>;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    };
+
+interface RawJsonScanner {
+  readonly text: string;
+  index: number;
+  duplicateKey: boolean;
+  readonly rawStringTokens: Map<string, string>;
+}
+
+interface RawJsonStringToken {
+  readonly value: string;
+  readonly rawToken: string;
+}
+
 const SUPPORTED_MANIFEST_VERSION = 1;
+const INVALID_RAW_JSON = Symbol("invalidRawJson");
 const MANIFEST_FIELDS = new Set([
   "capability",
   "crossFieldRules",
@@ -319,18 +346,39 @@ export function compileCapabilityValidator(manifest: CapabilityManifest): Capabi
 
   return (input: unknown): CapabilityValidationResult => {
     try {
-      const normalized = safeNormalize(input);
+      let normalizedValue: PlainJson;
+      let rawStringTokens: ReadonlyMap<string, string> | undefined;
 
-      if (!normalized.ok) {
-        return reject([
-          {
-            message: `Invalid untrusted input: ${normalized.reason}`,
-            path: "",
-          },
-        ]);
+      if (typeof input === "string") {
+        const parsed = parseRawCapabilityRequest(input);
+
+        if (!parsed.ok) {
+          return reject([
+            {
+              message: `Invalid JSON request: ${parsed.reason}`,
+              path: "",
+            },
+          ]);
+        }
+
+        normalizedValue = parsed.value;
+        rawStringTokens = parsed.rawStringTokens;
+      } else {
+        const normalized = safeNormalize(input);
+
+        if (!normalized.ok) {
+          return reject([
+            {
+              message: `Invalid untrusted input: ${normalized.reason}`,
+              path: "",
+            },
+          ]);
+        }
+
+        normalizedValue = normalized.value;
       }
 
-      const value = validateInput(normalized.value, compiled.value);
+      const value = validateInput(normalizedValue, compiled.value, rawStringTokens);
 
       if (!value.ok) {
         return reject(value.rejections);
@@ -989,7 +1037,299 @@ function parseCrossFieldRule(
   }
 }
 
-function validateInput(value: PlainJson, manifest: CompiledManifest):
+function parseRawCapabilityRequest(raw: string): RawCapabilityRequestParseResult {
+  const scanner: RawJsonScanner = {
+    duplicateKey: false,
+    index: 0,
+    rawStringTokens: new Map<string, string>(),
+    text: raw,
+  };
+
+  const value = scanRawJsonValue(scanner, []);
+
+  if (value === INVALID_RAW_JSON) {
+    return rejectRawCapabilityRequest("malformed JSON");
+  }
+
+  skipRawJsonWhitespace(scanner);
+
+  if (scanner.index !== scanner.text.length) {
+    return rejectRawCapabilityRequest("trailing data");
+  }
+
+  if (scanner.duplicateKey) {
+    return rejectRawCapabilityRequest("duplicate object key");
+  }
+
+  return {
+    ok: true,
+    rawStringTokens: new Map(scanner.rawStringTokens),
+    value,
+  };
+}
+
+function scanRawJsonValue(scanner: RawJsonScanner, path: Path): RawJsonValue {
+  skipRawJsonWhitespace(scanner);
+
+  const char = peekRawJson(scanner);
+
+  if (char === "{") {
+    return scanRawJsonObject(scanner, path);
+  }
+  if (char === "[") {
+    return scanRawJsonArray(scanner, path);
+  }
+  if (char === "\"") {
+    const token = consumeRawJsonString(scanner);
+
+    if (token === undefined) {
+      return INVALID_RAW_JSON;
+    }
+
+    scanner.rawStringTokens.set(formatPath(path), token.rawToken);
+    return token.value;
+  }
+  if (char === "t") {
+    return consumeRawJsonLiteral(scanner, "true") ? true : INVALID_RAW_JSON;
+  }
+  if (char === "f") {
+    return consumeRawJsonLiteral(scanner, "false") ? false : INVALID_RAW_JSON;
+  }
+  if (char === "n") {
+    return consumeRawJsonLiteral(scanner, "null") ? null : INVALID_RAW_JSON;
+  }
+
+  return scanRawJsonNumber(scanner);
+}
+
+function scanRawJsonObject(scanner: RawJsonScanner, path: Path): RawJsonValue {
+  if (!consumeRawJsonChar(scanner, "{")) {
+    return INVALID_RAW_JSON;
+  }
+
+  skipRawJsonWhitespace(scanner);
+
+  const output: Record<string, PlainJson> = {};
+  const seen = new Set<string>();
+
+  if (consumeRawJsonChar(scanner, "}")) {
+    return Object.freeze(output);
+  }
+
+  for (;;) {
+    skipRawJsonWhitespace(scanner);
+
+    const key = consumeRawJsonString(scanner);
+
+    if (key === undefined) {
+      return INVALID_RAW_JSON;
+    }
+
+    if (seen.has(key.value)) {
+      scanner.duplicateKey = true;
+    } else {
+      seen.add(key.value);
+    }
+
+    skipRawJsonWhitespace(scanner);
+
+    if (!consumeRawJsonChar(scanner, ":")) {
+      return INVALID_RAW_JSON;
+    }
+
+    const child = scanRawJsonValue(scanner, [...path, key.value]);
+
+    if (child === INVALID_RAW_JSON) {
+      return INVALID_RAW_JSON;
+    }
+
+    Object.defineProperty(output, key.value, {
+      configurable: true,
+      enumerable: true,
+      value: child,
+      writable: true,
+    });
+
+    skipRawJsonWhitespace(scanner);
+
+    if (consumeRawJsonChar(scanner, "}")) {
+      return Object.freeze(output);
+    }
+
+    if (!consumeRawJsonChar(scanner, ",")) {
+      return INVALID_RAW_JSON;
+    }
+  }
+}
+
+function scanRawJsonArray(scanner: RawJsonScanner, path: Path): RawJsonValue {
+  if (!consumeRawJsonChar(scanner, "[")) {
+    return INVALID_RAW_JSON;
+  }
+
+  skipRawJsonWhitespace(scanner);
+
+  const output: PlainJson[] = [];
+
+  if (consumeRawJsonChar(scanner, "]")) {
+    return Object.freeze(output);
+  }
+
+  for (;;) {
+    const child = scanRawJsonValue(scanner, [...path, String(output.length)]);
+
+    if (child === INVALID_RAW_JSON) {
+      return INVALID_RAW_JSON;
+    }
+
+    output.push(child);
+    skipRawJsonWhitespace(scanner);
+
+    if (consumeRawJsonChar(scanner, "]")) {
+      return Object.freeze(output);
+    }
+
+    if (!consumeRawJsonChar(scanner, ",")) {
+      return INVALID_RAW_JSON;
+    }
+  }
+}
+
+function consumeRawJsonString(scanner: RawJsonScanner): RawJsonStringToken | undefined {
+  if (!consumeRawJsonChar(scanner, "\"")) {
+    return undefined;
+  }
+
+  const tokenStart = scanner.index - 1;
+  const rawStart = scanner.index;
+  let escaped = false;
+
+  while (scanner.index < scanner.text.length) {
+    const char = scanner.text.charAt(scanner.index);
+
+    if (escaped) {
+      escaped = false;
+      scanner.index += 1;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      scanner.index += 1;
+      continue;
+    }
+
+    if (char === "\"") {
+      const rawToken = scanner.text.slice(rawStart, scanner.index);
+      scanner.index += 1;
+
+      try {
+        const parsed = JSON.parse(scanner.text.slice(tokenStart, scanner.index)) as unknown;
+
+        if (typeof parsed !== "string") {
+          return undefined;
+        }
+
+        return {
+          rawToken,
+          value: parsed,
+        };
+      } catch {
+        return undefined;
+      }
+    }
+
+    scanner.index += 1;
+  }
+
+  return undefined;
+}
+
+function scanRawJsonNumber(scanner: RawJsonScanner): RawJsonValue {
+  const start = scanner.index;
+
+  while (scanner.index < scanner.text.length) {
+    const char = scanner.text.charAt(scanner.index);
+
+    if (
+      char !== "-" &&
+      char !== "+" &&
+      char !== "." &&
+      char !== "e" &&
+      char !== "E" &&
+      !isAsciiDigitCode(char.charCodeAt(0))
+    ) {
+      break;
+    }
+
+    scanner.index += 1;
+  }
+
+  if (scanner.index === start) {
+    return INVALID_RAW_JSON;
+  }
+
+  try {
+    const parsed = JSON.parse(scanner.text.slice(start, scanner.index)) as unknown;
+
+    if (typeof parsed !== "number" || !Number.isFinite(parsed)) {
+      return INVALID_RAW_JSON;
+    }
+
+    return parsed;
+  } catch {
+    return INVALID_RAW_JSON;
+  }
+}
+
+function consumeRawJsonLiteral(scanner: RawJsonScanner, literal: string): boolean {
+  if (!scanner.text.startsWith(literal, scanner.index)) {
+    return false;
+  }
+
+  scanner.index += literal.length;
+  return true;
+}
+
+function consumeRawJsonChar(scanner: RawJsonScanner, char: string): boolean {
+  if (peekRawJson(scanner) !== char) {
+    return false;
+  }
+
+  scanner.index += 1;
+  return true;
+}
+
+function skipRawJsonWhitespace(scanner: RawJsonScanner): void {
+  while (scanner.index < scanner.text.length) {
+    const char = scanner.text.charAt(scanner.index);
+
+    if (char !== " " && char !== "\n" && char !== "\r" && char !== "\t") {
+      return;
+    }
+
+    scanner.index += 1;
+  }
+}
+
+function peekRawJson(scanner: RawJsonScanner): string | undefined {
+  return scanner.text.at(scanner.index);
+}
+
+function rejectRawCapabilityRequest(
+  reason: string,
+): Extract<RawCapabilityRequestParseResult, { readonly ok: false }> {
+  return {
+    ok: false,
+    reason,
+  };
+}
+
+function validateInput(
+  value: PlainJson,
+  manifest: CompiledManifest,
+  rawStringTokens: ReadonlyMap<string, string> | undefined,
+):
   | {
       readonly ok: true;
       readonly value: CapabilityRecord;
@@ -1028,7 +1368,7 @@ function validateInput(value: PlainJson, manifest: CompiledManifest):
       continue;
     }
 
-    const result = validateField(value[fieldName], schema, [fieldName], errors);
+    const result = validateField(value[fieldName], schema, [fieldName], errors, rawStringTokens);
 
     if (result.ok) {
       Object.defineProperty(output, fieldName, {
@@ -1061,6 +1401,7 @@ function validateField(
   schema: CompiledFieldSchema,
   path: Path,
   errors: CapabilityRejection[],
+  rawStringTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (value === undefined) {
     addError(errors, path, "Required field is missing.");
@@ -1069,15 +1410,15 @@ function validateField(
 
   switch (schema.type) {
     case "string":
-      return validateStringField(value, schema, path, errors);
+      return validateStringField(value, schema, path, errors, rawStringTokens);
     case "integer":
       return validateIntegerField(value, schema, path, errors);
     case "boolean":
       return validateBooleanField(value, path, errors);
     case "array":
-      return validateArrayField(value, schema, path, errors);
+      return validateArrayField(value, schema, path, errors, rawStringTokens);
     case "object":
-      return validateObjectField(value, schema, path, errors);
+      return validateObjectField(value, schema, path, errors, rawStringTokens);
   }
 }
 
@@ -1086,6 +1427,7 @@ function validateStringField(
   schema: CompiledStringFieldSchema,
   path: Path,
   errors: CapabilityRejection[],
+  rawStringTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (typeof value !== "string") {
     addError(errors, path, "Expected string.");
@@ -1101,7 +1443,7 @@ function validateStringField(
   let normalized = value;
 
   if (schema.format !== undefined) {
-    const formatted = normalizeStringFormat(value, schema.format);
+    const formatted = normalizeStringFormat(value, schema.format, rawStringTokens?.get(formatPath(path)));
 
     if (formatted === undefined) {
       addError(errors, path, "String does not match required format.");
@@ -1184,6 +1526,7 @@ function validateArrayField(
   schema: CompiledArrayFieldSchema,
   path: Path,
   errors: CapabilityRejection[],
+  rawStringTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (!Array.isArray(value)) {
     addError(errors, path, "Expected array.");
@@ -1206,7 +1549,7 @@ function validateArrayField(
 
   for (let index = 0; index < value.length; index += 1) {
     const itemPath = [...path, String(index)];
-    const result = validateField(value[index], schema.items, itemPath, errors);
+    const result = validateField(value[index], schema.items, itemPath, errors, rawStringTokens);
 
     if (!result.ok) {
       continue;
@@ -1265,6 +1608,7 @@ function validateObjectField(
   schema: CompiledObjectFieldSchema,
   path: Path,
   errors: CapabilityRejection[],
+  rawStringTokens: ReadonlyMap<string, string> | undefined,
 ): FieldValidationResult {
   if (!isRecord(value)) {
     addError(errors, path, "Expected object.");
@@ -1297,7 +1641,7 @@ function validateObjectField(
       continue;
     }
 
-    const result = validateField(value[fieldName], field, [...path, fieldName], errors);
+    const result = validateField(value[fieldName], field, [...path, fieldName], errors, rawStringTokens);
 
     if (result.ok) {
       Object.defineProperty(output, fieldName, {
@@ -1705,11 +2049,16 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "posixUsername" ||
     value === "groupName" ||
     value === "systemdUnitName" ||
-    value === "absolutePath"
+    value === "absolutePath" ||
+    value === "rfc3339Instant"
   );
 }
 
-function normalizeStringFormat(value: string, format: StringFieldFormat): string | undefined {
+function normalizeStringFormat(
+  value: string,
+  format: StringFieldFormat,
+  rawToken?: string,
+): string | undefined {
   switch (format) {
     case "hostnameRFC1123":
       return isHostnameRFC1123(value) ? value : undefined;
@@ -1733,7 +2082,277 @@ function normalizeStringFormat(value: string, format: StringFieldFormat): string
       return isSystemdUnitName(value) ? value : undefined;
     case "absolutePath":
       return isCanonicalAbsolutePath(value) ? value : undefined;
+    case "rfc3339Instant":
+      return isRFC3339Instant(value, rawToken) ? value : undefined;
   }
+}
+
+interface ParsedRFC3339Instant {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly hour: number;
+  readonly minute: number;
+  readonly second: number;
+  readonly nanosecond: number;
+  readonly offsetSeconds: number;
+}
+
+interface ParsedFixedDigits {
+  readonly value: number;
+  readonly next: number;
+}
+
+function isRFC3339Instant(value: string, rawToken: string | undefined): boolean {
+  const token = rawToken ?? value;
+
+  if (containsChar(token, 92)) {
+    return false;
+  }
+
+  const parsed = parseRFC3339InstantToken(token);
+
+  return parsed !== undefined && !isZeroRFC3339Instant(parsed);
+}
+
+function parseRFC3339InstantToken(value: string): ParsedRFC3339Instant | undefined {
+  let index = 0;
+
+  const year = readFixedDigits(value, index, 4);
+
+  if (year === undefined || value.charAt(year.next) !== "-") {
+    return undefined;
+  }
+
+  index = year.next + 1;
+
+  const month = readFixedDigits(value, index, 2);
+
+  if (month === undefined || value.charAt(month.next) !== "-") {
+    return undefined;
+  }
+
+  index = month.next + 1;
+
+  const day = readFixedDigits(value, index, 2);
+
+  if (day === undefined || value.charAt(day.next) !== "T") {
+    return undefined;
+  }
+
+  index = day.next + 1;
+
+  const hour = readFixedDigits(value, index, 2);
+
+  if (hour === undefined || value.charAt(hour.next) !== ":") {
+    return undefined;
+  }
+
+  index = hour.next + 1;
+
+  const minute = readFixedDigits(value, index, 2);
+
+  if (minute === undefined || value.charAt(minute.next) !== ":") {
+    return undefined;
+  }
+
+  index = minute.next + 1;
+
+  const second = readFixedDigits(value, index, 2);
+
+  if (second === undefined) {
+    return undefined;
+  }
+
+  index = second.next;
+
+  let nanosecond = 0;
+  const fractionMarker = value.charAt(index);
+
+  if (fractionMarker === "." || fractionMarker === ",") {
+    index += 1;
+
+    const fraction = readRFC3339Fraction(value, index);
+
+    if (fraction === undefined) {
+      return undefined;
+    }
+
+    nanosecond = fraction.nanosecond;
+    index = fraction.next;
+  }
+
+  const offset = readRFC3339Offset(value, index);
+
+  if (offset === undefined || offset.next !== value.length) {
+    return undefined;
+  }
+
+  if (
+    month.value < 1 ||
+    month.value > 12 ||
+    day.value < 1 ||
+    day.value > daysInMonth(year.value, month.value) ||
+    hour.value > 23 ||
+    minute.value > 59 ||
+    second.value > 59
+  ) {
+    return undefined;
+  }
+
+  return {
+    day: day.value,
+    hour: hour.value,
+    minute: minute.value,
+    month: month.value,
+    nanosecond,
+    offsetSeconds: offset.offsetSeconds,
+    second: second.value,
+    year: year.value,
+  };
+}
+
+function readRFC3339Fraction(
+  value: string,
+  start: number,
+): { readonly nanosecond: number; readonly next: number } | undefined {
+  let index = start;
+  let digits = 0;
+  let nanosecond = 0;
+
+  while (index < value.length) {
+    const code = value.charCodeAt(index);
+
+    if (!isAsciiDigitCode(code)) {
+      break;
+    }
+
+    if (digits < 9) {
+      nanosecond = nanosecond * 10 + code - 48;
+    }
+
+    digits += 1;
+    index += 1;
+  }
+
+  if (digits === 0) {
+    return undefined;
+  }
+
+  while (digits < 9) {
+    nanosecond *= 10;
+    digits += 1;
+  }
+
+  return {
+    nanosecond,
+    next: index,
+  };
+}
+
+function readRFC3339Offset(
+  value: string,
+  start: number,
+): { readonly offsetSeconds: number; readonly next: number } | undefined {
+  const marker = value.charAt(start);
+
+  if (marker === "Z") {
+    return {
+      next: start + 1,
+      offsetSeconds: 0,
+    };
+  }
+
+  if (marker !== "+" && marker !== "-") {
+    return undefined;
+  }
+
+  const hour = readFixedDigits(value, start + 1, 2);
+
+  if (hour === undefined || value.charAt(hour.next) !== ":") {
+    return undefined;
+  }
+
+  const minute = readFixedDigits(value, hour.next + 1, 2);
+
+  if (minute === undefined || hour.value > 24 || minute.value > 60) {
+    return undefined;
+  }
+
+  const sign = marker === "+" ? 1 : -1;
+
+  return {
+    next: minute.next,
+    offsetSeconds: sign * ((hour.value * 60 + minute.value) * 60),
+  };
+}
+
+function readFixedDigits(value: string, start: number, width: number): ParsedFixedDigits | undefined {
+  let parsed = 0;
+
+  for (let index = 0; index < width; index += 1) {
+    const code = value.charCodeAt(start + index);
+
+    if (!isAsciiDigitCode(code)) {
+      return undefined;
+    }
+
+    parsed = parsed * 10 + code - 48;
+  }
+
+  return {
+    next: start + width,
+    value: parsed,
+  };
+}
+
+function isZeroRFC3339Instant(value: ParsedRFC3339Instant): boolean {
+  if (value.nanosecond !== 0) {
+    return false;
+  }
+
+  const localSeconds =
+    daysFromCivil(value.year, value.month, value.day) * 86_400 +
+    value.hour * 3_600 +
+    value.minute * 60 +
+    value.second;
+  const utcSeconds = localSeconds - value.offsetSeconds;
+  const zeroSeconds = daysFromCivil(1, 1, 1) * 86_400;
+
+  return utcSeconds === zeroSeconds;
+}
+
+function daysFromCivil(year: number, month: number, day: number): number {
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(adjustedYear / 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const monthPrime = month + (month > 2 ? -3 : 9);
+  const dayOfYear = Math.floor((153 * monthPrime + 2) / 5) + day - 1;
+  const dayOfEra =
+    yearOfEra * 365 +
+    Math.floor(yearOfEra / 4) -
+    Math.floor(yearOfEra / 100) +
+    dayOfYear;
+
+  return era * 146_097 + dayOfEra;
+}
+
+function daysInMonth(year: number, month: number): number {
+  switch (month) {
+    case 2:
+      return isLeapYear(year) ? 29 : 28;
+    case 4:
+    case 6:
+    case 9:
+    case 11:
+      return 30;
+    default:
+      return 31;
+  }
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function isPOSIXName(value: string): boolean {

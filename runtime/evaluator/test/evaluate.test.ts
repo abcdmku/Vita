@@ -105,6 +105,32 @@ test("valid time.sync request evaluates to one canonical operation", () => {
   });
 });
 
+test("valid time.set request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "time.set": {
+        desired: "2026-06-21T12:02:03+05:30",
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "time.set",
+        request: {
+          desired: "2026-06-21T12:02:03+05:30",
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {

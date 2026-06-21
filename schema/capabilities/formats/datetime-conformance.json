@@ -1,0 +1,233 @@
+[
+  {
+    "name": "valid UTC instant",
+    "request": {
+      "value": "2026-06-21T12:02:03Z"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03Z"
+  },
+  {
+    "name": "valid positive offset",
+    "request": {
+      "value": "2026-06-21T12:02:03+05:30"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03+05:30"
+  },
+  {
+    "name": "valid negative offset",
+    "request": {
+      "value": "2026-06-21T12:02:03-07:00"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03-07:00"
+  },
+  {
+    "name": "fractional seconds",
+    "request": {
+      "value": "2026-06-21T12:02:03.123456789Z"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03.123456789Z"
+  },
+  {
+    "name": "comma fractional seconds",
+    "request": {
+      "value": "2026-06-21T12:02:03,1Z"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03,1Z"
+  },
+  {
+    "name": "long fractional seconds",
+    "request": {
+      "value": "2026-06-21T12:02:03.1234567890Z"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T12:02:03.1234567890Z"
+  },
+  {
+    "name": "offset hour twenty four",
+    "request": {
+      "value": "2026-06-21T01:02:03+24:00"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T01:02:03+24:00"
+  },
+  {
+    "name": "offset minute sixty",
+    "request": {
+      "value": "2026-06-21T01:02:03-24:60"
+    },
+    "expect": "accept",
+    "canonical": "2026-06-21T01:02:03-24:60"
+  },
+  {
+    "name": "year zero",
+    "request": {
+      "value": "0000-01-01T00:00:00Z"
+    },
+    "expect": "accept",
+    "canonical": "0000-01-01T00:00:00Z"
+  },
+  {
+    "name": "leap day",
+    "request": {
+      "value": "2024-02-29T00:00:00Z"
+    },
+    "expect": "accept",
+    "canonical": "2024-02-29T00:00:00Z"
+  },
+  {
+    "name": "zero instant UTC",
+    "request": {
+      "value": "0001-01-01T00:00:00Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "zero instant with offset",
+    "request": {
+      "value": "0001-01-01T01:00:00+01:00"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "zero instant from previous year",
+    "request": {
+      "value": "0000-12-31T23:00:00-01:00"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "zero instant with truncated fractional precision",
+    "request": {
+      "value": "0001-01-01T00:00:00.0000000001Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "non-zero nanosecond instant",
+    "request": {
+      "value": "0001-01-01T00:00:00.000000001Z"
+    },
+    "expect": "accept",
+    "canonical": "0001-01-01T00:00:00.000000001Z"
+  },
+  {
+    "name": "bad month",
+    "request": {
+      "value": "2026-13-21T12:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "bad day",
+    "request": {
+      "value": "2026-04-31T12:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "non leap february twenty ninth",
+    "request": {
+      "value": "2023-02-29T12:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "space separator",
+    "request": {
+      "value": "2026-06-21 12:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "missing seconds",
+    "request": {
+      "value": "2026-06-21T12:02Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "single digit hour with following non-digit",
+    "request": {
+      "value": "2026-06-21T1x:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "lowercase t",
+    "request": {
+      "value": "2026-06-21t12:02:03Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "lowercase z",
+    "request": {
+      "value": "2026-06-21T12:02:03z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "unicode digit",
+    "request": {
+      "value": "2026-06-21T12:02:0٣Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "surrounding whitespace",
+    "request": {
+      "value": " 2026-06-21T12:02:03Z "
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "offset hour above Go bound",
+    "request": {
+      "value": "2026-06-21T01:02:03+25:00"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "offset minute above Go bound",
+    "request": {
+      "value": "2026-06-21T01:02:03+00:61"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "leap second",
+    "request": {
+      "value": "2026-06-21T12:02:60Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "hour twenty four",
+    "request": {
+      "value": "2026-06-21T24:00:00Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "fraction marker without digits",
+    "request": {
+      "value": "2026-06-21T12:02:03.Z"
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "escaped Z raw token",
+    "request": "{\"value\":\"2026-06-21T12:02:03\\u005A\"}",
+    "expect": "reject"
+  },
+  {
+    "name": "escaped digit raw token",
+    "request": "{\"value\":\"2026-0\\u0036-21T12:02:03Z\"}",
+    "expect": "reject"
+  }
+]

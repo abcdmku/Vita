@@ -1,0 +1,12 @@
+{
+  "capability": "time.set",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "format": "rfc3339Instant",
+      "required": true,
+      "type": "string"
+    }
+  },
+  "crossFieldRules": []
+}

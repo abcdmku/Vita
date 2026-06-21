@@ -1,0 +1,256 @@
+[
+  {
+    "name": "valid UTC instant accepts",
+    "request": {
+      "desired": "2026-06-21T12:02:03Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid positive offset accepts",
+    "request": {
+      "desired": "2026-06-21T12:02:03+05:30"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid negative offset accepts",
+    "request": {
+      "desired": "2026-06-21T12:02:03-07:00"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "fractional seconds accept",
+    "request": {
+      "desired": "2026-06-21T12:02:03.123456789Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "comma fractional seconds accept like Go",
+    "request": {
+      "desired": "2026-06-21T12:02:03,1Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "long fractional seconds accept like Go",
+    "request": {
+      "desired": "2026-06-21T12:02:03.1234567890Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "offset hour twenty four accepts",
+    "request": {
+      "desired": "2026-06-21T01:02:03+24:00"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "offset minute sixty accepts",
+    "request": {
+      "desired": "2026-06-21T01:02:03-24:60"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "year zero accepts like Go",
+    "request": {
+      "desired": "0000-01-01T00:00:00Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "leap day accepts",
+    "request": {
+      "desired": "2024-02-29T00:00:00Z"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "zero instant UTC rejects",
+    "request": {
+      "desired": "0001-01-01T00:00:00Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "zero instant with zero offset rejects",
+    "request": {
+      "desired": "0001-01-01T00:00:00+00:00"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "zero instant via positive offset rejects",
+    "request": {
+      "desired": "0001-01-01T01:00:00+01:00"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "empty desired rejects",
+    "request": {
+      "desired": ""
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "non string desired rejects",
+    "request": {
+      "desired": 1700000000
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "bad month rejects",
+    "request": {
+      "desired": "2026-13-21T12:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "bad day rejects",
+    "request": {
+      "desired": "2026-04-31T12:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "non leap february twenty ninth rejects",
+    "request": {
+      "desired": "2023-02-29T12:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "lenient space separator rejects",
+    "request": {
+      "desired": "2026-06-21 12:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "missing seconds rejects",
+    "request": {
+      "desired": "2026-06-21T12:02Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "malformed single digit hour rejects",
+    "request": {
+      "desired": "2026-06-21T1x:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "lowercase t rejects",
+    "request": {
+      "desired": "2026-06-21t12:02:03Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "lowercase z rejects",
+    "request": {
+      "desired": "2026-06-21T12:02:03z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "unicode digit rejects",
+    "request": {
+      "desired": "2026-06-21T12:02:0٣Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "surrounding whitespace rejects",
+    "request": {
+      "desired": " 2026-06-21T12:02:03Z "
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "offset hour above Go bound rejects",
+    "request": {
+      "desired": "2026-06-21T01:02:03+25:00"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "offset minute above Go bound rejects",
+    "request": {
+      "desired": "2026-06-21T01:02:03+00:61"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "leap second rejects like Go",
+    "request": {
+      "desired": "2026-06-21T12:02:60Z"
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "escaped Z raw token rejects",
+    "request": "{\"desired\":\"2026-06-21T12:02:03\\u005A\"}",
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "escaped digit raw token rejects",
+    "request": "{\"desired\":\"2026-0\\u0036-21T12:02:03Z\"}",
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": "2026-06-21T12:02:03Z",
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "duplicate desired key rejects",
+    "request": "{\"desired\":\"2026-06-21T12:02:03Z\",\"desired\":\"2026-06-21T12:02:04Z\"}",
+    "expect": "reject"
+  }
+]
