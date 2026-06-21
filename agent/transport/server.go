@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
 	"github.com/vita/agent/capabilities/hostname"
@@ -226,6 +227,7 @@ func NewHandler(config Config) (http.Handler, error) {
 
 func DefaultRequestDecoders() map[string]RequestDecoder {
 	return map[string]RequestDecoder{
+		accounts.Name:   DecodeJSONRequest[accounts.ApplyRequest],
 		backup.Name:     DecodeJSONRequest[backup.ApplyRequest],
 		capsule.Name:    DecodeJSONRequest[capsule.ApplyRequest],
 		nodeconfig.Name: DecodeJSONRequest[nodeconfig.ApplyRequest],
@@ -243,6 +245,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 
 func DefaultReadRequests() map[string]ReadRequestFactory {
 	return map[string]ReadRequestFactory{
+		accounts.Name:   func() capabilities.TypedRequest { return accounts.ReadRequest{} },
 		backup.Name:     func() capabilities.TypedRequest { return backup.ReadRequest{} },
 		capsule.Name:    func() capabilities.TypedRequest { return capsule.ReadRequest{} },
 		nodeconfig.Name: func() capabilities.TypedRequest { return nodeconfig.ReadRequest{} },

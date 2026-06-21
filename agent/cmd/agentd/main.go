@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
 	"github.com/vita/agent/capabilities/hostname"
@@ -41,6 +42,7 @@ func main() {
 	startedAt := time.Now().UTC()
 
 	registry, err := capabilities.NewRegistry(
+		accounts.NewCapability(),
 		backup.NewCapability(),
 		capsule.NewCapability(),
 		hostname.NewCapability(),
