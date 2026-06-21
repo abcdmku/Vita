@@ -212,6 +212,15 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 (safeNormalize retrofit — see Lessons).
 
 
+## ⚠️ CODEX OUTAGE (2026-06-21 ~21:24 UTC → resets Jun 24 7:30 PM): usage limit hit.
+Both `npm run dispatch` (Codex builder) AND `npm run review` (Codex gate) are DOWN — a failed `review` now
+returns a SPURIOUS `revise` with an EMPTY `.review.md` (the log shows "You've hit your usage limit"), NOT a
+real finding. Per the owner's standing directive ([[vita-opus-during-codex-outage]]): substitute **Opus 4.8
+subagents** as BUILDERS (Agent tool / Workflow) and the **adversarial `migration-probe` (Opus) as the R3 gate
+substitute** — merge on probe-approve + my independent ground-truth verification. Switch back to Codex after
+the reset. P9-020 (network) is mid-gate: its Codex review failed on the limit; the Opus probe (running) is the
+gate. Builds for backup/storage/pdssync now go via Opus subagent builders, not `npm run dispatch`.
+
 ## Lessons (most recent first)
 - **NEVER prefix a contract-revision commit with `git reset --hard main` — it reverts the just-made edit
   before `git add`.** P9-014 rounds 2-3: my commit command began with `git reset -q --hard main` (habit, to
