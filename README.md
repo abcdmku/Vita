@@ -31,6 +31,13 @@ npm run ready
 npm run dispatch -- P0-001
 ```
 
+## Architecture
+
+For an overview of the **built system** — the fail-closed control plane, the 13 transactional agent
+capabilities, the controller management plane, the SDK, the security model, and what remains gated on a
+Linux build host — see [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md). Design decisions are
+recorded as ADRs under [architecture/adr/](architecture/adr/).
+
 ## Layout
 
 Top-level directories follow spec §19. The product code (`os/`, `agent/`, `runtime/`,
