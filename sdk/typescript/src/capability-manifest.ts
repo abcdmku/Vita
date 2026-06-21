@@ -144,13 +144,10 @@ export type CapabilityValidator = (input: unknown) => CapabilityValidationResult
 
 export type CapabilityManifestRegistry = ReadonlyMap<string, CapabilityManifest>;
 
-export {
-  DEFAULT_CAPABILITY_MANIFESTS,
-  HOSTNAME_MANIFEST,
-  NODE_CONFIG_MANIFEST,
-  SERVICES_MANIFEST,
-  TIMESYNC_MANIFEST,
-} from "./generated/capability-manifests.generated.ts";
+// Re-export everything the codegen emits (DEFAULT_CAPABILITY_MANIFESTS + each <CAP>_MANIFEST). Using
+// `export *` so a newly-generated cap manifest is publicly available WITHOUT editing this list by hand —
+// the generated file only ever exports manifests, so there is nothing internal to leak.
+export * from "./generated/capability-manifests.generated.ts";
 
 type JsonRecord = PlainJsonObject;
 type Path = readonly string[];
