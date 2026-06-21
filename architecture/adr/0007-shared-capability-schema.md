@@ -11,10 +11,16 @@
   from P9-002 + a mirrored, audited Go validator) — one small, conformance-tested engine per plane replacing
   per-cap hand-written validators, rather than a Node→Go codegen toolchain. (Codegen remains a future option;
   the runtime validator is simpler and already proven.)
-- **Format primitives & the parity bound:** simple formats (pattern/enum/range/RFC-1123 hostname) are
-  provably-equivalent across planes. Complex canonicalizing formats (IP literals — see "Empirical evidence")
-  are made SAFE not by hand-parity but by a **cross-language conformance corpus**: a shared vectors file both
-  validators run, asserting agreement; drift fails CI. IP-format support is added per-cap behind that corpus.
+- **No raw regex — named FORMAT primitives.** Raw regex CANNOT be kept semantically equal across JS and Go
+  RE2 (JS `$` matches before a trailing `\n` and Go's does not; `.`, `\s`, `\b`, Unicode, lookahead all
+  differ). The dialect therefore has NO `pattern`; string structure is expressed via a CLOSED `format` enum
+  (e.g. `hostnameRFC1123`) implemented identically as a STRUCTURED, non-regex check in both planes, plus the
+  simple primitives (`maxLength`/`enum`/`lowercase`/`noInlineSecrets`). A new format is a governance decision
+  to extend the closed set. (Discovered building P9-005 — the Go engine had to special-case a JS-lookahead
+  hostname pattern; the fix was to drop regex.)
+- **The parity bound:** every named format + the number handling (JS-`float64` semantics) is made SAFE by a
+  **cross-language conformance corpus**: a shared vectors file both validators run, asserting agreement; drift
+  fails CI. IP-literal canonicalizing formats are added per-cap behind that corpus.
 - **Migration:** incremental + reversible, cap-by-cap behind the conformance gate; a cap's existing
   hand-written validators remain authoritative until its manifest passes conformance against them.
 
