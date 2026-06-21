@@ -15,6 +15,7 @@ import {
   NETWORK_MANIFEST,
   NODE_CONFIG_MANIFEST,
   SERVICES_MANIFEST,
+  STORAGE_MANIFEST,
   TIME_MANIFEST,
   TIMESYNC_MANIFEST,
   UPDATE_MANIFEST,
@@ -42,6 +43,7 @@ test("default capability manifests are keyed by agent operation names", () => {
     "network.policy",
     "node.config",
     "services.config",
+    "storage.layout",
     "time.set",
     "time.sync",
     "update.plan",
@@ -54,6 +56,7 @@ test("default capability manifests are keyed by agent operation names", () => {
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["network.policy"], NETWORK_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["node.config"], NODE_CONFIG_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["services.config"], SERVICES_MANIFEST);
+  assert.equal(DEFAULT_CAPABILITY_MANIFESTS["storage.layout"], STORAGE_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["time.set"], TIME_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["time.sync"], TIMESYNC_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["update.plan"], UPDATE_MANIFEST);
@@ -72,10 +75,11 @@ test("defaultCapabilityRegistry exposes every generated manifest", () => {
   assert.equal(registry.get("network.policy"), NETWORK_MANIFEST);
   assert.equal(registry.get("node.config"), NODE_CONFIG_MANIFEST);
   assert.equal(registry.get("services.config"), SERVICES_MANIFEST);
+  assert.equal(registry.get("storage.layout"), STORAGE_MANIFEST);
   assert.equal(registry.get("time.set"), TIME_MANIFEST);
   assert.equal(registry.get("time.sync"), TIMESYNC_MANIFEST);
   assert.equal(registry.get("update.plan"), UPDATE_MANIFEST);
-  assert.equal(registry.size, 11);
+  assert.equal(registry.size, 12);
 });
 
 test("generated capability manifests are fresh", () => {

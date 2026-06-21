@@ -90,6 +90,35 @@ export interface BooleanFieldSchema {
   readonly required: boolean;
 }
 
+// An enum-discriminated whole-list invariant: it selects array items by the value of an enum-typed
+// string field (`field`) on each item object and asserts a property over the matched subset. These
+// mirror the agent's storage `normalizeLayout` whole-list checks (singleton roles, required role
+// coverage, per-role appId uniqueness). All three are opt-in and default-off, so a manifest without
+// them is unaffected.
+export interface SingletonEnumValuesRule {
+  // Each listed enum value of `field` may appear AT MOST ONCE across the array; values NOT listed are
+  // unbounded (may repeat). Mirrors storage `singletonRoles` (system-state/user-data/snapshots/
+  // local-backup-cache at-most-once; app-state unbounded).
+  readonly field: string;
+  readonly values: readonly string[];
+}
+
+export interface RequiredEnumValuesRule {
+  // Every listed enum value of `field` must appear AT LEAST ONCE across the array. Mirrors storage
+  // `requiredRoles` (all five roles present).
+  readonly field: string;
+  readonly values: readonly string[];
+}
+
+export interface UniqueByWhenEnumRule {
+  // Among ONLY the items whose `field` equals `value`, the `uniqueBy` key tuple must be unique.
+  // A filtered uniqueBy scoped to a single enum value. Mirrors storage `seenAppIDs` (appId unique
+  // among app-state subvolumes only).
+  readonly field: string;
+  readonly value: string;
+  readonly uniqueBy: readonly string[];
+}
+
 export interface ArrayFieldSchema {
   readonly type: "array";
   readonly required: boolean;
@@ -99,6 +128,9 @@ export interface ArrayFieldSchema {
   readonly uniqueItems?: boolean;
   readonly dedupItems?: boolean;
   readonly uniqueBy?: readonly string[];
+  readonly singletonEnumValues?: SingletonEnumValuesRule;
+  readonly requiredEnumValues?: RequiredEnumValuesRule;
+  readonly uniqueByWhenEnum?: UniqueByWhenEnumRule;
 }
 
 export interface ObjectFieldSchema {
@@ -136,6 +168,17 @@ export type CrossFieldRule =
   | {
       readonly type: "exactlyOneOf";
       readonly fields: readonly string[];
+    }
+  | {
+      // Enum-keyed conditional presence, BOTH directions: when sibling `enumField` equals `enumValue`,
+      // `field` is REQUIRED and non-empty; when it does NOT equal `enumValue`, `field` is FORBIDDEN
+      // (must be absent). Mirrors storage `normalizeSubvolume` appId rule (required+non-empty for
+      // app-state, forbidden otherwise). `field` carries nullAsAbsent so an explicit null counts as
+      // absent before this rule runs, matching the agent's *string pointer.
+      readonly type: "requireFieldWhenEnumEquals";
+      readonly enumField: string;
+      readonly enumValue: string;
+      readonly field: string;
     };
 
 export interface CapabilityManifest {
@@ -276,6 +319,25 @@ interface CompiledArrayFieldSchema {
   uniqueItems: boolean;
   dedupItems: boolean;
   uniqueBy?: readonly string[];
+  singletonEnumValues?: CompiledSingletonEnumValuesRule;
+  requiredEnumValues?: CompiledRequiredEnumValuesRule;
+  uniqueByWhenEnum?: CompiledUniqueByWhenEnumRule;
+}
+
+interface CompiledSingletonEnumValuesRule {
+  field: string;
+  values: ReadonlySet<string>;
+}
+
+interface CompiledRequiredEnumValuesRule {
+  field: string;
+  values: readonly string[];
+}
+
+interface CompiledUniqueByWhenEnumRule {
+  field: string;
+  value: string;
+  uniqueBy: readonly string[];
 }
 
 interface CompiledObjectFieldSchema {
@@ -366,12 +428,28 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "maxItems",
   "minItems",
   "required",
+  "requiredEnumValues",
+  "singletonEnumValues",
   "type",
   "uniqueBy",
+  "uniqueByWhenEnum",
   "uniqueItems",
 ]);
 const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
-const CROSS_FIELD_RULE_FIELDS = new Set(["control", "fields", "integer", "sentinel", "target", "type"]);
+const CROSS_FIELD_RULE_FIELDS = new Set([
+  "control",
+  "enumField",
+  "enumValue",
+  "field",
+  "fields",
+  "integer",
+  "sentinel",
+  "target",
+  "type",
+]);
+const SINGLETON_ENUM_VALUES_FIELDS = new Set(["field", "values"]);
+const REQUIRED_ENUM_VALUES_FIELDS = new Set(["field", "values"]);
+const UNIQUE_BY_WHEN_ENUM_FIELDS = new Set(["field", "uniqueBy", "value"]);
 export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResult {
   try {
     const normalized = safeNormalize(raw);
@@ -1029,6 +1107,24 @@ function parseArrayFieldSchema(
   const dedupItemsValue = readOptionalBoolean(value, "dedupItems", [...path, "dedupItems"], errors);
   const dedupItems = dedupItemsValue ?? false;
   const uniqueBy = readOptionalUniqueBy(value, "uniqueBy", [...path, "uniqueBy"], errors);
+  const singletonEnumValues = parseSingletonEnumValuesRule(
+    value,
+    [...path, "singletonEnumValues"],
+    items?.compiled,
+    errors,
+  );
+  const requiredEnumValues = parseRequiredEnumValuesRule(
+    value,
+    [...path, "requiredEnumValues"],
+    items?.compiled,
+    errors,
+  );
+  const uniqueByWhenEnum = parseUniqueByWhenEnumRule(
+    value,
+    [...path, "uniqueByWhenEnum"],
+    items?.compiled,
+    errors,
+  );
 
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems) {
     addError(errors, path, "minItems must be less than or equal to maxItems.");
@@ -1058,6 +1154,9 @@ function parseArrayFieldSchema(
     dedupItems?: boolean;
     uniqueItems?: boolean;
     uniqueBy?: readonly string[];
+    singletonEnumValues?: SingletonEnumValuesRule;
+    requiredEnumValues?: RequiredEnumValuesRule;
+    uniqueByWhenEnum?: UniqueByWhenEnumRule;
   } = {
     items: items.manifest,
     required,
@@ -1082,11 +1181,250 @@ function parseArrayFieldSchema(
     compiled.uniqueBy = uniqueBy;
     manifest.uniqueBy = uniqueBy;
   }
+  if (singletonEnumValues !== undefined) {
+    compiled.singletonEnumValues = {
+      field: singletonEnumValues.field,
+      values: new Set(singletonEnumValues.values),
+    };
+    manifest.singletonEnumValues = singletonEnumValues;
+  }
+  if (requiredEnumValues !== undefined) {
+    compiled.requiredEnumValues = requiredEnumValues;
+    manifest.requiredEnumValues = requiredEnumValues;
+  }
+  if (uniqueByWhenEnum !== undefined) {
+    compiled.uniqueByWhenEnum = uniqueByWhenEnum;
+    manifest.uniqueByWhenEnum = uniqueByWhenEnum;
+  }
 
   return {
     compiled,
     manifest: Object.freeze(manifest),
   };
+}
+
+// An enum-discriminator string field on the array's item object: it must be a required string with a
+// closed `enum`, and every listed value must be a member of that enum. This guards the governed,
+// closed dialect — the discriminator and its values are fixed at manifest-load time.
+function validateEnumDiscriminatorField(
+  items: CompiledFieldSchema | undefined,
+  field: string,
+  values: readonly string[],
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (items === undefined) {
+    return;
+  }
+  if (items.type !== "object") {
+    addError(errors, path, "enum-discriminated rule requires object array items.");
+    return;
+  }
+  const discriminator = items.fields.get(field);
+  if (discriminator === undefined) {
+    addError(errors, [...path, "field"], "field must reference an item object field.");
+    return;
+  }
+  if (discriminator.type !== "string" || !discriminator.required || discriminator.enumValues === undefined) {
+    addError(errors, [...path, "field"], "field must reference a required enum string item field.");
+    return;
+  }
+  for (let index = 0; index < values.length; index += 1) {
+    const candidate = values[index];
+
+    if (candidate === undefined) {
+      continue;
+    }
+
+    if (!discriminator.enumValues.has(candidate)) {
+      addError(errors, [...path, "values", String(index)], "value must be a member of the discriminator enum.");
+    }
+  }
+}
+
+function parseSingletonEnumValuesRule(
+  value: JsonRecord,
+  path: Path,
+  items: CompiledFieldSchema | undefined,
+  errors: CapabilityRejection[],
+): SingletonEnumValuesRule | undefined {
+  if (!hasOwn(value, "singletonEnumValues")) {
+    return undefined;
+  }
+
+  const child = value.singletonEnumValues;
+
+  if (!isRecord(child)) {
+    addError(errors, path, "Expected singletonEnumValues object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+  rejectUnknownFields(child, SINGLETON_ENUM_VALUES_FIELDS, path, errors);
+  const field = readRequiredString(child, "field", [...path, "field"], errors);
+  const valuesList = readEnumValueList(child, "values", [...path, "values"], errors);
+
+  if (field === undefined || valuesList === undefined) {
+    return undefined;
+  }
+
+  validateEnumDiscriminatorField(items, field, valuesList, path, errors);
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze({ field, values: valuesList });
+}
+
+function parseRequiredEnumValuesRule(
+  value: JsonRecord,
+  path: Path,
+  items: CompiledFieldSchema | undefined,
+  errors: CapabilityRejection[],
+): RequiredEnumValuesRule | undefined {
+  if (!hasOwn(value, "requiredEnumValues")) {
+    return undefined;
+  }
+
+  const child = value.requiredEnumValues;
+
+  if (!isRecord(child)) {
+    addError(errors, path, "Expected requiredEnumValues object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+  rejectUnknownFields(child, REQUIRED_ENUM_VALUES_FIELDS, path, errors);
+  const field = readRequiredString(child, "field", [...path, "field"], errors);
+  const valuesList = readEnumValueList(child, "values", [...path, "values"], errors);
+
+  if (field === undefined || valuesList === undefined) {
+    return undefined;
+  }
+
+  validateEnumDiscriminatorField(items, field, valuesList, path, errors);
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze({ field, values: valuesList });
+}
+
+function parseUniqueByWhenEnumRule(
+  value: JsonRecord,
+  path: Path,
+  items: CompiledFieldSchema | undefined,
+  errors: CapabilityRejection[],
+): UniqueByWhenEnumRule | undefined {
+  if (!hasOwn(value, "uniqueByWhenEnum")) {
+    return undefined;
+  }
+
+  const child = value.uniqueByWhenEnum;
+
+  if (!isRecord(child)) {
+    addError(errors, path, "Expected uniqueByWhenEnum object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+  rejectUnknownFields(child, UNIQUE_BY_WHEN_ENUM_FIELDS, path, errors);
+  const field = readRequiredString(child, "field", [...path, "field"], errors);
+  const enumValue = readRequiredString(child, "value", [...path, "value"], errors);
+  const uniqueBy = readOptionalUniqueBy(child, "uniqueBy", [...path, "uniqueBy"], errors);
+
+  if (field === undefined || enumValue === undefined || uniqueBy === undefined) {
+    if (uniqueBy === undefined && errors.length === errorStart) {
+      addError(errors, [...path, "uniqueBy"], "Expected non-empty uniqueBy array.");
+    }
+    return undefined;
+  }
+
+  validateEnumDiscriminatorField(items, field, [enumValue], path, errors);
+  // Within the matched subset, the keyed fields are guaranteed present by the conditional-presence
+  // cross-field rule, so they need not be globally required on the item — only existing item fields.
+  validateUniqueByFieldsAllowOptional(items, uniqueBy, [...path, "uniqueBy"], errors);
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze({ field, value: enumValue, uniqueBy });
+}
+
+function readEnumValueList(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): readonly string[] | undefined {
+  if (!hasOwn(value, key)) {
+    addError(errors, path, "Expected non-empty values array.");
+    return undefined;
+  }
+
+  const child = value[key];
+
+  if (!Array.isArray(child) || child.length === 0) {
+    addError(errors, path, "Expected non-empty values array.");
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const values: string[] = [];
+  const errorStart = errors.length;
+
+  for (let index = 0; index < child.length; index += 1) {
+    const item = child[index];
+
+    if (typeof item !== "string" || item.length === 0) {
+      addError(errors, [...path, String(index)], "Expected non-empty enum value.");
+      continue;
+    }
+
+    if (seen.has(item)) {
+      addError(errors, [...path, String(index)], "Duplicate enum value.");
+      continue;
+    }
+
+    seen.add(item);
+    values.push(item);
+  }
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze(values);
+}
+
+function validateUniqueByFieldsAllowOptional(
+  items: CompiledFieldSchema | undefined,
+  uniqueBy: readonly string[],
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (items === undefined) {
+    return;
+  }
+  if (items.type !== "object") {
+    addError(errors, path, "uniqueBy requires object array items.");
+    return;
+  }
+
+  for (let index = 0; index < uniqueBy.length; index += 1) {
+    const fieldName = uniqueBy[index];
+
+    if (fieldName === undefined) {
+      continue;
+    }
+
+    if (items.fields.get(fieldName) === undefined) {
+      addError(errors, [...path, String(index)], "uniqueBy field must reference an item object field.");
+    }
+  }
 }
 
 function validateUniqueByFields(
@@ -1233,9 +1571,15 @@ function parseCrossFieldRule(
     errors,
   );
   const exactlyOneOfFields = readOptionalCrossFieldFieldList(value, "fields", [...path, "fields"], errors);
+  const enumField = readOptionalString(value, "enumField", [...path, "enumField"], errors);
+  const enumValue = readOptionalString(value, "enumValue", [...path, "enumValue"], errors);
+  const conditionalField = readOptionalString(value, "field", [...path, "field"], errors);
   const hasControl = hasOwn(value, "control");
   const hasTarget = hasOwn(value, "target");
   const hasFields = hasOwn(value, "fields");
+  const hasEnumField = hasOwn(value, "enumField");
+  const hasEnumValue = hasOwn(value, "enumValue");
+  const hasField = hasOwn(value, "field");
 
   if (errors.length > errorStart || typeValue === undefined) {
     return undefined;
@@ -1243,6 +1587,14 @@ function parseCrossFieldRule(
 
   if (typeValue !== "exactlyOneOf" && hasFields) {
     addError(errors, [...path, "fields"], "fields is not supported by this cross-field rule.");
+    return undefined;
+  }
+
+  if (
+    typeValue !== "requireFieldWhenEnumEquals" &&
+    (hasEnumField || hasEnumValue || hasField)
+  ) {
+    addError(errors, path, "enumField/enumValue/field are not supported by this cross-field rule.");
     return undefined;
   }
 
@@ -1353,9 +1705,85 @@ function parseCrossFieldRule(
         type: "forbidIntegerSentinelAndCidrCoversAllUnlessTrue",
       });
     }
+    case "requireFieldWhenEnumEquals": {
+      if (hasControl) {
+        addError(errors, [...path, "control"], "control is not supported by this cross-field rule.");
+      }
+      if (hasTarget) {
+        addError(errors, [...path, "target"], "target is not supported by this cross-field rule.");
+      }
+      if (integer !== undefined) {
+        addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
+      }
+      if (sentinel !== undefined) {
+        addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      if (enumField === undefined) {
+        addError(errors, [...path, "enumField"], "Expected non-empty string.");
+      }
+      if (!hasEnumValue || enumValue === undefined) {
+        addError(errors, [...path, "enumValue"], "Expected non-empty string.");
+      }
+      if (conditionalField === undefined) {
+        addError(errors, [...path, "field"], "Expected non-empty string.");
+      }
+      if (enumField === undefined || enumValue === undefined || conditionalField === undefined) {
+        return undefined;
+      }
+      validateEnumConditionalFields(fields, enumField, enumValue, conditionalField, path, errors);
+      if (errors.length > errorStart) {
+        return undefined;
+      }
+      return Object.freeze({
+        enumField,
+        enumValue,
+        field: conditionalField,
+        type: "requireFieldWhenEnumEquals",
+      });
+    }
     default:
       addError(errors, [...path, "type"], "Unknown cross-field rule type.");
       return undefined;
+  }
+}
+
+// Validates that a requireFieldWhenEnumEquals rule references a required enum-string `enumField`
+// whose enum contains `enumValue`, and a sibling `field` that is OPTIONAL (the rule, not the schema,
+// makes it required for matching items) and carries nullAsAbsent (so an explicit null behaves like
+// absent, matching the agent's *string omitempty pointer).
+function validateEnumConditionalFields(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  enumField: string,
+  enumValue: string,
+  field: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (fields === undefined) {
+    return;
+  }
+  const discriminator = fields.get(enumField);
+  if (
+    discriminator === undefined ||
+    discriminator.type !== "string" ||
+    !discriminator.required ||
+    discriminator.enumValues === undefined
+  ) {
+    addError(errors, [...path, "enumField"], "enumField must reference a required enum string sibling field.");
+  } else if (!discriminator.enumValues.has(enumValue)) {
+    addError(errors, [...path, "enumValue"], "enumValue must be a member of the enumField enum.");
+  }
+
+  const conditional = fields.get(field);
+  if (conditional === undefined || conditional.type !== "string") {
+    addError(errors, [...path, "field"], "field must reference a string sibling field.");
+    return;
+  }
+  if (conditional.required) {
+    addError(errors, [...path, "field"], "field must reference an optional sibling field.");
+  }
+  if (!conditional.nullAsAbsent) {
+    addError(errors, [...path, "field"], "field must reference a nullAsAbsent sibling field.");
   }
 }
 
@@ -2158,6 +2586,13 @@ function validateArrayField(
     output.push(result.value);
   }
 
+  // Whole-list enum-discriminated invariants run only once every item validated, mirroring the agent
+  // (which evaluates them over the fully-normalized subvolume slice). Skipping them on a per-item
+  // failure keeps reject/reject agreement without depending on a partial list.
+  if (errors.length === errorStart) {
+    applyEnumDiscriminatedArrayRules(output, schema, path, errors);
+  }
+
   if (errors.length > errorStart) {
     return { ok: false };
   }
@@ -2166,6 +2601,122 @@ function validateArrayField(
     ok: true,
     value: Object.freeze(output),
   };
+}
+
+function applyEnumDiscriminatedArrayRules(
+  output: readonly CapabilityValue[],
+  schema: CompiledArrayFieldSchema,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  const singleton = schema.singletonEnumValues;
+  if (singleton !== undefined) {
+    const seen = new Map<string, number>();
+
+    for (let index = 0; index < output.length; index += 1) {
+      const item = output[index];
+      const discriminator = readEnumDiscriminatorValue(item, singleton.field);
+
+      if (discriminator === undefined || !singleton.values.has(discriminator)) {
+        continue;
+      }
+
+      const previousIndex = seen.get(discriminator);
+
+      if (previousIndex !== undefined) {
+        addError(
+          errors,
+          [...path, String(index), singleton.field],
+          `${singleton.field} value ${discriminator} also appears at ${formatPath([...path, String(previousIndex)])}.`,
+        );
+      } else {
+        seen.set(discriminator, index);
+      }
+    }
+  }
+
+  const uniqueByWhenEnum = schema.uniqueByWhenEnum;
+  if (uniqueByWhenEnum !== undefined) {
+    const seen = new Map<string, number>();
+
+    for (let index = 0; index < output.length; index += 1) {
+      const item = output[index];
+
+      if (item === undefined) {
+        continue;
+      }
+
+      const discriminator = readEnumDiscriminatorValue(item, uniqueByWhenEnum.field);
+
+      if (discriminator !== uniqueByWhenEnum.value) {
+        continue;
+      }
+
+      const keys = uniqueByValueKeys(item, uniqueByWhenEnum.uniqueBy);
+
+      if (keys === undefined) {
+        // The conditional-presence rule guarantees the keyed fields exist for matched items; a missing
+        // key here means a malformed manifest pairing, so fail closed.
+        addError(
+          errors,
+          [...path, String(index)],
+          "uniqueByWhenEnum requires the keyed fields to be present on matched items.",
+        );
+        continue;
+      }
+
+      for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+        const key = keys[keyIndex];
+
+        if (key === undefined) {
+          continue;
+        }
+
+        const previousIndex = seen.get(key);
+
+        if (previousIndex !== undefined) {
+          addError(
+            errors,
+            [...path, String(index)],
+            `Duplicate ${uniqueByWhenEnum.field}=${uniqueByWhenEnum.value} key also appears at ${formatPath([...path, String(previousIndex)])}.`,
+          );
+        } else {
+          seen.set(key, index);
+        }
+      }
+    }
+  }
+
+  const required = schema.requiredEnumValues;
+  if (required !== undefined) {
+    const present = new Set<string>();
+
+    for (let index = 0; index < output.length; index += 1) {
+      const discriminator = readEnumDiscriminatorValue(output[index], required.field);
+
+      if (discriminator !== undefined) {
+        present.add(discriminator);
+      }
+    }
+
+    for (let index = 0; index < required.values.length; index += 1) {
+      const requiredValue = required.values[index];
+
+      if (requiredValue !== undefined && !present.has(requiredValue)) {
+        addError(errors, path, `Missing required ${required.field} value ${requiredValue}.`);
+      }
+    }
+  }
+}
+
+function readEnumDiscriminatorValue(item: CapabilityValue | undefined, field: string): string | undefined {
+  if (item === undefined || !isCapabilityObject(item)) {
+    return undefined;
+  }
+
+  const value = item[field];
+
+  return typeof value === "string" ? value : undefined;
 }
 
 function validateObjectField(
@@ -2325,6 +2876,38 @@ function applyCrossFieldRules(
             errors,
             [...path, rule.target],
             `${rule.integer} ${rule.sentinel} with ${rule.target} covering all sources requires ${rule.control} true.`,
+          );
+        }
+        break;
+      }
+      case "requireFieldWhenEnumEquals": {
+        const discriminator = value[rule.enumField];
+
+        if (typeof discriminator !== "string") {
+          addError(errors, [...path, rule.enumField], "Cross-field rule references invalid fields.");
+          break;
+        }
+
+        const present = hasOwn(value, rule.field);
+        const fieldValue = present ? value[rule.field] : undefined;
+
+        if (discriminator === rule.enumValue) {
+          // Required AND non-empty when the discriminator matches (mirrors the agent's
+          // `AppID == nil || *AppID == ""` rejection for app-state).
+          if (!present || typeof fieldValue !== "string" || fieldValue.length === 0) {
+            addError(
+              errors,
+              [...path, rule.field],
+              `${rule.field} is required when ${rule.enumField} is ${rule.enumValue}.`,
+            );
+          }
+        } else if (present) {
+          // Forbidden when the discriminator does not match (mirrors the agent's
+          // `AppID != nil` rejection for non-app-state).
+          addError(
+            errors,
+            [...path, rule.field],
+            `${rule.field} is only allowed when ${rule.enumField} is ${rule.enumValue}.`,
           );
         }
         break;

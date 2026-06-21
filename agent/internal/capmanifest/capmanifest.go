@@ -56,6 +56,9 @@ type FieldSchema struct {
 	UniqueItems              bool
 	DedupItems               bool
 	UniqueBy                 []string
+	SingletonEnumValues      *EnumValuesRule
+	RequiredEnumValues       *EnumValuesRule
+	UniqueByWhenEnum         *UniqueByWhenEnumRule
 	Fields                   map[string]FieldSchema
 	CrossFieldRules          []CrossFieldRule
 	// NullAsAbsent: on an OPTIONAL string/integer field, an explicit JSON null is treated as ABSENT
@@ -65,12 +68,33 @@ type FieldSchema struct {
 }
 
 type CrossFieldRule struct {
-	Type     string
-	Control  string
-	Target   string
-	Integer  string
-	Sentinel *int64
-	Fields   []string
+	Type      string
+	Control   string
+	Target    string
+	Integer   string
+	Sentinel  *int64
+	Fields    []string
+	EnumField string
+	EnumValue string
+	HasEnum   bool
+	Field     string
+}
+
+// EnumValuesRule is an enum-discriminated whole-list invariant: it selects array items by the value
+// of an enum-typed string field (Field) on each item object and asserts a property over the matched
+// subset. Used by SingletonEnumValues (each listed value at most once) and RequiredEnumValues (every
+// listed value at least once). Mirrors storage normalizeLayout singletonRoles/requiredRoles.
+type EnumValuesRule struct {
+	Field  string
+	Values []string
+}
+
+// UniqueByWhenEnumRule is a filtered uniqueBy: among ONLY the items whose Field equals Value, the
+// UniqueBy key tuple must be unique. Mirrors storage seenAppIDs (appId unique among app-state rows).
+type UniqueByWhenEnumRule struct {
+	Field    string
+	Value    string
+	UniqueBy []string
 }
 
 type jsonValue interface{}
@@ -112,10 +136,25 @@ type compiledField struct {
 	uniqueItems              bool
 	dedupItems               bool
 	uniqueBy                 []string
+	singletonEnumValues      *compiledEnumValuesRule
+	requiredEnumValues       *compiledEnumValuesRule
+	uniqueByWhenEnum         *compiledUniqueByWhenEnumRule
 	fields                   map[string]compiledField
 	fieldNames               []string
 	crossFieldRules          []CrossFieldRule
 	nullAsAbsent             bool
+}
+
+type compiledEnumValuesRule struct {
+	field  string
+	values map[string]struct{}
+	order  []string
+}
+
+type compiledUniqueByWhenEnumRule struct {
+	field    string
+	value    string
+	uniqueBy []string
 }
 
 type capabilityValue interface{}
@@ -163,14 +202,17 @@ var (
 		"type":     {},
 	}
 	arraySchemaFields = map[string]struct{}{
-		"items":       {},
-		"dedupItems":  {},
-		"maxItems":    {},
-		"minItems":    {},
-		"required":    {},
-		"type":        {},
-		"uniqueBy":    {},
-		"uniqueItems": {},
+		"items":               {},
+		"dedupItems":          {},
+		"maxItems":            {},
+		"minItems":            {},
+		"required":            {},
+		"requiredEnumValues":  {},
+		"singletonEnumValues": {},
+		"type":                {},
+		"uniqueBy":            {},
+		"uniqueByWhenEnum":    {},
+		"uniqueItems":         {},
 	}
 	objectSchemaFields = map[string]struct{}{
 		"crossFieldRules": {},
@@ -179,12 +221,28 @@ var (
 		"type":            {},
 	}
 	crossFieldRuleFields = map[string]struct{}{
-		"control":  {},
-		"fields":   {},
-		"integer":  {},
-		"sentinel": {},
-		"target":   {},
-		"type":     {},
+		"control":   {},
+		"enumField": {},
+		"enumValue": {},
+		"field":     {},
+		"fields":    {},
+		"integer":   {},
+		"sentinel":  {},
+		"target":    {},
+		"type":      {},
+	}
+	singletonEnumValuesFields = map[string]struct{}{
+		"field":  {},
+		"values": {},
+	}
+	requiredEnumValuesFields = map[string]struct{}{
+		"field":  {},
+		"values": {},
+	}
+	uniqueByWhenEnumFields = map[string]struct{}{
+		"field":    {},
+		"uniqueBy": {},
+		"value":    {},
 	}
 )
 
@@ -562,17 +620,164 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 	if err := validateUniqueByFields(uniqueBy, items, joinPath(path, "uniqueBy")); err != nil {
 		return FieldSchema{}, err
 	}
+	singletonEnumValues, err := parseEnumValuesRule(object, "singletonEnumValues", singletonEnumValuesFields, items, joinPath(path, "singletonEnumValues"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
+	requiredEnumValues, err := parseEnumValuesRule(object, "requiredEnumValues", requiredEnumValuesFields, items, joinPath(path, "requiredEnumValues"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
+	uniqueByWhenEnum, err := parseUniqueByWhenEnumRule(object, "uniqueByWhenEnum", items, joinPath(path, "uniqueByWhenEnum"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 
 	return FieldSchema{
-		Type:        "array",
-		Required:    required,
-		Items:       &items,
-		MinItems:    minItems,
-		MaxItems:    maxItems,
-		UniqueItems: uniqueItems,
-		DedupItems:  dedupItems,
-		UniqueBy:    uniqueBy,
+		Type:                "array",
+		Required:            required,
+		Items:               &items,
+		MinItems:            minItems,
+		MaxItems:            maxItems,
+		UniqueItems:         uniqueItems,
+		DedupItems:          dedupItems,
+		UniqueBy:            uniqueBy,
+		SingletonEnumValues: singletonEnumValues,
+		RequiredEnumValues:  requiredEnumValues,
+		UniqueByWhenEnum:    uniqueByWhenEnum,
 	}, nil
+}
+
+// parseEnumValuesRule parses a singletonEnumValues/requiredEnumValues rule object: { field, values }.
+// Field must reference a required enum-string item field, and every listed value must be a member of
+// that enum (the governed, closed dialect fixes the discriminator + values at load time).
+func parseEnumValuesRule(object jsonObject, key string, allowed map[string]struct{}, items FieldSchema, path string) (*EnumValuesRule, error) {
+	value, ok := object[key]
+	if !ok {
+		return nil, nil
+	}
+	ruleObject, ok := value.(jsonObject)
+	if !ok {
+		return nil, pathError(path, "expected "+key+" object")
+	}
+	if err := rejectUnknownFields(ruleObject, allowed, path); err != nil {
+		return nil, err
+	}
+	field, err := requiredString(ruleObject, "field", joinPath(path, "field"))
+	if err != nil {
+		return nil, err
+	}
+	values, err := enumValueList(ruleObject, "values", joinPath(path, "values"))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEnumDiscriminatorField(items, field, values, path); err != nil {
+		return nil, err
+	}
+	return &EnumValuesRule{Field: field, Values: values}, nil
+}
+
+// parseUniqueByWhenEnumRule parses { field, value, uniqueBy }: a filtered uniqueBy over the subset of
+// items whose enum field equals value. The keyed fields need only EXIST on the item object (they are
+// guaranteed present for matched items by the conditional-presence cross-field rule), so they need
+// not be globally required.
+func parseUniqueByWhenEnumRule(object jsonObject, key string, items FieldSchema, path string) (*UniqueByWhenEnumRule, error) {
+	value, ok := object[key]
+	if !ok {
+		return nil, nil
+	}
+	ruleObject, ok := value.(jsonObject)
+	if !ok {
+		return nil, pathError(path, "expected "+key+" object")
+	}
+	if err := rejectUnknownFields(ruleObject, uniqueByWhenEnumFields, path); err != nil {
+		return nil, err
+	}
+	field, err := requiredString(ruleObject, "field", joinPath(path, "field"))
+	if err != nil {
+		return nil, err
+	}
+	enumValue, err := requiredString(ruleObject, "value", joinPath(path, "value"))
+	if err != nil {
+		return nil, err
+	}
+	uniqueBy, err := optionalUniqueBy(ruleObject, "uniqueBy", joinPath(path, "uniqueBy"))
+	if err != nil {
+		return nil, err
+	}
+	if len(uniqueBy) == 0 {
+		return nil, pathError(joinPath(path, "uniqueBy"), "expected non-empty uniqueBy array")
+	}
+	if err := validateEnumDiscriminatorField(items, field, []string{enumValue}, path); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueByFieldsAllowOptional(uniqueBy, items, joinPath(path, "uniqueBy")); err != nil {
+		return nil, err
+	}
+	return &UniqueByWhenEnumRule{Field: field, Value: enumValue, UniqueBy: uniqueBy}, nil
+}
+
+func enumValueList(object jsonObject, key string, path string) ([]string, error) {
+	value, ok := object[key]
+	if !ok {
+		return nil, pathError(path, "expected non-empty values array")
+	}
+	array, ok := value.(jsonArray)
+	if !ok || len(array) == 0 {
+		return nil, pathError(path, "expected non-empty values array")
+	}
+	seen := map[string]struct{}{}
+	values := make([]string, 0, len(array))
+	for index, item := range array {
+		stringValue, ok := asJSONString(item)
+		if !ok || stringValue.value == "" {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "expected non-empty enum value")
+		}
+		if _, exists := seen[stringValue.value]; exists {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate enum value")
+		}
+		seen[stringValue.value] = struct{}{}
+		values = append(values, stringValue.value)
+	}
+	return values, nil
+}
+
+func validateEnumDiscriminatorField(items FieldSchema, field string, values []string, path string) error {
+	if items.Type != "object" {
+		return pathError(path, "enum-discriminated rule requires object array items")
+	}
+	discriminator, ok := items.Fields[field]
+	if !ok {
+		return pathError(joinPath(path, "field"), "field must reference an item object field")
+	}
+	if discriminator.Type != "string" || !discriminator.Required || len(discriminator.Enum) == 0 {
+		return pathError(joinPath(path, "field"), "field must reference a required enum string item field")
+	}
+	enumSet := map[string]struct{}{}
+	for _, value := range discriminator.Enum {
+		enumSet[value] = struct{}{}
+	}
+	for index, value := range values {
+		if _, ok := enumSet[value]; !ok {
+			return pathError(joinPath(joinPath(path, "values"), strconv.Itoa(index)), "value must be a member of the discriminator enum")
+		}
+	}
+	return nil
+}
+
+func validateUniqueByFieldsAllowOptional(uniqueBy []string, items FieldSchema, path string) error {
+	if len(uniqueBy) == 0 {
+		return nil
+	}
+	if items.Type != "object" {
+		return pathError(path, "uniqueBy requires object array items")
+	}
+	for index, name := range uniqueBy {
+		if _, ok := items.Fields[name]; !ok {
+			return pathError(joinPath(path, strconv.Itoa(index)), "uniqueBy field must reference an item object field")
+		}
+	}
+	return nil
 }
 
 func parseObjectFieldSchema(object jsonObject, required bool, path string) (FieldSchema, error) {
@@ -655,9 +860,28 @@ func parseCrossFieldRule(value jsonValue, fields map[string]FieldSchema, path st
 		return CrossFieldRule{}, err
 	}
 	_, hasFields := object["fields"]
+	enumField, err := optionalString(object, "enumField", joinPath(path, "enumField"))
+	if err != nil {
+		return CrossFieldRule{}, err
+	}
+	_, hasEnumField := object["enumField"]
+	enumValue, err := optionalString(object, "enumValue", joinPath(path, "enumValue"))
+	if err != nil {
+		return CrossFieldRule{}, err
+	}
+	_, hasEnumValue := object["enumValue"]
+	conditionalField, err := optionalString(object, "field", joinPath(path, "field"))
+	if err != nil {
+		return CrossFieldRule{}, err
+	}
+	_, hasField := object["field"]
 
 	if ruleType != "exactlyOneOf" && hasFields {
 		return CrossFieldRule{}, pathError(joinPath(path, "fields"), "fields is not supported by this cross-field rule")
+	}
+
+	if ruleType != "requireFieldWhenEnumEquals" && (hasEnumField || hasEnumValue || hasField) {
+		return CrossFieldRule{}, pathError(path, "enumField/enumValue/field are not supported by this cross-field rule")
 	}
 
 	switch ruleType {
@@ -738,9 +962,72 @@ func parseCrossFieldRule(value jsonValue, fields map[string]FieldSchema, path st
 			Integer:  integer,
 			Sentinel: cloneInt64Pointer(sentinel),
 		}, nil
+	case "requireFieldWhenEnumEquals":
+		if hasControl {
+			return CrossFieldRule{}, pathError(joinPath(path, "control"), "control is not supported by this cross-field rule")
+		}
+		if hasTarget {
+			return CrossFieldRule{}, pathError(joinPath(path, "target"), "target is not supported by this cross-field rule")
+		}
+		if hasInteger {
+			return CrossFieldRule{}, pathError(joinPath(path, "integer"), "integer is not supported by this cross-field rule")
+		}
+		if hasSentinel {
+			return CrossFieldRule{}, pathError(joinPath(path, "sentinel"), "sentinel is not supported by this cross-field rule")
+		}
+		if !hasEnumField || enumField == "" {
+			return CrossFieldRule{}, pathError(joinPath(path, "enumField"), "enumField is required for this cross-field rule")
+		}
+		if !hasEnumValue {
+			return CrossFieldRule{}, pathError(joinPath(path, "enumValue"), "enumValue is required for this cross-field rule")
+		}
+		if !hasField || conditionalField == "" {
+			return CrossFieldRule{}, pathError(joinPath(path, "field"), "field is required for this cross-field rule")
+		}
+		if err := validateCrossFieldEnumConditional(fields, enumField, enumValue, conditionalField, path); err != nil {
+			return CrossFieldRule{}, err
+		}
+		return CrossFieldRule{
+			Type:      ruleType,
+			EnumField: enumField,
+			EnumValue: enumValue,
+			HasEnum:   true,
+			Field:     conditionalField,
+		}, nil
 	default:
 		return CrossFieldRule{}, pathError(joinPath(path, "type"), "unknown cross-field rule type")
 	}
+}
+
+// validateCrossFieldEnumConditional checks a requireFieldWhenEnumEquals rule references a required
+// enum-string enumField whose enum contains enumValue, and a sibling field that is OPTIONAL and
+// carries nullAsAbsent (so explicit null behaves like absent, matching the agent's *string pointer).
+func validateCrossFieldEnumConditional(fields map[string]FieldSchema, enumField, enumValue, field, path string) error {
+	discriminator, ok := fields[enumField]
+	if !ok || discriminator.Type != "string" || !discriminator.Required || len(discriminator.Enum) == 0 {
+		return pathError(joinPath(path, "enumField"), "enumField must reference a required enum string sibling field")
+	}
+	found := false
+	for _, value := range discriminator.Enum {
+		if value == enumValue {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return pathError(joinPath(path, "enumValue"), "enumValue must be a member of the enumField enum")
+	}
+	conditional, ok := fields[field]
+	if !ok || conditional.Type != "string" {
+		return pathError(joinPath(path, "field"), "field must reference a string sibling field")
+	}
+	if conditional.Required {
+		return pathError(joinPath(path, "field"), "field must reference an optional sibling field")
+	}
+	if !conditional.NullAsAbsent {
+		return pathError(joinPath(path, "field"), "field must reference a nullAsAbsent sibling field")
+	}
+	return nil
 }
 
 func optionalCrossFieldFieldList(object jsonObject, key string, path string) ([]string, error) {
@@ -935,6 +1222,43 @@ func validateCompiledCrossFieldRule(rule CrossFieldRule, fields map[string]compi
 			return pathError(joinPath(path, "target"), "target field must reference a cidrLiteral string field")
 		}
 		return nil
+	case "requireFieldWhenEnumEquals":
+		if rule.Control != "" {
+			return pathError(joinPath(path, "control"), "control is not supported by this cross-field rule")
+		}
+		if rule.Target != "" {
+			return pathError(joinPath(path, "target"), "target is not supported by this cross-field rule")
+		}
+		if rule.Integer != "" {
+			return pathError(joinPath(path, "integer"), "integer is not supported by this cross-field rule")
+		}
+		if rule.Sentinel != nil {
+			return pathError(joinPath(path, "sentinel"), "sentinel is not supported by this cross-field rule")
+		}
+		if rule.EnumField == "" {
+			return pathError(joinPath(path, "enumField"), "enumField is required for this cross-field rule")
+		}
+		if rule.Field == "" {
+			return pathError(joinPath(path, "field"), "field is required for this cross-field rule")
+		}
+		discriminator, ok := fields[rule.EnumField]
+		if !ok || discriminator.fieldType != "string" || !discriminator.required || len(discriminator.enumValues) == 0 {
+			return pathError(joinPath(path, "enumField"), "enumField must reference a required enum string sibling field")
+		}
+		if _, ok := discriminator.enumValues[rule.EnumValue]; !ok {
+			return pathError(joinPath(path, "enumValue"), "enumValue must be a member of the enumField enum")
+		}
+		conditional, ok := fields[rule.Field]
+		if !ok || conditional.fieldType != "string" {
+			return pathError(joinPath(path, "field"), "field must reference a string sibling field")
+		}
+		if conditional.required {
+			return pathError(joinPath(path, "field"), "field must reference an optional sibling field")
+		}
+		if !conditional.nullAsAbsent {
+			return pathError(joinPath(path, "field"), "field must reference a nullAsAbsent sibling field")
+		}
+		return nil
 	default:
 		return pathError(joinPath(path, "type"), "unknown cross-field rule type")
 	}
@@ -962,7 +1286,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -1012,7 +1336,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -1040,7 +1364,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil || field.NullAsAbsent {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.Fields != nil || field.CrossFieldRules != nil || field.NullAsAbsent {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -1072,6 +1396,18 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 	if err := validateUniqueByFields(field.UniqueBy, *field.Items, joinPath(path, "uniqueBy")); err != nil {
 		return compiledField{}, err
 	}
+	compiledSingleton, err := compileEnumValuesRule(field.SingletonEnumValues, *field.Items, joinPath(path, "singletonEnumValues"))
+	if err != nil {
+		return compiledField{}, err
+	}
+	compiledRequired, err := compileEnumValuesRule(field.RequiredEnumValues, *field.Items, joinPath(path, "requiredEnumValues"))
+	if err != nil {
+		return compiledField{}, err
+	}
+	compiledUniqueByWhenEnum, err := compileUniqueByWhenEnumRule(field.UniqueByWhenEnum, *field.Items, joinPath(path, "uniqueByWhenEnum"))
+	if err != nil {
+		return compiledField{}, err
+	}
 
 	seen[field.Items] = struct{}{}
 	items, err := compileFieldSchema(*field.Items, joinPath(path, "items"), depth+1, seen)
@@ -1081,19 +1417,72 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 	}
 
 	return compiledField{
-		fieldType:   "array",
-		required:    field.Required,
-		items:       &items,
-		minItems:    cloneInt64Pointer(field.MinItems),
-		maxItems:    cloneInt64Pointer(field.MaxItems),
-		uniqueItems: field.UniqueItems,
-		dedupItems:  field.DedupItems,
-		uniqueBy:    cloneStrings(field.UniqueBy),
+		fieldType:           "array",
+		required:            field.Required,
+		items:               &items,
+		minItems:            cloneInt64Pointer(field.MinItems),
+		maxItems:            cloneInt64Pointer(field.MaxItems),
+		uniqueItems:         field.UniqueItems,
+		dedupItems:          field.DedupItems,
+		uniqueBy:            cloneStrings(field.UniqueBy),
+		singletonEnumValues: compiledSingleton,
+		requiredEnumValues:  compiledRequired,
+		uniqueByWhenEnum:    compiledUniqueByWhenEnum,
 	}, nil
 }
 
+func compileEnumValuesRule(rule *EnumValuesRule, items FieldSchema, path string) (*compiledEnumValuesRule, error) {
+	if rule == nil {
+		return nil, nil
+	}
+	if rule.Field == "" {
+		return nil, pathError(joinPath(path, "field"), "expected non-empty string")
+	}
+	if len(rule.Values) == 0 {
+		return nil, pathError(joinPath(path, "values"), "expected non-empty values array")
+	}
+	if err := validateEnumDiscriminatorField(items, rule.Field, rule.Values, path); err != nil {
+		return nil, err
+	}
+	values := make(map[string]struct{}, len(rule.Values))
+	order := make([]string, 0, len(rule.Values))
+	for index, value := range rule.Values {
+		if value == "" {
+			return nil, pathError(joinPath(joinPath(path, "values"), strconv.Itoa(index)), "expected non-empty enum value")
+		}
+		if _, exists := values[value]; exists {
+			return nil, pathError(joinPath(joinPath(path, "values"), strconv.Itoa(index)), "duplicate enum value")
+		}
+		values[value] = struct{}{}
+		order = append(order, value)
+	}
+	return &compiledEnumValuesRule{field: rule.Field, values: values, order: order}, nil
+}
+
+func compileUniqueByWhenEnumRule(rule *UniqueByWhenEnumRule, items FieldSchema, path string) (*compiledUniqueByWhenEnumRule, error) {
+	if rule == nil {
+		return nil, nil
+	}
+	if rule.Field == "" {
+		return nil, pathError(joinPath(path, "field"), "expected non-empty string")
+	}
+	if rule.Value == "" {
+		return nil, pathError(joinPath(path, "value"), "expected non-empty string")
+	}
+	if len(rule.UniqueBy) == 0 {
+		return nil, pathError(joinPath(path, "uniqueBy"), "expected non-empty uniqueBy array")
+	}
+	if err := validateEnumDiscriminatorField(items, rule.Field, []string{rule.Value}, path); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueByFieldsAllowOptional(rule.UniqueBy, items, joinPath(path, "uniqueBy")); err != nil {
+		return nil, err
+	}
+	return &compiledUniqueByWhenEnumRule{field: rule.Field, value: rule.Value, uniqueBy: cloneStrings(rule.UniqueBy)}, nil
+}
+
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.NullAsAbsent {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.SingletonEnumValues != nil || field.RequiredEnumValues != nil || field.UniqueByWhenEnum != nil || field.NullAsAbsent {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -1300,7 +1689,81 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 		}
 		output = append(output, normalized)
 	}
+	if err := applyEnumDiscriminatedArrayRules(output, field, path); err != nil {
+		return nil, err
+	}
 	return output, nil
+}
+
+// applyEnumDiscriminatedArrayRules evaluates the whole-list enum-discriminated invariants over the
+// fully-normalized array (singleton-subset, filtered uniqueBy, required coverage), mirroring storage
+// normalizeLayout. Per-item validation has already run; these only read the discriminator string.
+func applyEnumDiscriminatedArrayRules(output capabilityArray, field compiledField, path string) error {
+	if singleton := field.singletonEnumValues; singleton != nil {
+		seen := map[string]int{}
+		for index, item := range output {
+			discriminator, ok := enumDiscriminatorValue(item, singleton.field)
+			if !ok {
+				continue
+			}
+			if _, listed := singleton.values[discriminator]; !listed {
+				continue
+			}
+			if previous, ok := seen[discriminator]; ok {
+				return pathError(joinPath(joinPath(path, strconv.Itoa(index)), singleton.field), fmt.Sprintf("%s value %s also appears at %s", singleton.field, discriminator, joinPath(path, strconv.Itoa(previous))))
+			}
+			seen[discriminator] = index
+		}
+	}
+
+	if rule := field.uniqueByWhenEnum; rule != nil {
+		seen := map[string]int{}
+		for index, item := range output {
+			discriminator, ok := enumDiscriminatorValue(item, rule.field)
+			if !ok || discriminator != rule.value {
+				continue
+			}
+			itemPath := joinPath(path, strconv.Itoa(index))
+			keys, err := uniqueByValueKeys(item, rule.uniqueBy, itemPath)
+			if err != nil {
+				return pathError(itemPath, "uniqueByWhenEnum requires the keyed fields to be present on matched items")
+			}
+			for _, key := range keys {
+				if previous, ok := seen[key]; ok {
+					return pathError(itemPath, fmt.Sprintf("duplicate %s=%s key also appears at %s", rule.field, rule.value, joinPath(path, strconv.Itoa(previous))))
+				}
+				seen[key] = index
+			}
+		}
+	}
+
+	if required := field.requiredEnumValues; required != nil {
+		present := map[string]struct{}{}
+		for _, item := range output {
+			if discriminator, ok := enumDiscriminatorValue(item, required.field); ok {
+				present[discriminator] = struct{}{}
+			}
+		}
+		for _, value := range required.order {
+			if _, ok := present[value]; !ok {
+				return pathError(path, fmt.Sprintf("missing required %s value %s", required.field, value))
+			}
+		}
+	}
+
+	return nil
+}
+
+func enumDiscriminatorValue(item capabilityValue, field string) (string, bool) {
+	object, ok := item.(capabilityObject)
+	if !ok {
+		return "", false
+	}
+	value, ok := object[field].(string)
+	if !ok {
+		return "", false
+	}
+	return value, true
 }
 
 func validateObjectField(value jsonValue, field compiledField, path string) (capabilityValue, error) {
@@ -1354,6 +1817,28 @@ func applyCrossFieldRules(value map[string]capabilityValue, rules []CrossFieldRu
 			}
 			if present != 1 {
 				return pathError(path, fmt.Sprintf("exactly one of %s must be set", strings.Join(rule.Fields, ", ")))
+			}
+			continue
+		}
+
+		if rule.Type == "requireFieldWhenEnumEquals" {
+			discriminator, ok := value[rule.EnumField].(string)
+			if !ok {
+				return pathError(joinPath(path, rule.EnumField), "cross-field rule references invalid fields")
+			}
+			fieldValue, present := value[rule.Field]
+			fieldPath := joinPath(path, rule.Field)
+			if discriminator == rule.EnumValue {
+				// Required AND non-empty when the discriminator matches (mirrors the agent's
+				// AppID == nil || *AppID == "" rejection for app-state).
+				stringValue, isString := fieldValue.(string)
+				if !present || !isString || stringValue == "" {
+					return pathError(fieldPath, fmt.Sprintf("%s is required when %s is %s", rule.Field, rule.EnumField, rule.EnumValue))
+				}
+			} else if present {
+				// Forbidden when the discriminator does not match (mirrors the agent's
+				// AppID != nil rejection for non-app-state).
+				return pathError(fieldPath, fmt.Sprintf("%s is only allowed when %s is %s", rule.Field, rule.EnumField, rule.EnumValue))
 			}
 			continue
 		}

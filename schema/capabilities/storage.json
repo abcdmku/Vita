@@ -1,0 +1,82 @@
+{
+  "capability": "storage.layout",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "subvolumes": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "role": {
+                "enum": [
+                  "system-state",
+                  "user-data",
+                  "app-state",
+                  "snapshots",
+                  "local-backup-cache"
+                ],
+                "required": true,
+                "type": "string"
+              },
+              "path": {
+                "format": "absolutePath",
+                "required": true,
+                "type": "string"
+              },
+              "appId": {
+                "nullAsAbsent": true,
+                "required": false,
+                "type": "string"
+              },
+              "quotaGiB": {
+                "minimum": 1,
+                "nullAsAbsent": true,
+                "required": false,
+                "type": "integer"
+              }
+            },
+            "crossFieldRules": [
+              {
+                "type": "requireFieldWhenEnumEquals",
+                "enumField": "role",
+                "enumValue": "app-state",
+                "field": "appId"
+              }
+            ]
+          },
+          "required": true,
+          "type": "array",
+          "singletonEnumValues": {
+            "field": "role",
+            "values": [
+              "system-state",
+              "user-data",
+              "snapshots",
+              "local-backup-cache"
+            ]
+          },
+          "requiredEnumValues": {
+            "field": "role",
+            "values": [
+              "system-state",
+              "user-data",
+              "app-state",
+              "snapshots",
+              "local-backup-cache"
+            ]
+          },
+          "uniqueByWhenEnum": {
+            "field": "role",
+            "value": "app-state",
+            "uniqueBy": ["appId"]
+          }
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

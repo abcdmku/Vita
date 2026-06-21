@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/backup.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/backup.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/storage.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -431,6 +431,91 @@ export const SERVICES_MANIFEST = Object.freeze({
   crossFieldRules: Object.freeze([]),
 }) satisfies CapabilityManifest;
 
+export const STORAGE_MANIFEST = Object.freeze({
+  capability: "storage.layout",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        subvolumes: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              appId: Object.freeze({
+                required: false,
+                type: "string",
+                nullAsAbsent: true,
+              }),
+              path: Object.freeze({
+                format: "absolutePath",
+                required: true,
+                type: "string",
+              }),
+              quotaGiB: Object.freeze({
+                required: false,
+                type: "integer",
+                minimum: 1,
+                nullAsAbsent: true,
+              }),
+              role: Object.freeze({
+                required: true,
+                type: "string",
+                enum: Object.freeze([
+                  "system-state",
+                  "user-data",
+                  "app-state",
+                  "snapshots",
+                  "local-backup-cache",
+                ]),
+              }),
+            }),
+            crossFieldRules: Object.freeze([
+              Object.freeze({
+                type: "requireFieldWhenEnumEquals",
+                enumField: "role",
+                enumValue: "app-state",
+                field: "appId",
+              }),
+            ]),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+          requiredEnumValues: Object.freeze({
+            field: "role",
+            values: Object.freeze([
+              "system-state",
+              "user-data",
+              "app-state",
+              "snapshots",
+              "local-backup-cache",
+            ]),
+          }),
+          singletonEnumValues: Object.freeze({
+            field: "role",
+            values: Object.freeze([
+              "system-state",
+              "user-data",
+              "snapshots",
+              "local-backup-cache",
+            ]),
+          }),
+          uniqueByWhenEnum: Object.freeze({
+            field: "role",
+            uniqueBy: Object.freeze([
+              "appId",
+            ]),
+            value: "app-state",
+          }),
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
+
 export const TIME_MANIFEST = Object.freeze({
   capability: "time.set",
   version: 1,
@@ -540,6 +625,7 @@ export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "network.policy": NETWORK_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
   "services.config": SERVICES_MANIFEST,
+  "storage.layout": STORAGE_MANIFEST,
   "time.set": TIME_MANIFEST,
   "time.sync": TIMESYNC_MANIFEST,
   "update.plan": UPDATE_MANIFEST,

@@ -1,0 +1,533 @@
+[
+  {
+    "name": "full valid five-role layout with two distinct app-state accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user", "quotaGiB": 500 },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/var/cache/backup" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.example.a", "quotaGiB": 10 },
+          { "role": "app-state", "path": "/apps/b", "appId": "com.example.b" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "minimal valid layout with single app-state accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.example.a" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "app-state appId present with quota accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a", "quotaGiB": 1 }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "three app-state with distinct appIds accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" },
+          { "role": "app-state", "path": "/apps/b", "appId": "com.b" },
+          { "role": "app-state", "path": "/apps/c", "appId": "com.c" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "non-app-state null appId treated as absent accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "appId": null },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "quotaGiB null treated as absent accepts",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "quotaGiB": null },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "deep canonical paths accept",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/a/b/c/system" },
+          { "role": "user-data", "path": "/a/b/c/user" },
+          { "role": "snapshots", "path": "/a/b/c/snap" },
+          { "role": "local-backup-cache", "path": "/a/b/c/cache" },
+          { "role": "app-state", "path": "/a/b/c/app", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "desired absent rejects",
+    "request": {},
+    "expect": "reject"
+  },
+  {
+    "name": "desired null rejects",
+    "request": { "desired": null },
+    "expect": "reject"
+  },
+  {
+    "name": "subvolumes absent rejects",
+    "request": { "desired": {} },
+    "expect": "reject"
+  },
+  {
+    "name": "subvolumes null rejects",
+    "request": { "desired": { "subvolumes": null } },
+    "expect": "reject"
+  },
+  {
+    "name": "subvolumes empty rejects",
+    "request": { "desired": { "subvolumes": [] } },
+    "expect": "reject"
+  },
+  {
+    "name": "missing required app-state role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "missing required snapshots role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate singleton system-state role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "system-state", "path": "/system2" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate singleton user-data role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "user-data", "path": "/user2" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate singleton local-backup-cache role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "local-backup-cache", "path": "/cache2" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate app-state appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.dup" },
+          { "role": "app-state", "path": "/apps/b", "appId": "com.dup" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "app-state without appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "app-state null appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": null }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "app-state empty appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "non-app-state with appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "appId": "com.x" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "snapshots with appId rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots", "appId": "com.x" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path root rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path trailing slash rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system/" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path dot-dot segment rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system/../etc" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path dot segment rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system/./x" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path relative rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "path empty rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "quotaGiB zero rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "quotaGiB": 0 },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "quotaGiB negative rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "quotaGiB": -5 },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "quotaGiB integer-valued float token rejects",
+    "request": "{\"desired\":{\"subvolumes\":[{\"role\":\"system-state\",\"path\":\"/system\",\"quotaGiB\":10.0},{\"role\":\"user-data\",\"path\":\"/user\"},{\"role\":\"snapshots\",\"path\":\"/snapshots\"},{\"role\":\"local-backup-cache\",\"path\":\"/cache\"},{\"role\":\"app-state\",\"path\":\"/apps/a\",\"appId\":\"com.a\"}]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "quotaGiB exponent token rejects",
+    "request": "{\"desired\":{\"subvolumes\":[{\"role\":\"system-state\",\"path\":\"/system\",\"quotaGiB\":1e3},{\"role\":\"user-data\",\"path\":\"/user\"},{\"role\":\"snapshots\",\"path\":\"/snapshots\"},{\"role\":\"local-backup-cache\",\"path\":\"/cache\"},{\"role\":\"app-state\",\"path\":\"/apps/a\",\"appId\":\"com.a\"}]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "quotaGiB decimal-zero-fraction token rejects",
+    "request": "{\"desired\":{\"subvolumes\":[{\"role\":\"system-state\",\"path\":\"/system\",\"quotaGiB\":1.0e1},{\"role\":\"user-data\",\"path\":\"/user\"},{\"role\":\"snapshots\",\"path\":\"/snapshots\"},{\"role\":\"local-backup-cache\",\"path\":\"/cache\"},{\"role\":\"app-state\",\"path\":\"/apps/a\",\"appId\":\"com.a\"}]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "invalid role rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "bogus", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "unknown subvolume field rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system", "extra": 1 },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate JSON key in subvolume rejects",
+    "request": "{\"desired\":{\"subvolumes\":[{\"role\":\"system-state\",\"path\":\"/system\",\"path\":\"/other\"},{\"role\":\"user-data\",\"path\":\"/user\"},{\"role\":\"snapshots\",\"path\":\"/snapshots\"},{\"role\":\"local-backup-cache\",\"path\":\"/cache\"},{\"role\":\"app-state\",\"path\":\"/apps/a\",\"appId\":\"com.a\"}]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "subvolume role missing rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "subvolume path missing rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "two app-state same appId among many distinct rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "system-state", "path": "/system" },
+          { "role": "user-data", "path": "/user" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" },
+          { "role": "app-state", "path": "/apps/b", "appId": "com.b" },
+          { "role": "app-state", "path": "/apps/c", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "appId on non-app-state plus missing role both wrong rejects",
+    "request": {
+      "desired": {
+        "subvolumes": [
+          { "role": "user-data", "path": "/user", "appId": "com.x" },
+          { "role": "snapshots", "path": "/snapshots" },
+          { "role": "local-backup-cache", "path": "/cache" },
+          { "role": "app-state", "path": "/apps/a", "appId": "com.a" }
+        ]
+      }
+    },
+    "expect": "reject"
+  }
+]

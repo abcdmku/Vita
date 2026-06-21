@@ -399,6 +399,97 @@ test("valid backup.policy request evaluates to one operation", () => {
   });
 });
 
+test("valid storage.layout request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "storage.layout": {
+        desired: {
+          subvolumes: [
+            { role: "system-state", path: "/system" },
+            { role: "user-data", path: "/user", quotaGiB: 500 },
+            { role: "snapshots", path: "/snapshots" },
+            { role: "local-backup-cache", path: "/var/cache/backup" },
+            { role: "app-state", path: "/apps/a", appId: "com.example.a", quotaGiB: 10 },
+            { role: "app-state", path: "/apps/b", appId: "com.example.b" },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "storage.layout",
+        request: {
+          desired: {
+            subvolumes: [
+              { role: "system-state", path: "/system" },
+              { role: "user-data", path: "/user", quotaGiB: 500 },
+              { role: "snapshots", path: "/snapshots" },
+              { role: "local-backup-cache", path: "/var/cache/backup" },
+              { role: "app-state", path: "/apps/a", appId: "com.example.a", quotaGiB: 10 },
+              { role: "app-state", path: "/apps/b", appId: "com.example.b" },
+            ],
+          },
+        },
+      },
+    ],
+  });
+});
+
+test("storage.layout request missing a required role rejects", () => {
+  const result = evaluateNodeConfig(
+    {
+      "storage.layout": {
+        desired: {
+          subvolumes: [
+            { role: "system-state", path: "/system" },
+            { role: "user-data", path: "/user" },
+            { role: "snapshots", path: "/snapshots" },
+            { role: "local-backup-cache", path: "/cache" },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), [
+    "storage.layout/desired/subvolumes",
+  ]);
+});
+
+test("storage.layout request with app-state missing appId rejects", () => {
+  const result = evaluateNodeConfig(
+    {
+      "storage.layout": {
+        desired: {
+          subvolumes: [
+            { role: "system-state", path: "/system" },
+            { role: "user-data", path: "/user" },
+            { role: "snapshots", path: "/snapshots" },
+            { role: "local-backup-cache", path: "/cache" },
+            { role: "app-state", path: "/apps/a" },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), [
+    "storage.layout/desired/subvolumes/4/appId",
+  ]);
+});
+
 test("backup.policy request with both schedule modes rejects", () => {
   const result = evaluateNodeConfig(
     {
