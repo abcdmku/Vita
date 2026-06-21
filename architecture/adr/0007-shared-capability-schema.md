@@ -2,7 +2,25 @@
 
 ## Status
 
-Proposed (owner decision required — this unblocks the config→plan evaluator P9-001 and whole-node apply).
+**Accepted** (owner approved 2026-06-21). Implementation decisions for this rollout:
+- **Shared artifact:** each capability manifest is a checked-in JSON file under `schema/capabilities/` (the
+  P9-002 dialect, as data) — the single source of truth, embedded into both planes at build time (a trusted
+  build input, not loaded from an untrusted source). It should be added to protected-policy (owner action —
+  agents must not alter the authoritative schema without governance).
+- **Derivation:** a SHARED runtime manifest-validator in each plane (the proven TS `compileCapabilityValidator`
+  from P9-002 + a mirrored, audited Go validator) — one small, conformance-tested engine per plane replacing
+  per-cap hand-written validators, rather than a Node→Go codegen toolchain. (Codegen remains a future option;
+  the runtime validator is simpler and already proven.)
+- **Format primitives & the parity bound:** simple formats (pattern/enum/range/RFC-1123 hostname) are
+  provably-equivalent across planes. Complex canonicalizing formats (IP literals — see "Empirical evidence")
+  are made SAFE not by hand-parity but by a **cross-language conformance corpus**: a shared vectors file both
+  validators run, asserting agreement; drift fails CI. IP-format support is added per-cap behind that corpus.
+- **Migration:** incremental + reversible, cap-by-cap behind the conformance gate; a cap's existing
+  hand-written validators remain authoritative until its manifest passes conformance against them.
+
+Sequenced contracts: P9-003 (promote the dialect to a shared JSON manifest + TS loader) → P9-005 (the Go
+manifest-validator) → P9-006 (cross-language conformance gate for `timesync`) → P9-001 (the evaluator, now
+unblocked, derives from the manifests) → per-cap migration.
 
 ## Context
 
