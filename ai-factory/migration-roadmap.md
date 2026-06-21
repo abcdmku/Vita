@@ -68,3 +68,10 @@ Only ONE dialect-touching contract in flight at a time (WAVE 0-2 + the dialect-e
 parallel lane opens at WAVE 3 once the shared base exists. Each format/primitive lands WITH its simplest
 consumer so the conformance corpus validates it on arrival. Re-dispatch (not hand-merge) to rebase a staler
 branch onto newly-merged dialect.
+- **A format built WITHOUT a real cap consumer is only TS≡Go-validated, NOT manifest≡agent — it WILL diverge
+  from the agent's CUSTOM rules.** P9-009's `hostnameOrIp` captured `netip` but not the agent
+  `normalizeServer`'s `validHostname` FALLBACK (all-numeric labels like `1.2.3.999` accepted) — invisible
+  until timesync (P9-011) became its first consumer. So when the agent COMBINES a stdlib parser with a custom
+  fallback/extra rule, READ the real agent validator and capture BOTH exactly; never assume the stdlib parser
+  alone is the format. cidrLiteral/sriIntegrity must likewise be validated against the network/capsule agent
+  CIDR/integrity entrypoints, not just `net/netip`/`base64` in isolation.
