@@ -121,7 +121,20 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   invariants + canonicalAbsolutePath — HARDEST; has notInEnum/dedupItems/uniqueBy/integer-fix), pdssync
   (cidV1Multibase heaviest decoder + did/handle REUSE from identity + secretKeyNameDenylist). These build via
   **Opus subagents** (Codex dispatch down until Jun 24).
-  **126 contracts merged. Reviewer gate has blocked 73 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-021 (backup.policy) MIGRATED — 11th cap** (registry = 11; +backup.policy), OPUS-BUILT + OPUS-GATED
+  (Codex outage). Built exactlyOneOf(cron|interval) + cron5OrMacro + the opt-in `nullAsAbsent` per-field option
+  (explicit JSON `null` on the agent's `*string`/`*int64` omitempty fields = ABSENT, matching Go pointer
+  decode — verified via the dual oracle + ground-truth; default OFF so opt-in/no other-cap regression — ALSO
+  unblocks storage's appId/quotaGiB). Opus gate found 2: the null one (REAL, fixed) + a scanner one (FALSE
+  POSITIVE — Go RE2 `(?i)` does NOT fold long-s; the probe used JS `/iu`; my ground-truth refuted). **The
+  Opus-builder flow WORKS** (Agent isolation:worktree → commits task/<id> → I verify+gate+merge from shared
+  refs; it also caught + I fixed a pre-existing regression: P9-019's scheme-fuzz shelled out to native `go`,
+  ENOENT-failing the host TS suite → now t.skip()s). **11/13 migrated.** Remaining 2: storage (4 enum-domain
+  array invariants: enum-conditional appId-presence + singleton-roles + required-role-coverage +
+  filtered-uniqueBy[appId among app-state] + canonicalAbsolutePath + quotaGiB>0 — prereqs notInEnum/dedupItems/
+  uniqueBy/integer-fix/nullAsAbsent now ALL built), pdssync (cidV1Multibase heaviest decoder + did/handle REUSE
+  from identity + secretKeyNameDenylist).
+  **127 contracts merged. Reviewer gate has blocked 74 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
