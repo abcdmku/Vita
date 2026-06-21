@@ -116,7 +116,12 @@ conventions you must follow are below.
   function or a VENDORED copy of its exact source (e.g. services.go's `privateKeyPattern`/`secretAssignment`
   regexes), never the dialect's own port. (Recurred P9-015: a token-list scanner dropped the agent regex's
   `[-_\s]?` whitespace separator — accepting `"private key"`/`"seed phrase"` the agent rejects — and the
-  self-referential harness could not see it.)
+  self-referential harness could not see it.) (9) **An INTEGER field decoded into a Go `int`/`int64` must
+  reject integer-valued FLOAT/EXPONENT tokens** (`1000.0`, `1e3`, `1.0e3`) — Go `json.Decode` into an int
+  type rejects any number token with `.`/`e`/`E` (only a bare `-?[0-9]+` literal decodes), so a manifest that
+  accepts "mathematically integer" floats (Trunc==value / `Number.isSafeInteger` after `JSON.parse`) is
+  LOOSER. Require a true integer-literal token (no `.`/`e`/`E`) before the range check. (Recurred P9-018
+  uid — the FIRST integer field; affects storage.quotaGiB / network.port.)
 - **Go `encoding/json` accepts DUPLICATE object keys (last-wins) — a TCB-parser hazard.** A request like
   `{"id":"-----BEGIN PRIVATE KEY-----","id":"rk:owner"}` validates on the clean last value while smuggling
   the bad first value into the RAW bytes. If a capability persists/returns raw input, that leaks (§13.1)
