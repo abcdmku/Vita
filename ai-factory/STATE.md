@@ -235,14 +235,12 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 (safeNormalize retrofit — see Lessons).
 
 
-## ⚠️ CODEX OUTAGE (2026-06-21 ~21:24 UTC → resets Jun 24 7:30 PM): usage limit hit.
-Both `npm run dispatch` (Codex builder) AND `npm run review` (Codex gate) are DOWN — a failed `review` now
-returns a SPURIOUS `revise` with an EMPTY `.review.md` (the log shows "You've hit your usage limit"), NOT a
-real finding. Per the owner's standing directive ([[vita-opus-during-codex-outage]]): substitute **Opus 4.8
-subagents** as BUILDERS (Agent tool / Workflow) and the **adversarial `migration-probe` (Opus) as the R3 gate
-substitute** — merge on probe-approve + my independent ground-truth verification. Switch back to Codex after
-the reset. P9-020 (network) is mid-gate: its Codex review failed on the limit; the Opus probe (running) is the
-gate. Builds for backup/storage/pdssync now go via Opus subagent builders, not `npm run dispatch`.
+## ✅ CODEX RESTORED (owner 2026-06-21: "codex is reset you can use it again") — outage was ~21:24 UTC.
+Back to Codex: `npm run dispatch` (builder) + `npm run review` (R3 gate). The Opus-builder + Opus-probe flow
+held the floor during the gap (network P9-020, backup P9-021 both Opus-built/gated; storage P9-022
+Opus-BUILT, now CODEX-gated). **The Opus-builder flow is PROVEN** (Agent isolation:worktree → commits
+task/<id> on shared refs → orchestrator verifies + gates + merges) — keep it as the outage fallback
+([[vita-opus-during-codex-outage]]). pdssync (last cap) → Codex dispatch.
 
 ## Lessons (most recent first)
 - **NEVER prefix a contract-revision commit with `git reset --hard main` — it reverts the just-made edit
