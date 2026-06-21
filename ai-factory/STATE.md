@@ -30,9 +30,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   lost-write; a symlink/TOCTOU atomic-write).
 - **Change-set thread (capstone):** P0-030 unified change-set model + P2-028 whole-node change-set preview
   (composes all 4 subsystem previews into one operator view with aggregated security/privilege flags).
-  **104 contracts merged. The buildable control plane is exhaustively complete.** Remaining frontier —
-  bootable signed image (FR-001) + whole-node apply — stays blocked on the Linux build host + the config→plan
-  shared schema (both flagged; see blocked/). Continuing with verifiable depth (integration scenarios, breadth).
+- **Integration + docs:** P7-011 (agent end-to-end lifecycle scenario) + P2-029 (controller operator-session
+  workflow) — BOTH planes integration-tested end-to-end. `architecture/ARCHITECTURE.md` consolidates the
+  built system.
+- **Frontier-unblock proposal:** `architecture/adr/0007-shared-capability-schema.md` (PROPOSED, owner
+  decision) — a shared language-neutral capability manifest both planes derive from, which unblocks the
+  closed config→plan evaluator (P9-001) + whole-node apply. Next: a low-risk ADDITIVE proof-of-concept
+  (manifest dialect + a manifest-driven TS validator + a conformance test vs. the existing validators) that
+  does NOT touch the TCB — de-risks the owner decision before any migration.
+  **106 contracts merged. The buildable control plane is exhaustively complete + integration-tested + documented.**
+  Remaining high-value frontier: (a) bootable signed image → Linux build host; (b) evaluator/whole-node apply
+  → owner-approve ADR 0007. Both owner-gated; building the additive PoC meanwhile.
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
