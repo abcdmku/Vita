@@ -96,6 +96,18 @@ conventions you must follow are below.
   The conformance corpus encodes the AGENT's accept/reject, never a guess — and NEVER delete a vector that
   would expose a disagreement. If you think the agent SHOULD be stricter (a real §13.1/security gap), HARDEN
   THE AGENT first in a deliberate change, then the manifest follows — don't silently diverge.
+  Specific manifest≢agent traps (the [migration-roadmap](ai-factory/migration-roadmap.md) quality floor):
+  (1) the EXISTING `noInlineSecrets` (data:/`-----BEGIN`/48-base64) is LOOSER than the agent's service-grade
+  `containsInlineServiceMaterial` (PEM, key/secret token-assignment with a `scheme://` carve-out, seed-word
+  runs, hex≥32, std+url base64≥48) — do NOT reuse it where the agent does the strong scan; use
+  `noInlineMaterial-strong`. (2) Whole-object `uniqueItems` where the agent dedups by ONE sub-field is LOOSER
+  ({name,enabled} hashes distinct while the agent keys on name) — use `uniqueBy:[field]`. (3) A field the
+  agent DEDUPS (keep-first) must NOT be modeled as `uniqueItems` (which REJECTS) — that's STRICTER; use
+  `dedupItems`. (4) Length caps are Go BYTE length (UTF-8), not JS UTF-16 `.length`. (5) Whitespace trims use
+  Go `unicode.IsSpace`, not ASCII-only. (6) RUNTIME/stateful checks (clock skew, monotonic cursor
+  non-regression) belong in the agent, NOT the manifest — putting them in the manifest makes single-request
+  validation STRICTER than the agent's. (7) Custom (no-Go-stdlib-oracle) formats need a FROZEN golden corpus
+  generated from the Go validator — the corpus IS the parity contract.
 - **Go `encoding/json` accepts DUPLICATE object keys (last-wins) — a TCB-parser hazard.** A request like
   `{"id":"-----BEGIN PRIVATE KEY-----","id":"rk:owner"}` validates on the clean last value while smuggling
   the bad first value into the RAW bytes. If a capability persists/returns raw input, that leaks (§13.1)

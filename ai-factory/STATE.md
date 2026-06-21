@@ -66,6 +66,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   identity = DID/handle; pdssync = CID/URL; capsule = SRI/version; time = datetime. PLAN: front-load the
   dialect primitives + formats (sequential through the dialect), THEN fan out all 9 remaining cap migrations
   in parallel (they become dialect-disjoint). (a) bootable image still → Linux build host (owner-gated).
+- **AUTHORITATIVE MIGRATION ROADMAP: [migration-roadmap.md](migration-roadmap.md)** (from an exhaustive
+  9-cap validator map via the `map-cap-dialect-needs` workflow). 5 WAVES: W0 parity-safe formats
+  (rfc3339Instant+time.set [P9-014], cidrLiteral, sriIntegrity) → W1 shared string substrate
+  (stringScreenBundle, noInlineMaterial-strong [replaces the LOOSE existing noInlineSecrets],
+  forbiddenSchemePrefix, rawPattern) + update.plan → W2 uniqueBy family + capsule → W3 FAN OUT accounts ∥
+  identity → W4 backup ∥ storage ∥ network ∥ pdssync (hardest, last). The 7 parity traps are in AGENTS.md.
+  **VERIFICATION (ultracode): run the reusable adversarial probe `ai-factory/workflows/migration-probe.js`
+  (3 lenses: stricter/looser/conformance-integrity, confirmed + synthesized) on each R3 migration BEFORE the
+  Codex gate — it already caught the services dup-name LOOSER bug the green corpus hid (64th finding).**
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
