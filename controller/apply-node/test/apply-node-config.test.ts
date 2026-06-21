@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  TIMESYNC_MANIFEST,
-} from "../../../sdk/typescript/src/capability-manifest.ts";
-import type {
-  CapabilityManifest,
+  defaultCapabilityRegistry,
 } from "../../../sdk/typescript/src/capability-manifest.ts";
 import type {
   CapabilityManifestRegistry,
@@ -18,16 +15,14 @@ import type {
   ApplyNodeTransportResponse,
 } from "../src/apply-node-config.ts";
 
-const REGISTRY: CapabilityManifestRegistry = new Map<string, CapabilityManifest>([
-  ["timesync", TIMESYNC_MANIFEST],
-]);
+const REGISTRY: CapabilityManifestRegistry = defaultCapabilityRegistry();
 
-test("valid timesync config evaluates, submits the plan, and surfaces a committed result", async () => {
+test("valid node.config request evaluates, submits the plan, and surfaces a committed result", async () => {
   const applyResult = committedResult(true);
   const calls: TransportCall[] = [];
 
   const result = await applyNodeConfig(
-    validTimesyncConfig(),
+    validNodeConfig(),
     REGISTRY,
     fakeTransport({ body: applyResult, status: 200 }, calls),
   );
@@ -39,10 +34,12 @@ test("valid timesync config evaluates, submits the plan, and surfaces a committe
   const expectedPlan = {
     operations: [
       {
-        capability: "timesync",
+        capability: "node.config",
         request: {
-          enabled: true,
-          servers: ["pool.ntp.org"],
+          desired: {
+            mode: "normal",
+            remoteAccess: "disabled",
+          },
         },
       },
     ],
@@ -79,9 +76,10 @@ test("evaluation failures return evaluate stage and never call transport", async
 
   const invalid = await applyNodeConfig(
     {
-      timesync: {
-        enabled: true,
-        servers: [],
+      "node.config": {
+        desired: {
+          mode: "normal",
+        },
       },
     },
     REGISTRY,
@@ -98,7 +96,7 @@ test("evaluation failures return evaluate stage and never call transport", async
 
 test("non-2xx apply response returns apply stage failure", async () => {
   const result = await applyNodeConfig(
-    validTimesyncConfig(),
+    validNodeConfig(),
     REGISTRY,
     fakeTransport({
       body: {
@@ -118,7 +116,7 @@ test("non-2xx apply response returns apply stage failure", async () => {
 
 test("rejected and rolledBack apply outcomes return apply stage failure", async () => {
   const rejected = await applyNodeConfig(
-    validTimesyncConfig(),
+    validNodeConfig(),
     REGISTRY,
     fakeTransport({ body: rejectedResult(), status: 200 }),
   );
@@ -127,7 +125,7 @@ test("rejected and rolledBack apply outcomes return apply stage failure", async 
   assert.equal(rejected.applyResult?.outcome, "rejected");
 
   const rolledBack = await applyNodeConfig(
-    validTimesyncConfig(),
+    validNodeConfig(),
     REGISTRY,
     fakeTransport({ body: rolledBackResult(), status: 200 }),
   );
@@ -138,7 +136,7 @@ test("rejected and rolledBack apply outcomes return apply stage failure", async 
 
 test("transport throw returns transport stage failure", async () => {
   let calls = 0;
-  const result = await applyNodeConfig(validTimesyncConfig(), REGISTRY, async () => {
+  const result = await applyNodeConfig(validNodeConfig(), REGISTRY, async () => {
     calls += 1;
     throw new Error("socket unavailable");
   });
@@ -152,7 +150,7 @@ test("hostile config fails closed without invoking accessors or calling transpor
   let getterReads = 0;
   let transportCalls = 0;
 
-  Object.defineProperty(hostile, "timesync", {
+  Object.defineProperty(hostile, "node.config", {
     enumerable: true,
     get() {
       getterReads += 1;
@@ -199,11 +197,13 @@ function fakeTransport(
   };
 }
 
-function validTimesyncConfig(): unknown {
+function validNodeConfig(): unknown {
   return {
-    timesync: {
-      enabled: true,
-      servers: ["POOL.NTP.ORG"],
+    "node.config": {
+      desired: {
+        mode: "normal",
+        remoteAccess: "disabled",
+      },
     },
   };
 }
@@ -212,7 +212,7 @@ function committedResult(auditUnrecorded?: boolean): ApplyNodeApplyResult {
   const base = {
     applied: [
       {
-        capability: "timesync",
+        capability: "node.config",
         index: 0,
       },
     ],
@@ -248,21 +248,21 @@ function rolledBackResult(): ApplyNodeApplyResult {
   return {
     applied: [
       {
-        capability: "timesync",
+        capability: "node.config",
         index: 0,
       },
     ],
     error: {
-      capability: "timesync",
+      capability: "node.config",
       code: "apply_failed",
       index: 0,
-      message: "timesync apply failed",
+      message: "node.config apply failed",
     },
     outcome: "rolledBack",
     rollbackErrors: [],
     rolledBack: [
       {
-        capability: "timesync",
+        capability: "node.config",
         index: 0,
       },
     ],

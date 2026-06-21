@@ -22,6 +22,7 @@ test("loads timesync JSON and matches the committed generated export", () => {
   const manifest = loadTimesyncManifest();
 
   assert.deepEqual(manifest, TIMESYNC_MANIFEST);
+  assert.equal(manifest.defaultRegistry, false);
   assert.equal(Object.isFrozen(TIMESYNC_MANIFEST.fields.enabled), true);
   assert.equal(Object.isFrozen(TIMESYNC_MANIFEST.fields.servers), true);
 
@@ -288,6 +289,13 @@ test("loadCapabilityManifest rejects malformed manifests without throwing", () =
       raw: {
         ...manifestWith({}),
         version: 2,
+      },
+    },
+    {
+      name: "defaultRegistry true is rejected",
+      raw: {
+        ...manifestWith({}),
+        defaultRegistry: true,
       },
     },
   ];

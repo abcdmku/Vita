@@ -2,8 +2,10 @@ package nodeconfig
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/vita/agent/capabilities"
@@ -250,6 +252,42 @@ func TestApplyRejectsInvalidRequestWithoutWriting(t *testing.T) {
 				t.Fatalf("live config = %q, want unchanged %q", got, prior)
 			}
 		})
+	}
+}
+
+func TestDecodeRejectsExcessiveNestingWithInvalidRequestError(t *testing.T) {
+	validRaw := []byte(`{"desired":{"mode":"normal","remoteAccess":"disabled"}}`)
+	var valid ApplyRequest
+	if err := json.Unmarshal(validRaw, &valid); err != nil {
+		t.Fatalf("json.Unmarshal valid request returned error: %v", err)
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate valid request returned error: %v", err)
+	}
+
+	depth := maxRequestJSONDepth + 2
+	deepArrays := strings.Repeat("[", depth) + "null" + strings.Repeat("]", depth)
+	deepEnvelope := []byte(`{"desired":` + deepArrays + `}`)
+	assertInvalidRequestDecodeError(t, deepEnvelope, "JSON depth budget exceeded")
+
+	deepDesired := []byte(`{"desired":{"mode":"normal","remoteAccess":"disabled","extra":` + deepArrays + `}}`)
+	assertInvalidRequestDecodeError(t, deepDesired, "JSON depth budget exceeded")
+}
+
+func assertInvalidRequestDecodeError(t *testing.T, raw []byte, reason string) {
+	t.Helper()
+
+	var request ApplyRequest
+	err := json.Unmarshal(raw, &request)
+	if err == nil {
+		t.Fatal("json.Unmarshal returned nil error, want rejection")
+	}
+	var invalid *InvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("json.Unmarshal error = %T %v, want InvalidRequestError", err, err)
+	}
+	if !strings.Contains(invalid.Reason, reason) {
+		t.Fatalf("InvalidRequestError reason = %q, want %q", invalid.Reason, reason)
 	}
 }
 

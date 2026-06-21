@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  NODE_CONFIG_MANIFEST,
   TIMESYNC_MANIFEST,
   compileCapabilityValidator,
 } from "../src/capability-manifest.ts";
@@ -11,6 +12,7 @@ import type {
 } from "../src/capability-manifest.ts";
 
 const validateTimesync = compileCapabilityValidator(TIMESYNC_MANIFEST);
+const validateNodeConfig = compileCapabilityValidator(NODE_CONFIG_MANIFEST);
 
 test("TIMESYNC manifest accepts valid enabled hostname config", () => {
   const result = validateTimesync({
@@ -106,6 +108,35 @@ test("TIMESYNC rejects absent required fields and unknown keys", () => {
   assert.deepEqual(
     rejectedPaths(validateTimesync({ enabled: false, servers: [], extra: true })),
     ["extra"],
+  );
+});
+
+test("object fields validate nested full-request shape", () => {
+  const result = validateNodeConfig({
+    desired: {
+      mode: "normal",
+      remoteAccess: "disabled",
+    },
+  });
+
+  if (!result.ok) {
+    assert.fail(`expected node.config request to validate: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.value, {
+    desired: {
+      mode: "normal",
+      remoteAccess: "disabled",
+    },
+  });
+
+  assert.deepEqual(
+    rejectedPaths(validateNodeConfig({ desired: { mode: "normal" } })),
+    ["desired/remoteAccess"],
+  );
+  assert.deepEqual(
+    rejectedPaths(validateNodeConfig({ desired: { mode: "normal", remoteAccess: "disabled", extra: true } })),
+    ["desired/extra"],
   );
 });
 

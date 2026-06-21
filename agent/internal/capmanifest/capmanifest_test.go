@@ -27,6 +27,32 @@ func TestLoadManifestAcceptsTimesyncJSON(t *testing.T) {
 	}
 }
 
+func TestLoadManifestAcceptsNodeConfigObjectJSON(t *testing.T) {
+	manifestRaw := readRepoFile(t, "schema", "capabilities", "node.config.json")
+	manifest, err := LoadManifest(manifestRaw)
+	if err != nil {
+		t.Fatalf("LoadManifest returned error: %v", err)
+	}
+
+	desired := manifest.Fields["desired"]
+	if desired.Type != "object" || desired.Fields == nil {
+		t.Fatalf("desired field = %#v, want object with fields", desired)
+	}
+	if desiredField := desired.Fields["mode"]; desiredField.Type != "string" || len(desiredField.Enum) != 2 {
+		t.Fatalf("desired.mode field = %#v, want string enum", desiredField)
+	}
+
+	if err := Validate(manifest, []byte(`{"desired":{"mode":"normal","remoteAccess":"disabled"}}`)); err != nil {
+		t.Fatalf("Validate valid node.config request returned error: %v", err)
+	}
+	if err := Validate(manifest, []byte(`{"desired":{"mode":"normal","remoteAccess":"disabled","extra":true}}`)); err == nil {
+		t.Fatal("Validate accepted nested unknown field")
+	}
+	if err := Validate(manifest, []byte(`{"desired":{"mode":"normal"}}`)); err == nil {
+		t.Fatal("Validate accepted missing nested required field")
+	}
+}
+
 func TestLoadManifestRejectsMalformedManifests(t *testing.T) {
 	tests := []struct {
 		name string
@@ -39,6 +65,14 @@ func TestLoadManifestRejectsMalformedManifests(t *testing.T) {
 		{
 			name: "raw pattern key",
 			raw:  `{"capability":"demo","version":1,"fields":{"name":{"type":"string","required":true,"pattern":"^[a-z]+$"}},"crossFieldRules":[]}`,
+		},
+		{
+			name: "default registry true",
+			raw:  `{"capability":"demo","version":1,"defaultRegistry":true,"fields":{},"crossFieldRules":[]}`,
+		},
+		{
+			name: "object schema missing fields",
+			raw:  `{"capability":"demo","version":1,"fields":{"desired":{"type":"object","required":true}},"crossFieldRules":[]}`,
 		},
 		{
 			name: "bad cross-field ref",

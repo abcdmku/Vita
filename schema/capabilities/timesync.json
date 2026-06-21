@@ -1,6 +1,7 @@
 {
   "capability": "time.sync",
   "version": 1,
+  "defaultRegistry": false,
   "fields": {
     "enabled": {
       "required": true,

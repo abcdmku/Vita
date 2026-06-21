@@ -2,106 +2,167 @@
   {
     "name": "normal disabled accepts",
     "request": {
-      "mode": "normal",
-      "remoteAccess": "disabled"
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": "disabled"
+      }
     },
     "expect": "accept"
   },
   {
     "name": "normal enabled accepts",
     "request": {
-      "mode": "normal",
-      "remoteAccess": "enabled"
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": "enabled"
+      }
     },
     "expect": "accept"
   },
   {
     "name": "maintenance disabled accepts",
     "request": {
-      "mode": "maintenance",
-      "remoteAccess": "disabled"
+      "desired": {
+        "mode": "maintenance",
+        "remoteAccess": "disabled"
+      }
     },
     "expect": "accept"
   },
   {
     "name": "maintenance enabled accepts",
     "request": {
-      "mode": "maintenance",
-      "remoteAccess": "enabled"
+      "desired": {
+        "mode": "maintenance",
+        "remoteAccess": "enabled"
+      }
     },
     "expect": "accept"
   },
   {
     "name": "invalid mode rejects",
     "request": {
-      "mode": "reboot",
-      "remoteAccess": "disabled"
+      "desired": {
+        "mode": "reboot",
+        "remoteAccess": "disabled"
+      }
     },
     "expect": "reject",
-    "rejectCode": "mode"
+    "rejectCode": "desired/mode"
   },
   {
     "name": "uppercase mode rejects",
     "request": {
-      "mode": "NORMAL",
-      "remoteAccess": "disabled"
+      "desired": {
+        "mode": "NORMAL",
+        "remoteAccess": "disabled"
+      }
     },
     "expect": "reject",
-    "rejectCode": "mode"
+    "rejectCode": "desired/mode"
   },
   {
     "name": "invalid remoteAccess rejects",
     "request": {
-      "mode": "normal",
-      "remoteAccess": "ssh"
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": "ssh"
+      }
     },
     "expect": "reject",
-    "rejectCode": "remoteAccess"
+    "rejectCode": "desired/remoteAccess"
   },
   {
     "name": "non string remoteAccess rejects",
     "request": {
-      "mode": "normal",
-      "remoteAccess": true
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": true
+      }
     },
     "expect": "reject",
-    "rejectCode": "remoteAccess"
+    "rejectCode": "desired/remoteAccess"
   },
   {
     "name": "absent mode rejects",
     "request": {
-      "remoteAccess": "disabled"
+      "desired": {
+        "remoteAccess": "disabled"
+      }
     },
     "expect": "reject",
-    "rejectCode": "mode"
+    "rejectCode": "desired/mode"
   },
   {
     "name": "absent remoteAccess rejects",
     "request": {
-      "mode": "normal"
+      "desired": {
+        "mode": "normal"
+      }
     },
     "expect": "reject",
-    "rejectCode": "remoteAccess"
+    "rejectCode": "desired/remoteAccess"
   },
   {
-    "name": "unknown key rejects",
+    "name": "unknown top-level key rejects",
     "request": {
-      "mode": "normal",
-      "remoteAccess": "disabled",
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": "disabled"
+      },
       "extra": true
     },
     "expect": "reject",
     "rejectCode": "extra"
   },
   {
-    "name": "duplicate JSON key with valid final mode rejects",
-    "request": "{\"mode\":\"reboot\",\"mode\":\"normal\",\"remoteAccess\":\"disabled\"}",
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "mode": "normal",
+        "remoteAccess": "disabled",
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "duplicate top-level desired key with valid final desired rejects",
+    "request": "{\"desired\":{\"mode\":\"reboot\",\"remoteAccess\":\"disabled\"},\"desired\":{\"mode\":\"normal\",\"remoteAccess\":\"disabled\"}}",
     "expect": "reject"
   },
   {
-    "name": "duplicate JSON key with valid final remoteAccess rejects",
-    "request": "{\"mode\":\"normal\",\"remoteAccess\":\"ssh\",\"remoteAccess\":\"disabled\"}",
+    "name": "duplicate inner mode key with valid final mode rejects",
+    "request": "{\"desired\":{\"mode\":\"reboot\",\"mode\":\"normal\",\"remoteAccess\":\"disabled\"}}",
     "expect": "reject"
+  },
+  {
+    "name": "duplicate inner remoteAccess key with valid final remoteAccess rejects",
+    "request": "{\"desired\":{\"mode\":\"normal\",\"remoteAccess\":\"ssh\",\"remoteAccess\":\"disabled\"}}",
+    "expect": "reject"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "array desired rejects",
+    "request": {
+      "desired": []
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
   },
   {
     "name": "null request rejects",

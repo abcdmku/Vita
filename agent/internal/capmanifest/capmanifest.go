@@ -22,6 +22,7 @@ const (
 type Manifest struct {
 	Capability      string
 	Version         int
+	DefaultRegistry *bool
 	Fields          map[string]FieldSchema
 	CrossFieldRules []CrossFieldRule
 }
@@ -40,6 +41,7 @@ type FieldSchema struct {
 	MinItems        *int64
 	MaxItems        *int64
 	UniqueItems     bool
+	Fields          map[string]FieldSchema
 }
 
 type CrossFieldRule struct {
@@ -72,15 +74,19 @@ type compiledField struct {
 	minItems        *int64
 	maxItems        *int64
 	uniqueItems     bool
+	fields          map[string]compiledField
+	fieldNames      []string
 }
 
 type capabilityValue interface{}
 type capabilityArray []capabilityValue
+type capabilityObject map[string]capabilityValue
 
 var (
 	manifestFields = map[string]struct{}{
 		"capability":      {},
 		"crossFieldRules": {},
+		"defaultRegistry": {},
 		"fields":          {},
 		"version":         {},
 	}
@@ -110,6 +116,11 @@ var (
 		"required":    {},
 		"type":        {},
 		"uniqueItems": {},
+	}
+	objectSchemaFields = map[string]struct{}{
+		"fields":   {},
+		"required": {},
+		"type":     {},
 	}
 	crossFieldRuleFields = map[string]struct{}{
 		"control": {},
@@ -208,6 +219,18 @@ func parseManifest(value jsonValue) (Manifest, error) {
 		return Manifest{}, pathError("version", "unsupported manifest version")
 	}
 
+	var defaultRegistry *bool
+	if _, ok := object["defaultRegistry"]; ok {
+		value, err := optionalBool(object, "defaultRegistry", "defaultRegistry")
+		if err != nil {
+			return Manifest{}, err
+		}
+		if value {
+			return Manifest{}, pathError("defaultRegistry", "defaultRegistry may only be false when present")
+		}
+		defaultRegistry = boolPointer(false)
+	}
+
 	fieldsValue, ok := object["fields"]
 	if !ok {
 		return Manifest{}, pathError("fields", "required field is missing")
@@ -237,6 +260,7 @@ func parseManifest(value jsonValue) (Manifest, error) {
 	return Manifest{
 		Capability:      capability,
 		Version:         supportedManifestVersion,
+		DefaultRegistry: defaultRegistry,
 		Fields:          fields,
 		CrossFieldRules: rules,
 	}, nil
@@ -287,6 +311,8 @@ func parseFieldSchema(value jsonValue, path string) (FieldSchema, error) {
 		return parseBooleanFieldSchema(object, required, path)
 	case "array":
 		return parseArrayFieldSchema(object, required, path)
+	case "object":
+		return parseObjectFieldSchema(object, required, path)
 	default:
 		return FieldSchema{}, pathError(joinPath(path, "type"), "unknown field schema type")
 	}
@@ -409,6 +435,31 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 	}, nil
 }
 
+func parseObjectFieldSchema(object jsonObject, required bool, path string) (FieldSchema, error) {
+	if err := rejectUnknownFields(object, objectSchemaFields, path); err != nil {
+		return FieldSchema{}, err
+	}
+
+	fieldsValue, ok := object["fields"]
+	if !ok {
+		return FieldSchema{}, pathError(joinPath(path, "fields"), "required field is missing")
+	}
+	fieldsObject, ok := fieldsValue.(jsonObject)
+	if !ok {
+		return FieldSchema{}, pathError(joinPath(path, "fields"), "expected fields object")
+	}
+	fields, err := parseManifestFields(fieldsObject, joinPath(path, "fields"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
+
+	return FieldSchema{
+		Type:     "object",
+		Required: required,
+		Fields:   fields,
+	}, nil
+}
+
 func parseCrossFieldRules(array jsonArray, fields map[string]FieldSchema, path string) ([]CrossFieldRule, error) {
 	rules := make([]CrossFieldRule, 0, len(array))
 	for index, value := range array {
@@ -468,6 +519,9 @@ func compileManifest(manifest Manifest) (compiledManifest, error) {
 	if manifest.Version != supportedManifestVersion {
 		return compiledManifest{}, pathError("version", "unsupported manifest version")
 	}
+	if manifest.DefaultRegistry != nil && *manifest.DefaultRegistry {
+		return compiledManifest{}, pathError("defaultRegistry", "defaultRegistry may only be false when present")
+	}
 	if manifest.Fields == nil {
 		return compiledManifest{}, pathError("fields", "expected fields object")
 	}
@@ -526,13 +580,15 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 		return compileBooleanFieldSchema(field, path)
 	case "array":
 		return compileArrayFieldSchema(field, path, depth, seen)
+	case "object":
+		return compileObjectFieldSchema(field, path, depth, seen)
 	default:
 		return compiledField{}, pathError(joinPath(path, "type"), "unknown field schema type")
 	}
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems {
+	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -559,7 +615,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -581,7 +637,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -592,7 +648,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -628,6 +684,40 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 	}, nil
 }
 
+func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems {
+		return compiledField{}, pathError(path, "object field contains unsupported constraints")
+	}
+	if field.Fields == nil {
+		return compiledField{}, pathError(joinPath(path, "fields"), "required field is missing")
+	}
+
+	fieldNames := make([]string, 0, len(field.Fields))
+	for name := range field.Fields {
+		if name == "" {
+			return compiledField{}, pathError(joinPath(path, "fields"), "expected non-empty field name")
+		}
+		fieldNames = append(fieldNames, name)
+	}
+	sort.Strings(fieldNames)
+
+	fields := make(map[string]compiledField, len(field.Fields))
+	for _, name := range fieldNames {
+		compiled, err := compileFieldSchema(field.Fields[name], joinPath(joinPath(path, "fields"), name), depth+1, seen)
+		if err != nil {
+			return compiledField{}, err
+		}
+		fields[name] = compiled
+	}
+
+	return compiledField{
+		fieldType:  "object",
+		required:   field.Required,
+		fieldNames: fieldNames,
+		fields:     fields,
+	}, nil
+}
+
 func validateField(value jsonValue, field compiledField, path string) (capabilityValue, error) {
 	switch field.fieldType {
 	case "string":
@@ -638,6 +728,8 @@ func validateField(value jsonValue, field compiledField, path string) (capabilit
 		return validateBooleanField(value, path)
 	case "array":
 		return validateArrayField(value, field, path)
+	case "object":
+		return validateObjectField(value, field, path)
 	default:
 		return nil, pathError(path, "unknown manifest field")
 	}
@@ -727,6 +819,40 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 			seen[key] = index
 		}
 		output = append(output, normalized)
+	}
+	return output, nil
+}
+
+func validateObjectField(value jsonValue, field compiledField, path string) (capabilityValue, error) {
+	object, ok := value.(jsonObject)
+	if !ok {
+		return nil, pathError(path, "expected object")
+	}
+
+	allowed := make(map[string]struct{}, len(field.fieldNames))
+	for _, name := range field.fieldNames {
+		allowed[name] = struct{}{}
+	}
+	if err := rejectUnknownFields(object, allowed, path); err != nil {
+		return nil, err
+	}
+
+	output := make(capabilityObject, len(field.fieldNames))
+	for _, name := range field.fieldNames {
+		childField := field.fields[name]
+		raw, ok := object[name]
+		if !ok {
+			if childField.required {
+				return nil, pathError(joinPath(path, name), "required field is missing")
+			}
+			continue
+		}
+
+		normalized, err := validateField(raw, childField, joinPath(path, name))
+		if err != nil {
+			return nil, err
+		}
+		output[name] = normalized
 	}
 	return output, nil
 }
@@ -1180,6 +1306,18 @@ func uniqueValueKey(value capabilityValue) string {
 			parts = append(parts, uniqueValueKey(item))
 		}
 		return "a:[" + strings.Join(parts, ",") + "]"
+	case capabilityObject:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, key+":"+uniqueValueKey(typed[key]))
+		}
+		return "o:{" + strings.Join(parts, ",") + "}"
 	default:
 		return fmt.Sprintf("%T:%v", value, value)
 	}
@@ -1197,6 +1335,10 @@ func cloneInt64Pointer(value *int64) *int64 {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func joinPath(parent string, child string) string {

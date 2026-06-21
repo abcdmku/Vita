@@ -3,10 +3,13 @@ package capmanifest
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/transport"
 )
 
 type nodeConfigConformanceVector struct {
@@ -89,9 +92,16 @@ func assertNodeConfigExpectedDecision(t *testing.T, vector nodeConfigConformance
 }
 
 func validateNodeConfigAgentRequest(raw []byte) error {
-	var config nodeconfig.Config
-	if err := json.Unmarshal(raw, &config); err != nil {
+	request, err := transport.DecodeJSONRequest[nodeconfig.ApplyRequest](json.RawMessage(raw))
+	if err != nil {
 		return err
 	}
-	return config.Validate()
+	validator, ok := request.(interface {
+		capabilities.TypedRequest
+		Validate() error
+	})
+	if !ok {
+		return fmt.Errorf("nodeconfig request %T cannot be validated", request)
+	}
+	return validator.Validate()
 }

@@ -20,8 +20,12 @@ const ROOT_DIR_WITH_SEPARATOR = `${ROOT_DIR}${path.sep}`;
 const PREFERRED_KEY_ORDER = [
   "capability",
   "version",
+  "defaultRegistry",
   "fields",
   "crossFieldRules",
+  "desired",
+  "mode",
+  "remoteAccess",
   "enabled",
   "servers",
   "items",
@@ -177,9 +181,9 @@ function constantNameForManifest(fileName) {
 }
 
 function formatDefaultManifestRegistry(manifests) {
-  const entries = [...manifests].sort((left, right) =>
-    compareStrings(left.value.capability, right.value.capability)
-  );
+  const entries = manifests
+    .filter((manifest) => manifest.value.defaultRegistry !== false)
+    .sort((left, right) => compareStrings(left.value.capability, right.value.capability));
 
   if (entries.length === 0) {
     return "Object.freeze({})";

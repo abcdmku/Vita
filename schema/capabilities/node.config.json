@@ -2,15 +2,21 @@
   "capability": "node.config",
   "version": 1,
   "fields": {
-    "mode": {
+    "desired": {
       "required": true,
-      "type": "string",
-      "enum": ["normal", "maintenance"]
-    },
-    "remoteAccess": {
-      "required": true,
-      "type": "string",
-      "enum": ["disabled", "enabled"]
+      "type": "object",
+      "fields": {
+        "mode": {
+          "required": true,
+          "type": "string",
+          "enum": ["normal", "maintenance"]
+        },
+        "remoteAccess": {
+          "required": true,
+          "type": "string",
+          "enum": ["disabled", "enabled"]
+        }
+      }
     }
   },
   "crossFieldRules": []

@@ -18,7 +18,7 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * code point is left unchanged. That avoids JS/Go Unicode case-folding drift.
  *
  * Default registry keys are the agent operation names carried in each manifest's
- * `capability` field, for example `time.sync` and `hostname.set`.
+ * `capability` field, for example `node.config` and `hostname.set`.
  */
 
 export type StringFieldFormat = "hostnameRFC1123" | "hostnameLabel";
@@ -54,11 +54,18 @@ export interface ArrayFieldSchema {
   readonly uniqueItems?: boolean;
 }
 
+export interface ObjectFieldSchema {
+  readonly type: "object";
+  readonly required: boolean;
+  readonly fields: Readonly<Record<string, FieldSchema>>;
+}
+
 export type FieldSchema =
   | StringFieldSchema
   | IntegerFieldSchema
   | BooleanFieldSchema
-  | ArrayFieldSchema;
+  | ArrayFieldSchema
+  | ObjectFieldSchema;
 
 export type CrossFieldRule =
   | {
@@ -75,6 +82,7 @@ export type CrossFieldRule =
 export interface CapabilityManifest {
   readonly capability: string;
   readonly version?: 1;
+  readonly defaultRegistry?: false;
   readonly fields: Readonly<Record<string, FieldSchema>>;
   readonly crossFieldRules: readonly CrossFieldRule[];
 }
@@ -97,9 +105,14 @@ export type CapabilityValue =
   | string
   | number
   | boolean
-  | readonly CapabilityValue[];
+  | readonly CapabilityValue[]
+  | CapabilityObject;
 
-export type CapabilityRecord = Readonly<Record<string, CapabilityValue>>;
+export interface CapabilityObject {
+  readonly [key: string]: CapabilityValue;
+}
+
+export type CapabilityRecord = CapabilityObject;
 
 export interface CapabilityRejection {
   readonly path: string;
@@ -123,6 +136,7 @@ export type CapabilityManifestRegistry = ReadonlyMap<string, CapabilityManifest>
 export {
   DEFAULT_CAPABILITY_MANIFESTS,
   HOSTNAME_MANIFEST,
+  NODE_CONFIG_MANIFEST,
   TIMESYNC_MANIFEST,
 } from "./generated/capability-manifests.generated.ts";
 
@@ -160,7 +174,8 @@ type CompiledFieldSchema =
   | CompiledStringFieldSchema
   | CompiledIntegerFieldSchema
   | CompiledBooleanFieldSchema
-  | CompiledArrayFieldSchema;
+  | CompiledArrayFieldSchema
+  | CompiledObjectFieldSchema;
 
 interface CompiledStringFieldSchema {
   type: "string";
@@ -193,6 +208,13 @@ interface CompiledArrayFieldSchema {
   uniqueItems: boolean;
 }
 
+interface CompiledObjectFieldSchema {
+  type: "object";
+  required: boolean;
+  fields: ReadonlyMap<string, CompiledFieldSchema>;
+  fieldNames: readonly string[];
+}
+
 type FieldValidationResult =
   | {
       readonly ok: true;
@@ -203,7 +225,13 @@ type FieldValidationResult =
     };
 
 const SUPPORTED_MANIFEST_VERSION = 1;
-const MANIFEST_FIELDS = new Set(["capability", "crossFieldRules", "fields", "version"]);
+const MANIFEST_FIELDS = new Set([
+  "capability",
+  "crossFieldRules",
+  "defaultRegistry",
+  "fields",
+  "version",
+]);
 const STRING_SCHEMA_FIELDS = new Set([
   "enum",
   "format",
@@ -223,6 +251,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "type",
   "uniqueItems",
 ]);
+const OBJECT_SCHEMA_FIELDS = new Set(["fields", "required", "type"]);
 const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
 const DATA_URL_PATTERN = /data:/iu;
 const PEM_BLOCK_PATTERN = /-----BEGIN/iu;
@@ -243,12 +272,22 @@ export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResu
       return rejectManifestLoad(formatManifestLoadReason(errors));
     }
 
-    const manifest = Object.freeze({
-      capability: parsed.manifest.capability,
-      version: SUPPORTED_MANIFEST_VERSION,
-      fields: parsed.manifest.fields,
-      crossFieldRules: parsed.manifest.crossFieldRules,
-    } satisfies LoadedCapabilityManifest);
+    const manifest = Object.freeze(
+      parsed.manifest.defaultRegistry === undefined
+        ? {
+            capability: parsed.manifest.capability,
+            version: SUPPORTED_MANIFEST_VERSION,
+            fields: parsed.manifest.fields,
+            crossFieldRules: parsed.manifest.crossFieldRules,
+          }
+        : {
+            capability: parsed.manifest.capability,
+            version: SUPPORTED_MANIFEST_VERSION,
+            defaultRegistry: parsed.manifest.defaultRegistry,
+            fields: parsed.manifest.fields,
+            crossFieldRules: parsed.manifest.crossFieldRules,
+          },
+    ) satisfies LoadedCapabilityManifest;
 
     return {
       ok: true,
@@ -354,6 +393,12 @@ function parseManifest(
   const version = options.requireVersion
     ? readRequiredManifestVersion(value, "version", [...path, "version"], errors)
     : readOptionalManifestVersion(value, "version", [...path, "version"], errors);
+  const defaultRegistry = readOptionalDefaultRegistry(
+    value,
+    "defaultRegistry",
+    [...path, "defaultRegistry"],
+    errors,
+  );
   const fieldsValue = readRequiredProperty(value, "fields", [...path, "fields"], errors);
   const rulesValue = readRequiredProperty(value, "crossFieldRules", [...path, "crossFieldRules"], errors);
 
@@ -382,17 +427,32 @@ function parseManifest(
 
   const manifest = Object.freeze(
     version === undefined
-      ? {
-          capability,
-          crossFieldRules,
-          fields: fields.manifest,
-        }
-      : {
-          capability,
-          version,
-          crossFieldRules,
-          fields: fields.manifest,
-        },
+      ? defaultRegistry === undefined
+        ? {
+            capability,
+            crossFieldRules,
+            fields: fields.manifest,
+          }
+        : {
+            capability,
+            defaultRegistry,
+            crossFieldRules,
+            fields: fields.manifest,
+          }
+      : defaultRegistry === undefined
+        ? {
+            capability,
+            version,
+            crossFieldRules,
+            fields: fields.manifest,
+          }
+        : {
+            capability,
+            version,
+            defaultRegistry,
+            crossFieldRules,
+            fields: fields.manifest,
+          },
   );
 
   const compiled = Object.freeze({
@@ -485,6 +545,8 @@ function parseFieldSchema(
       return parseBooleanFieldSchema(value, required, path, errors);
     case "array":
       return parseArrayFieldSchema(value, required, path, errors);
+    case "object":
+      return parseObjectFieldSchema(value, required, path, errors);
     default:
       addError(errors, [...path, "type"], "Unknown field schema type.");
       return undefined;
@@ -731,6 +793,43 @@ function parseArrayFieldSchema(
   };
 }
 
+function parseObjectFieldSchema(
+  value: JsonRecord,
+  required: boolean,
+  path: Path,
+  errors: CapabilityRejection[],
+): ParsedFieldSchema | undefined {
+  const errorStart = errors.length;
+  rejectUnknownFields(value, OBJECT_SCHEMA_FIELDS, path, errors);
+
+  const fieldsValue = readRequiredProperty(value, "fields", [...path, "fields"], errors);
+  const fields =
+    fieldsValue === undefined
+      ? undefined
+      : parseManifestFields(fieldsValue, [...path, "fields"], errors);
+
+  if (errors.length > errorStart || fields === undefined) {
+    return undefined;
+  }
+
+  const compiled: CompiledObjectFieldSchema = {
+    fieldNames: fields.fieldNames,
+    fields: fields.compiled,
+    required,
+    type: "object",
+  };
+  const manifest = Object.freeze({
+    fields: fields.manifest,
+    required,
+    type: "object",
+  } satisfies ObjectFieldSchema);
+
+  return {
+    compiled,
+    manifest,
+  };
+}
+
 function parseCrossFieldRules(
   value: PlainJson,
   path: Path,
@@ -904,6 +1003,8 @@ function validateField(
       return validateBooleanField(value, path, errors);
     case "array":
       return validateArrayField(value, schema, path, errors);
+    case "object":
+      return validateObjectField(value, schema, path, errors);
   }
 }
 
@@ -1055,6 +1156,65 @@ function validateArrayField(
   };
 }
 
+function validateObjectField(
+  value: PlainJson,
+  schema: CompiledObjectFieldSchema,
+  path: Path,
+  errors: CapabilityRejection[],
+): FieldValidationResult {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected object.");
+    return { ok: false };
+  }
+
+  const errorStart = errors.length;
+  const output: Record<string, CapabilityValue> = {};
+
+  rejectUnknownFields(value, new Set(schema.fieldNames), path, errors);
+
+  for (let index = 0; index < schema.fieldNames.length; index += 1) {
+    const fieldName = schema.fieldNames[index];
+
+    if (fieldName === undefined) {
+      continue;
+    }
+
+    const field = schema.fields.get(fieldName);
+
+    if (field === undefined) {
+      addError(errors, [...path, fieldName], "Unknown manifest field.");
+      continue;
+    }
+
+    if (!hasOwn(value, fieldName)) {
+      if (field.required) {
+        addError(errors, [...path, fieldName], "Required field is missing.");
+      }
+      continue;
+    }
+
+    const result = validateField(value[fieldName], field, [...path, fieldName], errors);
+
+    if (result.ok) {
+      Object.defineProperty(output, fieldName, {
+        configurable: true,
+        enumerable: true,
+        value: result.value,
+        writable: true,
+      });
+    }
+  }
+
+  if (errors.length > errorStart) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    value: Object.freeze(output),
+  };
+}
+
 function applyCrossFieldRules(
   value: CapabilityRecord,
   rules: readonly CrossFieldRule[],
@@ -1182,6 +1342,24 @@ function readOptionalManifestVersion(
   }
 
   return parseManifestVersion(value[key], path, errors);
+}
+
+function readOptionalDefaultRegistry(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): false | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  if (value[key] !== false) {
+    addError(errors, path, "defaultRegistry may only be false when present.");
+    return undefined;
+  }
+
+  return false;
 }
 
 function parseManifestVersion(
@@ -1499,11 +1677,34 @@ function uniqueValueKey(value: CapabilityValue): string {
     return `a:[${parts.join(",")}]`;
   }
 
+  if (isCapabilityObject(value)) {
+    const keys = Object.keys(value).sort(compareStrings);
+    const parts: string[] = [];
+
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+
+      if (key !== undefined) {
+        const item = value[key];
+
+        if (item !== undefined) {
+          parts.push(`${key}:${uniqueValueKey(item)}`);
+        }
+      }
+    }
+
+    return `o:{${parts.join(",")}}`;
+  }
+
   return `${typeof value}:${String(value)}`;
 }
 
 function isRecord(value: PlainJson | undefined): value is JsonRecord {
   return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCapabilityObject(value: CapabilityValue): value is CapabilityObject {
+  return typeof value === "object" && !Array.isArray(value);
 }
 
 function hasOwn(value: JsonRecord | CapabilityRecord, key: string): boolean {

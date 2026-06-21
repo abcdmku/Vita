@@ -15,12 +15,14 @@ import type {
 
 const REGISTRY = defaultCapabilityRegistry();
 
-test("valid timesync config evaluates to one canonical operation", () => {
+test("valid node.config request evaluates to one operation", () => {
   const result = evaluateNodeConfig(
     {
-      "time.sync": {
-        enabled: true,
-        servers: ["POOL.NTP.ORG"],
+      "node.config": {
+        desired: {
+          mode: "normal",
+          remoteAccess: "disabled",
+        },
       },
     },
     REGISTRY,
@@ -33,10 +35,12 @@ test("valid timesync config evaluates to one canonical operation", () => {
   assert.deepEqual(result.plan, {
     operations: [
       {
-        capability: "time.sync",
+        capability: "node.config",
         request: {
-          enabled: true,
-          servers: ["pool.ntp.org"],
+          desired: {
+            mode: "normal",
+            remoteAccess: "disabled",
+          },
         },
       },
     ],
@@ -83,19 +87,22 @@ test("unknown capability rejects at evaluation", () => {
   assert.equal(Object.hasOwn(result, "plan"), false);
 });
 
-test("invalid timesync request rejects the whole evaluation without a partial plan", () => {
+test("invalid node.config request rejects the whole evaluation without a partial plan", () => {
   const result = evaluateNodeConfig(
     {
-      "time.sync": {
-        enabled: true,
-        servers: [],
+      "node.config": {
+        desired: {
+          mode: "normal",
+        },
       },
     },
     REGISTRY,
   );
 
   assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
-  assert.deepEqual(result.rejections.map((rejection) => rejection.path), ["time.sync/servers"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), [
+    "node.config/desired/remoteAccess",
+  ]);
   assert.equal(Object.hasOwn(result, "plan"), false);
 });
 
@@ -105,9 +112,11 @@ test("multi-capability configs emit sorted byte-identical plans", () => {
     ["alpha", ALPHA_MANIFEST],
   ]);
   const input = {
-    "time.sync": {
-      enabled: true,
-      servers: ["time.cloudflare.com"],
+    "node.config": {
+      desired: {
+        mode: "maintenance",
+        remoteAccess: "enabled",
+      },
     },
     alpha: {
       enabled: false,
@@ -126,7 +135,7 @@ test("multi-capability configs emit sorted byte-identical plans", () => {
 
   assert.deepEqual(
     first.plan.operations.map((operation) => operation.capability),
-    ["alpha", "time.sync"],
+    ["alpha", "node.config"],
   );
   assert.equal(JSON.stringify(first.plan), JSON.stringify(second.plan));
 });
@@ -143,7 +152,7 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
   const hostile: Record<string, unknown> = {};
   let getterReads = 0;
 
-  Object.defineProperty(hostile, "time.sync", {
+  Object.defineProperty(hostile, "node.config", {
     enumerable: true,
     get() {
       getterReads += 1;
@@ -152,20 +161,25 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
   });
 
   const cyclic: Record<string, unknown> = {
-    "time.sync": {
-      enabled: true,
-      servers: ["pool.ntp.org"],
+    "node.config": {
+      desired: {
+        mode: "normal",
+        remoteAccess: "disabled",
+      },
     },
   };
   cyclic.self = cyclic;
 
-  const hostileServers = ["pool.ntp.org"];
-  let iteratorReads = 0;
-  Object.defineProperty(hostileServers, Symbol.iterator, {
+  const hostileDesired: Record<string, unknown> = {
+    mode: "normal",
+    remoteAccess: "disabled",
+  };
+  let getterReadsNested = 0;
+  Object.defineProperty(hostileDesired, "extra", {
     enumerable: true,
     get() {
-      iteratorReads += 1;
-      throw new Error("iterator should not be invoked");
+      getterReadsNested += 1;
+      throw new Error("nested getter should not be invoked");
     },
   });
 
@@ -177,9 +191,8 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
     assertRejected(
       evaluateNodeConfig(
         {
-          "time.sync": {
-            enabled: true,
-            servers: hostileServers,
+          "node.config": {
+            desired: hostileDesired,
           },
         },
         REGISTRY,
@@ -188,7 +201,7 @@ test("hostile and non-object configs fail closed without invoking accessors", ()
     );
   });
   assert.equal(getterReads, 0);
-  assert.equal(iteratorReads, 0);
+  assert.equal(getterReadsNested, 0);
 });
 
 const ALPHA_MANIFEST = Object.freeze({
