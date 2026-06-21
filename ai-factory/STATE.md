@@ -85,7 +85,18 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   cron5OrMacro + SECRET scanner), storage (4 enum-domain array invariants + canonicalAbsolutePath — HARDEST),
   network (cidrLiteral + networkInterfaceName + integer-sentinel + item-level-forbid-unless), pdssync
   (cidV1Multibase + did/handle + secretKeyNameDenylist). identity+pdssync share did/handle+anyOfFormats.
-  **123 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-018 (accounts.config) MIGRATED — 8th cap** (registry = 8; +accounts.config). Built REUSABLE `notInEnum`
+  (privileged-group blocklist) + `dedupItems` (keep-first) + multi-key `uniqueBy[name,uid]` + posixAccountName/
+  groupName + shell-allowlist enum + uid bounds. **Round-2 fixed the shared INTEGER primitive** (rejects
+  `1000.0`/`1e3` float/exponent tokens to match Go `json.Decode`-into-int; AGENTS trap 9) — hardens
+  storage.quotaGiB/network.port. The PROBE caught this (Codex r1 missed it) — dual-gate value. **8/13 migrated**
+  (… +capsule, update, accounts). **Remaining 5:** identity (didPlc/Web+atprotoHandle+keyReference+anyOfFormats+
+  identity SECRET scanner; did/handle REUSED by pdssync — do identity FIRST), backup (exactlyOneOf
+  cron-XOR-interval + cron5OrMacro + opaqueRef + SECRET scanner), storage (4 enum-domain array invariants +
+  canonicalAbsolutePath — HARDEST; now has notInEnum/dedupItems/uniqueBy/integer-fix), network (cidrLiteral
+  [extends ipLiteral] + networkInterfaceName + integer-sentinel + item-level-forbid-unless), pdssync
+  (cidV1Multibase heaviest + did/handle from identity + secretKeyNameDenylist).
+  **124 contracts merged. Reviewer gate has blocked 71 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
