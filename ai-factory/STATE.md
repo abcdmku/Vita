@@ -49,8 +49,10 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   evaluator → P2-030 apply orchestration). **Migration:** P9-007 (hostname) + P9-008 (the FOUNDATIONAL
   full-request/object-dialect correction + node.config; 9 rounds — surfaced the full-request model, a
   Go/TS verification gap, and an unbounded-dup-key-scan DoS now bounded) faithfully migrated; default
-  registry = {hostname.set, node.config}. **timesync DEFERRED** then UN-deferred (P9-011 in flight).
-  **117 contracts merged. Reviewer gate has blocked 63 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  registry = {hostname.set, node.config}. **timesync MIGRATED** (P9-011, 4th registered cap — full-request,
+  servers=hostnameOrIp matching agent normalizeServer EXACTLY incl. all-numeric labels; nested cross-field
+  dialect ext). Registry now = {hostname.set, node.config, time.sync}.
+  **118 contracts merged. Reviewer gate has blocked 65 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
