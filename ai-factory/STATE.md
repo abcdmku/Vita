@@ -45,10 +45,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   bypasses), P9-006 (cross-language conformance gate — TS≡Go on a shared corpus, drift fails CI), and
   **P9-001 (the §8.2 config→plan evaluator) — manifest-driven, CLOSED, deterministic — RESOLVED** (was
   blocked 3 rounds on the feasibility wall). `blocked/` now holds ONLY the boot chain (P1-017, build-host).
-  **111 contracts merged. The buildable control plane is exhaustively complete + integration-tested + documented; ADR 0007 is implemented and the config-evaluator blocker is resolved.**
-  Remaining: (a) bootable signed image → **Linux build host (owner-gated)**; (b) whole-node apply breadth →
-  incrementally migrate the other 12 caps to manifests (each behind the conformance gate) + a controller
-  config→plan→apply integration. Reviewer gate has now blocked **55+ real bugs**.
+  **ADR 0007 implemented; config-evaluator resolved; whole-node apply demonstrated end-to-end** (P9-001
+  evaluator → P2-030 apply orchestration). **Migration:** P9-007 (hostname) + P9-008 (the FOUNDATIONAL
+  full-request/object-dialect correction + node.config; 9 rounds — surfaced the full-request model, a
+  Go/TS verification gap, and an unbounded-dup-key-scan DoS now bounded) faithfully migrated; default
+  registry = {hostname.set, node.config}. **timesync DEFERRED** (`defaultRegistry:false`) — its faithful
+  migration needs a parity-safe IP-literal format (the hard work deferred in P9-002; also needed by network).
+  **114 contracts merged. Reviewer gate has blocked 59 real bugs.**
+  **Remaining is a LARGE effort, worth owner prioritization:** (a) bootable image → Linux build host
+  (owner-gated); (b) migrate the other 11 caps — several need parity-safe FORMATS to build first (IP,
+  datetime, path, DID/handle, CID — each a P9-002-style multi-round build), plus nested-object configs +
+  per-cap hardening; (c) the systemic bounded-dup-key-scanner audit across ~13 caps (spawned as a task).
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
