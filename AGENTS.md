@@ -97,10 +97,12 @@ conventions you must follow are below.
   would expose a disagreement. If you think the agent SHOULD be stricter (a real §13.1/security gap), HARDEN
   THE AGENT first in a deliberate change, then the manifest follows — don't silently diverge.
   Specific manifest≢agent traps (the [migration-roadmap](ai-factory/migration-roadmap.md) quality floor):
-  (1) the EXISTING `noInlineSecrets` (data:/`-----BEGIN`/48-base64) is LOOSER than the agent's service-grade
-  `containsInlineServiceMaterial` (PEM, key/secret token-assignment with a `scheme://` carve-out, seed-word
-  runs, hex≥32, std+url base64≥48) — do NOT reuse it where the agent does the strong scan; use
-  `noInlineMaterial-strong`. (2) Whole-object `uniqueItems` where the agent dedups by ONE sub-field is LOOSER
+  (1) the EXISTING `noInlineSecrets` (data:/`-----BEGIN`/48-base64) is LOOSER than the agent's strong scanners
+  — do NOT reuse it; use the matching strong option. NOTE there are TWO distinct agent scanners, validate
+  against the RIGHT one per cap: `services.go:containsInlineServiceMaterial` (privateKey/secretAssignment with
+  `[-_\s]?` separators, hex≥32, std+url base64≥48 — NO word-run) vs `backup.go`/`identity.go:containsInlineSecretMaterial`
+  (the same PLUS a `seedWordsPattern` 12-24-word run AND `openssh\s+private\s+key`/literal `age-secret-key`).
+  They are genuinely different — never assume one canonical scanner. (2) Whole-object `uniqueItems` where the agent dedups by ONE sub-field is LOOSER
   ({name,enabled} hashes distinct while the agent keys on name) — use `uniqueBy:[field]`. (3) A field the
   agent DEDUPS (keep-first) must NOT be modeled as `uniqueItems` (which REJECTS) — that's STRICTER; use
   `dedupItems`. (4) Length caps are Go BYTE length (UTF-8), not JS UTF-16 `.length`. (5) Whitespace trims use
