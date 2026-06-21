@@ -1,0 +1,532 @@
+[
+  {
+    "name": "posixUsername simple accepts",
+    "format": "posixUsername",
+    "value": "alice",
+    "expect": "accept",
+    "canonical": "alice"
+  },
+  {
+    "name": "posixUsername underscore accepts",
+    "format": "posixUsername",
+    "value": "_",
+    "expect": "accept",
+    "canonical": "_"
+  },
+  {
+    "name": "posixUsername system underscore accepts",
+    "format": "posixUsername",
+    "value": "_system",
+    "expect": "accept",
+    "canonical": "_system"
+  },
+  {
+    "name": "posixUsername one character accepts",
+    "format": "posixUsername",
+    "value": "a",
+    "expect": "accept",
+    "canonical": "a"
+  },
+  {
+    "name": "posixUsername mixed allowed rest accepts",
+    "format": "posixUsername",
+    "value": "a-b_c9",
+    "expect": "accept",
+    "canonical": "a-b_c9"
+  },
+  {
+    "name": "posixUsername 32 characters accepts",
+    "format": "posixUsername",
+    "value": "a1234567890123456789012345678901",
+    "expect": "accept",
+    "canonical": "a1234567890123456789012345678901"
+  },
+  {
+    "name": "posixUsername empty rejects",
+    "format": "posixUsername",
+    "value": "",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername uppercase first rejects",
+    "format": "posixUsername",
+    "value": "Alice",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername digit first rejects",
+    "format": "posixUsername",
+    "value": "1alice",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername hyphen first rejects",
+    "format": "posixUsername",
+    "value": "-alice",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername dot rejects",
+    "format": "posixUsername",
+    "value": "bad.name",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername dollar rejects",
+    "format": "posixUsername",
+    "value": "bad$name",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername too long rejects",
+    "format": "posixUsername",
+    "repeatValue": { "unit": "a", "count": 33 },
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername non ascii rejects",
+    "format": "posixUsername",
+    "value": "caf\u00e9",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername newline rejects",
+    "format": "posixUsername",
+    "value": "bad\nname",
+    "expect": "reject"
+  },
+  {
+    "name": "posixUsername inline secret rejects",
+    "format": "posixUsername",
+    "value": "-----BEGIN PRIVATE KEY-----",
+    "noInlineSecrets": true,
+    "expect": "reject"
+  },
+  {
+    "name": "groupName simple accepts",
+    "format": "groupName",
+    "value": "users",
+    "expect": "accept",
+    "canonical": "users"
+  },
+  {
+    "name": "groupName underscore first accepts",
+    "format": "groupName",
+    "value": "_ops",
+    "expect": "accept",
+    "canonical": "_ops"
+  },
+  {
+    "name": "groupName hyphen and digit accepts",
+    "format": "groupName",
+    "value": "dev-team1",
+    "expect": "accept",
+    "canonical": "dev-team1"
+  },
+  {
+    "name": "groupName one character accepts",
+    "format": "groupName",
+    "value": "g",
+    "expect": "accept",
+    "canonical": "g"
+  },
+  {
+    "name": "groupName underscore rest accepts",
+    "format": "groupName",
+    "value": "staff_2",
+    "expect": "accept",
+    "canonical": "staff_2"
+  },
+  {
+    "name": "groupName 32 characters accepts",
+    "format": "groupName",
+    "value": "g1234567890123456789012345678901",
+    "expect": "accept",
+    "canonical": "g1234567890123456789012345678901"
+  },
+  {
+    "name": "groupName empty rejects",
+    "format": "groupName",
+    "value": "",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName uppercase first rejects",
+    "format": "groupName",
+    "value": "Users",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName digit first rejects",
+    "format": "groupName",
+    "value": "9users",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName hyphen first rejects",
+    "format": "groupName",
+    "value": "-users",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName dot rejects",
+    "format": "groupName",
+    "value": "bad.group",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName colon rejects",
+    "format": "groupName",
+    "value": "bad:group",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName too long rejects",
+    "format": "groupName",
+    "repeatValue": { "unit": "g", "count": 33 },
+    "expect": "reject"
+  },
+  {
+    "name": "groupName non ascii rejects",
+    "format": "groupName",
+    "value": "gr\u00fcpe",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName newline rejects",
+    "format": "groupName",
+    "value": "bad\ngroup",
+    "expect": "reject"
+  },
+  {
+    "name": "groupName inline secret rejects",
+    "format": "groupName",
+    "value": "-----BEGIN PRIVATE KEY-----",
+    "noInlineSecrets": true,
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName service accepts",
+    "format": "systemdUnitName",
+    "value": "ssh.service",
+    "expect": "accept",
+    "canonical": "ssh.service"
+  },
+  {
+    "name": "systemdUnitName socket accepts",
+    "format": "systemdUnitName",
+    "value": "dbus.socket",
+    "expect": "accept",
+    "canonical": "dbus.socket"
+  },
+  {
+    "name": "systemdUnitName device accepts",
+    "format": "systemdUnitName",
+    "value": "dev-sda.device",
+    "expect": "accept",
+    "canonical": "dev-sda.device"
+  },
+  {
+    "name": "systemdUnitName mount accepts",
+    "format": "systemdUnitName",
+    "value": "home.mount",
+    "expect": "accept",
+    "canonical": "home.mount"
+  },
+  {
+    "name": "systemdUnitName automount accepts",
+    "format": "systemdUnitName",
+    "value": "media-data.automount",
+    "expect": "accept",
+    "canonical": "media-data.automount"
+  },
+  {
+    "name": "systemdUnitName swap accepts",
+    "format": "systemdUnitName",
+    "value": "swapfile.swap",
+    "expect": "accept",
+    "canonical": "swapfile.swap"
+  },
+  {
+    "name": "systemdUnitName target accepts",
+    "format": "systemdUnitName",
+    "value": "multi-user.target",
+    "expect": "accept",
+    "canonical": "multi-user.target"
+  },
+  {
+    "name": "systemdUnitName path accepts",
+    "format": "systemdUnitName",
+    "value": "trigger.path",
+    "expect": "accept",
+    "canonical": "trigger.path"
+  },
+  {
+    "name": "systemdUnitName timer accepts",
+    "format": "systemdUnitName",
+    "value": "backup.timer",
+    "expect": "accept",
+    "canonical": "backup.timer"
+  },
+  {
+    "name": "systemdUnitName slice accepts",
+    "format": "systemdUnitName",
+    "value": "user-1000.slice",
+    "expect": "accept",
+    "canonical": "user-1000.slice"
+  },
+  {
+    "name": "systemdUnitName scope accepts",
+    "format": "systemdUnitName",
+    "value": "session-2.scope",
+    "expect": "accept",
+    "canonical": "session-2.scope"
+  },
+  {
+    "name": "systemdUnitName instance accepts",
+    "format": "systemdUnitName",
+    "value": "user@1000.service",
+    "expect": "accept",
+    "canonical": "user@1000.service"
+  },
+  {
+    "name": "systemdUnitName colon accepts",
+    "format": "systemdUnitName",
+    "value": "name:part.service",
+    "expect": "accept",
+    "canonical": "name:part.service"
+  },
+  {
+    "name": "systemdUnitName empty rejects",
+    "format": "systemdUnitName",
+    "value": "",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName empty prefix rejects",
+    "format": "systemdUnitName",
+    "value": ".service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName leading dot rejects",
+    "format": "systemdUnitName",
+    "value": ".hidden.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName missing suffix rejects",
+    "format": "systemdUnitName",
+    "value": "ssh",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName disallowed suffix rejects",
+    "format": "systemdUnitName",
+    "value": "ssh.service.extra",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName bad charset rejects",
+    "format": "systemdUnitName",
+    "value": "ssh%.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName slash rejects",
+    "format": "systemdUnitName",
+    "value": "ssh/service.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName backslash rejects",
+    "format": "systemdUnitName",
+    "value": "ssh\\service.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName dot dot rejects",
+    "format": "systemdUnitName",
+    "value": "ssh..service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName space rejects",
+    "format": "systemdUnitName",
+    "value": "ssh service.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName inline scheme rejects",
+    "format": "systemdUnitName",
+    "value": "data:secret.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName inline key phrase rejects",
+    "format": "systemdUnitName",
+    "value": "private-key.service",
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName too long rejects",
+    "format": "systemdUnitName",
+    "repeatValue": { "unit": "a", "count": 249, "suffix": ".service" },
+    "expect": "reject"
+  },
+  {
+    "name": "systemdUnitName non ascii rejects",
+    "format": "systemdUnitName",
+    "value": "\u00e9.service",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath root accepts",
+    "format": "absolutePath",
+    "value": "/",
+    "expect": "accept",
+    "canonical": "/"
+  },
+  {
+    "name": "absolutePath single segment accepts",
+    "format": "absolutePath",
+    "value": "/var",
+    "expect": "accept",
+    "canonical": "/var"
+  },
+  {
+    "name": "absolutePath nested accepts",
+    "format": "absolutePath",
+    "value": "/var/lib/vita",
+    "expect": "accept",
+    "canonical": "/var/lib/vita"
+  },
+  {
+    "name": "absolutePath allowed punctuation accepts",
+    "format": "absolutePath",
+    "value": "/mnt/data-1/app_state",
+    "expect": "accept",
+    "canonical": "/mnt/data-1/app_state"
+  },
+  {
+    "name": "absolutePath colon and at accepts",
+    "format": "absolutePath",
+    "value": "/srv/app@home:1",
+    "expect": "accept",
+    "canonical": "/srv/app@home:1"
+  },
+  {
+    "name": "absolutePath dotted filename accepts",
+    "format": "absolutePath",
+    "value": "/tmp/file.name",
+    "expect": "accept",
+    "canonical": "/tmp/file.name"
+  },
+  {
+    "name": "absolutePath spaces accepts",
+    "format": "absolutePath",
+    "value": "/path with spaces/file",
+    "expect": "accept",
+    "canonical": "/path with spaces/file"
+  },
+  {
+    "name": "absolutePath uppercase accepts",
+    "format": "absolutePath",
+    "value": "/UPPER/lower-09",
+    "expect": "accept",
+    "canonical": "/UPPER/lower-09"
+  },
+  {
+    "name": "absolutePath hidden segment accepts",
+    "format": "absolutePath",
+    "value": "/.hidden",
+    "expect": "accept",
+    "canonical": "/.hidden"
+  },
+  {
+    "name": "absolutePath date segment accepts",
+    "format": "absolutePath",
+    "value": "/opt/backup.2026-06-21",
+    "expect": "accept",
+    "canonical": "/opt/backup.2026-06-21"
+  },
+  {
+    "name": "absolutePath empty rejects",
+    "format": "absolutePath",
+    "value": "",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath relative rejects",
+    "format": "absolutePath",
+    "value": "var/lib",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath relative traversal rejects",
+    "format": "absolutePath",
+    "value": "../var",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath terminal traversal rejects",
+    "format": "absolutePath",
+    "value": "/var/..",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath interior traversal rejects",
+    "format": "absolutePath",
+    "value": "/var/../lib",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath dot segment rejects",
+    "format": "absolutePath",
+    "value": "/var/.",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath empty segment rejects",
+    "format": "absolutePath",
+    "value": "/var//lib",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath trailing slash rejects",
+    "format": "absolutePath",
+    "value": "/var/lib/",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath nul rejects",
+    "format": "absolutePath",
+    "value": "/var/\u0000lib",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath newline rejects",
+    "format": "absolutePath",
+    "value": "/var/\nlib",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath non ascii rejects",
+    "format": "absolutePath",
+    "value": "/var/\u00e9",
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath too long rejects",
+    "format": "absolutePath",
+    "repeatValue": { "prefix": "/", "unit": "a", "count": 4096 },
+    "expect": "reject"
+  },
+  {
+    "name": "absolutePath inline secret rejects",
+    "format": "absolutePath",
+    "value": "/backup/-----BEGIN PRIVATE KEY-----",
+    "noInlineSecrets": true,
+    "expect": "reject"
+  }
+]
