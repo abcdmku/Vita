@@ -65,9 +65,24 @@ export type CrossFieldRule =
 
 export interface CapabilityManifest {
   readonly capability: string;
+  readonly version?: 1;
   readonly fields: Readonly<Record<string, FieldSchema>>;
   readonly crossFieldRules: readonly CrossFieldRule[];
 }
+
+export interface LoadedCapabilityManifest extends CapabilityManifest {
+  readonly version: 1;
+}
+
+export type CapabilityManifestLoadResult =
+  | {
+      readonly ok: true;
+      readonly manifest: LoadedCapabilityManifest;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    };
 
 export type CapabilityValue =
   | string
@@ -94,6 +109,8 @@ export type CapabilityValidationResult =
 
 export type CapabilityValidator = (input: unknown) => CapabilityValidationResult;
 
+export { TIMESYNC_MANIFEST } from "./generated/capability-manifests.generated.ts";
+
 type JsonRecord = PlainJsonObject;
 type Path = readonly string[];
 
@@ -102,6 +119,26 @@ interface CompiledManifest {
   readonly fields: ReadonlyMap<string, CompiledFieldSchema>;
   readonly fieldNames: readonly string[];
   readonly crossFieldRules: readonly CrossFieldRule[];
+}
+
+interface ParsedManifest {
+  readonly manifest: CapabilityManifest;
+  readonly compiled: CompiledManifest;
+}
+
+interface ParsedManifestFields {
+  readonly manifest: Readonly<Record<string, FieldSchema>>;
+  readonly compiled: ReadonlyMap<string, CompiledFieldSchema>;
+  readonly fieldNames: readonly string[];
+}
+
+interface ParsedFieldSchema {
+  readonly manifest: FieldSchema;
+  readonly compiled: CompiledFieldSchema;
+}
+
+interface ParseManifestOptions {
+  readonly requireVersion: boolean;
 }
 
 type CompiledFieldSchema =
@@ -150,7 +187,8 @@ type FieldValidationResult =
       readonly ok: false;
     };
 
-const MANIFEST_FIELDS = new Set(["capability", "crossFieldRules", "fields"]);
+const SUPPORTED_MANIFEST_VERSION = 1;
+const MANIFEST_FIELDS = new Set(["capability", "crossFieldRules", "fields", "version"]);
 const STRING_SCHEMA_FIELDS = new Set([
   "enum",
   "lowercase",
@@ -171,49 +209,40 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "uniqueItems",
 ]);
 const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
-const MAX_TIMESYNC_SERVERS = 8;
-const MAX_HOSTNAME_LENGTH = 253;
-const RFC1123_HOSTNAME_PATTERN_SOURCE =
-  "^(?![0-9]+(?:\\.[0-9]+){3}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$";
 const DATA_URL_PATTERN = /data:/iu;
 const PEM_BLOCK_PATTERN = /-----BEGIN/iu;
 const LONG_BASE64_OR_BASE64URL_PATTERN = /[A-Za-z0-9+/_-]{48,}/u;
 
-export const TIMESYNC_MANIFEST = Object.freeze({
-  capability: "time.sync",
-  fields: Object.freeze({
-    enabled: Object.freeze({
-      required: true,
-      type: "boolean",
-    }),
-    servers: Object.freeze({
-      items: Object.freeze({
-        lowercase: true,
-        maxLength: MAX_HOSTNAME_LENGTH,
-        noInlineSecrets: true,
-        pattern: RFC1123_HOSTNAME_PATTERN_SOURCE,
-        required: true,
-        type: "string",
-      }),
-      maxItems: MAX_TIMESYNC_SERVERS,
-      required: true,
-      type: "array",
-      uniqueItems: true,
-    }),
-  }),
-  crossFieldRules: Object.freeze([
-    Object.freeze({
-      control: "enabled",
-      target: "servers",
-      type: "requireNonEmptyArrayWhenTrue",
-    }),
-    Object.freeze({
-      control: "enabled",
-      target: "servers",
-      type: "requireEmptyArrayWhenFalse",
-    }),
-  ]),
-} satisfies CapabilityManifest);
+export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResult {
+  try {
+    const normalized = safeNormalize(raw);
+
+    if (!normalized.ok) {
+      return rejectManifestLoad(`Invalid manifest: ${normalized.reason}`);
+    }
+
+    const errors: CapabilityRejection[] = [];
+    const parsed = parseManifest(normalized.value, [], errors, { requireVersion: true });
+
+    if (parsed === undefined || errors.length > 0 || parsed.manifest.version !== SUPPORTED_MANIFEST_VERSION) {
+      return rejectManifestLoad(formatManifestLoadReason(errors));
+    }
+
+    const manifest = Object.freeze({
+      capability: parsed.manifest.capability,
+      version: SUPPORTED_MANIFEST_VERSION,
+      fields: parsed.manifest.fields,
+      crossFieldRules: parsed.manifest.crossFieldRules,
+    } satisfies LoadedCapabilityManifest);
+
+    return {
+      ok: true,
+      manifest,
+    };
+  } catch {
+    return rejectManifestLoad("Capability manifest loading failed.");
+  }
+}
 
 export function compileCapabilityValidator(manifest: CapabilityManifest): CapabilityValidator {
   const compiled = compileManifest(manifest);
@@ -273,7 +302,7 @@ function compileManifest(input: unknown):
     }
 
     const errors: CapabilityRejection[] = [];
-    const manifest = parseManifest(normalized.value, [], errors);
+    const manifest = parseManifest(normalized.value, [], errors, { requireVersion: false });
 
     if (manifest === undefined || errors.length > 0) {
       return reject(errors);
@@ -281,7 +310,7 @@ function compileManifest(input: unknown):
 
     return {
       ok: true,
-      value: manifest,
+      value: manifest.compiled,
     };
   } catch {
     return reject([{ message: "Capability manifest compilation failed.", path: "" }]);
@@ -292,7 +321,8 @@ function parseManifest(
   value: PlainJson,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledManifest | undefined {
+  options: ParseManifestOptions,
+): ParsedManifest | undefined {
   if (!isRecord(value)) {
     addError(errors, path, "Expected capability manifest object.");
     return undefined;
@@ -302,6 +332,9 @@ function parseManifest(
   rejectUnknownFields(value, MANIFEST_FIELDS, path, errors);
 
   const capability = readRequiredString(value, "capability", [...path, "capability"], errors);
+  const version = options.requireVersion
+    ? readRequiredManifestVersion(value, "version", [...path, "version"], errors)
+    : readOptionalManifestVersion(value, "version", [...path, "version"], errors);
   const fieldsValue = readRequiredProperty(value, "fields", [...path, "fields"], errors);
   const rulesValue = readRequiredProperty(value, "crossFieldRules", [...path, "crossFieldRules"], errors);
 
@@ -312,7 +345,7 @@ function parseManifest(
   const crossFieldRules =
     rulesValue === undefined
       ? undefined
-      : parseCrossFieldRules(rulesValue, [...path, "crossFieldRules"], fields, errors);
+      : parseCrossFieldRules(rulesValue, [...path, "crossFieldRules"], fields?.compiled, errors);
 
   if (capability !== undefined && capability.length === 0) {
     addError(errors, [...path, "capability"], "Expected non-empty capability name.");
@@ -328,19 +361,39 @@ function parseManifest(
     return undefined;
   }
 
-  return Object.freeze({
+  const manifest = Object.freeze(
+    version === undefined
+      ? {
+          capability,
+          crossFieldRules,
+          fields: fields.manifest,
+        }
+      : {
+          capability,
+          version,
+          crossFieldRules,
+          fields: fields.manifest,
+        },
+  );
+
+  const compiled = Object.freeze({
     capability,
     crossFieldRules,
-    fieldNames: Object.freeze(Array.from(fields.keys()).sort(compareStrings)),
-    fields,
+    fieldNames: fields.fieldNames,
+    fields: fields.compiled,
   });
+
+  return {
+    compiled,
+    manifest,
+  };
 }
 
 function parseManifestFields(
   value: PlainJson,
   path: Path,
   errors: CapabilityRejection[],
-): ReadonlyMap<string, CompiledFieldSchema> | undefined {
+): ParsedManifestFields | undefined {
   if (!isRecord(value)) {
     addError(errors, path, "Expected fields object.");
     return undefined;
@@ -348,6 +401,7 @@ function parseManifestFields(
 
   const fieldNames = Object.keys(value).sort(compareStrings);
   const fields = new Map<string, CompiledFieldSchema>();
+  const manifestFields: Record<string, FieldSchema> = {};
   const errorStart = errors.length;
 
   for (let index = 0; index < fieldNames.length; index += 1) {
@@ -365,7 +419,13 @@ function parseManifestFields(
     const schema = parseFieldSchema(value[fieldName], [...path, fieldName], errors);
 
     if (schema !== undefined) {
-      fields.set(fieldName, schema);
+      fields.set(fieldName, schema.compiled);
+      Object.defineProperty(manifestFields, fieldName, {
+        configurable: true,
+        enumerable: true,
+        value: schema.manifest,
+        writable: true,
+      });
     }
   }
 
@@ -373,14 +433,18 @@ function parseManifestFields(
     return undefined;
   }
 
-  return fields;
+  return {
+    compiled: fields,
+    fieldNames: Object.freeze(Array.from(fields.keys()).sort(compareStrings)),
+    manifest: Object.freeze(manifestFields),
+  };
 }
 
 function parseFieldSchema(
   value: PlainJson | undefined,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledFieldSchema | undefined {
+): ParsedFieldSchema | undefined {
   if (!isRecord(value)) {
     addError(errors, path, "Expected field schema object.");
     return undefined;
@@ -413,7 +477,7 @@ function parseStringFieldSchema(
   required: boolean,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledStringFieldSchema | undefined {
+): ParsedFieldSchema | undefined {
   const errorStart = errors.length;
   rejectUnknownFields(value, STRING_SCHEMA_FIELDS, path, errors);
 
@@ -427,9 +491,15 @@ function parseStringFieldSchema(
     errors,
   );
   const enumValues = readOptionalStringEnum(value, "enum", [...path, "enum"], errors);
-  const lowercase = readOptionalBoolean(value, "lowercase", [...path, "lowercase"], errors) ?? false;
-  const noInlineSecrets =
-    readOptionalBoolean(value, "noInlineSecrets", [...path, "noInlineSecrets"], errors) ?? false;
+  const lowercaseValue = readOptionalBoolean(value, "lowercase", [...path, "lowercase"], errors);
+  const noInlineSecretsValue = readOptionalBoolean(
+    value,
+    "noInlineSecrets",
+    [...path, "noInlineSecrets"],
+    errors,
+  );
+  const lowercase = lowercaseValue ?? false;
+  const noInlineSecrets = noInlineSecretsValue ?? false;
   const pattern =
     patternSource === undefined
       ? undefined
@@ -439,24 +509,50 @@ function parseStringFieldSchema(
     return undefined;
   }
 
-  const schema: CompiledStringFieldSchema = {
+  const compiled: CompiledStringFieldSchema = {
     lowercase,
     noInlineSecrets,
     required,
     type: "string",
   };
+  const manifest: {
+    type: "string";
+    required: boolean;
+    pattern?: string;
+    maxLength?: number;
+    enum?: readonly string[];
+    lowercase?: boolean;
+    noInlineSecrets?: boolean;
+  } = {
+    required,
+    type: "string",
+  };
 
   if (pattern !== undefined) {
-    schema.pattern = pattern;
+    compiled.pattern = pattern;
+  }
+  if (patternSource !== undefined) {
+    manifest.pattern = patternSource;
   }
   if (maxLength !== undefined) {
-    schema.maxLength = maxLength;
+    compiled.maxLength = maxLength;
+    manifest.maxLength = maxLength;
   }
   if (enumValues !== undefined) {
-    schema.enumValues = enumValues;
+    compiled.enumValues = new Set(enumValues);
+    manifest.enum = Object.freeze([...enumValues]);
+  }
+  if (lowercaseValue !== undefined) {
+    manifest.lowercase = lowercaseValue;
+  }
+  if (noInlineSecretsValue !== undefined) {
+    manifest.noInlineSecrets = noInlineSecretsValue;
   }
 
-  return schema;
+  return {
+    compiled,
+    manifest: Object.freeze(manifest),
+  };
 }
 
 function parseIntegerFieldSchema(
@@ -464,7 +560,7 @@ function parseIntegerFieldSchema(
   required: boolean,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledIntegerFieldSchema | undefined {
+): ParsedFieldSchema | undefined {
   const errorStart = errors.length;
   rejectUnknownFields(value, INTEGER_SCHEMA_FIELDS, path, errors);
 
@@ -493,19 +589,33 @@ function parseIntegerFieldSchema(
     return undefined;
   }
 
-  const schema: CompiledIntegerFieldSchema = {
+  const compiled: CompiledIntegerFieldSchema = {
+    required,
+    type: "integer",
+  };
+  const manifest: {
+    type: "integer";
+    required: boolean;
+    minimum?: number;
+    maximum?: number;
+  } = {
     required,
     type: "integer",
   };
 
   if (minimum !== undefined) {
-    schema.minimum = minimum;
+    compiled.minimum = minimum;
+    manifest.minimum = minimum;
   }
   if (maximum !== undefined) {
-    schema.maximum = maximum;
+    compiled.maximum = maximum;
+    manifest.maximum = maximum;
   }
 
-  return schema;
+  return {
+    compiled,
+    manifest: Object.freeze(manifest),
+  };
 }
 
 function parseBooleanFieldSchema(
@@ -513,7 +623,7 @@ function parseBooleanFieldSchema(
   required: boolean,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledBooleanFieldSchema | undefined {
+): ParsedFieldSchema | undefined {
   const errorStart = errors.length;
   rejectUnknownFields(value, BOOLEAN_SCHEMA_FIELDS, path, errors);
 
@@ -521,9 +631,14 @@ function parseBooleanFieldSchema(
     return undefined;
   }
 
-  return {
+  const schema = Object.freeze({
     required,
     type: "boolean",
+  } satisfies BooleanFieldSchema);
+
+  return {
+    compiled: schema,
+    manifest: schema,
   };
 }
 
@@ -532,7 +647,7 @@ function parseArrayFieldSchema(
   required: boolean,
   path: Path,
   errors: CapabilityRejection[],
-): CompiledArrayFieldSchema | undefined {
+): ParsedFieldSchema | undefined {
   const errorStart = errors.length;
   rejectUnknownFields(value, ARRAY_SCHEMA_FIELDS, path, errors);
 
@@ -555,7 +670,8 @@ function parseArrayFieldSchema(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
-  const uniqueItems = readOptionalBoolean(value, "uniqueItems", [...path, "uniqueItems"], errors) ?? false;
+  const uniqueItemsValue = readOptionalBoolean(value, "uniqueItems", [...path, "uniqueItems"], errors);
+  const uniqueItems = uniqueItemsValue ?? false;
 
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems) {
     addError(errors, path, "minItems must be less than or equal to maxItems.");
@@ -565,21 +681,41 @@ function parseArrayFieldSchema(
     return undefined;
   }
 
-  const schema: CompiledArrayFieldSchema = {
-    items,
+  const compiled: CompiledArrayFieldSchema = {
+    items: items.compiled,
     required,
     type: "array",
     uniqueItems,
   };
+  const manifest: {
+    type: "array";
+    required: boolean;
+    items: FieldSchema;
+    minItems?: number;
+    maxItems?: number;
+    uniqueItems?: boolean;
+  } = {
+    items: items.manifest,
+    required,
+    type: "array",
+  };
 
   if (minItems !== undefined) {
-    schema.minItems = minItems;
+    compiled.minItems = minItems;
+    manifest.minItems = minItems;
   }
   if (maxItems !== undefined) {
-    schema.maxItems = maxItems;
+    compiled.maxItems = maxItems;
+    manifest.maxItems = maxItems;
+  }
+  if (uniqueItemsValue !== undefined) {
+    manifest.uniqueItems = uniqueItemsValue;
   }
 
-  return schema;
+  return {
+    compiled,
+    manifest: Object.freeze(manifest),
+  };
 }
 
 function parseCrossFieldRules(
@@ -651,17 +787,17 @@ function parseCrossFieldRule(
 
   switch (typeValue) {
     case "requireNonEmptyArrayWhenTrue":
-      return {
+      return Object.freeze({
         control,
         target,
         type: "requireNonEmptyArrayWhenTrue",
-      };
+      });
     case "requireEmptyArrayWhenFalse":
-      return {
+      return Object.freeze({
         control,
         target,
         type: "requireEmptyArrayWhenFalse",
-      };
+      });
     default:
       addError(errors, [...path, "type"], "Unknown cross-field rule type.");
       return undefined;
@@ -1006,6 +1142,52 @@ function readRequiredBoolean(
   return child;
 }
 
+function readRequiredManifestVersion(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): 1 | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  return parseManifestVersion(child, path, errors);
+}
+
+function readOptionalManifestVersion(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): 1 | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  return parseManifestVersion(value[key], path, errors);
+}
+
+function parseManifestVersion(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: CapabilityRejection[],
+): 1 | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    addError(errors, path, "Expected supported manifest version integer.");
+    return undefined;
+  }
+
+  if (value !== SUPPORTED_MANIFEST_VERSION) {
+    addError(errors, path, "Unsupported manifest version.");
+    return undefined;
+  }
+
+  return SUPPORTED_MANIFEST_VERSION;
+}
+
 function readOptionalString(
   value: JsonRecord,
   key: string,
@@ -1078,7 +1260,7 @@ function readOptionalStringEnum(
   key: string,
   path: Path,
   errors: CapabilityRejection[],
-): ReadonlySet<string> | undefined {
+): readonly string[] | undefined {
   if (!hasOwn(value, key)) {
     return undefined;
   }
@@ -1090,7 +1272,8 @@ function readOptionalStringEnum(
     return undefined;
   }
 
-  const values = new Set<string>();
+  const seen = new Set<string>();
+  const values: string[] = [];
 
   for (let index = 0; index < child.length; index += 1) {
     const item = child[index];
@@ -1100,15 +1283,16 @@ function readOptionalStringEnum(
       continue;
     }
 
-    if (values.has(item)) {
+    if (seen.has(item)) {
       addError(errors, [...path, String(index)], "Duplicate enum value.");
       continue;
     }
 
-    values.add(item);
+    seen.add(item);
+    values.push(item);
   }
 
-  return values;
+  return Object.freeze(values);
 }
 
 function compilePattern(
@@ -1189,6 +1373,33 @@ function reject(
     ok: false,
     rejections,
   };
+}
+
+function rejectManifestLoad(reason: string): Extract<CapabilityManifestLoadResult, { readonly ok: false }> {
+  return {
+    ok: false,
+    reason,
+  };
+}
+
+function formatManifestLoadReason(errors: readonly CapabilityRejection[]): string {
+  if (errors.length === 0) {
+    return "Invalid capability manifest.";
+  }
+
+  const messages: string[] = [];
+
+  for (let index = 0; index < errors.length; index += 1) {
+    const error = errors[index];
+
+    if (error === undefined) {
+      continue;
+    }
+
+    messages.push(error.path.length === 0 ? error.message : `${error.path}: ${error.message}`);
+  }
+
+  return messages.length === 0 ? "Invalid capability manifest." : messages.join("; ");
 }
 
 function formatPath(path: Path): string {

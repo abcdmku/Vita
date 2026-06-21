@@ -13,6 +13,7 @@
     "dispatch": "node tools/dispatch/dispatch-task.mjs",
     "review": "node tools/dispatch/review-task.mjs",
     "auth:check": "node tools/dispatch/check-auth.mjs",
+    "gen:manifests": "node tools/schema/gen-capability-manifests.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "workspaces": [],
