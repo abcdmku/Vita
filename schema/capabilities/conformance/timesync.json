@@ -1,0 +1,168 @@
+[
+  {
+    "name": "enabled with multiple hostnames accepts",
+    "request": {
+      "enabled": true,
+      "servers": ["pool.ntp.org", "time.cloudflare.com"]
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "enabled with uppercase hostname accepts",
+    "request": {
+      "enabled": true,
+      "servers": ["A.ORG"]
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "enabled with single label hostname accepts",
+    "request": {
+      "enabled": true,
+      "servers": ["timehost"]
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "disabled with empty servers accepts",
+    "request": {
+      "enabled": false,
+      "servers": []
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "enabled with empty servers rejects",
+    "request": {
+      "enabled": true,
+      "servers": []
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "disabled with non empty servers rejects",
+    "request": {
+      "enabled": false,
+      "servers": ["pool.ntp.org"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "hostname with underscore rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["bad_host.example"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "hostname with leading hyphen rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["-bad.example"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "hostname with trailing newline rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["host\n"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "IPv4 literal rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["10.0.0.1"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "IPv6 literal rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["::1"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "case insensitive duplicate rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["A.ORG", "a.org"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "absent enabled rejects",
+    "request": {
+      "servers": []
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "absent servers rejects",
+    "request": {
+      "enabled": true
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "unknown key rejects",
+    "request": {
+      "enabled": false,
+      "servers": [],
+      "extra": true
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate JSON key rejects",
+    "request": "{\"enabled\":true,\"enabled\":false,\"servers\":[]}",
+    "expect": "reject"
+  },
+  {
+    "name": "inline base64ish secret rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["pool.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.org"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "inline PEM marker rejects",
+    "request": {
+      "enabled": true,
+      "servers": ["-----BEGIN PRIVATE KEY-----"]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "too many servers rejects",
+    "request": {
+      "enabled": true,
+      "servers": [
+        "h0.example",
+        "h1.example",
+        "h2.example",
+        "h3.example",
+        "h4.example",
+        "h5.example",
+        "h6.example",
+        "h7.example",
+        "h8.example"
+      ]
+    },
+    "expect": "reject"
+  },
+  {
+    "name": "non array servers rejects",
+    "request": {
+      "enabled": true,
+      "servers": "pool.ntp.org"
+    },
+    "expect": "reject"
+  }
+]
