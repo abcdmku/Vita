@@ -24,9 +24,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
 - **Post-restore (Codex):** **services** subsystem (P7-007 cap + P0-028 model + P2-026 preview + P7-008
   wiring) and **accounts** subsystem (P0-029 security-gated model + P7-009 cap + P7-010 wiring + P2-027
   preview) — the agent now has **13 transactional capabilities** (… + timesync, services, accounts), all
-  wired/discoverable/applicable/readable/in-/state. **101 contracts merged.** Reviewer gate has now blocked
-  **48 real bugs** (latest: a model-valid `__proto__` username polluting a plain-`{}` diff record →
-  AGENTS.md null-prototype-keying rule; a concurrent-append lost-write; a symlink/TOCTOU atomic-write).
+  wired/discoverable/applicable/readable/in-/state. Reviewer gate has now blocked **49 real bugs** (latest:
+  a model-valid `__proto__` username polluting a plain-`{}` diff record → AGENTS.md null-prototype-keying
+  rule; a nodeConfig-add/remove passing `undefined` to a preview that rejects it; a concurrent-append
+  lost-write; a symlink/TOCTOU atomic-write).
+- **Change-set thread (capstone):** P0-030 unified change-set model + P2-028 whole-node change-set preview
+  (composes all 4 subsystem previews into one operator view with aggregated security/privilege flags).
+  **104 contracts merged. The buildable control plane is exhaustively complete.** Remaining frontier —
+  bootable signed image (FR-001) + whole-node apply — stays blocked on the Linux build host + the config→plan
+  shared schema (both flagged; see blocked/). Continuing with verifiable depth (integration scenarios, breadth).
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
