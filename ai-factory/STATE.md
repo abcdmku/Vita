@@ -49,13 +49,23 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   evaluator → P2-030 apply orchestration). **Migration:** P9-007 (hostname) + P9-008 (the FOUNDATIONAL
   full-request/object-dialect correction + node.config; 9 rounds — surfaced the full-request model, a
   Go/TS verification gap, and an unbounded-dup-key-scan DoS now bounded) faithfully migrated; default
-  registry = {hostname.set, node.config}. **timesync DEFERRED** (`defaultRegistry:false`) — its faithful
-  migration needs a parity-safe IP-literal format (the hard work deferred in P9-002; also needed by network).
-  **114 contracts merged. Reviewer gate has blocked 59 real bugs.**
-  **Remaining is a LARGE effort, worth owner prioritization:** (a) bootable image → Linux build host
-  (owner-gated); (b) migrate the other 11 caps — several need parity-safe FORMATS to build first (IP,
-  datetime, path, DID/handle, CID — each a P9-002-style multi-round build), plus nested-object configs +
-  per-cap hardening; (c) the systemic bounded-dup-key-scanner audit across ~13 caps (spawned as a task).
+  registry = {hostname.set, node.config}. **timesync DEFERRED** then UN-deferred (P9-011 in flight).
+  **117 contracts merged. Reviewer gate has blocked 63 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
+  P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
+  MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
+  flight: P9-011 (timesync faithful migration + nested-cross-field dialect ext), P9-013 (services migration,
+  dialect-disjoint).
+  **STRATEGY (owner: "build parity-safe formats, then continue migration"):** the dialect
+  (`agent/internal/capmanifest/capmanifest.go` + `sdk/typescript/src/capability-manifest.ts`) is a HARD
+  serialization point — almost every remaining cap needs a new FORMAT or a cross-field PRIMITIVE there, so
+  format/dialect work canNOT parallelize. Safe max ≈ 2 streams: one dialect-touching + one disjoint-cap
+  (only `services` uses purely-existing primitives). Map of remaining dialect needs: storage =
+  enum-conditional field presence (appId⟺app-state); accounts = notEnum/disallowedValues (privileged groups)
+  + nested; backup = mutually-exclusive one-of (cron XOR interval) + a cron format; network = CIDR format;
+  identity = DID/handle; pdssync = CID/URL; capsule = SRI/version; time = datetime. PLAN: front-load the
+  dialect primitives + formats (sequential through the dialect), THEN fan out all 9 remaining cap migrations
+  in parallel (they become dialect-disjoint). (a) bootable image still → Linux build host (owner-gated).
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
