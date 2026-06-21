@@ -1173,6 +1173,21 @@ func normalizeStringFormat(value string, format string) (string, bool) {
 			return value, true
 		}
 		return "", false
+	case "posixUsername", "groupName":
+		if isPOSIXName(value) {
+			return value, true
+		}
+		return "", false
+	case "systemdUnitName":
+		if isSystemdUnitName(value) {
+			return value, true
+		}
+		return "", false
+	case "absolutePath":
+		if isCanonicalAbsolutePath(value) {
+			return value, true
+		}
+		return "", false
 	default:
 		return "", false
 	}
@@ -1182,7 +1197,256 @@ func isKnownStringFormat(format string) bool {
 	return format == "hostnameRFC1123" ||
 		format == "hostnameLabel" ||
 		format == "ipLiteral" ||
-		format == "hostnameOrIp"
+		format == "hostnameOrIp" ||
+		format == "posixUsername" ||
+		format == "groupName" ||
+		format == "systemdUnitName" ||
+		format == "absolutePath"
+}
+
+func isPOSIXName(value string) bool {
+	if len(value) == 0 || len(value) > 32 {
+		return false
+	}
+	if !isASCIILowercase(value[0]) && value[0] != '_' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		char := value[index]
+		if !isASCIILowercase(char) && !isASCIIDigit(char) && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+const maxSystemdUnitNameLength = 256
+
+var (
+	systemdUnitSuffixes = []string{
+		".service",
+		".socket",
+		".device",
+		".mount",
+		".automount",
+		".swap",
+		".target",
+		".path",
+		".timer",
+		".slice",
+		".scope",
+	}
+	forbiddenInlineReferenceSchemes = []string{"data", "inline", "literal"}
+	servicePrivateMaterialTokens    = []string{
+		"privatekey",
+		"private-key",
+		"private_key",
+		"opensshprivatekey",
+		"opensshprivate-key",
+		"opensshprivate_key",
+		"openssh-privatekey",
+		"openssh-private-key",
+		"openssh-private_key",
+		"openssh_privatekey",
+		"openssh_private-key",
+		"openssh_private_key",
+		"agesecretkey",
+		"agesecret-key",
+		"agesecret_key",
+		"age-secretkey",
+		"age-secret-key",
+		"age-secret_key",
+		"age_secretkey",
+		"age_secret-key",
+		"age_secret_key",
+		"xprv",
+		"seedphrase",
+		"seed-phrase",
+		"seed_phrase",
+		"mnemonic",
+		"recoveryphrase",
+		"recovery-phrase",
+		"recovery_phrase",
+	}
+	serviceSecretAssignmentTokens = []string{
+		"privatekey",
+		"private-key",
+		"private_key",
+		"apikey",
+		"api-key",
+		"api_key",
+		"accesstoken",
+		"access-token",
+		"access_token",
+		"refreshtoken",
+		"refresh-token",
+		"refresh_token",
+		"password",
+		"secret",
+	}
+)
+
+func isSystemdUnitName(value string) bool {
+	if value == "" ||
+		len(value) > maxSystemdUnitNameLength ||
+		value[0] == '.' ||
+		strings.Contains(value, "..") ||
+		hasInlineReferenceScheme(value) ||
+		containsInlineServiceMaterial(value) {
+		return false
+	}
+
+	for index := 0; index < len(value); index++ {
+		if !isSystemdUnitNameChar(value[index]) {
+			return false
+		}
+	}
+
+	prefix, ok := systemdUnitPrefix(value)
+	if !ok || prefix == "" || strings.HasPrefix(prefix, ".") {
+		return false
+	}
+
+	for index := 0; index < len(prefix); index++ {
+		if !isSystemdUnitNameChar(prefix[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func systemdUnitPrefix(value string) (string, bool) {
+	for _, suffix := range systemdUnitSuffixes {
+		if strings.HasSuffix(value, suffix) {
+			return strings.TrimSuffix(value, suffix), true
+		}
+	}
+	return "", false
+}
+
+func hasInlineReferenceScheme(value string) bool {
+	colon := strings.IndexByte(value, ':')
+	if colon <= 0 {
+		return false
+	}
+	scheme := asciiLowercase(value[:colon])
+	for _, forbidden := range forbiddenInlineReferenceSchemes {
+		if scheme == forbidden {
+			return true
+		}
+	}
+	return false
+}
+
+func containsInlineServiceMaterial(value string) bool {
+	lower := asciiLowercase(value)
+	if strings.Contains(lower, "-----begin") || containsLongHexRun(value) || containsLongBase64Run(value) {
+		return true
+	}
+	for _, token := range servicePrivateMaterialTokens {
+		if containsBoundedToken(lower, token) {
+			return true
+		}
+	}
+	for _, token := range serviceSecretAssignmentTokens {
+		if containsSecretAssignmentToken(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsBoundedToken(value string, token string) bool {
+	for start := strings.Index(value, token); start != -1; start = nextStringIndex(value, token, start+1) {
+		afterIndex := start + len(token)
+		beforeOK := start == 0 || !isASCIIRegexWord(value[start-1])
+		afterOK := afterIndex >= len(value) || !isASCIIRegexWord(value[afterIndex])
+		if beforeOK && afterOK {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSecretAssignmentToken(value string, token string) bool {
+	for start := strings.Index(value, token); start != -1; start = nextStringIndex(value, token, start+1) {
+		if start != 0 && isASCIIRegexWord(value[start-1]) {
+			continue
+		}
+
+		afterIndex := start + len(token)
+		for afterIndex < len(value) && isASCIIWhitespace(value[afterIndex]) {
+			afterIndex++
+		}
+		if afterIndex < len(value) && (value[afterIndex] == ':' || value[afterIndex] == '=') {
+			return true
+		}
+	}
+	return false
+}
+
+func nextStringIndex(value string, token string, offset int) int {
+	next := strings.Index(value[offset:], token)
+	if next == -1 {
+		return -1
+	}
+	return offset + next
+}
+
+func containsLongHexRun(value string) bool {
+	runLength := 0
+	for index := 0; index < len(value); index++ {
+		if isASCIIHex(value[index]) {
+			runLength++
+			if runLength >= 32 {
+				return true
+			}
+		} else {
+			runLength = 0
+		}
+	}
+	return false
+}
+
+func containsLongBase64Run(value string) bool {
+	standardRunLength := 0
+	urlRunLength := 0
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if isASCIIAlphaNumeric(char) || char == '+' || char == '/' {
+			standardRunLength++
+			if standardRunLength >= 48 {
+				return true
+			}
+		} else {
+			standardRunLength = 0
+		}
+		if isASCIIAlphaNumeric(char) || char == '_' || char == '-' {
+			urlRunLength++
+			if urlRunLength >= 48 {
+				return true
+			}
+		} else {
+			urlRunLength = 0
+		}
+	}
+	return false
+}
+
+func isCanonicalAbsolutePath(value string) bool {
+	if !strings.HasPrefix(value, "/") || value == "/" || strings.HasSuffix(value, "/") {
+		return false
+	}
+
+	segments := strings.Split(value, "/")
+	for index := 1; index < len(segments); index++ {
+		segment := segments[index]
+		if segment == "" || segment == "." || segment == ".." || strings.ContainsRune(segment, '\x00') {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalizeIPLiteral(value string) (string, bool) {
@@ -1365,6 +1629,32 @@ func isASCIIAlphaNumeric(char byte) bool {
 	return (char >= '0' && char <= '9') ||
 		(char >= 'A' && char <= 'Z') ||
 		(char >= 'a' && char <= 'z')
+}
+
+func isASCIILowercase(char byte) bool {
+	return char >= 'a' && char <= 'z'
+}
+
+func isASCIIDigit(char byte) bool {
+	return char >= '0' && char <= '9'
+}
+
+func isASCIIHex(char byte) bool {
+	return (char >= '0' && char <= '9') ||
+		(char >= 'A' && char <= 'F') ||
+		(char >= 'a' && char <= 'f')
+}
+
+func isASCIIRegexWord(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == '_'
+}
+
+func isASCIIWhitespace(char byte) bool {
+	return char == '\t' || char == '\n' || char == '\v' || char == '\f' || char == '\r' || char == ' '
+}
+
+func isSystemdUnitNameChar(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == ':' || char == '.' || char == '_' || char == '@' || char == '-'
 }
 
 func cloneInt64Pointer(value *int64) *int64 {

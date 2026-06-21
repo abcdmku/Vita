@@ -8,7 +8,9 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * that needs a different invariant requires a governance-reviewed dialect extension,
  * not an embedded expression language.
  *
- * String formats are a closed, governed set. `ipLiteral` and `hostnameOrIp`
+ * String formats are a closed, governed set. `posixUsername`, `groupName`,
+ * `systemdUnitName`, and `absolutePath` are structured capability-agent
+ * parity formats. `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
  * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
  * validator in agent/internal/capmanifest.
@@ -20,7 +22,15 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * `capability` field, for example `node.config` and `hostname.set`.
  */
 
-export type StringFieldFormat = "hostnameRFC1123" | "hostnameLabel" | "ipLiteral" | "hostnameOrIp";
+export type StringFieldFormat =
+  | "hostnameRFC1123"
+  | "hostnameLabel"
+  | "ipLiteral"
+  | "hostnameOrIp"
+  | "posixUsername"
+  | "groupName"
+  | "systemdUnitName"
+  | "absolutePath";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -1551,7 +1561,11 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "hostnameRFC1123" ||
     value === "hostnameLabel" ||
     value === "ipLiteral" ||
-    value === "hostnameOrIp"
+    value === "hostnameOrIp" ||
+    value === "posixUsername" ||
+    value === "groupName" ||
+    value === "systemdUnitName" ||
+    value === "absolutePath"
   );
 }
 
@@ -1572,7 +1586,318 @@ function normalizeStringFormat(value: string, format: StringFieldFormat): string
 
       return isHostnameRFC1123(value) ? value : undefined;
     }
+    case "posixUsername":
+    case "groupName":
+      return isPOSIXName(value) ? value : undefined;
+    case "systemdUnitName":
+      return isSystemdUnitName(value) ? value : undefined;
+    case "absolutePath":
+      return isCanonicalAbsolutePath(value) ? value : undefined;
   }
+}
+
+function isPOSIXName(value: string): boolean {
+  if (value.length === 0 || value.length > 32) {
+    return false;
+  }
+
+  const first = value.charCodeAt(0);
+
+  if (!isAsciiLowercaseCode(first) && first !== 95) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isAsciiLowercaseCode(code) && !isAsciiDigitCode(code) && code !== 95 && code !== 45) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+const SYSTEMD_UNIT_SUFFIXES = Object.freeze([
+  ".service",
+  ".socket",
+  ".device",
+  ".mount",
+  ".automount",
+  ".swap",
+  ".target",
+  ".path",
+  ".timer",
+  ".slice",
+  ".scope",
+]);
+const MAX_SYSTEMD_UNIT_NAME_LENGTH = 256;
+const FORBIDDEN_INLINE_REFERENCE_SCHEMES = Object.freeze(["data", "inline", "literal"]);
+const SERVICE_PRIVATE_MATERIAL_TOKENS = Object.freeze([
+  "privatekey",
+  "private-key",
+  "private_key",
+  "opensshprivatekey",
+  "opensshprivate-key",
+  "opensshprivate_key",
+  "openssh-privatekey",
+  "openssh-private-key",
+  "openssh-private_key",
+  "openssh_privatekey",
+  "openssh_private-key",
+  "openssh_private_key",
+  "agesecretkey",
+  "agesecret-key",
+  "agesecret_key",
+  "age-secretkey",
+  "age-secret-key",
+  "age-secret_key",
+  "age_secretkey",
+  "age_secret-key",
+  "age_secret_key",
+  "xprv",
+  "seedphrase",
+  "seed-phrase",
+  "seed_phrase",
+  "mnemonic",
+  "recoveryphrase",
+  "recovery-phrase",
+  "recovery_phrase",
+]);
+const SERVICE_SECRET_ASSIGNMENT_TOKENS = Object.freeze([
+  "privatekey",
+  "private-key",
+  "private_key",
+  "apikey",
+  "api-key",
+  "api_key",
+  "accesstoken",
+  "access-token",
+  "access_token",
+  "refreshtoken",
+  "refresh-token",
+  "refresh_token",
+  "password",
+  "secret",
+]);
+
+function isSystemdUnitName(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > MAX_SYSTEMD_UNIT_NAME_LENGTH ||
+    value.charCodeAt(0) === 46 ||
+    containsConsecutiveDots(value) ||
+    hasInlineReferenceScheme(value) ||
+    containsInlineServiceMaterial(value)
+  ) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isSystemdUnitNameCode(value.charCodeAt(index))) {
+      return false;
+    }
+  }
+
+  const prefix = systemdUnitPrefix(value);
+
+  if (prefix === undefined || prefix.length === 0 || prefix.charCodeAt(0) === 46) {
+    return false;
+  }
+
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (!isSystemdUnitNameCode(prefix.charCodeAt(index))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function systemdUnitPrefix(value: string): string | undefined {
+  for (let index = 0; index < SYSTEMD_UNIT_SUFFIXES.length; index += 1) {
+    const suffix = SYSTEMD_UNIT_SUFFIXES[index];
+
+    if (suffix !== undefined && value.endsWith(suffix)) {
+      return value.slice(0, value.length - suffix.length);
+    }
+  }
+
+  return undefined;
+}
+
+function containsConsecutiveDots(value: string): boolean {
+  for (let index = 1; index < value.length; index += 1) {
+    if (value.charCodeAt(index - 1) === 46 && value.charCodeAt(index) === 46) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasInlineReferenceScheme(value: string): boolean {
+  const colon = value.indexOf(":");
+
+  if (colon <= 0) {
+    return false;
+  }
+
+  const scheme = asciiLowercase(value.slice(0, colon));
+
+  for (let index = 0; index < FORBIDDEN_INLINE_REFERENCE_SCHEMES.length; index += 1) {
+    if (scheme === FORBIDDEN_INLINE_REFERENCE_SCHEMES[index]) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function containsInlineServiceMaterial(value: string): boolean {
+  const lower = asciiLowercase(value);
+
+  if (lower.includes("-----begin") || containsLongHexRun(value) || containsLongBase64Run(value)) {
+    return true;
+  }
+
+  for (let index = 0; index < SERVICE_PRIVATE_MATERIAL_TOKENS.length; index += 1) {
+    const token = SERVICE_PRIVATE_MATERIAL_TOKENS[index];
+
+    if (token !== undefined && containsBoundedToken(lower, token)) {
+      return true;
+    }
+  }
+
+  for (let index = 0; index < SERVICE_SECRET_ASSIGNMENT_TOKENS.length; index += 1) {
+    const token = SERVICE_SECRET_ASSIGNMENT_TOKENS[index];
+
+    if (token !== undefined && containsSecretAssignmentToken(lower, token)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function containsBoundedToken(value: string, token: string): boolean {
+  let start = value.indexOf(token);
+
+  while (start !== -1) {
+    const before = start === 0 ? undefined : value.charCodeAt(start - 1);
+    const afterIndex = start + token.length;
+    const after = afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
+
+    if (
+      (before === undefined || !isAsciiRegexWordCode(before)) &&
+      (after === undefined || !isAsciiRegexWordCode(after))
+    ) {
+      return true;
+    }
+
+    start = value.indexOf(token, start + 1);
+  }
+
+  return false;
+}
+
+function containsSecretAssignmentToken(value: string, token: string): boolean {
+  let start = value.indexOf(token);
+
+  while (start !== -1) {
+    const before = start === 0 ? undefined : value.charCodeAt(start - 1);
+    let afterIndex = start + token.length;
+
+    while (afterIndex < value.length && isAsciiWhitespaceCode(value.charCodeAt(afterIndex))) {
+      afterIndex += 1;
+    }
+
+    const after = afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
+
+    if (
+      (before === undefined || !isAsciiRegexWordCode(before)) &&
+      (after === 58 || after === 61)
+    ) {
+      return true;
+    }
+
+    start = value.indexOf(token, start + 1);
+  }
+
+  return false;
+}
+
+function containsLongHexRun(value: string): boolean {
+  let runLength = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (isAsciiHexCode(value.charCodeAt(index))) {
+      runLength += 1;
+
+      if (runLength >= 32) {
+        return true;
+      }
+    } else {
+      runLength = 0;
+    }
+  }
+
+  return false;
+}
+
+function containsLongBase64Run(value: string): boolean {
+  let standardRunLength = 0;
+  let urlRunLength = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (isAsciiAlphaNumericCode(code) || code === 43 || code === 47) {
+      standardRunLength += 1;
+
+      if (standardRunLength >= 48) {
+        return true;
+      }
+    } else {
+      standardRunLength = 0;
+    }
+
+    if (isAsciiAlphaNumericCode(code) || code === 95 || code === 45) {
+      urlRunLength += 1;
+
+      if (urlRunLength >= 48) {
+        return true;
+      }
+    } else {
+      urlRunLength = 0;
+    }
+  }
+
+  return false;
+}
+
+function isCanonicalAbsolutePath(value: string): boolean {
+  if (value.length === 0 || value.charCodeAt(0) !== 47 || value === "/" || value.endsWith("/")) {
+    return false;
+  }
+
+  let segmentStart = 1;
+
+  for (let index = 1; index <= value.length; index += 1) {
+    if (index < value.length && value.charCodeAt(index) !== 47) {
+      continue;
+    }
+
+    const segment = value.slice(segmentStart, index);
+
+    if (segment.length === 0 || segment === "." || segment === ".." || containsChar(segment, 0)) {
+      return false;
+    }
+
+    segmentStart = index + 1;
+  }
+
+  return true;
 }
 
 function canonicalizeIPLiteral(value: string): string | undefined {
@@ -1985,6 +2310,34 @@ function isAsciiAlphaNumericCode(code: number): boolean {
     (code >= 65 && code <= 90) ||
     (code >= 97 && code <= 122)
   );
+}
+
+function isAsciiLowercaseCode(code: number): boolean {
+  return code >= 97 && code <= 122;
+}
+
+function isAsciiDigitCode(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+function isAsciiHexCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 70) ||
+    (code >= 97 && code <= 102)
+  );
+}
+
+function isAsciiRegexWordCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 95;
+}
+
+function isAsciiWhitespaceCode(code: number): boolean {
+  return code === 9 || code === 10 || code === 11 || code === 12 || code === 13 || code === 32;
+}
+
+function isSystemdUnitNameCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 58 || code === 46 || code === 95 || code === 64 || code === 45;
 }
 
 function uniqueValueKey(value: CapabilityValue): string {
