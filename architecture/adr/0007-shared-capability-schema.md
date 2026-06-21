@@ -52,6 +52,19 @@ capability vocabulary and every per-capability request schema, and have BOTH pla
 A proof-of-concept should land first: the manifest entry for `timesync` (+ `hostname`), the generated/derived
 validators on both sides, and the conformance test — proving zero behavior change before any broad rollout.
 
+### Empirical evidence (from the PoC, P9-002)
+
+The additive PoC tried to *hand-write* a TS validator mirroring the agent's timesync rules. Its IP-literal
+handling drifted from Go's `netip.ParseAddr` across THREE successive review rounds — first rejecting
+IPv4-mapped IPv6 (`::ffff:192.0.2.1`), then failing to canonical-dedup zero-padded forms
+(`2001:0db8::1` vs `2001:db8::1`), then mis-splitting compressed dotted-tail literals (`2001:db8::192.0.2.1`).
+This is direct evidence for the decision: **format/canonicalization validators (IP addresses especially)
+cannot be reliably kept in parity by hand across TS and Go — they MUST be generated from, or share, one
+source.** The PoC therefore scopes its `timesync.servers` to RFC-1123 hostnames (fully expressible in the
+declarative dialect, hand-conformant) and DEFERS IP-literal support to the generated/shared format primitive
+this ADR mandates. The dialect itself (field schemas + bounded cross-field invariants + §13.1) is proven;
+the format primitives are the part that needs codegen.
+
 ## Consequences
 
 Unblocks the closed config→plan evaluator (P9-001) and whole-node apply: a single authoritative schema means
