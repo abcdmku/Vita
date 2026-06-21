@@ -26,6 +26,7 @@ import (
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
+	"github.com/vita/agent/internal/auditlog"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -35,6 +36,16 @@ const defaultMaxBodyBytes int64 = 1 << 20
 type RequestDecoder func(json.RawMessage) (capabilities.TypedRequest, error)
 
 type ReadRequestFactory func() capabilities.TypedRequest
+
+// AuditStore is the narrow, append-only view of the audit log the transport
+// depends on. *auditlog.Store satisfies it. The store assigns the sequence;
+// the transport never supplies one. The dependency is OPTIONAL: when it is nil
+// the control surface still serves /apply, and /audit reports that the trail is
+// unavailable rather than panicking.
+type AuditStore interface {
+	Append(auditlog.Event) (auditlog.Event, error)
+	Read() ([]auditlog.Event, error)
+}
 
 type Config struct {
 	Version         string
@@ -46,6 +57,9 @@ type Config struct {
 	HealthCheck     transaction.HealthCheck
 	MaxBodyBytes    int64
 	Now             func() time.Time
+	// AuditStore records one event per /apply and backs the read-only /audit
+	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
+	AuditStore AuditStore
 }
 
 type ErrorResponse struct {
@@ -63,6 +77,11 @@ type ApplyResult struct {
 	RolledBack     []OperationResult   `json:"rolledBack"`
 	Error          *ResultError        `json:"error,omitempty"`
 	RollbackErrors []ResultError       `json:"rollbackErrors"`
+	// AuditUnrecorded is true when the post-commit audit append failed (or no
+	// store is configured) so the transaction's outcome was NOT persisted to the
+	// audit trail. The transaction result itself is unaffected — a record-keeping
+	// failure never rolls back a real change — but the gap is surfaced here.
+	AuditUnrecorded bool `json:"auditUnrecorded,omitempty"`
 }
 
 type OperationResult struct {
@@ -81,6 +100,27 @@ type OperationsResponse struct {
 	Operations []string `json:"operations"`
 }
 
+// AuditResponse is the read-only shape returned by GET /audit. It mirrors the
+// canonical event shape the store persists (a flat list with a nested actor).
+type AuditResponse struct {
+	Events []AuditEvent `json:"events"`
+}
+
+type AuditEvent struct {
+	Sequence        uint64     `json:"sequence"`
+	TimestampMillis int64      `json:"timestampMillis"`
+	Actor           AuditActor `json:"actor"`
+	Capability      string     `json:"capability"`
+	Operation       string     `json:"operation"`
+	Outcome         string     `json:"outcome"`
+	Reason          string     `json:"reason,omitempty"`
+}
+
+type AuditActor struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
 type stateCapabilityError struct {
 	Error string `json:"error"`
 }
@@ -96,6 +136,7 @@ type handler struct {
 	healthCheck     transaction.HealthCheck
 	maxBodyBytes    int64
 	now             func() time.Time
+	auditStore      AuditStore
 }
 
 type applyRequest struct {
@@ -178,6 +219,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		healthCheck:     config.HealthCheck,
 		maxBodyBytes:    maxBodyBytes,
 		now:             now,
+		auditStore:      config.AuditStore,
 	}, nil
 }
 
@@ -243,6 +285,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleState(w, r)
 	case "/apply":
 		h.handleApply(w, r)
+	case "/audit":
+		h.handleAudit(w, r)
 	case "/read":
 		h.handleRead(w, r, "")
 	default:
@@ -435,7 +479,131 @@ func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, applyResultFromTransaction(result))
+	// The transaction has reached its single commit point: it either committed
+	// (with a working Undo) or rolled back cleanly. Recording the outcome happens
+	// strictly AFTER that point and is best-effort: an audit-append failure must
+	// never change the transaction's result, only surface a gap via
+	// audit_unrecorded so the missing trail entry is visible.
+	response := applyResultFromTransaction(result)
+	response.AuditUnrecorded = !h.recordApply(plan, result)
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// recordApply appends one audit event describing the resolved transaction. It
+// returns true iff the event was durably recorded. It never mutates the
+// transaction result and never panics on a nil store; any failure (no store,
+// nothing to name, or an append error) is reported as a not-recorded gap by the
+// caller. The store assigns the sequence — the transport never supplies one.
+func (h *handler) recordApply(plan transaction.Plan, result transaction.Result) bool {
+	if h.auditStore == nil {
+		return false
+	}
+
+	capability, ok := appliedCapabilityName(plan, result)
+	if !ok {
+		// No operation to attribute the event to (e.g. an empty plan): there is
+		// no privileged effect to record, so there is no gap either.
+		return true
+	}
+
+	event := auditlog.Event{
+		TimestampMillis: h.now().UnixMilli(),
+		ActorKind:       auditlog.ActorKindSystem,
+		ActorID:         "agentd",
+		Capability:      capability,
+		Operation:       auditlog.OperationApply,
+		Outcome:         auditOutcome(result.Outcome),
+	}
+	if _, err := h.auditStore.Append(event); err != nil {
+		return false
+	}
+	return true
+}
+
+func (h *handler) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if h.auditStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "audit log is not configured")
+		return
+	}
+
+	events, err := h.auditStore.Read()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "audit_read_failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, auditResponse(events))
+}
+
+// appliedCapabilityName picks the single capability name to attribute the apply
+// event to. For a committed transaction that is the first applied operation; for
+// a rolled_back/failed transaction it is the operation whose failure determined
+// the outcome (falling back to the first planned operation). The boolean is
+// false only when there is no operation to name (an empty plan).
+func appliedCapabilityName(plan transaction.Plan, result transaction.Result) (string, bool) {
+	if name, ok := failingCapabilityName(result.Err); ok {
+		return name, true
+	}
+	if len(result.Applied) > 0 {
+		return result.Applied[0].Capability, true
+	}
+	if len(plan) > 0 {
+		return plan[0].Capability, true
+	}
+	return "", false
+}
+
+func failingCapabilityName(err error) (string, bool) {
+	var applyErr *transaction.ApplyError
+	if errors.As(err, &applyErr) && applyErr.Capability != "" {
+		return applyErr.Capability, true
+	}
+	var precondition *transaction.PreconditionError
+	if errors.As(err, &precondition) && precondition.Capability != "" {
+		return precondition.Capability, true
+	}
+	return "", false
+}
+
+// auditOutcome maps a resolved transaction outcome to the closed audit-log
+// outcome set. A rejected transaction is handled before this point (it never
+// reaches the commit path), so only committed/rolled_back are expected here;
+// any other value is recorded as "failed" rather than dropped.
+func auditOutcome(outcome transaction.Outcome) auditlog.Outcome {
+	switch outcome {
+	case transaction.OutcomeCommitted:
+		return auditlog.OutcomeCommitted
+	case transaction.OutcomeRolledBack:
+		return auditlog.OutcomeRolledBack
+	case transaction.OutcomeRejected:
+		return auditlog.OutcomeRejected
+	default:
+		return auditlog.OutcomeFailed
+	}
+}
+
+func auditResponse(events []auditlog.Event) AuditResponse {
+	out := make([]AuditEvent, 0, len(events))
+	for _, event := range events {
+		out = append(out, AuditEvent{
+			Sequence:        event.Sequence,
+			TimestampMillis: event.TimestampMillis,
+			Actor: AuditActor{
+				Kind: string(event.ActorKind),
+				ID:   event.ActorID,
+			},
+			Capability: event.Capability,
+			Operation:  string(event.Operation),
+			Outcome:    string(event.Outcome),
+			Reason:     event.Reason,
+		})
+	}
+	return AuditResponse{Events: out}
 }
 
 func (h *handler) buildPlan(request applyRequest) (transaction.Plan, *requestError) {

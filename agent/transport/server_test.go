@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +30,7 @@ import (
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
+	"github.com/vita/agent/internal/auditlog"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -970,6 +974,7 @@ type handlerConfig struct {
 	discoverer   hardware.Discoverer
 	readRequests map[string]ReadRequestFactory
 	maxBodyBytes int64
+	auditStore   AuditStore
 }
 
 func mustHandler(t *testing.T, config handlerConfig) http.Handler {
@@ -993,6 +998,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		RequestDecoders: map[string]RequestDecoder{"test.apply": decodeMockRequest, "test.first": decodeMockRequest, "test.second": decodeMockRequest},
 		ReadRequests:    config.readRequests,
 		MaxBodyBytes:    config.maxBodyBytes,
+		AuditStore:      config.auditStore,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
 		},
@@ -1239,4 +1245,319 @@ func capsuleRegistry(capsules []capsule.CapsuleEntry) capsule.Registry {
 	copied := make([]capsule.CapsuleEntry, len(capsules))
 	copy(copied, capsules)
 	return capsule.Registry{Capsules: &copied}
+}
+
+// auditMemoryFS is a minimal in-memory auditlog.FileSystem so transport tests
+// can back a real *auditlog.Store without touching disk. It emulates the
+// fresh-exclusive-temp + rename commit the store relies on.
+type auditMemoryFS struct {
+	mu      sync.Mutex
+	files   map[string][]byte
+	tempSeq int
+}
+
+func newAuditMemoryFS() *auditMemoryFS {
+	return &auditMemoryFS{files: map[string][]byte{}}
+}
+
+func (m *auditMemoryFS) ReadFile(name string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	data, ok := m.files[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out, nil
+}
+
+func (m *auditMemoryFS) MkdirAll(string, fs.FileMode) error { return nil }
+
+func (m *auditMemoryFS) CreateTemp(dir, pattern string) (auditlog.TempFile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	m.tempSeq++
+	name := filepath.Join(dir, fmt.Sprintf("%s%d%s", prefix, m.tempSeq, suffix))
+	if _, exists := m.files[name]; exists {
+		return nil, &fs.PathError{Op: "createtemp", Path: name, Err: fs.ErrExist}
+	}
+	m.files[name] = []byte{}
+	return &auditMemTempFile{fsys: m, name: name}, nil
+}
+
+func (m *auditMemoryFS) Rename(oldPath, newPath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	data, ok := m.files[oldPath]
+	if !ok {
+		return &fs.PathError{Op: "rename", Path: oldPath, Err: fs.ErrNotExist}
+	}
+	m.files[newPath] = data
+	delete(m.files, oldPath)
+	return nil
+}
+
+func (m *auditMemoryFS) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.files, name)
+	return nil
+}
+
+type auditMemTempFile struct {
+	fsys *auditMemoryFS
+	name string
+	buf  []byte
+}
+
+func (f *auditMemTempFile) Name() string { return f.name }
+
+func (f *auditMemTempFile) Chmod(fs.FileMode) error { return nil }
+
+func (f *auditMemTempFile) Write(data []byte) (int, error) {
+	f.buf = append(f.buf, data...)
+	return len(data), nil
+}
+
+func (f *auditMemTempFile) Sync() error { return nil }
+
+func (f *auditMemTempFile) Close() error {
+	f.fsys.mu.Lock()
+	defer f.fsys.mu.Unlock()
+	f.fsys.files[f.name] = f.buf
+	return nil
+}
+
+func newAuditStore(t *testing.T) *auditlog.Store {
+	t.Helper()
+	store, err := auditlog.NewStore(newAuditMemoryFS(), "/var/lib/vita-agent/audit-log.json", 1024)
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	return store
+}
+
+// failingAuditStore is an AuditStore whose Append always fails, used to prove a
+// record-keeping failure never changes a committed apply's result.
+type failingAuditStore struct {
+	appendErr error
+	appends   int
+}
+
+func (s *failingAuditStore) Append(auditlog.Event) (auditlog.Event, error) {
+	s.appends++
+	return auditlog.Event{}, s.appendErr
+}
+
+func (s *failingAuditStore) Read() ([]auditlog.Event, error) {
+	return nil, nil
+}
+
+func TestApplyAppendsSingleCommittedAuditEvent(t *testing.T) {
+	store := newAuditStore(t)
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply"})
+	handler := mustHandler(t, handlerConfig{registry: registry, auditStore: store})
+
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"test.apply","request":{"value":"one"}}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var result ApplyResult
+	decodeResponse(t, response, &result)
+	if result.Outcome != transaction.OutcomeCommitted {
+		t.Fatalf("Outcome = %q, want committed", result.Outcome)
+	}
+	if result.AuditUnrecorded {
+		t.Fatalf("AuditUnrecorded = true, want false on a recorded commit")
+	}
+
+	events, err := store.Read()
+	if err != nil {
+		t.Fatalf("store.Read returned error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("recorded %d events, want exactly 1: %#v", len(events), events)
+	}
+	got := events[0]
+	wantMillis := transportStartedAt.Add(90 * time.Second).UnixMilli()
+	want := auditlog.Event{
+		Sequence:        1,
+		TimestampMillis: wantMillis,
+		ActorKind:       auditlog.ActorKindSystem,
+		ActorID:         "agentd",
+		Capability:      "test.apply",
+		Operation:       auditlog.OperationApply,
+		Outcome:         auditlog.OutcomeCommitted,
+	}
+	if got != want {
+		t.Fatalf("audit event = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyRolledBackRecordsRolledBackAuditEvent(t *testing.T) {
+	store := newAuditStore(t)
+	registry := mustRegistry(t,
+		&mockTxCapability{name: "test.first"},
+		&mockTxCapability{name: "test.second", applyErr: errMockApply},
+	)
+	handler := mustHandler(t, handlerConfig{registry: registry, auditStore: store})
+
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"test.first","request":{"value":"one"}},{"capability":"test.second","request":{"value":"two"}}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var result ApplyResult
+	decodeResponse(t, response, &result)
+	if result.Outcome != transaction.OutcomeRolledBack {
+		t.Fatalf("Outcome = %q, want rolledBack", result.Outcome)
+	}
+	if result.AuditUnrecorded {
+		t.Fatalf("AuditUnrecorded = true, want false on a recorded rollback")
+	}
+
+	events, err := store.Read()
+	if err != nil {
+		t.Fatalf("store.Read returned error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("recorded %d events, want exactly 1: %#v", len(events), events)
+	}
+	got := events[0]
+	if got.Outcome != auditlog.OutcomeRolledBack {
+		t.Fatalf("audit outcome = %q, want rolled_back", got.Outcome)
+	}
+	if got.Capability != "test.second" {
+		t.Fatalf("audit capability = %q, want test.second (the failing op)", got.Capability)
+	}
+	if got.Sequence != 1 {
+		t.Fatalf("audit sequence = %d, want 1", got.Sequence)
+	}
+	if got.ActorKind != auditlog.ActorKindSystem || got.ActorID != "agentd" || got.Operation != auditlog.OperationApply {
+		t.Fatalf("audit actor/operation = %#v, want system:agentd apply", got)
+	}
+}
+
+func TestAuditReturnsEventsInOrder(t *testing.T) {
+	store := newAuditStore(t)
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply"})
+	handler := mustHandler(t, handlerConfig{registry: registry, auditStore: store})
+
+	for _, value := range []string{"one", "two", "three"} {
+		response := perform(handler, http.MethodPost, "/apply", fmt.Sprintf(`{"operations":[{"capability":"test.apply","request":{"value":%q}}]}`, value))
+		if response.Code != http.StatusOK {
+			t.Fatalf("apply %q status code = %d, want %d; body=%s", value, response.Code, http.StatusOK, response.Body.String())
+		}
+	}
+
+	response := perform(handler, http.MethodGet, "/audit", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("audit status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("audit Content-Type = %q, want application/json", contentType)
+	}
+	var got AuditResponse
+	decodeResponse(t, response, &got)
+	if len(got.Events) != 3 {
+		t.Fatalf("audit returned %d events, want 3: %#v", len(got.Events), got.Events)
+	}
+	for i, event := range got.Events {
+		wantSeq := uint64(i + 1)
+		if event.Sequence != wantSeq {
+			t.Fatalf("event %d sequence = %d, want %d", i, event.Sequence, wantSeq)
+		}
+		if event.Actor.Kind != string(auditlog.ActorKindSystem) || event.Actor.ID != "agentd" {
+			t.Fatalf("event %d actor = %#v, want system:agentd", i, event.Actor)
+		}
+		if event.Operation != string(auditlog.OperationApply) || event.Outcome != string(auditlog.OutcomeCommitted) {
+			t.Fatalf("event %d operation/outcome = %q/%q, want apply/committed", i, event.Operation, event.Outcome)
+		}
+		if event.Capability != "test.apply" {
+			t.Fatalf("event %d capability = %q, want test.apply", i, event.Capability)
+		}
+	}
+}
+
+func TestApplyAuditAppendFailureKeepsCommitButFlagsUnrecorded(t *testing.T) {
+	store := &failingAuditStore{appendErr: errors.New("disk full")}
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply"})
+	handler := mustHandler(t, handlerConfig{registry: registry, auditStore: store})
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("handler panicked: %v", recovered)
+		}
+	}()
+
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"test.apply","request":{"value":"one"}}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var result ApplyResult
+	decodeResponse(t, response, &result)
+	if result.Outcome != transaction.OutcomeCommitted {
+		t.Fatalf("Outcome = %q, want committed (audit failure must not roll back)", result.Outcome)
+	}
+	if result.Error != nil {
+		t.Fatalf("Error = %#v, want nil; an audit failure must not surface as a transaction error", result.Error)
+	}
+	if !result.AuditUnrecorded {
+		t.Fatal("AuditUnrecorded = false, want true after an audit-append failure")
+	}
+	if store.appends != 1 {
+		t.Fatalf("audit Append called %d times, want exactly 1", store.appends)
+	}
+}
+
+func TestApplyWithoutAuditStoreWorksAndAuditReportsUnavailable(t *testing.T) {
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply"})
+	handler := mustHandler(t, handlerConfig{registry: registry})
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("handler panicked with nil audit store: %v", recovered)
+		}
+	}()
+
+	applyResponse := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"test.apply","request":{"value":"one"}}]}`)
+	if applyResponse.Code != http.StatusOK {
+		t.Fatalf("apply status code = %d, want %d; body=%s", applyResponse.Code, http.StatusOK, applyResponse.Body.String())
+	}
+	var result ApplyResult
+	decodeResponse(t, applyResponse, &result)
+	if result.Outcome != transaction.OutcomeCommitted {
+		t.Fatalf("Outcome = %q, want committed", result.Outcome)
+	}
+	if !result.AuditUnrecorded {
+		t.Fatal("AuditUnrecorded = false, want true when no audit store is configured")
+	}
+
+	auditResponse := perform(handler, http.MethodGet, "/audit", "")
+	if auditResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("audit status code = %d, want %d; body=%s", auditResponse.Code, http.StatusServiceUnavailable, auditResponse.Body.String())
+	}
+	var errorResponse ErrorResponse
+	decodeResponse(t, auditResponse, &errorResponse)
+	if errorResponse.Error.Code != "audit_unavailable" {
+		t.Fatalf("audit error code = %q, want audit_unavailable", errorResponse.Error.Code)
+	}
+}
+
+func TestAuditRejectsNonGET(t *testing.T) {
+	store := newAuditStore(t)
+	registry := mustRegistry(t, &mockTxCapability{name: "test.apply"})
+	handler := mustHandler(t, handlerConfig{registry: registry, auditStore: store})
+
+	response := perform(handler, http.MethodPost, "/audit", "")
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusMethodNotAllowed, response.Body.String())
+	}
+	if allow := response.Header().Get("Allow"); allow != http.MethodGet {
+		t.Fatalf("Allow = %q, want %q", allow, http.MethodGet)
+	}
 }
