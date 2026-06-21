@@ -106,7 +106,13 @@ conventions you must follow are below.
   ({name,enabled} hashes distinct while the agent keys on name) — use `uniqueBy:[field]`. (3) A field the
   agent DEDUPS (keep-first) must NOT be modeled as `uniqueItems` (which REJECTS) — that's STRICTER; use
   `dedupItems`. (4) Length caps are Go BYTE length (UTF-8), not JS UTF-16 `.length`. (5) Whitespace trims use
-  Go `unicode.IsSpace`, not ASCII-only. (6) RUNTIME/stateful checks (clock skew, monotonic cursor
+  Go `unicode.IsSpace`, not ASCII-only. (5b) **Match the agent's EXACT lowercasing PER CHECK — `strings.ToLower`
+  ≠ regex `(?i)`.** Go `strings.ToLower` does FULL Unicode case mapping (folds e.g. Kelvin U+212A→`k`, so a
+  `Ｋ://` scheme lowercased by the agent is ACCEPTED) — the manifest must mirror it with JS `.toLowerCase()`
+  (verified `'Ｋ'.toLowerCase()==='k'`), NOT ASCII-only (which would be STRICTER). But Go RE2 `(?i)` does NOT
+  fold non-ASCII (`(?i)secret` does NOT match `ſecret`), so a `(?i)`-scanner is correctly mirrored by
+  ASCII-lowercase. Using ASCII where the agent used `strings.ToLower` = STRICTER; using Unicode where the
+  agent used `(?i)` = LOOSER. (Recurred P9-019: scheme=ToLower needs Unicode; scanner=`(?i)` needs ASCII.) (6) RUNTIME/stateful checks (clock skew, monotonic cursor
   non-regression) belong in the agent, NOT the manifest — putting them in the manifest makes single-request
   validation STRICTER than the agent's. (7) Custom (no-Go-stdlib-oracle) formats need a FROZEN golden corpus
   generated from the Go validator — the corpus IS the parity contract. (8) **A conformance harness whose
