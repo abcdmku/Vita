@@ -2,8 +2,11 @@ package auditlog
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -231,6 +234,136 @@ func TestAtomicRenameFailureLeavesLiveLogUnchanged(t *testing.T) {
 	}
 }
 
+// TestAppendIgnoresPrePlantedPredictableTemp proves the random-temp +
+// O_EXCL atomic-write pattern is immune to a TOCTOU/symlink attack at the OLD
+// predictable temp path. An attacker who pre-plants an entry at path+".tmp"
+// (the formerly-followed location) no longer affects anything: CreateTemp uses
+// a fresh random name, so Append still succeeds atomically and the planted
+// entry is left untouched.
+func TestAppendIgnoresPrePlantedPredictableTemp(t *testing.T) {
+	fileSystem := newMemoryFS()
+	store := mustStore(t, fileSystem, 10)
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("initial Append returned error: %v", err)
+	}
+
+	predictableTemp := testLogPath + ".tmp"
+	planted := []byte("attacker-controlled-target")
+	fileSystem.writeRaw(predictableTemp, planted)
+
+	stored, err := store.Append(validEvent())
+	if err != nil {
+		t.Fatalf("Append with pre-planted predictable temp returned error: %v", err)
+	}
+	if stored.Sequence != 2 {
+		t.Fatalf("stored Sequence = %d, want 2", stored.Sequence)
+	}
+
+	events, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read returned error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("Read returned %d events, want 2", len(events))
+	}
+
+	// The planted entry at the old predictable temp path is never followed or
+	// clobbered: it is left byte-identical.
+	after := fileSystem.mustRead(t, predictableTemp)
+	if !reflect.DeepEqual(after, planted) {
+		t.Fatalf("pre-planted predictable temp changed: got %s, want %s", string(after), string(planted))
+	}
+}
+
+// TestAppendFailsClosedWhenTempDirCreationFails proves Append fails CLOSED and
+// leaves the live log UNCHANGED when the atomic-write cannot create its temp
+// directory (e.g. an unwritable target dir or a symlink loop).
+func TestAppendFailsClosedWhenTempDirCreationFails(t *testing.T) {
+	fileSystem := newMemoryFS()
+	store := mustStore(t, fileSystem, 10)
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("initial Append returned error: %v", err)
+	}
+	before := fileSystem.mustRead(t, testLogPath)
+
+	mkdirErr := errors.New("mkdir failed: not a directory")
+	fileSystem.failNextMkdir(mkdirErr)
+	if _, err := store.Append(validEvent()); !errors.Is(err, mkdirErr) {
+		t.Fatalf("Append error = %v, want mkdirErr", err)
+	}
+
+	after := fileSystem.mustRead(t, testLogPath)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("log changed after failed temp dir creation: got %s, want %s", string(after), string(before))
+	}
+
+	// Recovery: a subsequent Append succeeds and the live log advances.
+	stored, err := store.Append(validEvent())
+	if err != nil {
+		t.Fatalf("Append after failed mkdir returned error: %v", err)
+	}
+	if stored.Sequence != 2 {
+		t.Fatalf("stored Sequence = %d, want 2", stored.Sequence)
+	}
+}
+
+// TestAppendFailsClosedWhenTempCreateFails proves Append fails CLOSED and
+// leaves the live log UNCHANGED when the exclusive temp file cannot be created
+// (e.g. CreateTemp's O_EXCL open fails because the slot is occupied).
+func TestAppendFailsClosedWhenTempCreateFails(t *testing.T) {
+	fileSystem := newMemoryFS()
+	store := mustStore(t, fileSystem, 10)
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("initial Append returned error: %v", err)
+	}
+	before := fileSystem.mustRead(t, testLogPath)
+
+	createErr := errors.New("createtemp failed")
+	fileSystem.failNextCreateTemp(createErr)
+	if _, err := store.Append(validEvent()); !errors.Is(err, createErr) {
+		t.Fatalf("Append error = %v, want createErr", err)
+	}
+
+	after := fileSystem.mustRead(t, testLogPath)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("log changed after failed temp create: got %s, want %s", string(after), string(before))
+	}
+}
+
+// TestAppendFailsClosedWhenTempSyncFails proves a failure between temp write
+// and the rename commit point leaves the live log UNCHANGED and removes the
+// orphaned temp file (no third "mutated-but-reported-failed" state).
+func TestAppendFailsClosedWhenTempSyncFails(t *testing.T) {
+	fileSystem := newMemoryFS()
+	store := mustStore(t, fileSystem, 10)
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("initial Append returned error: %v", err)
+	}
+	before := fileSystem.mustRead(t, testLogPath)
+
+	syncErr := errors.New("sync failed")
+	fileSystem.failNextSync(syncErr)
+	if _, err := store.Append(validEvent()); !errors.Is(err, syncErr) {
+		t.Fatalf("Append error = %v, want syncErr", err)
+	}
+
+	after := fileSystem.mustRead(t, testLogPath)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("log changed after failed sync: got %s, want %s", string(after), string(before))
+	}
+
+	// The orphaned temp file was cleaned up (best-effort) before the commit.
+	for _, name := range fileSystem.createdTmp {
+		if _, err := fileSystem.ReadFile(name); err == nil {
+			t.Fatalf("temp file %q left behind after failed sync", name)
+		}
+	}
+}
+
 func TestLoadRejectsCorruptLogsFailClosed(t *testing.T) {
 	canonical := `[{"sequence":1,"timestampMillis":1717171717000,"actor":{"kind":"agent","id":"agent:planner"},"capability":"system.hostname","operation":"apply","outcome":"committed","reason":"hostname applied"}]`
 	tests := []struct {
@@ -350,14 +483,19 @@ func validEvent() Event {
 }
 
 type memoryFS struct {
-	mu        sync.Mutex
-	files     map[string][]byte
-	writeErr  error
-	renameErr error
+	mu         sync.Mutex
+	files      map[string][]byte
+	dirs       map[string]struct{}
+	tempSeq    int
+	mkdirErr   error
+	createErr  error
+	renameErr  error
+	syncErr    error
+	createdTmp []string
 }
 
 func newMemoryFS() *memoryFS {
-	return &memoryFS{files: map[string][]byte{}}
+	return &memoryFS{files: map[string][]byte{}, dirs: map[string]struct{}{}}
 }
 
 func (m *memoryFS) ReadFile(name string) ([]byte, error) {
@@ -374,21 +512,97 @@ func (m *memoryFS) ReadFile(name string) ([]byte, error) {
 	return out, nil
 }
 
-func (m *memoryFS) WriteFile(name string, data []byte, _ fs.FileMode) error {
+func (m *memoryFS) MkdirAll(path string, _ fs.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.writeErr != nil {
-		err := m.writeErr
-		m.writeErr = nil
+	if m.mkdirErr != nil {
+		err := m.mkdirErr
+		m.mkdirErr = nil
 		return err
 	}
 
-	out := make([]byte, len(data))
-	copy(out, data)
-	m.files[name] = out
+	m.dirs[path] = struct{}{}
 	return nil
 }
+
+func (m *memoryFS) CreateTemp(dir, pattern string) (TempFile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.createErr != nil {
+		err := m.createErr
+		m.createErr = nil
+		return nil, err
+	}
+
+	// Emulate os.CreateTemp: a FRESH random-named file created with
+	// O_CREATE|O_EXCL. The name is unique, so any pre-existing entry (even at
+	// the OLD predictable path+".tmp") is never touched or followed.
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	m.tempSeq++
+	name := filepath.Join(dir, fmt.Sprintf("%s%d%s", prefix, m.tempSeq, suffix))
+	if _, exists := m.files[name]; exists {
+		return nil, &fs.PathError{Op: "createtemp", Path: name, Err: fs.ErrExist}
+	}
+	m.files[name] = []byte{}
+	m.createdTmp = append(m.createdTmp, name)
+
+	return &memTempFile{fsys: m, name: name}, nil
+}
+
+func (m *memoryFS) failNextSync(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncErr = err
+}
+
+func (m *memoryFS) failNextMkdir(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mkdirErr = err
+}
+
+func (m *memoryFS) failNextCreateTemp(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createErr = err
+}
+
+// memTempFile emulates the *os.File handle returned by CreateTemp, writing
+// directly into the parent memoryFS map under its unique random name.
+type memTempFile struct {
+	fsys *memoryFS
+	name string
+}
+
+func (f *memTempFile) Name() string { return f.name }
+
+func (f *memTempFile) Chmod(fs.FileMode) error { return nil }
+
+func (f *memTempFile) Write(data []byte) (int, error) {
+	f.fsys.mu.Lock()
+	defer f.fsys.mu.Unlock()
+
+	cur := f.fsys.files[f.name]
+	cur = append(cur, data...)
+	f.fsys.files[f.name] = cur
+	return len(data), nil
+}
+
+func (f *memTempFile) Sync() error {
+	f.fsys.mu.Lock()
+	defer f.fsys.mu.Unlock()
+
+	if f.fsys.syncErr != nil {
+		err := f.fsys.syncErr
+		f.fsys.syncErr = nil
+		return err
+	}
+	return nil
+}
+
+func (f *memTempFile) Close() error { return nil }
 
 func (m *memoryFS) Rename(oldPath, newPath string) error {
 	m.mu.Lock()
