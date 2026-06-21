@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/network.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -200,6 +200,70 @@ export const IDENTITY_MANIFEST = Object.freeze({
   crossFieldRules: Object.freeze([]),
 }) satisfies CapabilityManifest;
 
+export const NETWORK_MANIFEST = Object.freeze({
+  capability: "network.policy",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        allow: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              interface: Object.freeze({
+                format: "networkInterfaceName",
+                required: true,
+                type: "string",
+              }),
+              port: Object.freeze({
+                required: true,
+                type: "integer",
+                maximum: 65535,
+                minimum: 1,
+                sentinelValues: Object.freeze([
+                  -1,
+                ]),
+              }),
+              proto: Object.freeze({
+                required: true,
+                type: "string",
+                enum: Object.freeze([
+                  "tcp",
+                  "udp",
+                ]),
+              }),
+              sourceCidr: Object.freeze({
+                format: "cidrLiteral",
+                required: true,
+                type: "string",
+              }),
+              unsafeWideOpen: Object.freeze({
+                required: false,
+                type: "boolean",
+              }),
+            }),
+            crossFieldRules: Object.freeze([
+              Object.freeze({
+                type: "forbidIntegerSentinelAndCidrCoversAllUnlessTrue",
+                control: "unsafeWideOpen",
+                target: "sourceCidr",
+                integer: "port",
+                sentinel: -1,
+              }),
+            ]),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
+
 export const NODE_CONFIG_MANIFEST = Object.freeze({
   capability: "node.config",
   version: 1,
@@ -371,6 +435,7 @@ export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "capsule.registry": CAPSULE_MANIFEST,
   "hostname.set": HOSTNAME_MANIFEST,
   "identity.attestation": IDENTITY_MANIFEST,
+  "network.policy": NETWORK_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
   "services.config": SERVICES_MANIFEST,
   "time.set": TIME_MANIFEST,

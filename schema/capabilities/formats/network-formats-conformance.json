@@ -1,0 +1,128 @@
+{
+  "cidrLiteral": [
+    {
+      "name": "ipv4 host bits mask",
+      "value": "10.0.0.5/24",
+      "expect": "accept",
+      "canonical": "10.0.0.0/24",
+      "coversAll": false
+    },
+    {
+      "name": "ipv4 all covers all",
+      "value": "0.0.0.0/0",
+      "expect": "accept",
+      "canonical": "0.0.0.0/0",
+      "coversAll": true
+    },
+    {
+      "name": "ipv4 host all masks to covers all",
+      "value": "10.1.2.3/0",
+      "expect": "accept",
+      "canonical": "0.0.0.0/0",
+      "coversAll": true
+    },
+    {
+      "name": "ipv4 max prefix accepts",
+      "value": "192.0.2.1/32",
+      "expect": "accept",
+      "canonical": "192.0.2.1/32",
+      "coversAll": false
+    },
+    {
+      "name": "ipv4 leading zero bits reject",
+      "value": "192.0.2.1/024",
+      "expect": "reject"
+    },
+    {
+      "name": "ipv4 plus bits reject",
+      "value": "192.0.2.1/+24",
+      "expect": "reject"
+    },
+    {
+      "name": "ipv6 host bits mask",
+      "value": "2001:0db8::1/64",
+      "expect": "accept",
+      "canonical": "2001:db8::/64",
+      "coversAll": false
+    },
+    {
+      "name": "ipv6 all covers all",
+      "value": "::/0",
+      "expect": "accept",
+      "canonical": "::/0",
+      "coversAll": true
+    },
+    {
+      "name": "ipv6 host all masks to covers all",
+      "value": "2001:db8::1/0",
+      "expect": "accept",
+      "canonical": "::/0",
+      "coversAll": true
+    },
+    {
+      "name": "ipv4 mapped ipv6 accepts",
+      "value": "::ffff:192.0.2.129/120",
+      "expect": "accept",
+      "canonical": "::ffff:192.0.2.0/120",
+      "coversAll": false
+    },
+    {
+      "name": "empty rejects",
+      "value": "",
+      "expect": "reject"
+    },
+    {
+      "name": "missing slash rejects",
+      "value": "10.0.0.1",
+      "expect": "reject"
+    },
+    {
+      "name": "bad cidr rejects",
+      "value": "10.0.0.999/24",
+      "expect": "reject"
+    },
+    {
+      "name": "ipv4 overwide bits rejects",
+      "value": "10.0.0.1/33",
+      "expect": "reject"
+    },
+    {
+      "name": "ipv6 overwide bits rejects",
+      "value": "2001:db8::1/129",
+      "expect": "reject"
+    },
+    {
+      "name": "decimal bits reject",
+      "value": "10.0.0.1/24.0",
+      "expect": "reject"
+    },
+    {
+      "name": "exponent bits reject",
+      "value": "10.0.0.1/2e4",
+      "expect": "reject"
+    },
+    {
+      "name": "trimmed rejects",
+      "value": " 10.0.0.1/24",
+      "expect": "reject"
+    },
+    {
+      "name": "zone rejects",
+      "value": "fe80::1%eth0/64",
+      "expect": "reject"
+    }
+  ],
+  "networkInterfaceName": [
+    { "name": "eth0 accepts", "value": "eth0", "expect": "accept" },
+    { "name": "wlan punctuation accepts", "value": "wlx0.1:2-3_4", "expect": "accept" },
+    { "name": "digit first accepts", "value": "0tap", "expect": "accept" },
+    { "name": "fifteen bytes accepts", "value": "abcdefghijklmn0", "expect": "accept" },
+    { "name": "empty rejects", "value": "", "expect": "reject" },
+    { "name": "sixteen bytes rejects", "value": "abcdefghijklmnop", "expect": "reject" },
+    { "name": "underscore first rejects", "value": "_eth0", "expect": "reject" },
+    { "name": "space rejects", "value": "eth 0", "expect": "reject" },
+    { "name": "slash rejects", "value": "eth/0", "expect": "reject" },
+    { "name": "trimmed rejects", "value": "eth0 ", "expect": "reject" },
+    { "name": "non ascii rejects", "value": "éth0", "expect": "reject" }
+  ]
+}

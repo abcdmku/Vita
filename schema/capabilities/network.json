@@ -1,0 +1,58 @@
+{
+  "capability": "network.policy",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "allow": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "proto": {
+                "required": true,
+                "type": "string",
+                "enum": ["tcp", "udp"]
+              },
+              "port": {
+                "maximum": 65535,
+                "minimum": 1,
+                "required": true,
+                "sentinelValues": [-1],
+                "type": "integer"
+              },
+              "sourceCidr": {
+                "format": "cidrLiteral",
+                "required": true,
+                "type": "string"
+              },
+              "interface": {
+                "format": "networkInterfaceName",
+                "required": true,
+                "type": "string"
+              },
+              "unsafeWideOpen": {
+                "required": false,
+                "type": "boolean"
+              }
+            },
+            "crossFieldRules": [
+              {
+                "type": "forbidIntegerSentinelAndCidrCoversAllUnlessTrue",
+                "control": "unsafeWideOpen",
+                "target": "sourceCidr",
+                "integer": "port",
+                "sentinel": -1
+              }
+            ]
+          },
+          "required": true,
+          "type": "array"
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

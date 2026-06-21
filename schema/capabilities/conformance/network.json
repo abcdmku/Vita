@@ -1,0 +1,544 @@
+[
+  {
+    "name": "empty allow accepts",
+    "request": {
+      "desired": {
+        "allow": []
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid tcp rule accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 443,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid udp rule accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": 53,
+            "sourceCidr": "192.0.2.0/24",
+            "interface": "wlan0"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "port one accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 1,
+            "sourceCidr": "198.51.100.0/24",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "port max accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": 65535,
+            "sourceCidr": "198.51.100.0/24",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "port all scoped accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -1,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0",
+            "unsafeWideOpen": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "non canonical cidr accepts and normalizes",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 80,
+            "sourceCidr": "10.0.0.5/24",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "accept",
+    "normalized": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 80,
+            "sourceCidr": "10.0.0.0/24",
+            "interface": "eth0"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "ipv6 cidr accepts and normalizes",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": 546,
+            "sourceCidr": "2001:0db8::1/64",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "accept",
+    "normalized": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": 546,
+            "sourceCidr": "2001:db8::/64",
+            "interface": "eth0"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "interface fifteen bytes accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 22,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "abcdefghijklmn0"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "bad proto rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "icmp",
+            "port": 80,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/proto"
+  },
+  {
+    "name": "absent proto rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "port": 80,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/proto"
+  },
+  {
+    "name": "port zero rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 0,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/port"
+  },
+  {
+    "name": "port negative non sentinel rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -2,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/port"
+  },
+  {
+    "name": "port above max rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 65536,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/port"
+  },
+  {
+    "name": "port decimal literal rejects",
+    "request": "{\"desired\":{\"allow\":[{\"proto\":\"tcp\",\"port\":80.0,\"sourceCidr\":\"10.0.0.0/8\",\"interface\":\"eth0\"}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/port"
+  },
+  {
+    "name": "port exponent literal rejects",
+    "request": "{\"desired\":{\"allow\":[{\"proto\":\"tcp\",\"port\":8e1,\"sourceCidr\":\"10.0.0.0/8\",\"interface\":\"eth0\"}]}}",
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/port"
+  },
+  {
+    "name": "bad cidr rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 80,
+            "sourceCidr": "10.0.0.999/24",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/sourceCidr"
+  },
+  {
+    "name": "interface sixteen bytes rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 22,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "abcdefghijklmnop"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/interface"
+  },
+  {
+    "name": "interface bad char rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 22,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth/0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/interface"
+  },
+  {
+    "name": "interface empty rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 22,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": ""
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/interface"
+  },
+  {
+    "name": "wide open ipv4 false rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -1,
+            "sourceCidr": "0.0.0.0/0",
+            "interface": "eth0",
+            "unsafeWideOpen": false
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/sourceCidr"
+  },
+  {
+    "name": "wide open ipv4 true accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -1,
+            "sourceCidr": "0.0.0.0/0",
+            "interface": "eth0",
+            "unsafeWideOpen": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "scoped port all false accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": -1,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0",
+            "unsafeWideOpen": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "wide open ipv6 absent unsafe rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -1,
+            "sourceCidr": "::/0",
+            "interface": "eth0"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/sourceCidr"
+  },
+  {
+    "name": "wide open ipv6 true accepts",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "udp",
+            "port": -1,
+            "sourceCidr": "::/0",
+            "interface": "eth0",
+            "unsafeWideOpen": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "wide open host bits false rejects after mask",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": -1,
+            "sourceCidr": "10.1.2.3/0",
+            "interface": "eth0",
+            "unsafeWideOpen": false
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/sourceCidr"
+  },
+  {
+    "name": "absent allow rejects",
+    "request": {
+      "desired": {}
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow"
+  },
+  {
+    "name": "null allow rejects",
+    "request": {
+      "desired": {
+        "allow": null
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow"
+  },
+  {
+    "name": "allow must be array rejects",
+    "request": {
+      "desired": {
+        "allow": {}
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow"
+  },
+  {
+    "name": "null rule rejects",
+    "request": {
+      "desired": {
+        "allow": [null]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0"
+  },
+  {
+    "name": "unsafeWideOpen must be boolean rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 80,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0",
+            "unsafeWideOpen": "false"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/unsafeWideOpen"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "allow": []
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "allow": [],
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown rule key rejects",
+    "request": {
+      "desired": {
+        "allow": [
+          {
+            "proto": "tcp",
+            "port": 80,
+            "sourceCidr": "10.0.0.0/8",
+            "interface": "eth0",
+            "extra": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/allow/0/extra"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"allow\":[]},\"desired\":{\"allow\":[]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate rule JSON key rejects",
+    "request": "{\"desired\":{\"allow\":[{\"proto\":\"tcp\",\"proto\":\"udp\",\"port\":80,\"sourceCidr\":\"10.0.0.0/8\",\"interface\":\"eth0\"}]}}",
+    "expect": "reject"
+  }
+]

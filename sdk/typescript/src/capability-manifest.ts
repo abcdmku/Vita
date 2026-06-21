@@ -11,7 +11,8 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * String formats are a closed, governed set. `posixUsername`, `posixAccountName`, `groupName`,
  * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
  * `capsuleVersion`, `sriIntegrity`, `bundleRefString`, and
- * `bundleVersionString`, `didPlcOrWeb`, `atprotoHandle`, and `keyReference`
+ * `bundleVersionString`, `didPlcOrWeb`, `atprotoHandle`, `keyReference`,
+ * `cidrLiteral`, and `networkInterfaceName`
  * are structured capability-agent parity formats.
  * `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
@@ -43,7 +44,9 @@ export type StringFieldFormat =
   | "bundleVersionString"
   | "didPlcOrWeb"
   | "atprotoHandle"
-  | "keyReference";
+  | "keyReference"
+  | "cidrLiteral"
+  | "networkInterfaceName";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -70,6 +73,7 @@ export interface IntegerFieldSchema {
   readonly required: boolean;
   readonly minimum?: number;
   readonly maximum?: number;
+  readonly sentinelValues?: readonly number[];
 }
 
 export interface BooleanFieldSchema {
@@ -112,6 +116,13 @@ export type CrossFieldRule =
       readonly type: "requireEmptyArrayWhenFalse";
       readonly control: string;
       readonly target: string;
+    }
+  | {
+      readonly type: "forbidIntegerSentinelAndCidrCoversAllUnlessTrue";
+      readonly control: string;
+      readonly integer: string;
+      readonly target: string;
+      readonly sentinel: number;
     };
 
 export interface CapabilityManifest {
@@ -233,6 +244,7 @@ interface CompiledIntegerFieldSchema {
   required: boolean;
   minimum?: number;
   maximum?: number;
+  sentinelValues?: ReadonlySet<number>;
 }
 
 interface CompiledBooleanFieldSchema {
@@ -323,7 +335,7 @@ const STRING_SCHEMA_FIELDS = new Set([
   "trimmed",
   "type",
 ]);
-const INTEGER_SCHEMA_FIELDS = new Set(["maximum", "minimum", "required", "type"]);
+const INTEGER_SCHEMA_FIELDS = new Set(["maximum", "minimum", "required", "sentinelValues", "type"]);
 const BOOLEAN_SCHEMA_FIELDS = new Set(["required", "type"]);
 const ARRAY_SCHEMA_FIELDS = new Set([
   "items",
@@ -336,7 +348,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "uniqueItems",
 ]);
 const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
-const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
+const CROSS_FIELD_RULE_FIELDS = new Set(["control", "integer", "sentinel", "target", "type"]);
 export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResult {
   try {
     const normalized = safeNormalize(raw);
@@ -863,6 +875,14 @@ function parseIntegerFieldSchema(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
+  const sentinelValues = readOptionalSafeIntegerArray(
+    value,
+    "sentinelValues",
+    [...path, "sentinelValues"],
+    Number.MIN_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
 
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
     addError(errors, path, "minimum must be less than or equal to maximum.");
@@ -881,6 +901,7 @@ function parseIntegerFieldSchema(
     required: boolean;
     minimum?: number;
     maximum?: number;
+    sentinelValues?: readonly number[];
   } = {
     required,
     type: "integer",
@@ -893,6 +914,10 @@ function parseIntegerFieldSchema(
   if (maximum !== undefined) {
     compiled.maximum = maximum;
     manifest.maximum = maximum;
+  }
+  if (sentinelValues !== undefined) {
+    compiled.sentinelValues = new Set(sentinelValues);
+    manifest.sentinelValues = sentinelValues;
   }
 
   return {
@@ -1152,43 +1177,149 @@ function parseCrossFieldRule(
   const typeValue = readRequiredString(value, "type", [...path, "type"], errors);
   const control = readRequiredString(value, "control", [...path, "control"], errors);
   const target = readRequiredString(value, "target", [...path, "target"], errors);
-
-  if (fields !== undefined && control !== undefined) {
-    const controlField = fields.get(control);
-
-    if (controlField === undefined || controlField.type !== "boolean") {
-      addError(errors, [...path, "control"], "Control field must reference a boolean field.");
-    }
-  }
-
-  if (fields !== undefined && target !== undefined) {
-    const targetField = fields.get(target);
-
-    if (targetField === undefined || targetField.type !== "array") {
-      addError(errors, [...path, "target"], "Target field must reference an array field.");
-    }
-  }
+  const integer = readOptionalString(value, "integer", [...path, "integer"], errors);
+  const sentinel = readOptionalSafeInteger(
+    value,
+    "sentinel",
+    [...path, "sentinel"],
+    Number.MIN_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
 
   if (errors.length > errorStart || typeValue === undefined || control === undefined || target === undefined) {
     return undefined;
   }
 
   switch (typeValue) {
-    case "requireNonEmptyArrayWhenTrue":
+    case "requireNonEmptyArrayWhenTrue": {
+      if (integer !== undefined) {
+        addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
+      }
+      if (sentinel !== undefined) {
+        addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      validateBooleanControlField(fields, control, [...path, "control"], errors);
+      validateArrayTargetField(fields, target, [...path, "target"], errors);
+      if (errors.length > errorStart) {
+        return undefined;
+      }
       return Object.freeze({
         control,
         target,
         type: "requireNonEmptyArrayWhenTrue",
       });
-    case "requireEmptyArrayWhenFalse":
+    }
+    case "requireEmptyArrayWhenFalse": {
+      if (integer !== undefined) {
+        addError(errors, [...path, "integer"], "integer is not supported by this cross-field rule.");
+      }
+      if (sentinel !== undefined) {
+        addError(errors, [...path, "sentinel"], "sentinel is not supported by this cross-field rule.");
+      }
+      validateBooleanControlField(fields, control, [...path, "control"], errors);
+      validateArrayTargetField(fields, target, [...path, "target"], errors);
+      if (errors.length > errorStart) {
+        return undefined;
+      }
       return Object.freeze({
         control,
         target,
         type: "requireEmptyArrayWhenFalse",
       });
+    }
+    case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue": {
+      if (integer === undefined) {
+        addError(errors, [...path, "integer"], "integer field is required for this cross-field rule.");
+      }
+      if (sentinel === undefined) {
+        addError(errors, [...path, "sentinel"], "sentinel is required for this cross-field rule.");
+      }
+      validateBooleanControlField(fields, control, [...path, "control"], errors);
+      validateIntegerRuleField(fields, integer, [...path, "integer"], errors);
+      validateCIDRTargetField(fields, target, [...path, "target"], errors);
+      if (errors.length > errorStart || integer === undefined || sentinel === undefined) {
+        return undefined;
+      }
+      return Object.freeze({
+        control,
+        integer,
+        sentinel,
+        target,
+        type: "forbidIntegerSentinelAndCidrCoversAllUnlessTrue",
+      });
+    }
     default:
       addError(errors, [...path, "type"], "Unknown cross-field rule type.");
       return undefined;
+  }
+}
+
+function validateBooleanControlField(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  control: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (fields === undefined) {
+    return;
+  }
+
+  const controlField = fields.get(control);
+
+  if (controlField === undefined || controlField.type !== "boolean") {
+    addError(errors, path, "Control field must reference a boolean field.");
+  }
+}
+
+function validateArrayTargetField(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  target: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (fields === undefined) {
+    return;
+  }
+
+  const targetField = fields.get(target);
+
+  if (targetField === undefined || targetField.type !== "array") {
+    addError(errors, path, "Target field must reference an array field.");
+  }
+}
+
+function validateIntegerRuleField(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  integer: string | undefined,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (integer === undefined || fields === undefined) {
+    return;
+  }
+
+  const integerField = fields.get(integer);
+
+  if (integerField === undefined || integerField.type !== "integer") {
+    addError(errors, path, "integer must reference an integer field.");
+  }
+}
+
+function validateCIDRTargetField(
+  fields: ReadonlyMap<string, CompiledFieldSchema> | undefined,
+  target: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (fields === undefined) {
+    return;
+  }
+
+  const targetField = fields.get(target);
+
+  if (targetField === undefined || targetField.type !== "string" || targetField.format !== "cidrLiteral") {
+    addError(errors, path, "Target field must reference a cidrLiteral string field.");
   }
 }
 
@@ -1692,12 +1823,16 @@ function validateIntegerField(
     addError(errors, path, "Expected integer JSON literal.");
   }
 
-  if (schema.minimum !== undefined && value < schema.minimum) {
-    addError(errors, path, "Integer is below minimum.");
-  }
+  const isSentinel = schema.sentinelValues?.has(value) ?? false;
 
-  if (schema.maximum !== undefined && value > schema.maximum) {
-    addError(errors, path, "Integer is above maximum.");
+  if (!isSentinel) {
+    if (schema.minimum !== undefined && value < schema.minimum) {
+      addError(errors, path, "Integer is below minimum.");
+    }
+
+    if (schema.maximum !== undefined && value > schema.maximum) {
+      addError(errors, path, "Integer is above maximum.");
+    }
   }
 
   if (errors.length > errorStart) {
@@ -1915,21 +2050,15 @@ function applyCrossFieldRules(
       continue;
     }
 
-    if (!hasOwn(value, rule.control) || !hasOwn(value, rule.target)) {
-      addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
-      continue;
-    }
-
-    const control = value[rule.control];
-    const target = value[rule.target];
-
-    if (typeof control !== "boolean" || !Array.isArray(target)) {
-      addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
-      continue;
-    }
-
     switch (rule.type) {
-      case "requireNonEmptyArrayWhenTrue":
+      case "requireNonEmptyArrayWhenTrue": {
+        const control = value[rule.control];
+        const target = value[rule.target];
+
+        if (typeof control !== "boolean" || !Array.isArray(target)) {
+          addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
+          break;
+        }
         if (control && target.length === 0) {
           addError(
             errors,
@@ -1938,7 +2067,15 @@ function applyCrossFieldRules(
           );
         }
         break;
-      case "requireEmptyArrayWhenFalse":
+      }
+      case "requireEmptyArrayWhenFalse": {
+        const control = value[rule.control];
+        const target = value[rule.target];
+
+        if (typeof control !== "boolean" || !Array.isArray(target)) {
+          addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
+          break;
+        }
         if (!control && target.length !== 0) {
           addError(
             errors,
@@ -1947,6 +2084,26 @@ function applyCrossFieldRules(
           );
         }
         break;
+      }
+      case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue": {
+        const integer = value[rule.integer];
+        const target = value[rule.target];
+        const enabled = hasOwn(value, rule.control) ? value[rule.control] : false;
+
+        if (typeof integer !== "number" || typeof target !== "string" || typeof enabled !== "boolean") {
+          addError(errors, [...path, rule.target], "Cross-field rule references invalid fields.");
+          break;
+        }
+
+        if (integer === rule.sentinel && cidrLiteralCoversAll(target) && !enabled) {
+          addError(
+            errors,
+            [...path, rule.target],
+            `${rule.integer} ${rule.sentinel} with ${rule.target} covering all sources requires ${rule.control} true.`,
+          );
+        }
+        break;
+      }
     }
   }
 }
@@ -2143,6 +2300,59 @@ function readOptionalSafeInteger(
   return child;
 }
 
+function readOptionalSafeIntegerArray(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  minimum: number,
+  maximum: number,
+  errors: CapabilityRejection[],
+): readonly number[] | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  const child = value[key];
+
+  if (!Array.isArray(child) || child.length === 0) {
+    addError(errors, path, "Expected non-empty safe integer array.");
+    return undefined;
+  }
+
+  const seen = new Set<number>();
+  const values: number[] = [];
+  const errorStart = errors.length;
+
+  for (let index = 0; index < child.length; index += 1) {
+    const item = child[index];
+    const itemPath = [...path, String(index)];
+
+    if (
+      typeof item !== "number" ||
+      !Number.isSafeInteger(item) ||
+      item < minimum ||
+      item > maximum
+    ) {
+      addError(errors, itemPath, "Expected safe integer within bounds.");
+      continue;
+    }
+
+    if (seen.has(item)) {
+      addError(errors, itemPath, "Duplicate safe integer value.");
+      continue;
+    }
+
+    seen.add(item);
+    values.push(item);
+  }
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze(values);
+}
+
 function readOptionalStringEnum(
   value: JsonRecord,
   key: string,
@@ -2284,7 +2494,9 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "bundleVersionString" ||
     value === "didPlcOrWeb" ||
     value === "atprotoHandle" ||
-    value === "keyReference"
+    value === "keyReference" ||
+    value === "cidrLiteral" ||
+    value === "networkInterfaceName"
   );
 }
 
@@ -2300,6 +2512,10 @@ function normalizeStringFormat(
       return isHostnameLabel(value) ? value : undefined;
     case "ipLiteral":
       return canonicalizeIPLiteral(value);
+    case "cidrLiteral":
+      return canonicalizeCIDRLiteral(value);
+    case "networkInterfaceName":
+      return isNetworkInterfaceName(value) ? value : undefined;
     case "hostnameOrIp": {
       const ip = canonicalizeIPLiteral(value);
 
@@ -3761,6 +3977,78 @@ function canonicalizeIPLiteral(value: string): string | undefined {
   return canonicalizeIPv6Literal(value);
 }
 
+function canonicalizeCIDRLiteral(value: string): string | undefined {
+  if (value.length === 0 || goTrimSpace(value) !== value) {
+    return undefined;
+  }
+
+  const separator = value.lastIndexOf("/");
+
+  if (separator < 0) {
+    return undefined;
+  }
+
+  const address = value.slice(0, separator);
+  const bits = parseNetipPrefixBits(value.slice(separator + 1));
+
+  if (bits === undefined) {
+    return undefined;
+  }
+
+  const ipv4 = parseIPv4Literal(address);
+
+  if (ipv4 !== undefined) {
+    if (bits < 0 || bits > 32) {
+      return undefined;
+    }
+
+    return `${formatIPv4Octets(maskIPv4Octets(ipv4, bits))}/${bits}`;
+  }
+
+  const ipv6 = parseIPv6LiteralGroups(address);
+
+  if (ipv6 === undefined || bits < 0 || bits > 128) {
+    return undefined;
+  }
+
+  return `${formatIPv6Groups(maskIPv6Groups(ipv6, bits))}/${bits}`;
+}
+
+function cidrLiteralCoversAll(value: string): boolean {
+  const canonical = canonicalizeCIDRLiteral(value);
+
+  return canonical === "0.0.0.0/0" || canonical === "::/0";
+}
+
+function isNetworkInterfaceName(value: string): boolean {
+  if (value.length === 0 || utf8ByteLength(value) > 15 || goTrimSpace(value) !== value) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (index === 0) {
+      if (!isAsciiAlphaNumericCode(code)) {
+        return false;
+      }
+      continue;
+    }
+
+    if (
+      !isAsciiAlphaNumericCode(code) &&
+      code !== 46 &&
+      code !== 58 &&
+      code !== 95 &&
+      code !== 45
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function parseIPv4Literal(value: string): readonly [number, number, number, number] | undefined {
   const parts = value.split(".");
 
@@ -3822,7 +4110,74 @@ function parseIPv4Octet(value: string): number | undefined {
   return parsed;
 }
 
+function parseNetipPrefixBits(value: string): number | undefined {
+  if (value.length === 0) {
+    return undefined;
+  }
+
+  const first = value.charCodeAt(0);
+
+  if (value.length > 1 && (first < 49 || first > 57)) {
+    return undefined;
+  }
+
+  let parsed = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isAsciiDigitCode(code)) {
+      return undefined;
+    }
+
+    parsed = parsed * 10 + code - 48;
+
+    if (parsed > Number.MAX_SAFE_INTEGER) {
+      return undefined;
+    }
+  }
+
+  return parsed;
+}
+
+function maskIPv4Octets(
+  octets: readonly [number, number, number, number],
+  bits: number,
+): readonly [number, number, number, number] {
+  const output = [octets[0], octets[1], octets[2], octets[3]] satisfies [number, number, number, number];
+  let remaining = bits;
+
+  for (let index = 0; index < output.length; index += 1) {
+    const octet = output[index];
+
+    if (octet === undefined) {
+      return output;
+    }
+
+    if (remaining >= 8) {
+      remaining -= 8;
+      continue;
+    }
+
+    if (remaining <= 0) {
+      output[index] = 0;
+      continue;
+    }
+
+    output[index] = octet & (0xff << (8 - remaining));
+    remaining = 0;
+  }
+
+  return output;
+}
+
 function canonicalizeIPv6Literal(value: string): string | undefined {
+  const groups = parseIPv6LiteralGroups(value);
+
+  return groups === undefined ? undefined : formatIPv6Groups(groups);
+}
+
+function parseIPv6LiteralGroups(value: string): readonly number[] | undefined {
   if (!containsChar(value, 58)) {
     return undefined;
   }
@@ -3836,7 +4191,7 @@ function canonicalizeIPv6Literal(value: string): string | undefined {
   if (doubleColon === -1) {
     const groups = parseIPv6GroupSequence(value, true);
 
-    return groups !== undefined && groups.length === 8 ? formatIPv6Groups(groups) : undefined;
+    return groups !== undefined && groups.length === 8 ? groups : undefined;
   }
 
   const left = parseIPv6GroupSequence(value.slice(0, doubleColon), false);
@@ -3852,7 +4207,7 @@ function canonicalizeIPv6Literal(value: string): string | undefined {
     ...right,
   ];
 
-  return groups.length === 8 ? formatIPv6Groups(groups) : undefined;
+  return groups.length === 8 ? Object.freeze(groups) : undefined;
 }
 
 function parseIPv6GroupSequence(value: string, allowEmbeddedIPv4Tail: boolean): readonly number[] | undefined {
@@ -3915,6 +4270,34 @@ function parseIPv6HexGroup(value: string): number | undefined {
   }
 
   return parsed;
+}
+
+function maskIPv6Groups(groups: readonly number[], bits: number): readonly number[] {
+  const output = groups.slice();
+  let remaining = bits;
+
+  for (let index = 0; index < output.length; index += 1) {
+    const group = output[index];
+
+    if (group === undefined) {
+      return Object.freeze(output);
+    }
+
+    if (remaining >= 16) {
+      remaining -= 16;
+      continue;
+    }
+
+    if (remaining <= 0) {
+      output[index] = 0;
+      continue;
+    }
+
+    output[index] = group & (0xffff << (16 - remaining));
+    remaining = 0;
+  }
+
+  return Object.freeze(output);
 }
 
 function parseHexDigit(code: number): number | undefined {

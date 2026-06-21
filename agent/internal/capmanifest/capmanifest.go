@@ -49,6 +49,7 @@ type FieldSchema struct {
 	Format                   string
 	Minimum                  *int64
 	Maximum                  *int64
+	SentinelValues           []int64
 	Items                    *FieldSchema
 	MinItems                 *int64
 	MaxItems                 *int64
@@ -60,9 +61,11 @@ type FieldSchema struct {
 }
 
 type CrossFieldRule struct {
-	Type    string
-	Control string
-	Target  string
+	Type     string
+	Control  string
+	Target   string
+	Integer  string
+	Sentinel *int64
 }
 
 type jsonValue interface{}
@@ -97,6 +100,7 @@ type compiledField struct {
 	format                   string
 	minimum                  *int64
 	maximum                  *int64
+	sentinelValues           map[int64]struct{}
 	items                    *compiledField
 	minItems                 *int64
 	maxItems                 *int64
@@ -140,10 +144,11 @@ var (
 		"type":                     {},
 	}
 	integerSchemaFields = map[string]struct{}{
-		"maximum":  {},
-		"minimum":  {},
-		"required": {},
-		"type":     {},
+		"maximum":        {},
+		"minimum":        {},
+		"required":       {},
+		"sentinelValues": {},
+		"type":           {},
 	}
 	booleanSchemaFields = map[string]struct{}{
 		"required": {},
@@ -166,9 +171,11 @@ var (
 		"type":            {},
 	}
 	crossFieldRuleFields = map[string]struct{}{
-		"control": {},
-		"target":  {},
-		"type":    {},
+		"control":  {},
+		"integer":  {},
+		"sentinel": {},
+		"target":   {},
+		"type":     {},
 	}
 )
 
@@ -466,15 +473,20 @@ func parseIntegerFieldSchema(object jsonObject, required bool, path string) (Fie
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	sentinelValues, err := optionalSafeIntegerArray(object, "sentinelValues", joinPath(path, "sentinelValues"), -maxSafeInteger, maxSafeInteger)
+	if err != nil {
+		return FieldSchema{}, err
+	}
 	if minimum != nil && maximum != nil && *minimum > *maximum {
 		return FieldSchema{}, pathError(path, "minimum must be less than or equal to maximum")
 	}
 
 	return FieldSchema{
-		Type:     "integer",
-		Required: required,
-		Minimum:  minimum,
-		Maximum:  maximum,
+		Type:           "integer",
+		Required:       required,
+		Minimum:        minimum,
+		Maximum:        maximum,
+		SentinelValues: sentinelValues,
 	}, nil
 }
 
@@ -612,23 +624,94 @@ func parseCrossFieldRule(value jsonValue, fields map[string]FieldSchema, path st
 	if err != nil {
 		return CrossFieldRule{}, err
 	}
-	if ruleType != "requireNonEmptyArrayWhenTrue" && ruleType != "requireEmptyArrayWhenFalse" {
+	integer, err := optionalString(object, "integer", joinPath(path, "integer"))
+	if err != nil {
+		return CrossFieldRule{}, err
+	}
+	_, hasInteger := object["integer"]
+	sentinel, err := optionalSafeInteger(object, "sentinel", joinPath(path, "sentinel"), -maxSafeInteger, maxSafeInteger)
+	if err != nil {
+		return CrossFieldRule{}, err
+	}
+	_, hasSentinel := object["sentinel"]
+
+	switch ruleType {
+	case "requireNonEmptyArrayWhenTrue", "requireEmptyArrayWhenFalse":
+		if hasInteger {
+			return CrossFieldRule{}, pathError(joinPath(path, "integer"), "integer is not supported by this cross-field rule")
+		}
+		if hasSentinel {
+			return CrossFieldRule{}, pathError(joinPath(path, "sentinel"), "sentinel is not supported by this cross-field rule")
+		}
+		if err := validateCrossFieldBooleanControl(fields, control, joinPath(path, "control")); err != nil {
+			return CrossFieldRule{}, err
+		}
+		if err := validateCrossFieldArrayTarget(fields, target, joinPath(path, "target")); err != nil {
+			return CrossFieldRule{}, err
+		}
+		return CrossFieldRule{
+			Type:    ruleType,
+			Control: control,
+			Target:  target,
+		}, nil
+	case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue":
+		if !hasInteger || integer == "" {
+			return CrossFieldRule{}, pathError(joinPath(path, "integer"), "integer field is required for this cross-field rule")
+		}
+		if !hasSentinel || sentinel == nil {
+			return CrossFieldRule{}, pathError(joinPath(path, "sentinel"), "sentinel is required for this cross-field rule")
+		}
+		if err := validateCrossFieldBooleanControl(fields, control, joinPath(path, "control")); err != nil {
+			return CrossFieldRule{}, err
+		}
+		if err := validateCrossFieldIntegerField(fields, integer, joinPath(path, "integer")); err != nil {
+			return CrossFieldRule{}, err
+		}
+		if err := validateCrossFieldCIDRTarget(fields, target, joinPath(path, "target")); err != nil {
+			return CrossFieldRule{}, err
+		}
+		return CrossFieldRule{
+			Type:     ruleType,
+			Control:  control,
+			Target:   target,
+			Integer:  integer,
+			Sentinel: cloneInt64Pointer(sentinel),
+		}, nil
+	default:
 		return CrossFieldRule{}, pathError(joinPath(path, "type"), "unknown cross-field rule type")
 	}
+}
+
+func validateCrossFieldBooleanControl(fields map[string]FieldSchema, control string, path string) error {
 	controlField, ok := fields[control]
 	if !ok || controlField.Type != "boolean" {
-		return CrossFieldRule{}, pathError(joinPath(path, "control"), "control field must reference a boolean field")
+		return pathError(path, "control field must reference a boolean field")
 	}
+	return nil
+}
+
+func validateCrossFieldArrayTarget(fields map[string]FieldSchema, target string, path string) error {
 	targetField, ok := fields[target]
 	if !ok || targetField.Type != "array" {
-		return CrossFieldRule{}, pathError(joinPath(path, "target"), "target field must reference an array field")
+		return pathError(path, "target field must reference an array field")
 	}
+	return nil
+}
 
-	return CrossFieldRule{
-		Type:    ruleType,
-		Control: control,
-		Target:  target,
-	}, nil
+func validateCrossFieldIntegerField(fields map[string]FieldSchema, integer string, path string) error {
+	integerField, ok := fields[integer]
+	if !ok || integerField.Type != "integer" {
+		return pathError(path, "integer must reference an integer field")
+	}
+	return nil
+}
+
+func validateCrossFieldCIDRTarget(fields map[string]FieldSchema, target string, path string) error {
+	targetField, ok := fields[target]
+	if !ok || targetField.Type != "string" || targetField.Format != "cidrLiteral" {
+		return pathError(path, "target field must reference a cidrLiteral string field")
+	}
+	return nil
 }
 
 func compileManifest(manifest Manifest) (compiledManifest, error) {
@@ -665,16 +748,8 @@ func compileManifest(manifest Manifest) (compiledManifest, error) {
 
 	for index, rule := range manifest.CrossFieldRules {
 		path := joinPath("crossFieldRules", strconv.Itoa(index))
-		if rule.Type != "requireNonEmptyArrayWhenTrue" && rule.Type != "requireEmptyArrayWhenFalse" {
-			return compiledManifest{}, pathError(joinPath(path, "type"), "unknown cross-field rule type")
-		}
-		controlField, ok := fields[rule.Control]
-		if !ok || controlField.fieldType != "boolean" {
-			return compiledManifest{}, pathError(joinPath(path, "control"), "control field must reference a boolean field")
-		}
-		targetField, ok := fields[rule.Target]
-		if !ok || targetField.fieldType != "array" {
-			return compiledManifest{}, pathError(joinPath(path, "target"), "target field must reference an array field")
+		if err := validateCompiledCrossFieldRule(rule, fields, path); err != nil {
+			return compiledManifest{}, err
 		}
 	}
 
@@ -683,6 +758,49 @@ func compileManifest(manifest Manifest) (compiledManifest, error) {
 		fields:          fields,
 		crossFieldRules: append([]CrossFieldRule(nil), manifest.CrossFieldRules...),
 	}, nil
+}
+
+func validateCompiledCrossFieldRule(rule CrossFieldRule, fields map[string]compiledField, path string) error {
+	switch rule.Type {
+	case "requireNonEmptyArrayWhenTrue", "requireEmptyArrayWhenFalse":
+		if rule.Integer != "" {
+			return pathError(joinPath(path, "integer"), "integer is not supported by this cross-field rule")
+		}
+		if rule.Sentinel != nil {
+			return pathError(joinPath(path, "sentinel"), "sentinel is not supported by this cross-field rule")
+		}
+		controlField, ok := fields[rule.Control]
+		if !ok || controlField.fieldType != "boolean" {
+			return pathError(joinPath(path, "control"), "control field must reference a boolean field")
+		}
+		targetField, ok := fields[rule.Target]
+		if !ok || targetField.fieldType != "array" {
+			return pathError(joinPath(path, "target"), "target field must reference an array field")
+		}
+		return nil
+	case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue":
+		if rule.Integer == "" {
+			return pathError(joinPath(path, "integer"), "integer field is required for this cross-field rule")
+		}
+		if rule.Sentinel == nil {
+			return pathError(joinPath(path, "sentinel"), "sentinel is required for this cross-field rule")
+		}
+		controlField, ok := fields[rule.Control]
+		if !ok || controlField.fieldType != "boolean" {
+			return pathError(joinPath(path, "control"), "control field must reference a boolean field")
+		}
+		integerField, ok := fields[rule.Integer]
+		if !ok || integerField.fieldType != "integer" {
+			return pathError(joinPath(path, "integer"), "integer must reference an integer field")
+		}
+		targetField, ok := fields[rule.Target]
+		if !ok || targetField.fieldType != "string" || targetField.format != "cidrLiteral" {
+			return pathError(joinPath(path, "target"), "target field must reference a cidrLiteral string field")
+		}
+		return nil
+	default:
+		return pathError(joinPath(path, "type"), "unknown cross-field rule type")
+	}
 }
 
 func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
@@ -707,7 +825,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -768,17 +886,22 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 	if field.Minimum != nil && field.Maximum != nil && *field.Minimum > *field.Maximum {
 		return compiledField{}, pathError(path, "minimum must be less than or equal to maximum")
 	}
+	sentinelValues, err := compileIntegerSentinelValues(field.SentinelValues, joinPath(path, "sentinelValues"))
+	if err != nil {
+		return compiledField{}, err
+	}
 
 	return compiledField{
-		fieldType: "integer",
-		required:  field.Required,
-		minimum:   cloneInt64Pointer(field.Minimum),
-		maximum:   cloneInt64Pointer(field.Maximum),
+		fieldType:      "integer",
+		required:       field.Required,
+		minimum:        cloneInt64Pointer(field.Minimum),
+		maximum:        cloneInt64Pointer(field.Maximum),
+		sentinelValues: sentinelValues,
 	}, nil
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -789,7 +912,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -831,7 +954,7 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 }
 
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.SentinelValues != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -858,16 +981,8 @@ func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen ma
 
 	for index, rule := range field.CrossFieldRules {
 		rulePath := joinPath(joinPath(path, "crossFieldRules"), strconv.Itoa(index))
-		if rule.Type != "requireNonEmptyArrayWhenTrue" && rule.Type != "requireEmptyArrayWhenFalse" {
-			return compiledField{}, pathError(joinPath(rulePath, "type"), "unknown cross-field rule type")
-		}
-		controlField, ok := fields[rule.Control]
-		if !ok || controlField.fieldType != "boolean" {
-			return compiledField{}, pathError(joinPath(rulePath, "control"), "control field must reference a boolean field")
-		}
-		targetField, ok := fields[rule.Target]
-		if !ok || targetField.fieldType != "array" {
-			return compiledField{}, pathError(joinPath(rulePath, "target"), "target field must reference an array field")
+		if err := validateCompiledCrossFieldRule(rule, fields, rulePath); err != nil {
+			return compiledField{}, err
 		}
 	}
 
@@ -964,11 +1079,14 @@ func validateIntegerField(value jsonValue, field compiledField, path string) (ca
 	if err != nil {
 		return nil, pathError(path, "expected safe integer")
 	}
-	if field.minimum != nil && parsed < *field.minimum {
-		return nil, pathError(path, "integer is below minimum")
-	}
-	if field.maximum != nil && parsed > *field.maximum {
-		return nil, pathError(path, "integer is above maximum")
+	_, isSentinel := field.sentinelValues[parsed]
+	if !isSentinel {
+		if field.minimum != nil && parsed < *field.minimum {
+			return nil, pathError(path, "integer is below minimum")
+		}
+		if field.maximum != nil && parsed > *field.maximum {
+			return nil, pathError(path, "integer is above maximum")
+		}
 	}
 	return float64(parsed), nil
 }
@@ -1076,35 +1194,71 @@ func validateObjectField(value jsonValue, field compiledField, path string) (cap
 
 func applyCrossFieldRules(value map[string]capabilityValue, rules []CrossFieldRule, path string) error {
 	for _, rule := range rules {
-		controlValue, hasControl := value[rule.Control]
-		targetValue, hasTarget := value[rule.Target]
 		targetPath := joinPath(path, rule.Target)
-		if !hasControl || !hasTarget {
-			return pathError(targetPath, "cross-field rule references invalid fields")
-		}
-		control, ok := controlValue.(bool)
-		if !ok {
-			return pathError(targetPath, "cross-field rule references invalid fields")
-		}
-		target, ok := targetValue.(capabilityArray)
-		if !ok {
-			return pathError(targetPath, "cross-field rule references invalid fields")
-		}
 
 		switch rule.Type {
 		case "requireNonEmptyArrayWhenTrue":
+			control, target, ok := crossFieldBoolAndArray(value, rule)
+			if !ok {
+				return pathError(targetPath, "cross-field rule references invalid fields")
+			}
 			if control && len(target) == 0 {
 				return pathError(targetPath, fmt.Sprintf("%s must be non-empty when %s is true", rule.Target, rule.Control))
 			}
 		case "requireEmptyArrayWhenFalse":
+			control, target, ok := crossFieldBoolAndArray(value, rule)
+			if !ok {
+				return pathError(targetPath, "cross-field rule references invalid fields")
+			}
 			if !control && len(target) != 0 {
 				return pathError(targetPath, fmt.Sprintf("%s must be empty when %s is false", rule.Target, rule.Control))
+			}
+		case "forbidIntegerSentinelAndCidrCoversAllUnlessTrue":
+			integer, ok := value[rule.Integer].(float64)
+			if !ok {
+				return pathError(targetPath, "cross-field rule references invalid fields")
+			}
+			target, ok := value[rule.Target].(string)
+			if !ok {
+				return pathError(targetPath, "cross-field rule references invalid fields")
+			}
+			controlValue, hasControl := value[rule.Control]
+			control := false
+			if hasControl {
+				var ok bool
+				control, ok = controlValue.(bool)
+				if !ok {
+					return pathError(targetPath, "cross-field rule references invalid fields")
+				}
+			}
+			if rule.Sentinel == nil {
+				return pathError(targetPath, "cross-field rule references invalid fields")
+			}
+			if integer == float64(*rule.Sentinel) && cidrLiteralCoversAll(target) && !control {
+				return pathError(targetPath, fmt.Sprintf("%s %d with %s covering all sources requires %s true", rule.Integer, *rule.Sentinel, rule.Target, rule.Control))
 			}
 		default:
 			return pathError(targetPath, "unknown cross-field rule type")
 		}
 	}
 	return nil
+}
+
+func crossFieldBoolAndArray(value map[string]capabilityValue, rule CrossFieldRule) (bool, capabilityArray, bool) {
+	controlValue, hasControl := value[rule.Control]
+	targetValue, hasTarget := value[rule.Target]
+	if !hasControl || !hasTarget {
+		return false, nil, false
+	}
+	control, ok := controlValue.(bool)
+	if !ok {
+		return false, nil, false
+	}
+	target, ok := targetValue.(capabilityArray)
+	if !ok {
+		return false, nil, false
+	}
+	return control, target, true
 }
 
 func decodeJSON(raw []byte) (jsonValue, error) {
@@ -1327,6 +1481,32 @@ func optionalSafeInteger(object jsonObject, key string, path string, minimum int
 	return &integer, nil
 }
 
+func optionalSafeIntegerArray(object jsonObject, key string, path string, minimum int64, maximum int64) ([]int64, error) {
+	value, ok := object[key]
+	if !ok {
+		return nil, nil
+	}
+	array, ok := value.(jsonArray)
+	if !ok || len(array) == 0 {
+		return nil, pathError(path, "expected non-empty safe integer array")
+	}
+
+	seen := map[int64]struct{}{}
+	values := make([]int64, 0, len(array))
+	for index, item := range array {
+		integer, err := readSafeInteger(item, joinPath(path, strconv.Itoa(index)), minimum, maximum)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[integer]; exists {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate safe integer value")
+		}
+		seen[integer] = struct{}{}
+		values = append(values, integer)
+	}
+	return values, nil
+}
+
 func readSafeInteger(value jsonValue, path string, minimum int64, maximum int64) (int64, error) {
 	number, ok := value.(json.Number)
 	if !ok {
@@ -1439,6 +1619,27 @@ func compileStringEnum(values []string, path string) (map[string]struct{}, error
 	return seen, nil
 }
 
+func compileIntegerSentinelValues(values []int64, path string) (map[int64]struct{}, error) {
+	if values == nil {
+		return nil, nil
+	}
+	if len(values) == 0 {
+		return nil, pathError(path, "expected non-empty safe integer array")
+	}
+
+	seen := make(map[int64]struct{}, len(values))
+	for index, value := range values {
+		if value < -maxSafeInteger || value > maxSafeInteger {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "expected safe integer within bounds")
+		}
+		if _, exists := seen[value]; exists {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate safe integer value")
+		}
+		seen[value] = struct{}{}
+	}
+	return seen, nil
+}
+
 func parseJSONSafeInteger(number json.Number) (int64, error) {
 	raw := number.String()
 	if !isJSONIntegerLiteral(raw) {
@@ -1487,6 +1688,13 @@ func normalizeStringFormat(value string, format string, rawToken ...string) (str
 		return "", false
 	case "ipLiteral":
 		return canonicalizeIPLiteral(value)
+	case "cidrLiteral":
+		return canonicalizeCIDRLiteral(value)
+	case "networkInterfaceName":
+		if isNetworkInterfaceName(value) {
+			return value, true
+		}
+		return "", false
 	case "hostnameOrIp":
 		if ip, ok := canonicalizeIPLiteral(value); ok {
 			return ip, true
@@ -1586,7 +1794,9 @@ func isKnownStringFormat(format string) bool {
 		format == "bundleVersionString" ||
 		format == "didPlcOrWeb" ||
 		format == "atprotoHandle" ||
-		format == "keyReference"
+		format == "keyReference" ||
+		format == "cidrLiteral" ||
+		format == "networkInterfaceName"
 }
 
 func isCapsuleID(value string) bool {
@@ -2418,6 +2628,48 @@ func canonicalizeIPLiteral(value string) (string, bool) {
 	}
 
 	return addr.String(), true
+}
+
+func canonicalizeCIDRLiteral(value string) (string, bool) {
+	if value == "" || value != strings.TrimSpace(value) {
+		return "", false
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return "", false
+	}
+	return prefix.Masked().String(), true
+}
+
+func cidrLiteralCoversAll(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return false
+	}
+	masked := prefix.Masked()
+	return masked.Bits() == 0 && masked.Addr().IsUnspecified()
+}
+
+func isNetworkInterfaceName(value string) bool {
+	if value == "" || len(value) > 15 || value != strings.TrimSpace(value) {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if index == 0 {
+			if !isASCIIAlphaNumeric(char) {
+				return false
+			}
+			continue
+		}
+		if !isASCIIAlphaNumeric(char) && char != '_' && char != '.' && char != ':' && char != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func isAgentHostname(value string) bool {

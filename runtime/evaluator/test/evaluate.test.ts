@@ -303,6 +303,75 @@ test("valid identity.attestation request evaluates to one operation", () => {
   });
 });
 
+test("valid network.policy request evaluates to one canonical operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "network.policy": {
+        desired: {
+          allow: [
+            {
+              proto: "tcp",
+              port: 443,
+              sourceCidr: "10.0.0.5/24",
+              interface: "eth0",
+            },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "network.policy",
+        request: {
+          desired: {
+            allow: [
+              {
+                proto: "tcp",
+                port: 443,
+                sourceCidr: "10.0.0.0/24",
+                interface: "eth0",
+              },
+            ],
+          },
+        },
+      },
+    ],
+  });
+});
+
+test("wide open network.policy request rejects without unsafeWideOpen", () => {
+  const result = evaluateNodeConfig(
+    {
+      "network.policy": {
+        desired: {
+          allow: [
+            {
+              proto: "tcp",
+              port: -1,
+              sourceCidr: "0.0.0.0/0",
+              interface: "eth0",
+            },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  assertRejected(result, ["INVALID_CAPABILITY_REQUEST"]);
+  assert.deepEqual(result.rejections.map((rejection) => rejection.path), [
+    "network.policy/desired/allow/0/sourceCidr",
+  ]);
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {
