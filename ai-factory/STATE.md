@@ -111,7 +111,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   dup-name, self-ref harness, whitespace-scanner, integer-float (Codex missed it). Codex caught: identity
   scheme-lowercase (probe's scanner-fuzz missed it). Probe FALSE on: offset-bound, SRI-base64, identity-scanner
   (toolchain claims w/o Go). Run BOTH + verify toolchain claims against real Go.
-  **125 contracts merged. Reviewer gate has blocked 73 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-020 (network.policy) MIGRATED — 10th cap** (registry = 10; +network.policy). Built REUSABLE cidrLiteral
+  (net/netip ParsePrefix+Masked) + networkInterfaceName + port integer-sentinel(-1=PortAll) + the item-level
+  wide-open-guard cross-field. SECURITY-verified (Opus probe, exhaustive empirical: 33 vectors + 18 adversarial
+  inputs): the guard CANONICALIZES (masks) BEFORE the covers-all test, so host-bit-smuggled `0.0.0.1/0`, v6
+  `::/0`, IPv4-mapped `::ffff:0.0.0.0/0` all REJECT when unsafeWideOpen absent/false — NO firewall hole. Gated
+  by the OPUS PROBE (Codex usage-limited) + my ground-truth. **10/13 migrated.** Remaining 3: backup
+  (exactlyOneOf cron-XOR-interval + cron5OrMacro + opaqueRef + secret scanner), storage (4 enum-domain array
+  invariants + canonicalAbsolutePath — HARDEST; has notInEnum/dedupItems/uniqueBy/integer-fix), pdssync
+  (cidV1Multibase heaviest decoder + did/handle REUSE from identity + secretKeyNameDenylist). These build via
+  **Opus subagents** (Codex dispatch down until Jun 24).
+  **126 contracts merged. Reviewer gate has blocked 73 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
