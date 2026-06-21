@@ -148,6 +148,7 @@ export {
   DEFAULT_CAPABILITY_MANIFESTS,
   HOSTNAME_MANIFEST,
   NODE_CONFIG_MANIFEST,
+  SERVICES_MANIFEST,
   TIMESYNC_MANIFEST,
 } from "./generated/capability-manifests.generated.ts";
 
