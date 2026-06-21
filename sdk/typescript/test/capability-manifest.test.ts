@@ -12,10 +12,10 @@ import type {
 
 const validateTimesync = compileCapabilityValidator(TIMESYNC_MANIFEST);
 
-test("TIMESYNC manifest accepts valid enabled config", () => {
+test("TIMESYNC manifest accepts valid enabled hostname config", () => {
   const result = validateTimesync({
     enabled: true,
-    servers: ["pool.ntp.org", "10.0.0.1"],
+    servers: ["pool.ntp.org", "time.cloudflare.com"],
   });
 
   if (!result.ok) {
@@ -24,33 +24,8 @@ test("TIMESYNC manifest accepts valid enabled config", () => {
 
   assert.deepEqual(result.value, {
     enabled: true,
-    servers: ["pool.ntp.org", "10.0.0.1"],
+    servers: ["pool.ntp.org", "time.cloudflare.com"],
   });
-});
-
-test("TIMESYNC hostnameOrIp format accepts the reviewed corpus", () => {
-  const result = validateTimesync({
-    enabled: true,
-    servers: [
-      "::ffff:192.0.2.1",
-      "2001:db8::1",
-      "::1",
-      "10.0.0.1",
-      "pool.ntp.org",
-    ],
-  });
-
-  if (!result.ok) {
-    assert.fail(`expected hostname/IP corpus to validate: ${JSON.stringify(result.rejections)}`);
-  }
-
-  assert.deepEqual(result.value.servers, [
-    "::ffff:192.0.2.1",
-    "2001:db8::1",
-    "::1",
-    "10.0.0.1",
-    "pool.ntp.org",
-  ]);
 });
 
 test("TIMESYNC cross-field rules enforce enabled and servers together", () => {
@@ -76,17 +51,45 @@ test("TIMESYNC cross-field rules enforce enabled and servers together", () => {
   });
 });
 
-test("TIMESYNC rejects malformed hosts, duplicates, absent fields, and unknown keys", () => {
-  assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: true, servers: ["bad_host"] })),
-    ["servers/0"],
-  );
+test("TIMESYNC rejects malformed hostnames and out-of-scope IP literals", () => {
+  const tooLongHostname = Array.from({ length: 128 }, () => "a").join(".");
+
+  for (const server of [
+    "bad host",
+    "bad_host",
+    "-bad.example",
+    "bad-.example",
+    tooLongHostname,
+    "10.0.0.1",
+    "::1",
+  ]) {
+    assert.deepEqual(
+      rejectedPaths(validateTimesync({ enabled: true, servers: [server] })),
+      ["servers/0"],
+      `${server} must reject`,
+    );
+  }
+});
+
+test("TIMESYNC lowercases hosts before return and case-insensitive uniqueness", () => {
+  const canonical = validateTimesync({ enabled: true, servers: ["A.ORG"] });
+
+  if (!canonical.ok) {
+    assert.fail(`expected uppercase hostname to validate: ${JSON.stringify(canonical.rejections)}`);
+  }
+
+  assert.deepEqual(canonical.value, {
+    enabled: true,
+    servers: ["a.org"],
+  });
 
   assert.deepEqual(
-    rejectedPaths(validateTimesync({ enabled: true, servers: ["Pool.NTP.Org", "pool.ntp.org"] })),
+    rejectedPaths(validateTimesync({ enabled: true, servers: ["A.ORG", "a.org"] })),
     ["servers/1"],
   );
+});
 
+test("TIMESYNC rejects absent required fields and unknown keys", () => {
   assert.deepEqual(
     rejectedPaths(validateTimesync({ servers: [] })),
     ["enabled"],
@@ -98,13 +101,11 @@ test("TIMESYNC rejects malformed hosts, duplicates, absent fields, and unknown k
   );
 });
 
-test("TIMESYNC rejects inline key material and mid-string data/base64url blobs", () => {
-  const longBase64Url = "A".repeat(47) + "_";
-
+test("TIMESYNC rejects inline key material", () => {
   for (const server of [
     "-----BEGIN PRIVATE KEY-----",
     "pool.ntp.orgdata:text/plain,SGVsbG8=",
-    `pool.${longBase64Url}.org`,
+    `pool.${"A".repeat(48)}.org`,
   ]) {
     assert.equal(
       rejectedPaths(validateTimesync({ enabled: true, servers: [server] })).includes("servers/0"),
@@ -129,6 +130,7 @@ test("dialect field rules reject each violation", () => {
     [withFieldOverrides({ tags: ["a", "b", "c"] }), ["tags"]],
     [withFieldOverrides({ tags: ["a", "a"] }), ["tags/1"]],
     [withFieldOverrides({ tags: [1] }), ["tags/0"]],
+    [withFieldOverrides({ label: "Mixed1" }), ["label"]],
     [withFieldOverrides({ note: "prefixdata:text/plain,hello" }), ["note"]],
     [withFieldOverrides({ note: `prefix${"A".repeat(47)}_suffix` }), ["note"]],
   ];
@@ -143,6 +145,17 @@ test("dialect field rules reject each violation", () => {
     const [input, expectedPaths] = item;
     assert.deepEqual(rejectedPaths(validate(input)), expectedPaths);
   }
+});
+
+test("dialect lowercase primitive canonicalizes returned values", () => {
+  const validate = compileCapabilityValidator(FIELD_RULE_MANIFEST);
+  const result = validate(withFieldOverrides({ label: "MiXeD" }));
+
+  if (!result.ok) {
+    assert.fail(`expected lowercase field to validate: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.equal(result.value.label, "mixed");
 });
 
 test("dialect cross-field rules reject each violation", () => {
@@ -183,6 +196,26 @@ test("hostile input fails closed without invoking accessors", () => {
   assert.equal(getterReads, 0);
 });
 
+test("cyclic and method-shadowing inputs fail closed", () => {
+  const cyclic: Record<string, unknown> = {
+    enabled: true,
+    servers: ["pool.ntp.org"],
+  };
+  cyclic.self = cyclic;
+
+  assert.doesNotThrow(() => {
+    assert.equal(validateTimesync(cyclic).ok, false);
+    assert.equal(
+      validateTimesync({
+        enabled: true,
+        servers: ["pool.ntp.org"],
+        hasOwnProperty: "shadowed",
+      }).ok,
+      false,
+    );
+  });
+});
+
 const FIELD_RULE_MANIFEST = Object.freeze({
   capability: "demo.fields",
   fields: Object.freeze({
@@ -195,6 +228,12 @@ const FIELD_RULE_MANIFEST = Object.freeze({
     flag: Object.freeze({
       required: true,
       type: "boolean",
+    }),
+    label: Object.freeze({
+      lowercase: true,
+      pattern: "^[a-z]+$",
+      required: true,
+      type: "string",
     }),
     mode: Object.freeze({
       enum: Object.freeze(["on", "off"]),
@@ -236,7 +275,7 @@ const CROSS_FIELD_RULE_MANIFEST = Object.freeze({
     }),
     servers: Object.freeze({
       items: Object.freeze({
-        format: "hostnameOrIp",
+        pattern: "^[a-z.]+$",
         required: true,
         type: "string",
       }),
@@ -263,6 +302,7 @@ function withFieldOverrides(overrides: Readonly<Record<string, unknown>>): Recor
   return {
     count: 2,
     flag: true,
+    label: "mixed",
     mode: "on",
     name: "abcd",
     note: "public-note",

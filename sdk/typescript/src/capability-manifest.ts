@@ -7,13 +7,12 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * that needs a different invariant requires a governance-reviewed dialect extension,
  * not an embedded expression language.
  *
- * The `hostnameOrIp` format approximates the agent's Go `netip.ParseAddr` + hostname
- * normalization. Exact Go-netip parity is precisely what ADR 0007's generated/shared
- * validators are meant to deliver; this PoC keeps the drift visible as motivation for
- * the ADR rather than claiming a second handwritten implementation is authoritative.
+ * TIMESYNC server validation in this PoC is intentionally hostname-only. The agent
+ * capability also accepts IP literals, but IP parsing and canonical dedupe are the
+ * format-canonicalization surface ADR 0007 says must be generated/shared rather than
+ * hand-written twice. This file therefore rejects IP literals and does not implement
+ * IPv4 or IPv6 parsing.
  */
-
-export type StringFormat = "hostnameOrIp";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -21,8 +20,8 @@ export interface StringFieldSchema {
   readonly pattern?: string;
   readonly maxLength?: number;
   readonly enum?: readonly string[];
+  readonly lowercase?: boolean;
   readonly noInlineSecrets?: boolean;
-  readonly format?: StringFormat;
 }
 
 export interface IntegerFieldSchema {
@@ -117,8 +116,8 @@ interface CompiledStringFieldSchema {
   pattern?: RegExp;
   maxLength?: number;
   enumValues?: ReadonlySet<string>;
+  lowercase: boolean;
   noInlineSecrets: boolean;
-  format?: StringFormat;
 }
 
 interface CompiledIntegerFieldSchema {
@@ -154,7 +153,7 @@ type FieldValidationResult =
 const MANIFEST_FIELDS = new Set(["capability", "crossFieldRules", "fields"]);
 const STRING_SCHEMA_FIELDS = new Set([
   "enum",
-  "format",
+  "lowercase",
   "maxLength",
   "noInlineSecrets",
   "pattern",
@@ -172,19 +171,13 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "uniqueItems",
 ]);
 const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
-const CROSS_FIELD_RULE_TYPES = new Set([
-  "requireEmptyArrayWhenFalse",
-  "requireNonEmptyArrayWhenTrue",
-]);
 const MAX_TIMESYNC_SERVERS = 8;
 const MAX_HOSTNAME_LENGTH = 253;
-const HOSTNAME_LABEL_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
-const CONTROL_CHARACTER_PATTERN = /[\x00-\x1f\x7f]/u;
+const RFC1123_HOSTNAME_PATTERN_SOURCE =
+  "^(?![0-9]+(?:\\.[0-9]+){3}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$";
 const DATA_URL_PATTERN = /data:/iu;
 const PEM_BLOCK_PATTERN = /-----BEGIN/iu;
 const LONG_BASE64_OR_BASE64URL_PATTERN = /[A-Za-z0-9+/_-]{48,}/u;
-const IPV4_OCTET_PATTERN = /^[0-9]{1,3}$/u;
-const IPV6_GROUP_PATTERN = /^[0-9A-Fa-f]{1,4}$/u;
 
 export const TIMESYNC_MANIFEST = Object.freeze({
   capability: "time.sync",
@@ -195,9 +188,10 @@ export const TIMESYNC_MANIFEST = Object.freeze({
     }),
     servers: Object.freeze({
       items: Object.freeze({
-        format: "hostnameOrIp",
+        lowercase: true,
         maxLength: MAX_HOSTNAME_LENGTH,
         noInlineSecrets: true,
+        pattern: RFC1123_HOSTNAME_PATTERN_SOURCE,
         required: true,
         type: "string",
       }),
@@ -311,11 +305,18 @@ function parseManifest(
   const fieldsValue = readRequiredProperty(value, "fields", [...path, "fields"], errors);
   const rulesValue = readRequiredProperty(value, "crossFieldRules", [...path, "crossFieldRules"], errors);
 
-  const fields = fieldsValue === undefined ? undefined : parseManifestFields(fieldsValue, [...path, "fields"], errors);
+  const fields =
+    fieldsValue === undefined
+      ? undefined
+      : parseManifestFields(fieldsValue, [...path, "fields"], errors);
   const crossFieldRules =
     rulesValue === undefined
       ? undefined
       : parseCrossFieldRules(rulesValue, [...path, "crossFieldRules"], fields, errors);
+
+  if (capability !== undefined && capability.length === 0) {
+    addError(errors, [...path, "capability"], "Expected non-empty capability name.");
+  }
 
   if (
     errors.length > errorStart ||
@@ -324,9 +325,6 @@ function parseManifest(
     fields === undefined ||
     crossFieldRules === undefined
   ) {
-    if (capability !== undefined && capability.length === 0) {
-      addError(errors, [...path, "capability"], "Expected non-empty capability name.");
-    }
     return undefined;
   }
 
@@ -420,17 +418,29 @@ function parseStringFieldSchema(
   rejectUnknownFields(value, STRING_SCHEMA_FIELDS, path, errors);
 
   const patternSource = readOptionalString(value, "pattern", [...path, "pattern"], errors);
-  const maxLength = readOptionalSafeInteger(value, "maxLength", [...path, "maxLength"], 0, Number.MAX_SAFE_INTEGER, errors);
+  const maxLength = readOptionalSafeInteger(
+    value,
+    "maxLength",
+    [...path, "maxLength"],
+    0,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
   const enumValues = readOptionalStringEnum(value, "enum", [...path, "enum"], errors);
-  const noInlineSecrets = readOptionalBoolean(value, "noInlineSecrets", [...path, "noInlineSecrets"], errors) ?? false;
-  const format = readOptionalStringFormat(value, "format", [...path, "format"], errors);
-  const pattern = patternSource === undefined ? undefined : compilePattern(patternSource, [...path, "pattern"], errors);
+  const lowercase = readOptionalBoolean(value, "lowercase", [...path, "lowercase"], errors) ?? false;
+  const noInlineSecrets =
+    readOptionalBoolean(value, "noInlineSecrets", [...path, "noInlineSecrets"], errors) ?? false;
+  const pattern =
+    patternSource === undefined
+      ? undefined
+      : compilePattern(patternSource, [...path, "pattern"], errors);
 
   if (errors.length > errorStart) {
     return undefined;
   }
 
   const schema: CompiledStringFieldSchema = {
+    lowercase,
     noInlineSecrets,
     required,
     type: "string",
@@ -445,9 +455,6 @@ function parseStringFieldSchema(
   if (enumValues !== undefined) {
     schema.enumValues = enumValues;
   }
-  if (format !== undefined) {
-    schema.format = format;
-  }
 
   return schema;
 }
@@ -461,8 +468,22 @@ function parseIntegerFieldSchema(
   const errorStart = errors.length;
   rejectUnknownFields(value, INTEGER_SCHEMA_FIELDS, path, errors);
 
-  const minimum = readOptionalSafeInteger(value, "minimum", [...path, "minimum"], Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, errors);
-  const maximum = readOptionalSafeInteger(value, "maximum", [...path, "maximum"], Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, errors);
+  const minimum = readOptionalSafeInteger(
+    value,
+    "minimum",
+    [...path, "minimum"],
+    Number.MIN_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
+  const maximum = readOptionalSafeInteger(
+    value,
+    "maximum",
+    [...path, "maximum"],
+    Number.MIN_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
 
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
     addError(errors, path, "minimum must be less than or equal to maximum.");
@@ -516,9 +537,24 @@ function parseArrayFieldSchema(
   rejectUnknownFields(value, ARRAY_SCHEMA_FIELDS, path, errors);
 
   const itemValue = readRequiredProperty(value, "items", [...path, "items"], errors);
-  const items = itemValue === undefined ? undefined : parseFieldSchema(itemValue, [...path, "items"], errors);
-  const minItems = readOptionalSafeInteger(value, "minItems", [...path, "minItems"], 0, Number.MAX_SAFE_INTEGER, errors);
-  const maxItems = readOptionalSafeInteger(value, "maxItems", [...path, "maxItems"], 0, Number.MAX_SAFE_INTEGER, errors);
+  const items =
+    itemValue === undefined ? undefined : parseFieldSchema(itemValue, [...path, "items"], errors);
+  const minItems = readOptionalSafeInteger(
+    value,
+    "minItems",
+    [...path, "minItems"],
+    0,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
+  const maxItems = readOptionalSafeInteger(
+    value,
+    "maxItems",
+    [...path, "maxItems"],
+    0,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
   const uniqueItems = readOptionalBoolean(value, "uniqueItems", [...path, "uniqueItems"], errors) ?? false;
 
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems) {
@@ -593,10 +629,6 @@ function parseCrossFieldRule(
   const control = readRequiredString(value, "control", [...path, "control"], errors);
   const target = readRequiredString(value, "target", [...path, "target"], errors);
 
-  if (typeValue !== undefined && !CROSS_FIELD_RULE_TYPES.has(typeValue)) {
-    addError(errors, [...path, "type"], "Unknown cross-field rule type.");
-  }
-
   if (fields !== undefined && control !== undefined) {
     const controlField = fields.get(control);
 
@@ -617,23 +649,23 @@ function parseCrossFieldRule(
     return undefined;
   }
 
-  if (typeValue === "requireNonEmptyArrayWhenTrue") {
-    return {
-      control,
-      target,
-      type: "requireNonEmptyArrayWhenTrue",
-    };
+  switch (typeValue) {
+    case "requireNonEmptyArrayWhenTrue":
+      return {
+        control,
+        target,
+        type: "requireNonEmptyArrayWhenTrue",
+      };
+    case "requireEmptyArrayWhenFalse":
+      return {
+        control,
+        target,
+        type: "requireEmptyArrayWhenFalse",
+      };
+    default:
+      addError(errors, [...path, "type"], "Unknown cross-field rule type.");
+      return undefined;
   }
-
-  if (typeValue === "requireEmptyArrayWhenFalse") {
-    return {
-      control,
-      target,
-      type: "requireEmptyArrayWhenFalse",
-    };
-  }
-
-  return undefined;
 }
 
 function validateInput(value: PlainJson, manifest: CompiledManifest):
@@ -675,8 +707,7 @@ function validateInput(value: PlainJson, manifest: CompiledManifest):
       continue;
     }
 
-    const child = value[fieldName];
-    const result = validateField(child, schema, [fieldName], errors);
+    const result = validateField(value[fieldName], schema, [fieldName], errors);
 
     if (result.ok) {
       Object.defineProperty(output, fieldName, {
@@ -739,32 +770,22 @@ function validateStringField(
   }
 
   const errorStart = errors.length;
-  let normalized = value;
+  const normalized = schema.lowercase ? value.toLowerCase() : value;
 
   if (schema.noInlineSecrets && containsInlineSecretMaterial(value)) {
     addError(errors, path, "Inline secret material is not allowed.");
   }
 
-  if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+  if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
     addError(errors, path, "String exceeds maxLength.");
   }
 
-  if (schema.pattern !== undefined && !schema.pattern.test(value)) {
+  if (schema.pattern !== undefined && !schema.pattern.test(normalized)) {
     addError(errors, path, "String does not match required pattern.");
   }
 
-  if (schema.enumValues !== undefined && !schema.enumValues.has(value)) {
+  if (schema.enumValues !== undefined && !schema.enumValues.has(normalized)) {
     addError(errors, path, "String is not in the allowed enum.");
-  }
-
-  if (schema.format === "hostnameOrIp") {
-    const formatted = normalizeHostnameOrIp(value);
-
-    if (formatted === undefined) {
-      addError(errors, path, "Expected RFC-1123 hostname or IP literal.");
-    } else {
-      normalized = formatted;
-    }
   }
 
   if (errors.length > errorStart) {
@@ -893,6 +914,11 @@ function applyCrossFieldRules(
     const rule = rules[index];
 
     if (rule === undefined) {
+      continue;
+    }
+
+    if (!hasOwn(value, rule.control) || !hasOwn(value, rule.target)) {
+      addError(errors, [rule.target], "Cross-field rule references invalid fields.");
       continue;
     }
 
@@ -1085,26 +1111,6 @@ function readOptionalStringEnum(
   return values;
 }
 
-function readOptionalStringFormat(
-  value: JsonRecord,
-  key: string,
-  path: Path,
-  errors: CapabilityRejection[],
-): StringFormat | undefined {
-  if (!hasOwn(value, key)) {
-    return undefined;
-  }
-
-  const child = value[key];
-
-  if (child !== "hostnameOrIp") {
-    addError(errors, path, "Unknown string format.");
-    return undefined;
-  }
-
-  return child;
-}
-
 function compilePattern(
   source: string,
   path: Path,
@@ -1133,188 +1139,6 @@ function rejectUnknownFields(
       addError(errors, [...path, key], "Unknown field.");
     }
   }
-}
-
-function normalizeHostnameOrIp(value: string): string | undefined {
-  if (!isServerToken(value)) {
-    return undefined;
-  }
-
-  if (isIpv4(value)) {
-    return value;
-  }
-
-  if (looksLikeDottedQuad(value)) {
-    return undefined;
-  }
-
-  if (isIpv6(value)) {
-    return value.toLowerCase();
-  }
-
-  if (isHostname(value)) {
-    return value.toLowerCase();
-  }
-
-  return undefined;
-}
-
-function isServerToken(value: string): boolean {
-  return value.length > 0 && value === value.trim() && !CONTROL_CHARACTER_PATTERN.test(value);
-}
-
-function isHostname(value: string): boolean {
-  if (
-    value.length === 0 ||
-    value.length > MAX_HOSTNAME_LENGTH ||
-    value !== value.trim() ||
-    value.endsWith(".") ||
-    value.includes("..") ||
-    value.includes(":") ||
-    value.includes("/") ||
-    value.includes("?") ||
-    value.includes("#") ||
-    value.includes("[") ||
-    value.includes("]") ||
-    value.includes("@") ||
-    CONTROL_CHARACTER_PATTERN.test(value)
-  ) {
-    return false;
-  }
-
-  const labels = value.split(".");
-
-  for (let index = 0; index < labels.length; index += 1) {
-    const label = labels[index];
-
-    if (label === undefined || !HOSTNAME_LABEL_PATTERN.test(label)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function isIpv4(value: string): boolean {
-  const octets = value.split(".");
-
-  if (octets.length !== 4) {
-    return false;
-  }
-
-  for (let index = 0; index < octets.length; index += 1) {
-    const octet = octets[index];
-
-    if (octet === undefined || !IPV4_OCTET_PATTERN.test(octet)) {
-      return false;
-    }
-
-    if (octet.length > 1 && octet.startsWith("0")) {
-      return false;
-    }
-
-    const valueAsNumber = Number(octet);
-
-    if (valueAsNumber < 0 || valueAsNumber > 255) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function isIpv6(value: string): boolean {
-  if (
-    value.length === 0 ||
-    value.includes("/") ||
-    value.includes("[") ||
-    value.includes("]") ||
-    value.includes("@") ||
-    value.includes("?") ||
-    value.includes("#")
-  ) {
-    return false;
-  }
-
-  let address = value;
-
-  if (value.includes(".")) {
-    const lastColon = value.lastIndexOf(":");
-
-    if (lastColon < 0) {
-      return false;
-    }
-
-    const ipv4Tail = value.slice(lastColon + 1);
-
-    if (!isIpv4(ipv4Tail)) {
-      return false;
-    }
-
-    address = `${value.slice(0, lastColon)}:0:0`;
-  }
-
-  if (/[^0-9A-Fa-f:]/u.test(address)) {
-    return false;
-  }
-
-  const compressionParts = address.split("::");
-
-  if (compressionParts.length > 2) {
-    return false;
-  }
-
-  if (compressionParts.length === 1) {
-    const groups = address.split(":");
-
-    return groups.length === 8 && areIpv6Groups(groups);
-  }
-
-  const leftPart = compressionParts[0];
-  const rightPart = compressionParts[1];
-
-  if (leftPart === undefined || rightPart === undefined) {
-    return false;
-  }
-
-  const leftGroups = leftPart.length === 0 ? [] : leftPart.split(":");
-  const rightGroups = rightPart.length === 0 ? [] : rightPart.split(":");
-
-  if (!areIpv6Groups(leftGroups) || !areIpv6Groups(rightGroups)) {
-    return false;
-  }
-
-  return leftGroups.length + rightGroups.length < 8;
-}
-
-function areIpv6Groups(groups: readonly string[]): boolean {
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-
-    if (group === undefined || !IPV6_GROUP_PATTERN.test(group)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function looksLikeDottedQuad(value: string): boolean {
-  const parts = value.split(".");
-
-  if (parts.length !== 4) {
-    return false;
-  }
-
-  for (let index = 0; index < parts.length; index += 1) {
-    const part = parts[index];
-
-    if (part === undefined || !/^[0-9]+$/u.test(part)) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 function containsInlineSecretMaterial(value: string): boolean {
