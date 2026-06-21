@@ -1,0 +1,116 @@
+[
+  {
+    "name": "normal disabled accepts",
+    "request": {
+      "mode": "normal",
+      "remoteAccess": "disabled"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "normal enabled accepts",
+    "request": {
+      "mode": "normal",
+      "remoteAccess": "enabled"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "maintenance disabled accepts",
+    "request": {
+      "mode": "maintenance",
+      "remoteAccess": "disabled"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "maintenance enabled accepts",
+    "request": {
+      "mode": "maintenance",
+      "remoteAccess": "enabled"
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "invalid mode rejects",
+    "request": {
+      "mode": "reboot",
+      "remoteAccess": "disabled"
+    },
+    "expect": "reject",
+    "rejectCode": "mode"
+  },
+  {
+    "name": "uppercase mode rejects",
+    "request": {
+      "mode": "NORMAL",
+      "remoteAccess": "disabled"
+    },
+    "expect": "reject",
+    "rejectCode": "mode"
+  },
+  {
+    "name": "invalid remoteAccess rejects",
+    "request": {
+      "mode": "normal",
+      "remoteAccess": "ssh"
+    },
+    "expect": "reject",
+    "rejectCode": "remoteAccess"
+  },
+  {
+    "name": "non string remoteAccess rejects",
+    "request": {
+      "mode": "normal",
+      "remoteAccess": true
+    },
+    "expect": "reject",
+    "rejectCode": "remoteAccess"
+  },
+  {
+    "name": "absent mode rejects",
+    "request": {
+      "remoteAccess": "disabled"
+    },
+    "expect": "reject",
+    "rejectCode": "mode"
+  },
+  {
+    "name": "absent remoteAccess rejects",
+    "request": {
+      "mode": "normal"
+    },
+    "expect": "reject",
+    "rejectCode": "remoteAccess"
+  },
+  {
+    "name": "unknown key rejects",
+    "request": {
+      "mode": "normal",
+      "remoteAccess": "disabled",
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "duplicate JSON key with valid final mode rejects",
+    "request": "{\"mode\":\"reboot\",\"mode\":\"normal\",\"remoteAccess\":\"disabled\"}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate JSON key with valid final remoteAccess rejects",
+    "request": "{\"mode\":\"normal\",\"remoteAccess\":\"ssh\",\"remoteAccess\":\"disabled\"}",
+    "expect": "reject"
+  },
+  {
+    "name": "null request rejects",
+    "request": null,
+    "expect": "reject"
+  },
+  {
+    "name": "array request rejects",
+    "request": [],
+    "expect": "reject"
+  }
+]
