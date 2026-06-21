@@ -107,7 +107,14 @@ conventions you must follow are below.
   Go `unicode.IsSpace`, not ASCII-only. (6) RUNTIME/stateful checks (clock skew, monotonic cursor
   non-regression) belong in the agent, NOT the manifest — putting them in the manifest makes single-request
   validation STRICTER than the agent's. (7) Custom (no-Go-stdlib-oracle) formats need a FROZEN golden corpus
-  generated from the Go validator — the corpus IS the parity contract.
+  generated from the Go validator — the corpus IS the parity contract. (8) **A conformance harness whose
+  ORACLE is a RE-IMPLEMENTATION of the agent logic (e.g. capmanifest's own copy of `containsInlineServiceMaterial`)
+  validates manifest≡manifest, NOT manifest≡agent — it is structurally BLIND to drift.** When a primitive/format
+  has no full-cap `DecodeJSONRequest[…]` entrypoint to assert against, the oracle MUST be the REAL agent
+  function or a VENDORED copy of its exact source (e.g. services.go's `privateKeyPattern`/`secretAssignment`
+  regexes), never the dialect's own port. (Recurred P9-015: a token-list scanner dropped the agent regex's
+  `[-_\s]?` whitespace separator — accepting `"private key"`/`"seed phrase"` the agent rejects — and the
+  self-referential harness could not see it.)
 - **Go `encoding/json` accepts DUPLICATE object keys (last-wins) — a TCB-parser hazard.** A request like
   `{"id":"-----BEGIN PRIVATE KEY-----","id":"rk:owner"}` validates on the clean last value while smuggling
   the bad first value into the RAW bytes. If a capability persists/returns raw input, that leaks (§13.1)
