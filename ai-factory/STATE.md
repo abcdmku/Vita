@@ -55,8 +55,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   (WAVE 0a) DONE: `rfc3339Instant` mirrors `time.Parse(time.RFC3339)` EXACTLY — incl. precise digit-width
   (rejects `1x:02:03`), offset bound hr≤24/min≤60 (ground-truth Go), and RAW-TOKEN validation matching
   `time.Time.UnmarshalJSON`'s no-unescape (Go issue 47353; escaped timestamps reject). 4 rounds, all
-  ground-truth-verified.** Next: WAVE 0b/0c (cidrLiteral, sriIntegrity) + WAVE 1 string substrate.
-  **120 contracts merged. Reviewer gate has blocked 67 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  ground-truth-verified.** **P9-015 (WAVE 1 string substrate) DONE:** reusable composable string options
+  `noInlineMaterial`(SERVICE variant)/`noControlChars`/`trimmed`/`maxBytes`(UTF-8)/`minLength`, byte-faithful
+  to `services.go:containsInlineServiceMaterial` (ground-truth-verified across the battery incl. `[-_\s]?`
+  one-optional-separator), harness oracle = VENDORED services.go regexes (no longer self-referential), weak
+  `noInlineSecrets` aliased to strong. **KEY: there are TWO agent scanners** — services
+  `containsInlineServiceMaterial` (no word-run) vs backup/identity `containsInlineSecretMaterial` (+seedWords
+  + `openssh\s+`/literal age); the SECRET variant is deferred to WAVE 4 (AGENTS trap 1+8). Next: migrate a cap
+  end-to-end (capsule — uses uniqueBy+substrate, needs sriIntegrity/capsuleId/capsuleVersion/forbiddenSchemePrefix).
+  **121 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
