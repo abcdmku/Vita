@@ -1,0 +1,417 @@
+[
+  {
+    "name": "empty services accepts",
+    "request": {
+      "desired": {
+        "services": []
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "single enabled service accepts",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "single disabled service accepts",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "bluetooth.service",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "multiple unit types accept",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "backup.timer",
+            "enabled": true
+          },
+          {
+            "name": "web.socket",
+            "enabled": false
+          },
+          {
+            "name": "multi-user.target",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "instance and colon names accept",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "app@tenant.service",
+            "enabled": true
+          },
+          {
+            "name": "db:replica.service",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "uppercase service name accepts",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "SSH.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "desired must be object rejects",
+    "request": {
+      "desired": []
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent services rejects",
+    "request": {
+      "desired": {}
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services"
+  },
+  {
+    "name": "null services rejects",
+    "request": {
+      "desired": {
+        "services": null
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services"
+  },
+  {
+    "name": "services must be array rejects",
+    "request": {
+      "desired": {
+        "services": "ssh.service"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services"
+  },
+  {
+    "name": "null service entry rejects",
+    "request": {
+      "desired": {
+        "services": [null]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0"
+  },
+  {
+    "name": "absent service name rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "absent enabled rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/enabled"
+  },
+  {
+    "name": "null enabled rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": null
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/enabled"
+  },
+  {
+    "name": "enabled must be boolean rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": "true"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/enabled"
+  },
+  {
+    "name": "name must be string rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": 42,
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "empty service name rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "missing unit suffix rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "slash in service name rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "bad/name.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "leading dot rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": ".ssh.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "consecutive dots reject",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "bad..name.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "inline reference scheme rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "data:ssh.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "inline private material rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "-----BEGIN.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/name"
+  },
+  {
+    "name": "duplicate service name with same enabled rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": true
+          },
+          {
+            "name": "ssh.service",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/1"
+  },
+  {
+    "name": "duplicate service name with different enabled rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": true
+          },
+          {
+            "name": "ssh.service",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/1"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "services": []
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "services": [],
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown service entry key rejects",
+    "request": {
+      "desired": {
+        "services": [
+          {
+            "name": "ssh.service",
+            "enabled": true,
+            "reload": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/services/0/reload"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"services\":[]},\"desired\":{\"services\":[]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate service entry JSON key rejects",
+    "request": "{\"desired\":{\"services\":[{\"name\":\"ssh.service\",\"enabled\":true,\"enabled\":false}]}}",
+    "expect": "reject"
+  }
+]

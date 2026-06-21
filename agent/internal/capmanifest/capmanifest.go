@@ -42,6 +42,7 @@ type FieldSchema struct {
 	MinItems        *int64
 	MaxItems        *int64
 	UniqueItems     bool
+	UniqueBy        []string
 	Fields          map[string]FieldSchema
 	CrossFieldRules []CrossFieldRule
 }
@@ -76,6 +77,7 @@ type compiledField struct {
 	minItems        *int64
 	maxItems        *int64
 	uniqueItems     bool
+	uniqueBy        []string
 	fields          map[string]compiledField
 	fieldNames      []string
 	crossFieldRules []CrossFieldRule
@@ -118,6 +120,7 @@ var (
 		"minItems":    {},
 		"required":    {},
 		"type":        {},
+		"uniqueBy":    {},
 		"uniqueItems": {},
 	}
 	objectSchemaFields = map[string]struct{}{
@@ -428,6 +431,13 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	uniqueBy, err := optionalUniqueBy(object, "uniqueBy", joinPath(path, "uniqueBy"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
+	if err := validateUniqueByFields(uniqueBy, items, joinPath(path, "uniqueBy")); err != nil {
+		return FieldSchema{}, err
+	}
 
 	return FieldSchema{
 		Type:        "array",
@@ -436,6 +446,7 @@ func parseArrayFieldSchema(object jsonObject, required bool, path string) (Field
 		MinItems:    minItems,
 		MaxItems:    maxItems,
 		UniqueItems: uniqueItems,
+		UniqueBy:    uniqueBy,
 	}, nil
 }
 
@@ -605,7 +616,7 @@ func compileFieldSchema(field FieldSchema, path string, depth int, seen map[*Fie
 }
 
 func compileStringFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "string field contains unsupported constraints")
 	}
 	if field.MaxLength != nil && (*field.MaxLength < 0 || *field.MaxLength > maxSafeInteger) {
@@ -632,7 +643,7 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -654,7 +665,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -683,6 +694,9 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 	if field.MinItems != nil && field.MaxItems != nil && *field.MinItems > *field.MaxItems {
 		return compiledField{}, pathError(path, "minItems must be less than or equal to maxItems")
 	}
+	if err := validateUniqueByFields(field.UniqueBy, *field.Items, joinPath(path, "uniqueBy")); err != nil {
+		return compiledField{}, err
+	}
 
 	seen[field.Items] = struct{}{}
 	items, err := compileFieldSchema(*field.Items, joinPath(path, "items"), depth+1, seen)
@@ -698,11 +712,12 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 		minItems:    cloneInt64Pointer(field.MinItems),
 		maxItems:    cloneInt64Pointer(field.MaxItems),
 		uniqueItems: field.UniqueItems,
+		uniqueBy:    cloneStrings(field.UniqueBy),
 	}, nil
 }
 
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems {
+	if field.MaxLength != nil || field.Enum != nil || field.Lowercase || field.NoInlineSecrets || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.UniqueBy != nil {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -842,7 +857,8 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 	}
 
 	output := make(capabilityArray, 0, len(array))
-	seen := map[string]int{}
+	seenItems := map[string]int{}
+	seenUniqueBy := map[string]int{}
 	for index, item := range array {
 		itemPath := joinPath(path, strconv.Itoa(index))
 		normalized, err := validateField(item, *field.items, itemPath)
@@ -851,10 +867,20 @@ func validateArrayField(value jsonValue, field compiledField, path string) (capa
 		}
 		if field.uniqueItems {
 			key := uniqueValueKey(normalized)
-			if previous, ok := seen[key]; ok {
+			if previous, ok := seenItems[key]; ok {
 				return nil, pathError(itemPath, fmt.Sprintf("duplicate array item also appears at %s", joinPath(path, strconv.Itoa(previous))))
 			}
-			seen[key] = index
+			seenItems[key] = index
+		}
+		if len(field.uniqueBy) > 0 {
+			key, err := uniqueByValueKey(normalized, field.uniqueBy, itemPath)
+			if err != nil {
+				return nil, err
+			}
+			if previous, ok := seenUniqueBy[key]; ok {
+				return nil, pathError(itemPath, fmt.Sprintf("duplicate array item key also appears at %s", joinPath(path, strconv.Itoa(previous))))
+			}
+			seenUniqueBy[key] = index
 		}
 		output = append(output, normalized)
 	}
@@ -1147,6 +1173,62 @@ func optionalStringEnum(object jsonObject, key string, path string) ([]string, e
 		values = append(values, stringValue)
 	}
 	return values, nil
+}
+
+func optionalUniqueBy(object jsonObject, key string, path string) ([]string, error) {
+	value, ok := object[key]
+	if !ok {
+		return nil, nil
+	}
+	array, ok := value.(jsonArray)
+	if !ok || len(array) == 0 {
+		return nil, pathError(path, "expected non-empty uniqueBy field array")
+	}
+
+	seen := map[string]struct{}{}
+	values := make([]string, 0, len(array))
+	for index, item := range array {
+		stringValue, ok := item.(string)
+		if !ok || stringValue == "" {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "expected non-empty uniqueBy field name")
+		}
+		if _, exists := seen[stringValue]; exists {
+			return nil, pathError(joinPath(path, strconv.Itoa(index)), "duplicate uniqueBy field name")
+		}
+		seen[stringValue] = struct{}{}
+		values = append(values, stringValue)
+	}
+	return values, nil
+}
+
+func validateUniqueByFields(uniqueBy []string, items FieldSchema, path string) error {
+	if uniqueBy == nil {
+		return nil
+	}
+	if len(uniqueBy) == 0 {
+		return pathError(path, "expected non-empty uniqueBy field array")
+	}
+	if items.Type != "object" || items.Fields == nil {
+		return pathError(path, "uniqueBy requires object array items")
+	}
+	seen := map[string]struct{}{}
+	for index, name := range uniqueBy {
+		if name == "" {
+			return pathError(joinPath(path, strconv.Itoa(index)), "expected non-empty uniqueBy field name")
+		}
+		if _, exists := seen[name]; exists {
+			return pathError(joinPath(path, strconv.Itoa(index)), "duplicate uniqueBy field name")
+		}
+		seen[name] = struct{}{}
+		field, ok := items.Fields[name]
+		if !ok {
+			return pathError(joinPath(path, strconv.Itoa(index)), "uniqueBy field must reference an item object field")
+		}
+		if !field.Required {
+			return pathError(joinPath(path, strconv.Itoa(index)), "uniqueBy field must reference a required item field")
+		}
+	}
+	return nil
 }
 
 func compileStringEnum(values []string, path string) (map[string]struct{}, error) {
@@ -1708,6 +1790,23 @@ func uniqueValueKey(value capabilityValue) string {
 	}
 }
 
+func uniqueByValueKey(value capabilityValue, uniqueBy []string, path string) (string, error) {
+	object, ok := value.(capabilityObject)
+	if !ok {
+		return "", pathError(path, "uniqueBy requires object array items with all key fields present")
+	}
+
+	parts := make([]string, 0, len(uniqueBy))
+	for _, fieldName := range uniqueBy {
+		item, ok := object[fieldName]
+		if !ok {
+			return "", pathError(path, "uniqueBy requires object array items with all key fields present")
+		}
+		parts = append(parts, fieldName+":"+uniqueValueKey(item))
+	}
+	return "o:{" + strings.Join(parts, ",") + "}", nil
+}
+
 func isASCIIAlphaNumeric(char byte) bool {
 	return (char >= '0' && char <= '9') ||
 		(char >= 'A' && char <= 'Z') ||
@@ -1746,6 +1845,15 @@ func cloneInt64Pointer(value *int64) *int64 {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func cloneStrings(value []string) []string {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]string, len(value))
+	copy(cloned, value)
+	return cloned
 }
 
 func boolPointer(value bool) *bool {

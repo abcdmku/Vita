@@ -1,0 +1,33 @@
+{
+  "capability": "services.config",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "services": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "enabled": {
+                "required": true,
+                "type": "boolean"
+              },
+              "name": {
+                "format": "systemdUnitName",
+                "required": true,
+                "type": "string"
+              }
+            }
+          },
+          "required": true,
+          "type": "array",
+          "uniqueBy": ["name"]
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

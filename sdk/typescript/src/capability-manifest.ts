@@ -61,6 +61,7 @@ export interface ArrayFieldSchema {
   readonly minItems?: number;
   readonly maxItems?: number;
   readonly uniqueItems?: boolean;
+  readonly uniqueBy?: readonly string[];
 }
 
 export interface ObjectFieldSchema {
@@ -216,6 +217,7 @@ interface CompiledArrayFieldSchema {
   minItems?: number;
   maxItems?: number;
   uniqueItems: boolean;
+  uniqueBy?: readonly string[];
 }
 
 interface CompiledObjectFieldSchema {
@@ -260,6 +262,7 @@ const ARRAY_SCHEMA_FIELDS = new Set([
   "minItems",
   "required",
   "type",
+  "uniqueBy",
   "uniqueItems",
 ]);
 const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
@@ -758,9 +761,14 @@ function parseArrayFieldSchema(
   );
   const uniqueItemsValue = readOptionalBoolean(value, "uniqueItems", [...path, "uniqueItems"], errors);
   const uniqueItems = uniqueItemsValue ?? false;
+  const uniqueBy = readOptionalUniqueBy(value, "uniqueBy", [...path, "uniqueBy"], errors);
 
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems) {
     addError(errors, path, "minItems must be less than or equal to maxItems.");
+  }
+
+  if (uniqueBy !== undefined && items !== undefined) {
+    validateUniqueByFields(items.compiled, uniqueBy, [...path, "uniqueBy"], errors);
   }
 
   if (errors.length > errorStart || items === undefined) {
@@ -780,6 +788,7 @@ function parseArrayFieldSchema(
     minItems?: number;
     maxItems?: number;
     uniqueItems?: boolean;
+    uniqueBy?: readonly string[];
   } = {
     items: items.manifest,
     required,
@@ -797,11 +806,46 @@ function parseArrayFieldSchema(
   if (uniqueItemsValue !== undefined) {
     manifest.uniqueItems = uniqueItemsValue;
   }
+  if (uniqueBy !== undefined) {
+    compiled.uniqueBy = uniqueBy;
+    manifest.uniqueBy = uniqueBy;
+  }
 
   return {
     compiled,
     manifest: Object.freeze(manifest),
   };
+}
+
+function validateUniqueByFields(
+  items: CompiledFieldSchema,
+  uniqueBy: readonly string[],
+  path: Path,
+  errors: CapabilityRejection[],
+): void {
+  if (items.type !== "object") {
+    addError(errors, path, "uniqueBy requires object array items.");
+    return;
+  }
+
+  for (let index = 0; index < uniqueBy.length; index += 1) {
+    const fieldName = uniqueBy[index];
+
+    if (fieldName === undefined) {
+      continue;
+    }
+
+    const field = items.fields.get(fieldName);
+
+    if (field === undefined) {
+      addError(errors, [...path, String(index)], "uniqueBy field must reference an item object field.");
+      continue;
+    }
+
+    if (!field.required) {
+      addError(errors, [...path, String(index)], "uniqueBy field must reference a required item field.");
+    }
+  }
 }
 
 function parseObjectFieldSchema(
@@ -1159,7 +1203,8 @@ function validateArrayField(
   }
 
   const output: CapabilityValue[] = [];
-  const seen = new Map<string, number>();
+  const seenItems = new Map<string, number>();
+  const seenUniqueBy = new Map<string, number>();
 
   for (let index = 0; index < value.length; index += 1) {
     const itemPath = [...path, String(index)];
@@ -1171,7 +1216,7 @@ function validateArrayField(
 
     if (schema.uniqueItems) {
       const key = uniqueValueKey(result.value);
-      const previousIndex = seen.get(key);
+      const previousIndex = seenItems.get(key);
 
       if (previousIndex !== undefined) {
         addError(
@@ -1180,7 +1225,27 @@ function validateArrayField(
           `Duplicate array item also appears at ${formatPath([...path, String(previousIndex)])}.`,
         );
       } else {
-        seen.set(key, index);
+        seenItems.set(key, index);
+      }
+    }
+
+    if (schema.uniqueBy !== undefined) {
+      const key = uniqueByValueKey(result.value, schema.uniqueBy);
+
+      if (key === undefined) {
+        addError(errors, itemPath, "uniqueBy requires object array items with all key fields present.");
+      } else {
+        const previousIndex = seenUniqueBy.get(key);
+
+        if (previousIndex !== undefined) {
+          addError(
+            errors,
+            itemPath,
+            `Duplicate array item key also appears at ${formatPath([...path, String(previousIndex)])}.`,
+          );
+        } else {
+          seenUniqueBy.set(key, index);
+        }
       }
     }
 
@@ -1533,6 +1598,46 @@ function readOptionalStringEnum(
 
     if (seen.has(item)) {
       addError(errors, [...path, String(index)], "Duplicate enum value.");
+      continue;
+    }
+
+    seen.add(item);
+    values.push(item);
+  }
+
+  return Object.freeze(values);
+}
+
+function readOptionalUniqueBy(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: CapabilityRejection[],
+): readonly string[] | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  const child = value[key];
+
+  if (!Array.isArray(child) || child.length === 0) {
+    addError(errors, path, "Expected non-empty uniqueBy field array.");
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const values: string[] = [];
+
+  for (let index = 0; index < child.length; index += 1) {
+    const item = child[index];
+
+    if (typeof item !== "string" || item.length === 0) {
+      addError(errors, [...path, String(index)], "Expected non-empty uniqueBy field name.");
+      continue;
+    }
+
+    if (seen.has(item)) {
+      addError(errors, [...path, String(index)], "Duplicate uniqueBy field name.");
       continue;
     }
 
@@ -2480,6 +2585,32 @@ function uniqueValueKey(value: CapabilityValue): string {
   }
 
   return `${typeof value}:${String(value)}`;
+}
+
+function uniqueByValueKey(value: CapabilityValue, uniqueBy: readonly string[]): string | undefined {
+  if (!isCapabilityObject(value)) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+
+  for (let index = 0; index < uniqueBy.length; index += 1) {
+    const fieldName = uniqueBy[index];
+
+    if (fieldName === undefined) {
+      continue;
+    }
+
+    const item = value[fieldName];
+
+    if (item === undefined) {
+      return undefined;
+    }
+
+    parts.push(`${fieldName}:${uniqueValueKey(item)}`);
+  }
+
+  return `o:{${parts.join(",")}}`;
 }
 
 function isRecord(value: PlainJson | undefined): value is JsonRecord {
