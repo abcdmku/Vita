@@ -38,9 +38,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   closed config→plan evaluator (P9-001) + whole-node apply. Next: a low-risk ADDITIVE proof-of-concept
   (manifest dialect + a manifest-driven TS validator + a conformance test vs. the existing validators) that
   does NOT touch the TCB — de-risks the owner decision before any migration.
-  **107 contracts merged. The buildable control plane is exhaustively complete + integration-tested + documented; the frontier-unblock (ADR 0007) is proposed AND its dialect de-risked by the P9-002 PoC.**
-  Remaining high-value frontier: (a) bootable signed image → Linux build host; (b) evaluator/whole-node apply
-  → owner-approve ADR 0007. Both owner-gated; building the additive PoC meanwhile.
+- **ADR 0007 ACCEPTED (owner 2026-06-21) + IMPLEMENTED end-to-end → the config→plan evaluator is UNBLOCKED:**
+  P9-003 (shared JSON manifest `schema/capabilities/` + codegen single-source), P9-005 (Go
+  `capmanifest` validator + named-FORMAT dialect — raw regex dropped because it can't be JS↔Go-equal; 5
+  rounds surfaced real parity bugs: regex non-portability, JSON number underflow, two Unicode case-fold
+  bypasses), P9-006 (cross-language conformance gate — TS≡Go on a shared corpus, drift fails CI), and
+  **P9-001 (the §8.2 config→plan evaluator) — manifest-driven, CLOSED, deterministic — RESOLVED** (was
+  blocked 3 rounds on the feasibility wall). `blocked/` now holds ONLY the boot chain (P1-017, build-host).
+  **111 contracts merged. The buildable control plane is exhaustively complete + integration-tested + documented; ADR 0007 is implemented and the config-evaluator blocker is resolved.**
+  Remaining: (a) bootable signed image → **Linux build host (owner-gated)**; (b) whole-node apply breadth →
+  incrementally migrate the other 12 caps to manifests (each behind the conformance gate) + a controller
+  config→plan→apply integration. Reviewer gate has now blocked **55+ real bugs**.
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
