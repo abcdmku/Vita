@@ -12,10 +12,10 @@ export const TIMESYNC_MANIFEST = Object.freeze({
     }),
     servers: Object.freeze({
       items: Object.freeze({
+        format: "hostnameRFC1123",
         lowercase: true,
         maxLength: 253,
         noInlineSecrets: true,
-        pattern: "^(?![0-9]+(?:\\.[0-9]+){3}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$",
         required: true,
         type: "string",
       }),

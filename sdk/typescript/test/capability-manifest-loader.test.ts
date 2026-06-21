@@ -89,6 +89,24 @@ test("loaded timesync manifest validates the unchanged P9-002 corpus", () => {
     },
     {
       expectedOk: false,
+      expectedPaths: ["servers/0"],
+      input: {
+        enabled: true,
+        servers: ["host\n"],
+      },
+      name: "trailing newline rejects",
+    },
+    {
+      expectedOk: false,
+      expectedPaths: ["servers/0"],
+      input: {
+        enabled: true,
+        servers: ["K.example"],
+      },
+      name: "Unicode case-folding hostname rejects",
+    },
+    {
+      expectedOk: false,
       expectedPaths: ["servers"],
       input: {
         enabled: true,
@@ -199,6 +217,30 @@ test("loadCapabilityManifest rejects malformed manifests without throwing", () =
             extra: true,
             required: true,
             type: "boolean",
+          },
+        },
+      }),
+    },
+    {
+      name: "raw pattern key is rejected",
+      raw: manifestWith({
+        fields: {
+          name: {
+            pattern: "^[a-z]+$",
+            required: true,
+            type: "string",
+          },
+        },
+      }),
+    },
+    {
+      name: "unknown string format is rejected",
+      raw: manifestWith({
+        fields: {
+          name: {
+            format: "dnsName",
+            required: true,
+            type: "string",
           },
         },
       }),

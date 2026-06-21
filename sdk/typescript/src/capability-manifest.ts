@@ -12,16 +12,21 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * format-canonicalization surface ADR 0007 says must be generated/shared rather than
  * hand-written twice. This file therefore rejects IP literals and does not implement
  * IPv4 or IPv6 parsing.
+ *
+ * The lowercase primitive is ASCII-only by contract: A-Z map to a-z and every other
+ * code point is left unchanged. That avoids JS/Go Unicode case-folding drift.
  */
+
+export type StringFieldFormat = "hostnameRFC1123";
 
 export interface StringFieldSchema {
   readonly type: "string";
   readonly required: boolean;
-  readonly pattern?: string;
   readonly maxLength?: number;
   readonly enum?: readonly string[];
   readonly lowercase?: boolean;
   readonly noInlineSecrets?: boolean;
+  readonly format?: StringFieldFormat;
 }
 
 export interface IntegerFieldSchema {
@@ -150,7 +155,7 @@ type CompiledFieldSchema =
 interface CompiledStringFieldSchema {
   type: "string";
   required: boolean;
-  pattern?: RegExp;
+  format?: StringFieldFormat;
   maxLength?: number;
   enumValues?: ReadonlySet<string>;
   lowercase: boolean;
@@ -191,10 +196,10 @@ const SUPPORTED_MANIFEST_VERSION = 1;
 const MANIFEST_FIELDS = new Set(["capability", "crossFieldRules", "fields", "version"]);
 const STRING_SCHEMA_FIELDS = new Set([
   "enum",
+  "format",
   "lowercase",
   "maxLength",
   "noInlineSecrets",
-  "pattern",
   "required",
   "type",
 ]);
@@ -481,7 +486,7 @@ function parseStringFieldSchema(
   const errorStart = errors.length;
   rejectUnknownFields(value, STRING_SCHEMA_FIELDS, path, errors);
 
-  const patternSource = readOptionalString(value, "pattern", [...path, "pattern"], errors);
+  const format = readOptionalStringFormat(value, "format", [...path, "format"], errors);
   const maxLength = readOptionalSafeInteger(
     value,
     "maxLength",
@@ -500,10 +505,6 @@ function parseStringFieldSchema(
   );
   const lowercase = lowercaseValue ?? false;
   const noInlineSecrets = noInlineSecretsValue ?? false;
-  const pattern =
-    patternSource === undefined
-      ? undefined
-      : compilePattern(patternSource, [...path, "pattern"], errors);
 
   if (errors.length > errorStart) {
     return undefined;
@@ -518,21 +519,19 @@ function parseStringFieldSchema(
   const manifest: {
     type: "string";
     required: boolean;
-    pattern?: string;
     maxLength?: number;
     enum?: readonly string[];
     lowercase?: boolean;
     noInlineSecrets?: boolean;
+    format?: StringFieldFormat;
   } = {
     required,
     type: "string",
   };
 
-  if (pattern !== undefined) {
-    compiled.pattern = pattern;
-  }
-  if (patternSource !== undefined) {
-    manifest.pattern = patternSource;
+  if (format !== undefined) {
+    compiled.format = format;
+    manifest.format = format;
   }
   if (maxLength !== undefined) {
     compiled.maxLength = maxLength;
@@ -906,18 +905,19 @@ function validateStringField(
   }
 
   const errorStart = errors.length;
-  const normalized = schema.lowercase ? value.toLowerCase() : value;
 
   if (schema.noInlineSecrets && containsInlineSecretMaterial(value)) {
     addError(errors, path, "Inline secret material is not allowed.");
   }
 
-  if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
-    addError(errors, path, "String exceeds maxLength.");
+  if (schema.format !== undefined && !validateStringFormat(value, schema.format)) {
+    addError(errors, path, "String does not match required format.");
   }
 
-  if (schema.pattern !== undefined && !schema.pattern.test(normalized)) {
-    addError(errors, path, "String does not match required pattern.");
+  const normalized = schema.lowercase ? asciiLowercase(value) : value;
+
+  if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
+    addError(errors, path, "String exceeds maxLength.");
   }
 
   if (schema.enumValues !== undefined && !schema.enumValues.has(normalized)) {
@@ -1295,17 +1295,29 @@ function readOptionalStringEnum(
   return Object.freeze(values);
 }
 
-function compilePattern(
-  source: string,
+function readOptionalStringFormat(
+  value: JsonRecord,
+  key: string,
   path: Path,
   errors: CapabilityRejection[],
-): RegExp | undefined {
-  try {
-    return new RegExp(source, "u");
-  } catch {
-    addError(errors, path, "Invalid regular expression pattern.");
+): StringFieldFormat | undefined {
+  if (!hasOwn(value, key)) {
     return undefined;
   }
+
+  const child = value[key];
+
+  if (typeof child !== "string") {
+    addError(errors, path, "Expected string format.");
+    return undefined;
+  }
+
+  if (!isStringFieldFormat(child)) {
+    addError(errors, path, "Unknown string format.");
+    return undefined;
+  }
+
+  return child;
 }
 
 function rejectUnknownFields(
@@ -1330,6 +1342,101 @@ function containsInlineSecretMaterial(value: string): boolean {
     DATA_URL_PATTERN.test(value) ||
     PEM_BLOCK_PATTERN.test(value) ||
     LONG_BASE64_OR_BASE64URL_PATTERN.test(value)
+  );
+}
+
+function isStringFieldFormat(value: string): value is StringFieldFormat {
+  return value === "hostnameRFC1123";
+}
+
+function validateStringFormat(value: string, format: StringFieldFormat): boolean {
+  switch (format) {
+    case "hostnameRFC1123":
+      return isHostnameRFC1123(value);
+  }
+}
+
+function isHostnameRFC1123(value: string): boolean {
+  if (value.length === 0 || value.length > 253) {
+    return false;
+  }
+
+  const labels = value.split(".");
+
+  if (labels.length === 0 || isAllNumericDottedQuad(labels)) {
+    return false;
+  }
+
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+
+    if (label === undefined || label.length === 0 || label.length > 63) {
+      return false;
+    }
+
+    for (let charIndex = 0; charIndex < label.length; charIndex += 1) {
+      const code = label.charCodeAt(charIndex);
+
+      if (charIndex === 0 || charIndex === label.length - 1) {
+        if (!isAsciiAlphaNumericCode(code)) {
+          return false;
+        }
+      } else if (!isAsciiAlphaNumericCode(code) && code !== 45) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function isAllNumericDottedQuad(labels: readonly string[]): boolean {
+  if (labels.length !== 4) {
+    return false;
+  }
+
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+
+    if (label === undefined || label.length === 0) {
+      return false;
+    }
+
+    for (let charIndex = 0; charIndex < label.length; charIndex += 1) {
+      const code = label.charCodeAt(charIndex);
+
+      if (code < 48 || code > 57) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function asciiLowercase(value: string): string {
+  let output = "";
+  let changed = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (code >= 65 && code <= 90) {
+      output += String.fromCharCode(code + 32);
+      changed = true;
+    } else {
+      output += value.charAt(index);
+    }
+  }
+
+  return changed ? output : value;
+}
+
+function isAsciiAlphaNumericCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122)
   );
 }
 

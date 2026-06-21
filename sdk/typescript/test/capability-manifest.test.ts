@@ -59,9 +59,11 @@ test("TIMESYNC rejects malformed hostnames and out-of-scope IP literals", () => 
     "bad_host",
     "-bad.example",
     "bad-.example",
-    tooLongHostname,
     "10.0.0.1",
     "::1",
+    "host\n",
+    "K.example",
+    "İ.example",
   ]) {
     assert.deepEqual(
       rejectedPaths(validateTimesync({ enabled: true, servers: [server] })),
@@ -69,6 +71,12 @@ test("TIMESYNC rejects malformed hostnames and out-of-scope IP literals", () => 
       `${server} must reject`,
     );
   }
+
+  assert.equal(
+    rejectedPaths(validateTimesync({ enabled: true, servers: [tooLongHostname] })).includes("servers/0"),
+    true,
+    "hostname over 253 chars must reject",
+  );
 });
 
 test("TIMESYNC lowercases hosts before return and case-insensitive uniqueness", () => {
@@ -119,8 +127,8 @@ test("dialect field rules reject each violation", () => {
   const validate = compileCapabilityValidator(FIELD_RULE_MANIFEST);
 
   const cases: readonly [unknown, readonly string[]][] = [
-    [withFieldOverrides({ name: "abc1" }), ["name"]],
     [withFieldOverrides({ name: "abcde" }), ["name"]],
+    [withFieldOverrides({ host: "bad_host" }), ["host"]],
     [withFieldOverrides({ mode: "auto" }), ["mode"]],
     [withFieldOverrides({ count: 0 }), ["count"]],
     [withFieldOverrides({ count: 4 }), ["count"]],
@@ -156,6 +164,29 @@ test("dialect lowercase primitive canonicalizes returned values", () => {
   }
 
   assert.equal(result.value.label, "mixed");
+});
+
+test("dialect lowercase primitive is ASCII-only", () => {
+  const validate = compileCapabilityValidator(LOWERCASE_MANIFEST);
+  const result = validate({ value: "İKABC" });
+
+  if (!result.ok) {
+    assert.fail(`expected ASCII-only lowercase field to validate: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.equal(result.value.value, "İKabc");
+});
+
+test("integer fields use JS float64 JSON number semantics", () => {
+  const validate = compileCapabilityValidator(INTEGER_ZERO_MANIFEST);
+  const underflow = validate(JSON.parse('{"count":1e-1000}'));
+
+  if (!underflow.ok) {
+    assert.fail(`expected underflowed integer to validate: ${JSON.stringify(underflow.rejections)}`);
+  }
+
+  assert.equal(underflow.value.count, 0);
+  assert.deepEqual(rejectedPaths(validate(JSON.parse('{"count":1e400}'))), [""]);
 });
 
 test("dialect cross-field rules reject each violation", () => {
@@ -230,8 +261,15 @@ const FIELD_RULE_MANIFEST = Object.freeze({
       type: "boolean",
     }),
     label: Object.freeze({
+      enum: Object.freeze(["mixed"]),
       lowercase: true,
-      pattern: "^[a-z]+$",
+      required: true,
+      type: "string",
+    }),
+    host: Object.freeze({
+      format: "hostnameRFC1123",
+      lowercase: true,
+      maxLength: 253,
       required: true,
       type: "string",
     }),
@@ -242,7 +280,6 @@ const FIELD_RULE_MANIFEST = Object.freeze({
     }),
     name: Object.freeze({
       maxLength: 4,
-      pattern: "^[a-z]+$",
       required: true,
       type: "string",
     }),
@@ -275,7 +312,8 @@ const CROSS_FIELD_RULE_MANIFEST = Object.freeze({
     }),
     servers: Object.freeze({
       items: Object.freeze({
-        pattern: "^[a-z.]+$",
+        format: "hostnameRFC1123",
+        lowercase: true,
         required: true,
         type: "string",
       }),
@@ -298,10 +336,36 @@ const CROSS_FIELD_RULE_MANIFEST = Object.freeze({
   ]),
 } satisfies CapabilityManifest);
 
+const LOWERCASE_MANIFEST = Object.freeze({
+  capability: "demo.lowercase",
+  fields: Object.freeze({
+    value: Object.freeze({
+      lowercase: true,
+      required: true,
+      type: "string",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+} satisfies CapabilityManifest);
+
+const INTEGER_ZERO_MANIFEST = Object.freeze({
+  capability: "demo.integer-zero",
+  fields: Object.freeze({
+    count: Object.freeze({
+      maximum: 0,
+      minimum: 0,
+      required: true,
+      type: "integer",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+} satisfies CapabilityManifest);
+
 function withFieldOverrides(overrides: Readonly<Record<string, unknown>>): Record<string, unknown> {
   return {
     count: 2,
     flag: true,
+    host: "valid.example",
     label: "mixed",
     mode: "on",
     name: "abcd",
