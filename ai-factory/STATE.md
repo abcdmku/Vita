@@ -20,7 +20,13 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   symlink/atomic-write fix), P7-006 (transport audit emission + /audit, R3), P0-027 (update-applicability,
   R1), P2-023 (audit-trail client, R2), P2-024 (node-snapshot client, R2 — in final gate). The Opus
   build+independent-review+verify pipeline held the quality floor (see [[vita-opus-during-codex-outage]]).
-- **Codex restored:** new work resumes on the normal Codex dispatch + `npm run review` gate.
+- **Codex restored:** new work resumed on the normal Codex dispatch + `npm run review` gate.
+- **Post-restore (Codex):** **services** subsystem (P7-007 cap + P0-028 model + P2-026 preview + P7-008
+  wiring) and **accounts** subsystem (P0-029 security-gated model + P7-009 cap + P7-010 wiring + P2-027
+  preview) — the agent now has **13 transactional capabilities** (… + timesync, services, accounts), all
+  wired/discoverable/applicable/readable/in-/state. **101 contracts merged.** Reviewer gate has now blocked
+  **48 real bugs** (latest: a model-valid `__proto__` username polluting a plain-`{}` diff record →
+  AGENTS.md null-prototype-keying rule; a concurrent-append lost-write; a symlink/TOCTOU atomic-write).
 - **Agent — functional end-to-end, 11 transactional capabilities all wired/discoverable/applicable/readable:**
   registry/health (P1-004), hw discovery (P1-005), transaction engine (P1-006), loopback transport w/
   fail-closed /apply (P1-008), `/operations` discovery (P1-015), `/read/{cap}` (P1-023), `sysdeps` syscall
