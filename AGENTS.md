@@ -124,6 +124,14 @@ conventions you must follow are below.
     the outer object — an accessor/symbol/unknown field on the TOP-LEVEL params still slips through.
     Run the WHOLE input through `safeNormalize` FIRST and reject unknown top-level keys, THEN read the
     normalized fields and pass them on. Never hand-roll a partial "is it a plain object" envelope check.
+  - **Keying a record by an UNTRUSTED/spec-valid string ⇒ null-prototype record, never `{}[key]=`.** A
+    value that is VALID per your schema can still be a JS-special key: `__proto__` and `constructor` match
+    common identifier/username/path patterns (`^[a-z_][a-z0-9_-]*$` matches `__proto__`). `rec[name]=v` on
+    a plain `{}` then mutates the prototype instead of creating an own key — the entry VANISHES and any
+    later `Object.keys(rec)` count is wrong (a silent correctness + pollution bug). Build name-keyed maps
+    with `Object.create(null)` (or a real `Map`, or `Object.defineProperty(rec, name, {value, enumerable:
+    true, writable: true, configurable: true})`). Prove it with a regression keyed by `__proto__` /
+    `constructor`. (Go has no analogue — this is a JS-object-as-map hazard.)
 
 ---
 
