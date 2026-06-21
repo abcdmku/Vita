@@ -96,7 +96,22 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   canonicalAbsolutePath — HARDEST; now has notInEnum/dedupItems/uniqueBy/integer-fix), network (cidrLiteral
   [extends ipLiteral] + networkInterfaceName + integer-sentinel + item-level-forbid-unless), pdssync
   (cidV1Multibase heaviest + did/handle from identity + secretKeyNameDenylist).
-  **124 contracts merged. Reviewer gate has blocked 71 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-019 (identity.attestation) MIGRATED — 9th cap** (registry = 9; +identity.attestation). Built
+  didPlcOrWeb + atprotoHandle + keyReference + anyOfFormats + the identity SECRET scanner — did/handle REUSED
+  by pdssync. **4 rounds of Unicode case-folding subtleties (all ground-truth adjudicated):** (r1) "scanner
+  looser" = FALSE POSITIVE (Go RE2 `(?i)` does NOT fold non-ASCII — `(?i)secret`≠`ſecret` — so ASCII-lowercase
+  is CORRECT for a `(?i)` scanner); (r3) SCHEME lowercasing needs Go `strings.ToLower` UNICODE
+  (Kelvin U+212A->k accepted by agent); (r4) U+0130 needs SIMPLE fold ->`i` (JS full-fold gives `i̇`). **AGENTS
+  trap 5b: match the agent's lowercasing PER CHECK — `strings.ToLower`=Unicode-simple vs `(?i)`=no-non-ASCII-fold.**
+  **9/13 migrated.** Remaining 4: pdssync (cidV1Multibase heaviest + did/handle REUSE from identity +
+  secretKeyNameDenylist), network (cidrLiteral [extends ipLiteral] + networkInterfaceName + integer-sentinel +
+  item-level-forbid-unless), backup (exactlyOneOf cron-XOR-interval + cron5OrMacro + opaqueRef + secret
+  scanner), storage (4 enum-domain array invariants + canonicalAbsolutePath — HARDEST).
+  **PROBE vs CODEX: neither is infallible; GROUND-TRUTH Go-in-Docker is the tiebreaker.** Probe caught: services
+  dup-name, self-ref harness, whitespace-scanner, integer-float (Codex missed it). Codex caught: identity
+  scheme-lowercase (probe's scanner-fuzz missed it). Probe FALSE on: offset-bound, SRI-base64, identity-scanner
+  (toolchain claims w/o Go). Run BOTH + verify toolchain claims against real Go.
+  **125 contracts merged. Reviewer gate has blocked 73 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
