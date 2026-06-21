@@ -37,9 +37,15 @@ export interface StringFieldSchema {
   readonly type: "string";
   readonly required: boolean;
   readonly maxLength?: number;
+  readonly maxBytes?: number;
+  readonly minLength?: number;
   readonly enum?: readonly string[];
   readonly lowercase?: boolean;
+  readonly noControlChars?: boolean;
+  readonly noInlineMaterial?: boolean;
   readonly noInlineSecrets?: boolean;
+  readonly nonEmpty?: boolean;
+  readonly trimmed?: boolean;
   readonly format?: StringFieldFormat;
 }
 
@@ -192,9 +198,13 @@ interface CompiledStringFieldSchema {
   required: boolean;
   format?: StringFieldFormat;
   maxLength?: number;
+  maxBytes?: number;
+  minLength?: number;
   enumValues?: ReadonlySet<string>;
   lowercase: boolean;
-  noInlineSecrets: boolean;
+  noControlChars: boolean;
+  noInlineMaterial: boolean;
+  trimmed: boolean;
 }
 
 interface CompiledIntegerFieldSchema {
@@ -274,9 +284,15 @@ const STRING_SCHEMA_FIELDS = new Set([
   "enum",
   "format",
   "lowercase",
+  "maxBytes",
   "maxLength",
+  "minLength",
+  "noControlChars",
+  "noInlineMaterial",
   "noInlineSecrets",
+  "nonEmpty",
   "required",
+  "trimmed",
   "type",
 ]);
 const INTEGER_SCHEMA_FIELDS = new Set(["maximum", "minimum", "required", "type"]);
@@ -292,10 +308,6 @@ const ARRAY_SCHEMA_FIELDS = new Set([
 ]);
 const OBJECT_SCHEMA_FIELDS = new Set(["crossFieldRules", "fields", "required", "type"]);
 const CROSS_FIELD_RULE_FIELDS = new Set(["control", "target", "type"]);
-const DATA_URL_PATTERN = /data:/iu;
-const PEM_BLOCK_PATTERN = /-----BEGIN/iu;
-const LONG_BASE64_OR_BASE64URL_PATTERN = /[A-Za-z0-9+/_-]{48,}/u;
-
 export function loadCapabilityManifest(raw: unknown): CapabilityManifestLoadResult {
   try {
     const normalized = safeNormalize(raw);
@@ -631,16 +643,49 @@ function parseStringFieldSchema(
     Number.MAX_SAFE_INTEGER,
     errors,
   );
+  const maxBytes = readOptionalSafeInteger(
+    value,
+    "maxBytes",
+    [...path, "maxBytes"],
+    0,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
+  const minLength = readOptionalSafeInteger(
+    value,
+    "minLength",
+    [...path, "minLength"],
+    0,
+    Number.MAX_SAFE_INTEGER,
+    errors,
+  );
   const enumValues = readOptionalStringEnum(value, "enum", [...path, "enum"], errors);
   const lowercaseValue = readOptionalBoolean(value, "lowercase", [...path, "lowercase"], errors);
+  const noControlCharsValue = readOptionalBoolean(
+    value,
+    "noControlChars",
+    [...path, "noControlChars"],
+    errors,
+  );
+  const noInlineMaterialValue = readOptionalBoolean(
+    value,
+    "noInlineMaterial",
+    [...path, "noInlineMaterial"],
+    errors,
+  );
   const noInlineSecretsValue = readOptionalBoolean(
     value,
     "noInlineSecrets",
     [...path, "noInlineSecrets"],
     errors,
   );
+  const nonEmptyValue = readOptionalBoolean(value, "nonEmpty", [...path, "nonEmpty"], errors);
+  const trimmedValue = readOptionalBoolean(value, "trimmed", [...path, "trimmed"], errors);
   const lowercase = lowercaseValue ?? false;
-  const noInlineSecrets = noInlineSecretsValue ?? false;
+  const noControlChars = noControlCharsValue ?? false;
+  const noInlineMaterial = (noInlineMaterialValue ?? false) || (noInlineSecretsValue ?? false);
+  const trimmed = trimmedValue ?? false;
+  const effectiveMinLength = nonEmptyValue === true && (minLength === undefined || minLength < 1) ? 1 : minLength;
 
   if (errors.length > errorStart) {
     return undefined;
@@ -648,17 +693,25 @@ function parseStringFieldSchema(
 
   const compiled: CompiledStringFieldSchema = {
     lowercase,
-    noInlineSecrets,
+    noControlChars,
+    noInlineMaterial,
     required,
+    trimmed,
     type: "string",
   };
   const manifest: {
     type: "string";
     required: boolean;
     maxLength?: number;
+    maxBytes?: number;
+    minLength?: number;
     enum?: readonly string[];
     lowercase?: boolean;
+    noControlChars?: boolean;
+    noInlineMaterial?: boolean;
     noInlineSecrets?: boolean;
+    nonEmpty?: boolean;
+    trimmed?: boolean;
     format?: StringFieldFormat;
   } = {
     required,
@@ -673,6 +726,16 @@ function parseStringFieldSchema(
     compiled.maxLength = maxLength;
     manifest.maxLength = maxLength;
   }
+  if (maxBytes !== undefined) {
+    compiled.maxBytes = maxBytes;
+    manifest.maxBytes = maxBytes;
+  }
+  if (effectiveMinLength !== undefined) {
+    compiled.minLength = effectiveMinLength;
+  }
+  if (minLength !== undefined) {
+    manifest.minLength = minLength;
+  }
   if (enumValues !== undefined) {
     compiled.enumValues = new Set(enumValues);
     manifest.enum = Object.freeze([...enumValues]);
@@ -680,8 +743,20 @@ function parseStringFieldSchema(
   if (lowercaseValue !== undefined) {
     manifest.lowercase = lowercaseValue;
   }
+  if (noControlCharsValue !== undefined) {
+    manifest.noControlChars = noControlCharsValue;
+  }
+  if (noInlineMaterialValue !== undefined) {
+    manifest.noInlineMaterial = noInlineMaterialValue;
+  }
   if (noInlineSecretsValue !== undefined) {
     manifest.noInlineSecrets = noInlineSecretsValue;
+  }
+  if (nonEmptyValue !== undefined) {
+    manifest.nonEmpty = nonEmptyValue;
+  }
+  if (trimmedValue !== undefined) {
+    manifest.trimmed = trimmedValue;
   }
 
   return {
@@ -1436,8 +1511,16 @@ function validateStringField(
 
   const errorStart = errors.length;
 
-  if (schema.noInlineSecrets && containsInlineSecretMaterial(value)) {
-    addError(errors, path, "Inline secret material is not allowed.");
+  if (schema.noInlineMaterial && containsInlineServiceMaterial(value)) {
+    addError(errors, path, "Inline material is not allowed.");
+  }
+
+  if (schema.noControlChars && containsControlCharacter(value)) {
+    addError(errors, path, "Control characters are not allowed.");
+  }
+
+  if (schema.trimmed && goTrimSpace(value) !== value) {
+    addError(errors, path, "String must be trimmed.");
   }
 
   let normalized = value;
@@ -1458,6 +1541,14 @@ function validateStringField(
 
   if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
     addError(errors, path, "String exceeds maxLength.");
+  }
+
+  if (schema.maxBytes !== undefined && utf8ByteLength(normalized) > schema.maxBytes) {
+    addError(errors, path, "String exceeds maxBytes.");
+  }
+
+  if (schema.minLength !== undefined && utf8ByteLength(normalized) < schema.minLength) {
+    addError(errors, path, "String is shorter than minLength.");
   }
 
   if (schema.enumValues !== undefined && !schema.enumValues.has(normalized)) {
@@ -2032,14 +2123,6 @@ function rejectUnknownFields(
   }
 }
 
-function containsInlineSecretMaterial(value: string): boolean {
-  return (
-    DATA_URL_PATTERN.test(value) ||
-    PEM_BLOCK_PATTERN.test(value) ||
-    LONG_BASE64_OR_BASE64URL_PATTERN.test(value)
-  );
-}
-
 function isStringFieldFormat(value: string): value is StringFieldFormat {
   return (
     value === "hostnameRFC1123" ||
@@ -2393,52 +2476,22 @@ const SYSTEMD_UNIT_SUFFIXES = Object.freeze([
 const MAX_SYSTEMD_UNIT_NAME_LENGTH = 256;
 const FORBIDDEN_INLINE_REFERENCE_SCHEMES = Object.freeze(["data", "inline", "literal"]);
 const SERVICE_PRIVATE_MATERIAL_TOKENS = Object.freeze([
-  "privatekey",
-  "private-key",
-  "private_key",
-  "opensshprivatekey",
-  "opensshprivate-key",
-  "opensshprivate_key",
-  "openssh-privatekey",
-  "openssh-private-key",
-  "openssh-private_key",
-  "openssh_privatekey",
-  "openssh_private-key",
-  "openssh_private_key",
-  "agesecretkey",
-  "agesecret-key",
-  "agesecret_key",
-  "age-secretkey",
-  "age-secret-key",
-  "age-secret_key",
-  "age_secretkey",
-  "age_secret-key",
-  "age_secret_key",
-  "xprv",
-  "seedphrase",
-  "seed-phrase",
-  "seed_phrase",
-  "mnemonic",
-  "recoveryphrase",
-  "recovery-phrase",
-  "recovery_phrase",
-]);
+  Object.freeze(["private", "key"]),
+  Object.freeze(["openssh", "private", "key"]),
+  Object.freeze(["age", "secret", "key"]),
+  Object.freeze(["xprv"]),
+  Object.freeze(["seed", "phrase"]),
+  Object.freeze(["mnemonic"]),
+  Object.freeze(["recovery", "phrase"]),
+]) satisfies readonly (readonly string[])[];
 const SERVICE_SECRET_ASSIGNMENT_TOKENS = Object.freeze([
-  "privatekey",
-  "private-key",
-  "private_key",
-  "apikey",
-  "api-key",
-  "api_key",
-  "accesstoken",
-  "access-token",
-  "access_token",
-  "refreshtoken",
-  "refresh-token",
-  "refresh_token",
-  "password",
-  "secret",
-]);
+  Object.freeze(["private", "key"]),
+  Object.freeze(["api", "key"]),
+  Object.freeze(["access", "token"]),
+  Object.freeze(["refresh", "token"]),
+  Object.freeze(["password"]),
+  Object.freeze(["secret"]),
+]) satisfies readonly (readonly string[])[];
 
 function isSystemdUnitName(value: string): boolean {
   if (
@@ -2539,51 +2592,89 @@ function containsInlineServiceMaterial(value: string): boolean {
   return false;
 }
 
-function containsBoundedToken(value: string, token: string): boolean {
-  let start = value.indexOf(token);
+function containsBoundedToken(value: string, token: readonly string[]): boolean {
+  const first = token[0];
+
+  if (first === undefined) {
+    return false;
+  }
+
+  let start = value.indexOf(first);
 
   while (start !== -1) {
+    const matchEnd = matchSeparatedToken(value, token, start);
     const before = start === 0 ? undefined : value.charCodeAt(start - 1);
-    const afterIndex = start + token.length;
-    const after = afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
+    const after = matchEnd === undefined || matchEnd >= value.length ? undefined : value.charCodeAt(matchEnd);
 
     if (
+      matchEnd !== undefined &&
       (before === undefined || !isAsciiRegexWordCode(before)) &&
       (after === undefined || !isAsciiRegexWordCode(after))
     ) {
       return true;
     }
 
-    start = value.indexOf(token, start + 1);
+    start = value.indexOf(first, start + 1);
   }
 
   return false;
 }
 
-function containsSecretAssignmentToken(value: string, token: string): boolean {
-  let start = value.indexOf(token);
+function containsSecretAssignmentToken(value: string, token: readonly string[]): boolean {
+  const first = token[0];
+
+  if (first === undefined) {
+    return false;
+  }
+
+  let start = value.indexOf(first);
 
   while (start !== -1) {
     const before = start === 0 ? undefined : value.charCodeAt(start - 1);
-    let afterIndex = start + token.length;
+    let afterIndex = matchSeparatedToken(value, token, start);
 
-    while (afterIndex < value.length && isAsciiWhitespaceCode(value.charCodeAt(afterIndex))) {
+    while (
+      afterIndex !== undefined &&
+      afterIndex < value.length &&
+      isAsciiRegexWhitespaceCode(value.charCodeAt(afterIndex))
+    ) {
       afterIndex += 1;
     }
 
-    const after = afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
+    const after = afterIndex === undefined || afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
 
     if (
+      afterIndex !== undefined &&
       (before === undefined || !isAsciiRegexWordCode(before)) &&
       (after === 58 || after === 61)
     ) {
       return true;
     }
 
-    start = value.indexOf(token, start + 1);
+    start = value.indexOf(first, start + 1);
   }
 
   return false;
+}
+
+function matchSeparatedToken(value: string, token: readonly string[], start: number): number | undefined {
+  let offset = start;
+
+  for (let index = 0; index < token.length; index += 1) {
+    const segment = token[index];
+
+    if (segment === undefined || !value.startsWith(segment, offset)) {
+      return undefined;
+    }
+
+    offset += segment.length;
+
+    if (index + 1 < token.length && offset < value.length && isServiceTokenSeparatorCode(value.charCodeAt(offset))) {
+      offset += 1;
+    }
+  }
+
+  return offset;
 }
 
 function containsLongHexRun(value: string): boolean {
@@ -3027,6 +3118,98 @@ function containsControlCharacter(value: string): boolean {
   return false;
 }
 
+function goTrimSpace(value: string): string {
+  let start = 0;
+  let end = value.length;
+
+  while (start < end) {
+    const codePoint = value.codePointAt(start);
+
+    if (codePoint === undefined || !isGoUnicodeSpaceCodePoint(codePoint)) {
+      break;
+    }
+
+    start += codePoint > 0xffff ? 2 : 1;
+  }
+
+  while (end > start) {
+    const codePoint = codePointBefore(value, end);
+
+    if (codePoint === undefined || !isGoUnicodeSpaceCodePoint(codePoint)) {
+      break;
+    }
+
+    end -= codePoint > 0xffff ? 2 : 1;
+  }
+
+  return value.slice(start, end);
+}
+
+function codePointBefore(value: string, end: number): number | undefined {
+  if (end <= 0 || end > value.length) {
+    return undefined;
+  }
+
+  const last = value.charCodeAt(end - 1);
+
+  if (last >= 0xdc00 && last <= 0xdfff && end >= 2) {
+    const first = value.charCodeAt(end - 2);
+
+    if (first >= 0xd800 && first <= 0xdbff) {
+      return (first - 0xd800) * 0x400 + (last - 0xdc00) + 0x10000;
+    }
+  }
+
+  return last;
+}
+
+function isGoUnicodeSpaceCodePoint(codePoint: number): boolean {
+  return (
+    codePoint === 0x09 ||
+    codePoint === 0x0a ||
+    codePoint === 0x0b ||
+    codePoint === 0x0c ||
+    codePoint === 0x0d ||
+    codePoint === 0x20 ||
+    codePoint === 0x85 ||
+    codePoint === 0xa0 ||
+    codePoint === 0x1680 ||
+    (codePoint >= 0x2000 && codePoint <= 0x200a) ||
+    codePoint === 0x2028 ||
+    codePoint === 0x2029 ||
+    codePoint === 0x202f ||
+    codePoint === 0x205f ||
+    codePoint === 0x3000
+  );
+}
+
+function utf8ByteLength(value: string): number {
+  let length = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        index += 1;
+      } else {
+        length += 3;
+      }
+    } else {
+      length += 3;
+    }
+  }
+
+  return length;
+}
+
 function isHostnameRFC1123(value: string): boolean {
   if (value.length === 0 || value.length > 253) {
     return false;
@@ -3159,8 +3342,12 @@ function isAsciiRegexWordCode(code: number): boolean {
   return isAsciiAlphaNumericCode(code) || code === 95;
 }
 
-function isAsciiWhitespaceCode(code: number): boolean {
-  return code === 9 || code === 10 || code === 11 || code === 12 || code === 13 || code === 32;
+function isServiceTokenSeparatorCode(code: number): boolean {
+  return code === 45 || code === 95 || isAsciiRegexWhitespaceCode(code);
+}
+
+function isAsciiRegexWhitespaceCode(code: number): boolean {
+  return code === 9 || code === 10 || code === 12 || code === 13 || code === 32;
 }
 
 function isSystemdUnitNameCode(code: number): boolean {

@@ -210,7 +210,7 @@ test("dialect field rules reject each violation", () => {
     [withFieldOverrides({ tags: ["a", "a"] }), ["tags/1"]],
     [withFieldOverrides({ tags: [1] }), ["tags/0"]],
     [withFieldOverrides({ label: "Mixed1" }), ["label"]],
-    [withFieldOverrides({ note: "prefixdata:text/plain,hello" }), ["note"]],
+    [withFieldOverrides({ note: "api key=x" }), ["note"]],
     [withFieldOverrides({ note: `prefix${"A".repeat(47)}_suffix` }), ["note"]],
   ];
 
