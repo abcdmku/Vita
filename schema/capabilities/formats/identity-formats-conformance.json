@@ -1,0 +1,60 @@
+{
+  "didPlcOrWeb": [
+    { "name": "plc accepts", "value": "did:plc:abcdefghijklmnopqrstuvwx", "expect": "accept" },
+    { "name": "plc z accepts", "value": "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz", "expect": "accept" },
+    { "name": "web host accepts", "value": "did:web:example.com", "expect": "accept" },
+    { "name": "web path accepts", "value": "did:web:example.com:path:profile%2Fkey", "expect": "accept" },
+    { "name": "wrong prefix rejects", "value": "did:key:abcdefghijklmnopqrstuvwx", "expect": "reject" },
+    { "name": "short plc rejects", "value": "did:plc:abcdefghijklmnopqrstuvw", "expect": "reject" },
+    { "name": "long plc rejects", "value": "did:plc:abcdefghijklmnopqrstuvwxy", "expect": "reject" },
+    { "name": "plc zero rejects", "value": "did:plc:abcdefghijklmnopqrstuvw0", "expect": "reject" },
+    { "name": "single label web rejects", "value": "did:web:localhost", "expect": "reject" },
+    { "name": "bad web path percent rejects", "value": "did:web:example.com:path%2", "expect": "reject" },
+    { "name": "web slash rejects", "value": "did:web:example.com/path", "expect": "reject" }
+  ],
+  "atprotoHandle": [
+    { "name": "domain accepts", "value": "alice.example.com", "expect": "accept" },
+    { "name": "hyphen label accepts", "value": "alice-example.com", "expect": "accept" },
+    { "name": "sixty three byte label accepts", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com", "expect": "accept" },
+    { "name": "max length accepts", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "expect": "accept" },
+    { "name": "single label rejects", "value": "alice", "expect": "reject" },
+    { "name": "uppercase rejects", "value": "Alice.example.com", "expect": "reject" },
+    { "name": "all digit tld rejects", "value": "alice.123", "expect": "reject" },
+    { "name": "uri delimiter rejects", "value": "alice://example.com", "expect": "reject" },
+    { "name": "sixty four byte label rejects", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com", "expect": "reject" },
+    { "name": "too long rejects", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "expect": "reject" },
+    { "name": "trailing dot rejects", "value": "alice.example.com.", "expect": "reject" }
+  ],
+  "keyReference": [
+    { "name": "opaque accepts", "value": "rk:owner-1", "expect": "accept" },
+    { "name": "scheme accepts", "value": "vault://tenant/key-1", "expect": "accept" },
+    { "name": "kelvin scheme accepts", "value": "\u212a://ref", "expect": "accept" },
+    { "name": "dotted capital i scheme accepts", "value": "\u0130://ref", "expect": "accept" },
+    { "name": "secret scheme accepts", "value": "secret://ref", "expect": "accept" },
+    { "name": "long s secret assignment accepts", "value": "https://h/\u017fecret=x", "expect": "accept" },
+    { "name": "empty rejects", "value": "", "expect": "reject" },
+    { "name": "forbidden scheme rejects", "value": "data://ref", "expect": "reject" },
+    { "name": "space rejects", "value": "vault://tenant/key 1", "expect": "reject" },
+    { "name": "forbidden rune rejects", "value": "vault://tenant/<key>", "expect": "reject" },
+    { "name": "api key assignment rejects", "value": "https://h/x?apiKey=AKIA", "expect": "reject" },
+    { "name": "private key token rejects", "value": "https://h/private-key", "expect": "reject" },
+    { "name": "seed words reject", "value": "https://h/alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima", "expect": "reject" },
+    { "name": "pem marker rejects", "value": "https://h/-----BEGIN", "expect": "reject" },
+    { "name": "long hex rejects", "value": "https://h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expect": "reject" },
+    { "name": "long base64 rejects", "value": "https://h/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "expect": "reject" },
+    { "name": "too long opaque rejects", "value": "A................................................................................................................................................................................................................................................................", "expect": "reject" }
+  ],
+  "identitySecretMaterial": [
+    { "name": "plain reference accepts", "value": "rk:owner-1", "expect": "accept" },
+    { "name": "secret scheme accepts", "value": "secret://ref", "expect": "accept" },
+    { "name": "long s secret assignment accepts", "value": "https://h/\u017fecret=x", "expect": "accept" },
+    { "name": "api key assignment rejects", "value": "https://h/x?apiKey=AKIA", "expect": "reject" },
+    { "name": "private key assignment rejects", "value": "https://h/privateKey:z", "expect": "reject" },
+    { "name": "private key token rejects", "value": "https://h/private-key", "expect": "reject" },
+    { "name": "seed words reject", "value": "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima", "expect": "reject" },
+    { "name": "pem marker rejects", "value": "-----BEGIN", "expect": "reject" },
+    { "name": "long hex rejects", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expect": "reject" },
+    { "name": "long base64 rejects", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "expect": "reject" },
+    { "name": "control rejects", "value": "rk:\u0007owner", "expect": "reject" }
+  ]
+}

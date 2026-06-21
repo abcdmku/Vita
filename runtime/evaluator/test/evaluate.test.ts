@@ -263,6 +263,46 @@ test("valid accounts.config request evaluates to one normalized operation", () =
   });
 });
 
+test("valid identity.attestation request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "identity.attestation": {
+        desired: {
+          did: "did:plc:abcdefghijklmnopqrstuvwx",
+          handle: "alice.example.com",
+          signingKeyRef: {
+            id: "\u0130://ref",
+            handle: "rk:owner-1",
+          },
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "identity.attestation",
+        request: {
+          desired: {
+            did: "did:plc:abcdefghijklmnopqrstuvwx",
+            handle: "alice.example.com",
+            signingKeyRef: {
+              id: "\u0130://ref",
+              handle: "rk:owner-1",
+            },
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {

@@ -11,7 +11,8 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * String formats are a closed, governed set. `posixUsername`, `posixAccountName`, `groupName`,
  * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
  * `capsuleVersion`, `sriIntegrity`, `bundleRefString`, and
- * `bundleVersionString` are structured capability-agent parity formats.
+ * `bundleVersionString`, `didPlcOrWeb`, `atprotoHandle`, and `keyReference`
+ * are structured capability-agent parity formats.
  * `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
  * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
@@ -39,7 +40,10 @@ export type StringFieldFormat =
   | "capsuleVersion"
   | "sriIntegrity"
   | "bundleRefString"
-  | "bundleVersionString";
+  | "bundleVersionString"
+  | "didPlcOrWeb"
+  | "atprotoHandle"
+  | "keyReference";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -52,6 +56,7 @@ export interface StringFieldSchema {
   readonly lowercase?: boolean;
   readonly noControlChars?: boolean;
   readonly noInlineCapsuleMaterial?: boolean;
+  readonly noInlineIdentityMaterial?: boolean;
   readonly noInlineMaterial?: boolean;
   readonly noInlineSecrets?: boolean;
   readonly nonEmpty?: boolean;
@@ -217,6 +222,7 @@ interface CompiledStringFieldSchema {
   lowercase: boolean;
   noControlChars: boolean;
   noInlineCapsuleMaterial: boolean;
+  noInlineIdentityMaterial: boolean;
   noInlineMaterial: boolean;
   forbiddenSchemePrefix: boolean;
   trimmed: boolean;
@@ -309,6 +315,7 @@ const STRING_SCHEMA_FIELDS = new Set([
   "forbiddenSchemePrefix",
   "noInlineCapsuleMaterial",
   "noControlChars",
+  "noInlineIdentityMaterial",
   "noInlineMaterial",
   "noInlineSecrets",
   "nonEmpty",
@@ -698,6 +705,12 @@ function parseStringFieldSchema(
     [...path, "noInlineCapsuleMaterial"],
     errors,
   );
+  const noInlineIdentityMaterialValue = readOptionalBoolean(
+    value,
+    "noInlineIdentityMaterial",
+    [...path, "noInlineIdentityMaterial"],
+    errors,
+  );
   const noInlineMaterialValue = readOptionalBoolean(
     value,
     "noInlineMaterial",
@@ -721,6 +734,7 @@ function parseStringFieldSchema(
   const lowercase = lowercaseValue ?? false;
   const noControlChars = noControlCharsValue ?? false;
   const noInlineCapsuleMaterial = noInlineCapsuleMaterialValue ?? false;
+  const noInlineIdentityMaterial = noInlineIdentityMaterialValue ?? false;
   const noInlineMaterial = (noInlineMaterialValue ?? false) || (noInlineSecretsValue ?? false);
   const forbiddenSchemePrefix = forbiddenSchemePrefixValue ?? false;
   const trimmed = trimmedValue ?? false;
@@ -734,6 +748,7 @@ function parseStringFieldSchema(
     lowercase,
     noControlChars,
     noInlineCapsuleMaterial,
+    noInlineIdentityMaterial,
     noInlineMaterial,
     forbiddenSchemePrefix,
     required,
@@ -751,6 +766,7 @@ function parseStringFieldSchema(
     lowercase?: boolean;
     noControlChars?: boolean;
     noInlineCapsuleMaterial?: boolean;
+    noInlineIdentityMaterial?: boolean;
     noInlineMaterial?: boolean;
     noInlineSecrets?: boolean;
     nonEmpty?: boolean;
@@ -796,6 +812,9 @@ function parseStringFieldSchema(
   }
   if (noInlineCapsuleMaterialValue !== undefined) {
     manifest.noInlineCapsuleMaterial = noInlineCapsuleMaterialValue;
+  }
+  if (noInlineIdentityMaterialValue !== undefined) {
+    manifest.noInlineIdentityMaterial = noInlineIdentityMaterialValue;
   }
   if (noInlineMaterialValue !== undefined) {
     manifest.noInlineMaterial = noInlineMaterialValue;
@@ -1592,6 +1611,10 @@ function validateStringField(
     addError(errors, path, "Inline capsule material is not allowed.");
   }
 
+  if (schema.noInlineIdentityMaterial && containsInlineIdentityMaterial(value)) {
+    addError(errors, path, "Inline identity material is not allowed.");
+  }
+
   if (schema.forbiddenSchemePrefix && hasInlineReferenceScheme(value)) {
     addError(errors, path, "Forbidden scheme prefix is not allowed.");
   }
@@ -2258,7 +2281,10 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "capsuleVersion" ||
     value === "sriIntegrity" ||
     value === "bundleRefString" ||
-    value === "bundleVersionString"
+    value === "bundleVersionString" ||
+    value === "didPlcOrWeb" ||
+    value === "atprotoHandle" ||
+    value === "keyReference"
   );
 }
 
@@ -2303,6 +2329,12 @@ function normalizeStringFormat(
       return isBundleRefString(value) ? value : undefined;
     case "bundleVersionString":
       return isBundleVersionString(value) ? value : undefined;
+    case "didPlcOrWeb":
+      return isSupportedDID(value) ? value : undefined;
+    case "atprotoHandle":
+      return isDomainHandle(value) ? value : undefined;
+    case "keyReference":
+      return isKeyReference(value) ? value : undefined;
   }
 }
 
@@ -2627,6 +2659,292 @@ function isBundleVersionString(value: string): boolean {
     const code = value.charCodeAt(index);
 
     if (!isBundleVersionCode(code)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+const DID_PLC_PREFIX = "did:plc:";
+const DID_WEB_PREFIX = "did:web:";
+const MAX_ATPROTO_HANDLE_BYTES = 253;
+const MAX_DID_BYTES = 2048;
+const MAX_KEY_REFERENCE_BYTES = 2048;
+const INLINE_REFERENCE_SCHEMES = Object.freeze(["data", "inline", "literal"]);
+
+function isSupportedDID(value: string): boolean {
+  if (utf8ByteLength(value) > MAX_DID_BYTES || goTrimSpace(value) !== value) {
+    return false;
+  }
+
+  return isDIDPlc(value) || isDIDWeb(value);
+}
+
+function isDIDPlc(value: string): boolean {
+  if (!value.startsWith(DID_PLC_PREFIX)) {
+    return false;
+  }
+
+  const identifier = value.slice(DID_PLC_PREFIX.length);
+
+  if (identifier.length !== 24) {
+    return false;
+  }
+
+  for (let index = 0; index < identifier.length; index += 1) {
+    const code = identifier.charCodeAt(index);
+
+    if (!isAsciiLowercaseCode(code) && (code < 50 || code > 55)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isDIDWeb(value: string): boolean {
+  if (!value.startsWith(DID_WEB_PREFIX)) {
+    return false;
+  }
+
+  const identifier = value.slice(DID_WEB_PREFIX.length);
+
+  if (
+    identifier.length === 0 ||
+    identifier.includes("/") ||
+    identifier.includes("?") ||
+    identifier.includes("#") ||
+    containsControlCharacter(identifier)
+  ) {
+    return false;
+  }
+
+  const segments = identifier.split(":");
+  const host = segments[0];
+
+  if (host === undefined || !isDomainHandle(host)) {
+    return false;
+  }
+
+  for (let index = 1; index < segments.length; index += 1) {
+    const segment = segments[index];
+
+    if (
+      segment === undefined ||
+      segment.length === 0 ||
+      segment === "." ||
+      segment === ".." ||
+      !isDIDWebPathSegment(segment)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isDIDWebPathSegment(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (
+      isAsciiAlphaNumericCode(code) ||
+      code === 46 ||
+      code === 95 ||
+      code === 126 ||
+      code === 45
+    ) {
+      continue;
+    }
+
+    if (
+      code === 37 &&
+      index + 2 < value.length &&
+      isAsciiHexCode(value.charCodeAt(index + 1)) &&
+      isAsciiHexCode(value.charCodeAt(index + 2))
+    ) {
+      index += 2;
+      continue;
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+function isDomainHandle(value: string): boolean {
+  if (
+    utf8ByteLength(value) < 3 ||
+    utf8ByteLength(value) > MAX_ATPROTO_HANDLE_BYTES ||
+    goTrimSpace(value) !== value ||
+    goSimpleLowercase(value) !== value ||
+    value.includes("://") ||
+    value.includes("/") ||
+    value.includes(":") ||
+    value.endsWith(".")
+  ) {
+    return false;
+  }
+
+  const labels = value.split(".");
+
+  if (labels.length < 2) {
+    return false;
+  }
+
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+
+    if (label === undefined || !isDomainHandleLabel(label)) {
+      return false;
+    }
+  }
+
+  const topLevelLabel = labels[labels.length - 1];
+
+  return topLevelLabel !== undefined && topLevelLabel.length >= 2 && !isAllAsciiDigits(topLevelLabel);
+}
+
+function isDomainHandleLabel(value: string): boolean {
+  if (value.length === 0 || value.length > 63) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (index === 0 || index === value.length - 1) {
+      if (!isAsciiLowerAlphaNumericCode(code)) {
+        return false;
+      }
+    } else if (!isAsciiLowerAlphaNumericCode(code) && code !== 45) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isKeyReference(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !containsInlineIdentityMaterial(value) &&
+    utf8ByteLength(value) <= MAX_KEY_REFERENCE_BYTES &&
+    isReferenceSyntax(value)
+  );
+}
+
+function isReferenceSyntax(value: string): boolean {
+  if (goTrimSpace(value) !== value || containsControlCharacter(value)) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length;) {
+    const codePoint = value.codePointAt(index);
+
+    if (codePoint === undefined) {
+      return false;
+    }
+
+    switch (codePoint) {
+      case 0x20:
+      case 0x09:
+      case 0x0a:
+      case 0x0d:
+      case 0x0b:
+      case 0x0c:
+      case 0x3c:
+      case 0x3e:
+      case 0x7b:
+      case 0x7d:
+      case 0x60:
+      case 0x22:
+      case 0x27:
+        return false;
+      default:
+        break;
+    }
+
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+
+  const separator = value.indexOf("://");
+
+  if (separator === -1) {
+    return isOpaqueKeyReference(value);
+  }
+
+  if (separator <= 0 || separator === value.length - 3) {
+    return false;
+  }
+
+  const scheme = goSimpleLowercase(value.slice(0, separator));
+
+  return isReferenceScheme(scheme) && !isInlineReferenceScheme(scheme) && value.slice(separator + 3).length > 0;
+}
+
+function isOpaqueKeyReference(value: string): boolean {
+  if (value.length === 0 || value.length > 256 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (
+      !isAsciiAlphaNumericCode(code) &&
+      code !== 46 &&
+      code !== 95 &&
+      code !== 58 &&
+      code !== 64 &&
+      code !== 45
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isReferenceScheme(value: string): boolean {
+  if (value.length === 0 || !isAsciiLowercaseCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isAsciiLowerAlphaNumericCode(code) && code !== 43 && code !== 46 && code !== 45) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isInlineReferenceScheme(value: string): boolean {
+  for (let index = 0; index < INLINE_REFERENCE_SCHEMES.length; index += 1) {
+    if (value === INLINE_REFERENCE_SCHEMES[index]) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isAllAsciiDigits(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isAsciiDigitCode(value.charCodeAt(index))) {
       return false;
     }
   }
@@ -3048,6 +3366,20 @@ function containsInlineCapsuleMaterial(value: string): boolean {
   );
 }
 
+function containsInlineIdentityMaterial(value: string): boolean {
+  const lower = asciiLowercase(value);
+
+  return (
+    containsControlCharacter(value) ||
+    containsPEMBlockPattern(lower) ||
+    containsCapsulePrivateKeyPattern(lower) ||
+    containsIdentitySecretAssignment(lower, value) ||
+    containsSeedWordsPattern(lower) ||
+    containsLongHexRun(value) ||
+    containsLongBase64Run(value)
+  );
+}
+
 function containsCapsulePrivateKeyPattern(value: string): boolean {
   return (
     containsBoundedToken(value, ["private", "key"]) ||
@@ -3068,6 +3400,17 @@ function containsCapsuleSecretAssignment(value: string): boolean {
     containsSecretAssignmentToken(value, ["refresh", "token"]) ||
     containsSecretAssignmentToken(value, ["password"]) ||
     containsSecretAssignmentToken(value, ["secret"])
+  );
+}
+
+function containsIdentitySecretAssignment(lower: string, original: string): boolean {
+  return (
+    containsIdentitySecretAssignmentToken(lower, original, ["private", "key"]) ||
+    containsIdentitySecretAssignmentToken(lower, original, ["api", "key"]) ||
+    containsIdentitySecretAssignmentToken(lower, original, ["access", "token"]) ||
+    containsIdentitySecretAssignmentToken(lower, original, ["refresh", "token"]) ||
+    containsIdentitySecretAssignmentToken(lower, original, ["password"]) ||
+    containsIdentitySecretAssignmentToken(lower, original, ["secret"])
   );
 }
 
@@ -3197,6 +3540,53 @@ function skipAsciiLetters(value: string, start: number): number {
   }
 
   return offset;
+}
+
+function containsIdentitySecretAssignmentToken(
+  lower: string,
+  original: string,
+  token: readonly string[],
+): boolean {
+  const first = token[0];
+
+  if (first === undefined) {
+    return false;
+  }
+
+  let start = lower.indexOf(first);
+
+  while (start !== -1) {
+    const before = start === 0 ? undefined : lower.charCodeAt(start - 1);
+    let afterIndex = matchSeparatedToken(lower, token, start);
+
+    while (
+      afterIndex !== undefined &&
+      afterIndex < lower.length &&
+      isAsciiRegexWhitespaceCode(lower.charCodeAt(afterIndex))
+    ) {
+      afterIndex += 1;
+    }
+
+    const delimiter = afterIndex === undefined || afterIndex >= lower.length
+      ? undefined
+      : lower.charCodeAt(afterIndex);
+
+    if (
+      afterIndex !== undefined &&
+      (before === undefined || !isAsciiRegexWordCode(before)) &&
+      (delimiter === 58 || delimiter === 61)
+    ) {
+      const nextIndex = afterIndex + 1;
+
+      if (delimiter !== 58 || !original.startsWith("//", nextIndex)) {
+        return true;
+      }
+    }
+
+    start = lower.indexOf(first, start + 1);
+  }
+
+  return false;
 }
 
 function containsBoundedToken(value: string, token: readonly string[]): boolean {
@@ -3916,6 +4306,31 @@ function asciiLowercase(value: string): string {
     } else {
       output += value.charAt(index);
     }
+  }
+
+  return changed ? output : value;
+}
+
+function goSimpleLowercase(value: string): string {
+  let output = "";
+  let changed = false;
+
+  for (let index = 0; index < value.length;) {
+    const codePoint = value.codePointAt(index);
+
+    if (codePoint === undefined) {
+      break;
+    }
+
+    const current = String.fromCodePoint(codePoint);
+    const lower = codePoint === 0x0130 ? "i" : current.toLowerCase();
+
+    if (lower !== current) {
+      changed = true;
+    }
+
+    output += lower;
+    index += codePoint > 0xffff ? 2 : 1;
   }
 
   return changed ? output : value;

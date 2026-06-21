@@ -1,0 +1,728 @@
+[
+  {
+    "name": "valid did plc and opaque key references accept",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "did plc with z accepts per agent pattern",
+    "request": {
+      "desired": {
+        "did": "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid did web host accepts",
+    "request": {
+      "desired": {
+        "did": "did:web:example.com",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "valid did web path and percent encoding accept",
+    "request": {
+      "desired": {
+        "did": "did:web:example.com:users:alice%2Fprofile",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "did web path ending with percent escape accepts",
+    "request": {
+      "desired": {
+        "did": "did:web:example.com:path%2F",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "scheme key reference accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "vault://tenant/key-1",
+          "handle": "keystore://handles/signing"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "kelvin sign scheme key reference accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "\u212a://ref",
+          "handle": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "dotted capital i scheme key reference accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "\u0130://ref",
+          "handle": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "secret scheme key reference accepts because assignment skips scheme delimiter",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "secret://ref",
+          "handle": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "non ascii folded secret token in key reference accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/\u017fecret=x",
+          "handle": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "max length handle accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sixty three byte handle label accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "max length opaque key reference accepts",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "A...............................................................................................................................................................................................................................................................",
+          "handle": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent did rejects",
+    "request": {
+      "desired": {
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "absent handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "absent signing key ref rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef"
+  },
+  {
+    "name": "absent signing key id rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "absent signing key handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/handle"
+  },
+  {
+    "name": "wrong did prefix rejects",
+    "request": {
+      "desired": {
+        "did": "did:key:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "twenty three char did plc rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvw",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "twenty five char did plc rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwxy",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "did plc with zero rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvw0",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "did plc with one rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvw1",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "did plc with eight rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvw8",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "did plc with nine rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvw9",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "single label did web host rejects",
+    "request": {
+      "desired": {
+        "did": "did:web:localhost",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "bad did web percent escape rejects",
+    "request": {
+      "desired": {
+        "did": "did:web:example.com:path%2",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/did"
+  },
+  {
+    "name": "single label handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "all digit tld handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.123",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "uppercase handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "Alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "handle with uri delimiter rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice://example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "too long handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "sixty four byte handle label rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/handle"
+  },
+  {
+    "name": "empty key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "forbidden inline key reference scheme rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "data://ref",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "forbidden key reference rune rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "vault://tenant/<key>",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "too long opaque key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "A................................................................................................................................................................................................................................................................",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "api key token in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/x?apiKey=AKIA",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "private key assignment in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/privateKey:z",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "private key phrase in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/private-key",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "seed word run in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "pem marker in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/-----BEGIN",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "long hex in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "long base64 in uri key reference rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "https://h/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "handle": "signing-key@local"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/id"
+  },
+  {
+    "name": "secret token in signing key handle rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "https://h/x?apiKey=AKIA"
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/handle"
+  },
+  {
+    "name": "unknown top level field rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        }
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired field rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local"
+        },
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown signing key ref field rejects",
+    "request": {
+      "desired": {
+        "did": "did:plc:abcdefghijklmnopqrstuvwx",
+        "handle": "alice.example.com",
+        "signingKeyRef": {
+          "id": "rk:owner-1",
+          "handle": "signing-key@local",
+          "extra": true
+        }
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/signingKeyRef/extra"
+  },
+  {
+    "name": "duplicate top level json key rejects",
+    "request": "{\"desired\":{\"did\":\"did:plc:abcdefghijklmnopqrstuvwx\",\"handle\":\"alice.example.com\",\"signingKeyRef\":{\"id\":\"rk:owner-1\",\"handle\":\"signing-key@local\"}},\"desired\":{\"did\":\"did:plc:abcdefghijklmnopqrstuvwx\",\"handle\":\"alice.example.com\",\"signingKeyRef\":{\"id\":\"rk:owner-1\",\"handle\":\"signing-key@local\"}}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate nested json key rejects",
+    "request": "{\"desired\":{\"did\":\"did:plc:abcdefghijklmnopqrstuvwx\",\"handle\":\"alice.example.com\",\"signingKeyRef\":{\"id\":\"-----BEGIN PRIVATE KEY-----\",\"id\":\"rk:owner-1\",\"handle\":\"signing-key@local\"}}}",
+    "expect": "reject"
+  }
+]

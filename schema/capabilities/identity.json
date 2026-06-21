@@ -1,0 +1,41 @@
+{
+  "capability": "identity.attestation",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "did": {
+          "format": "didPlcOrWeb",
+          "required": true,
+          "type": "string"
+        },
+        "handle": {
+          "format": "atprotoHandle",
+          "required": true,
+          "type": "string"
+        },
+        "signingKeyRef": {
+          "required": true,
+          "type": "object",
+          "fields": {
+            "handle": {
+              "format": "keyReference",
+              "noInlineIdentityMaterial": true,
+              "required": true,
+              "type": "string"
+            },
+            "id": {
+              "format": "keyReference",
+              "noInlineIdentityMaterial": true,
+              "required": true,
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

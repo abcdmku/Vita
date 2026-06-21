@@ -1,4 +1,4 @@
-// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
+// DO NOT EDIT — generated from schema/capabilities/accounts.json, schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/identity.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json, schema/capabilities/update.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
 
@@ -153,6 +153,48 @@ export const HOSTNAME_MANIFEST = Object.freeze({
       maxLength: 63,
       required: true,
       type: "string",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
+
+export const IDENTITY_MANIFEST = Object.freeze({
+  capability: "identity.attestation",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        did: Object.freeze({
+          format: "didPlcOrWeb",
+          required: true,
+          type: "string",
+        }),
+        handle: Object.freeze({
+          format: "atprotoHandle",
+          required: true,
+          type: "string",
+        }),
+        signingKeyRef: Object.freeze({
+          fields: Object.freeze({
+            handle: Object.freeze({
+              format: "keyReference",
+              required: true,
+              type: "string",
+              noInlineIdentityMaterial: true,
+            }),
+            id: Object.freeze({
+              format: "keyReference",
+              required: true,
+              type: "string",
+              noInlineIdentityMaterial: true,
+            }),
+          }),
+          required: true,
+          type: "object",
+        }),
+      }),
+      required: true,
+      type: "object",
     }),
   }),
   crossFieldRules: Object.freeze([]),
@@ -328,6 +370,7 @@ export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
   "accounts.config": ACCOUNTS_MANIFEST,
   "capsule.registry": CAPSULE_MANIFEST,
   "hostname.set": HOSTNAME_MANIFEST,
+  "identity.attestation": IDENTITY_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
   "services.config": SERVICES_MANIFEST,
   "time.set": TIME_MANIFEST,

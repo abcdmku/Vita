@@ -10,6 +10,7 @@ import {
   CAPSULE_MANIFEST,
   DEFAULT_CAPABILITY_MANIFESTS,
   HOSTNAME_MANIFEST,
+  IDENTITY_MANIFEST,
   NODE_CONFIG_MANIFEST,
   SERVICES_MANIFEST,
   TIME_MANIFEST,
@@ -34,6 +35,7 @@ test("default capability manifests are keyed by agent operation names", () => {
     "accounts.config",
     "capsule.registry",
     "hostname.set",
+    "identity.attestation",
     "node.config",
     "services.config",
     "time.set",
@@ -43,6 +45,7 @@ test("default capability manifests are keyed by agent operation names", () => {
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["accounts.config"], ACCOUNTS_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["capsule.registry"], CAPSULE_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["hostname.set"], HOSTNAME_MANIFEST);
+  assert.equal(DEFAULT_CAPABILITY_MANIFESTS["identity.attestation"], IDENTITY_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["node.config"], NODE_CONFIG_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["services.config"], SERVICES_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["time.set"], TIME_MANIFEST);
@@ -58,12 +61,13 @@ test("defaultCapabilityRegistry exposes every generated manifest", () => {
   assert.equal(registry.get("accounts.config"), ACCOUNTS_MANIFEST);
   assert.equal(registry.get("capsule.registry"), CAPSULE_MANIFEST);
   assert.equal(registry.get("hostname.set"), HOSTNAME_MANIFEST);
+  assert.equal(registry.get("identity.attestation"), IDENTITY_MANIFEST);
   assert.equal(registry.get("node.config"), NODE_CONFIG_MANIFEST);
   assert.equal(registry.get("services.config"), SERVICES_MANIFEST);
   assert.equal(registry.get("time.set"), TIME_MANIFEST);
   assert.equal(registry.get("time.sync"), TIMESYNC_MANIFEST);
   assert.equal(registry.get("update.plan"), UPDATE_MANIFEST);
-  assert.equal(registry.size, 8);
+  assert.equal(registry.size, 9);
 });
 
 test("generated capability manifests are fresh", () => {

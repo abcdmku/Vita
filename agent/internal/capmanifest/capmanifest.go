@@ -30,32 +30,33 @@ type Manifest struct {
 }
 
 type FieldSchema struct {
-	Type                    string
-	Required                bool
-	MaxLength               *int64
-	MaxBytes                *int64
-	MinLength               *int64
-	Enum                    []string
-	NotInEnum               []string
-	Lowercase               bool
-	NoControlChars          bool
-	NoInlineCapsuleMaterial bool
-	NoInlineMaterial        bool
-	NoInlineSecrets         bool
-	NonEmpty                bool
-	Trimmed                 bool
-	ForbiddenSchemePrefix   bool
-	Format                  string
-	Minimum                 *int64
-	Maximum                 *int64
-	Items                   *FieldSchema
-	MinItems                *int64
-	MaxItems                *int64
-	UniqueItems             bool
-	DedupItems              bool
-	UniqueBy                []string
-	Fields                  map[string]FieldSchema
-	CrossFieldRules         []CrossFieldRule
+	Type                     string
+	Required                 bool
+	MaxLength                *int64
+	MaxBytes                 *int64
+	MinLength                *int64
+	Enum                     []string
+	NotInEnum                []string
+	Lowercase                bool
+	NoControlChars           bool
+	NoInlineCapsuleMaterial  bool
+	NoInlineIdentityMaterial bool
+	NoInlineMaterial         bool
+	NoInlineSecrets          bool
+	NonEmpty                 bool
+	Trimmed                  bool
+	ForbiddenSchemePrefix    bool
+	Format                   string
+	Minimum                  *int64
+	Maximum                  *int64
+	Items                    *FieldSchema
+	MinItems                 *int64
+	MaxItems                 *int64
+	UniqueItems              bool
+	DedupItems               bool
+	UniqueBy                 []string
+	Fields                   map[string]FieldSchema
+	CrossFieldRules          []CrossFieldRule
 }
 
 type CrossFieldRule struct {
@@ -79,31 +80,32 @@ type compiledManifest struct {
 }
 
 type compiledField struct {
-	fieldType               string
-	required                bool
-	maxLength               *int64
-	maxBytes                *int64
-	minLength               *int64
-	enumValues              map[string]struct{}
-	notInEnumValues         map[string]struct{}
-	lowercase               bool
-	noControlChars          bool
-	noInlineCapsuleMaterial bool
-	noInlineMaterial        bool
-	forbiddenSchemePrefix   bool
-	trimmed                 bool
-	format                  string
-	minimum                 *int64
-	maximum                 *int64
-	items                   *compiledField
-	minItems                *int64
-	maxItems                *int64
-	uniqueItems             bool
-	dedupItems              bool
-	uniqueBy                []string
-	fields                  map[string]compiledField
-	fieldNames              []string
-	crossFieldRules         []CrossFieldRule
+	fieldType                string
+	required                 bool
+	maxLength                *int64
+	maxBytes                 *int64
+	minLength                *int64
+	enumValues               map[string]struct{}
+	notInEnumValues          map[string]struct{}
+	lowercase                bool
+	noControlChars           bool
+	noInlineCapsuleMaterial  bool
+	noInlineIdentityMaterial bool
+	noInlineMaterial         bool
+	forbiddenSchemePrefix    bool
+	trimmed                  bool
+	format                   string
+	minimum                  *int64
+	maximum                  *int64
+	items                    *compiledField
+	minItems                 *int64
+	maxItems                 *int64
+	uniqueItems              bool
+	dedupItems               bool
+	uniqueBy                 []string
+	fields                   map[string]compiledField
+	fieldNames               []string
+	crossFieldRules          []CrossFieldRule
 }
 
 type capabilityValue interface{}
@@ -119,22 +121,23 @@ var (
 		"version":         {},
 	}
 	stringSchemaFields = map[string]struct{}{
-		"enum":                    {},
-		"format":                  {},
-		"lowercase":               {},
-		"maxBytes":                {},
-		"maxLength":               {},
-		"minLength":               {},
-		"notInEnum":               {},
-		"forbiddenSchemePrefix":   {},
-		"noInlineCapsuleMaterial": {},
-		"noControlChars":          {},
-		"noInlineMaterial":        {},
-		"noInlineSecrets":         {},
-		"nonEmpty":                {},
-		"required":                {},
-		"trimmed":                 {},
-		"type":                    {},
+		"enum":                     {},
+		"format":                   {},
+		"lowercase":                {},
+		"maxBytes":                 {},
+		"maxLength":                {},
+		"minLength":                {},
+		"notInEnum":                {},
+		"forbiddenSchemePrefix":    {},
+		"noInlineCapsuleMaterial":  {},
+		"noControlChars":           {},
+		"noInlineIdentityMaterial": {},
+		"noInlineMaterial":         {},
+		"noInlineSecrets":          {},
+		"nonEmpty":                 {},
+		"required":                 {},
+		"trimmed":                  {},
+		"type":                     {},
 	}
 	integerSchemaFields = map[string]struct{}{
 		"maximum":  {},
@@ -404,6 +407,10 @@ func parseStringFieldSchema(object jsonObject, required bool, path string) (Fiel
 	if err != nil {
 		return FieldSchema{}, err
 	}
+	noInlineIdentityMaterial, err := optionalBool(object, "noInlineIdentityMaterial", joinPath(path, "noInlineIdentityMaterial"))
+	if err != nil {
+		return FieldSchema{}, err
+	}
 	noInlineMaterial, err := optionalBool(object, "noInlineMaterial", joinPath(path, "noInlineMaterial"))
 	if err != nil {
 		return FieldSchema{}, err
@@ -426,22 +433,23 @@ func parseStringFieldSchema(object jsonObject, required bool, path string) (Fiel
 	}
 
 	return FieldSchema{
-		Type:                    "string",
-		Required:                required,
-		MaxLength:               maxLength,
-		MaxBytes:                maxBytes,
-		MinLength:               minLength,
-		Enum:                    enumValues,
-		NotInEnum:               notInEnumValues,
-		Lowercase:               lowercase,
-		NoControlChars:          noControlChars,
-		NoInlineCapsuleMaterial: noInlineCapsuleMaterial,
-		NoInlineMaterial:        noInlineMaterial,
-		NoInlineSecrets:         noInlineSecrets,
-		NonEmpty:                nonEmpty,
-		Trimmed:                 trimmed,
-		ForbiddenSchemePrefix:   forbiddenSchemePrefix,
-		Format:                  format,
+		Type:                     "string",
+		Required:                 required,
+		MaxLength:                maxLength,
+		MaxBytes:                 maxBytes,
+		MinLength:                minLength,
+		Enum:                     enumValues,
+		NotInEnum:                notInEnumValues,
+		Lowercase:                lowercase,
+		NoControlChars:           noControlChars,
+		NoInlineCapsuleMaterial:  noInlineCapsuleMaterial,
+		NoInlineIdentityMaterial: noInlineIdentityMaterial,
+		NoInlineMaterial:         noInlineMaterial,
+		NoInlineSecrets:          noInlineSecrets,
+		NonEmpty:                 nonEmpty,
+		Trimmed:                  trimmed,
+		ForbiddenSchemePrefix:    forbiddenSchemePrefix,
+		Format:                   format,
 	}, nil
 }
 
@@ -729,25 +737,26 @@ func compileStringFieldSchema(field FieldSchema, path string) (compiledField, er
 	}
 
 	return compiledField{
-		fieldType:               "string",
-		required:                field.Required,
-		maxLength:               cloneInt64Pointer(field.MaxLength),
-		maxBytes:                cloneInt64Pointer(field.MaxBytes),
-		minLength:               minLength,
-		enumValues:              enumValues,
-		notInEnumValues:         notInEnumValues,
-		lowercase:               field.Lowercase,
-		noControlChars:          field.NoControlChars,
-		noInlineCapsuleMaterial: field.NoInlineCapsuleMaterial,
-		noInlineMaterial:        field.NoInlineMaterial || field.NoInlineSecrets,
-		forbiddenSchemePrefix:   field.ForbiddenSchemePrefix,
-		trimmed:                 field.Trimmed,
-		format:                  field.Format,
+		fieldType:                "string",
+		required:                 field.Required,
+		maxLength:                cloneInt64Pointer(field.MaxLength),
+		maxBytes:                 cloneInt64Pointer(field.MaxBytes),
+		minLength:                minLength,
+		enumValues:               enumValues,
+		notInEnumValues:          notInEnumValues,
+		lowercase:                field.Lowercase,
+		noControlChars:           field.NoControlChars,
+		noInlineCapsuleMaterial:  field.NoInlineCapsuleMaterial,
+		noInlineIdentityMaterial: field.NoInlineIdentityMaterial,
+		noInlineMaterial:         field.NoInlineMaterial || field.NoInlineSecrets,
+		forbiddenSchemePrefix:    field.ForbiddenSchemePrefix,
+		trimmed:                  field.Trimmed,
+		format:                   field.Format,
 	}, nil
 }
 
 func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "integer field contains unsupported constraints")
 	}
 	if field.Minimum != nil && (*field.Minimum < -maxSafeInteger || *field.Minimum > maxSafeInteger) {
@@ -769,7 +778,7 @@ func compileIntegerFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "boolean field contains unsupported constraints")
 	}
 
@@ -780,7 +789,7 @@ func compileBooleanFieldSchema(field FieldSchema, path string) (compiledField, e
 }
 
 func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Fields != nil || field.CrossFieldRules != nil {
 		return compiledField{}, pathError(path, "array field contains unsupported constraints")
 	}
 	if field.Items == nil {
@@ -822,7 +831,7 @@ func compileArrayFieldSchema(field FieldSchema, path string, depth int, seen map
 }
 
 func compileObjectFieldSchema(field FieldSchema, path string, depth int, seen map[*FieldSchema]struct{}) (compiledField, error) {
-	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil {
+	if field.MaxLength != nil || field.MaxBytes != nil || field.MinLength != nil || field.Enum != nil || field.NotInEnum != nil || field.Lowercase || field.NoControlChars || field.NoInlineCapsuleMaterial || field.NoInlineIdentityMaterial || field.NoInlineMaterial || field.NoInlineSecrets || field.NonEmpty || field.Trimmed || field.ForbiddenSchemePrefix || field.Format != "" || field.Minimum != nil || field.Maximum != nil || field.Items != nil || field.MinItems != nil || field.MaxItems != nil || field.UniqueItems || field.DedupItems || field.UniqueBy != nil {
 		return compiledField{}, pathError(path, "object field contains unsupported constraints")
 	}
 	if field.Fields == nil {
@@ -898,6 +907,9 @@ func validateStringField(value jsonValue, field compiledField, path string) (cap
 	}
 	if field.noInlineCapsuleMaterial && containsInlineCapsuleMaterial(raw.value) {
 		return nil, pathError(path, "inline capsule material is not allowed")
+	}
+	if field.noInlineIdentityMaterial && containsInlineIdentityMaterial(raw.value) {
+		return nil, pathError(path, "inline identity material is not allowed")
 	}
 	if field.forbiddenSchemePrefix && hasInlineReferenceScheme(raw.value) {
 		return nil, pathError(path, "forbidden scheme prefix is not allowed")
@@ -1536,6 +1548,21 @@ func normalizeStringFormat(value string, format string, rawToken ...string) (str
 			return value, true
 		}
 		return "", false
+	case "didPlcOrWeb":
+		if isSupportedDID(value) {
+			return value, true
+		}
+		return "", false
+	case "atprotoHandle":
+		if isDomainHandle(value) {
+			return value, true
+		}
+		return "", false
+	case "keyReference":
+		if isKeyReference(value) {
+			return value, true
+		}
+		return "", false
 	default:
 		return "", false
 	}
@@ -1556,7 +1583,10 @@ func isKnownStringFormat(format string) bool {
 		format == "capsuleVersion" ||
 		format == "sriIntegrity" ||
 		format == "bundleRefString" ||
-		format == "bundleVersionString"
+		format == "bundleVersionString" ||
+		format == "didPlcOrWeb" ||
+		format == "atprotoHandle" ||
+		format == "keyReference"
 }
 
 func isCapsuleID(value string) bool {
@@ -1599,6 +1629,217 @@ func isBundleVersionString(value string) bool {
 	}
 	for index := 1; index < len(value); index++ {
 		if !isBundleVersionChar(value[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+const (
+	didPlcPrefix          = "did:plc:"
+	didWebPrefix          = "did:web:"
+	maxAtprotoHandleBytes = 253
+	maxDIDBytes           = 2048
+	maxKeyReferenceBytes  = 2048
+)
+
+var inlineReferenceSchemes = map[string]struct{}{
+	"data":    {},
+	"inline":  {},
+	"literal": {},
+}
+
+func isSupportedDID(value string) bool {
+	if len(value) > maxDIDBytes || value != strings.TrimSpace(value) {
+		return false
+	}
+	return isDIDPlc(value) || isDIDWeb(value)
+}
+
+func isDIDPlc(value string) bool {
+	if !strings.HasPrefix(value, didPlcPrefix) {
+		return false
+	}
+
+	identifier := value[len(didPlcPrefix):]
+	if len(identifier) != 24 {
+		return false
+	}
+
+	for index := 0; index < len(identifier); index++ {
+		char := identifier[index]
+		if !isASCIILowercase(char) && (char < '2' || char > '7') {
+			return false
+		}
+	}
+	return true
+}
+
+func isDIDWeb(value string) bool {
+	if !strings.HasPrefix(value, didWebPrefix) {
+		return false
+	}
+
+	identifier := value[len(didWebPrefix):]
+	if identifier == "" ||
+		strings.Contains(identifier, "/") ||
+		strings.Contains(identifier, "?") ||
+		strings.Contains(identifier, "#") ||
+		containsControlCharacter(identifier) {
+		return false
+	}
+
+	segments := strings.Split(identifier, ":")
+	if len(segments) == 0 || !isDomainHandle(segments[0]) {
+		return false
+	}
+
+	for index := 1; index < len(segments); index++ {
+		segment := segments[index]
+		if segment == "" ||
+			segment == "." ||
+			segment == ".." ||
+			!isDIDWebPathSegment(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDIDWebPathSegment(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if isASCIIAlphaNumeric(char) || char == '.' || char == '_' || char == '~' || char == '-' {
+			continue
+		}
+		if char == '%' && index+2 < len(value) && isASCIIHex(value[index+1]) && isASCIIHex(value[index+2]) {
+			index += 2
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isDomainHandle(value string) bool {
+	if len(value) < 3 ||
+		len(value) > maxAtprotoHandleBytes ||
+		value != strings.TrimSpace(value) ||
+		value != strings.ToLower(value) ||
+		strings.Contains(value, "://") ||
+		strings.Contains(value, "/") ||
+		strings.Contains(value, ":") ||
+		strings.HasSuffix(value, ".") {
+		return false
+	}
+
+	labels := strings.Split(value, ".")
+	if len(labels) < 2 {
+		return false
+	}
+
+	for _, label := range labels {
+		if !isDomainHandleLabel(label) {
+			return false
+		}
+	}
+
+	topLevelLabel := labels[len(labels)-1]
+	return len(topLevelLabel) >= 2 && !allDigits(topLevelLabel)
+}
+
+func isDomainHandleLabel(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if index == 0 || index == len(value)-1 {
+			if !isASCIILowerAlphaNumeric(char) {
+				return false
+			}
+		} else if !isASCIILowerAlphaNumeric(char) && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isKeyReference(value string) bool {
+	return value != "" &&
+		!containsInlineIdentityMaterial(value) &&
+		len(value) <= maxKeyReferenceBytes &&
+		isReferenceSyntax(value)
+}
+
+func isReferenceSyntax(value string) bool {
+	if value != strings.TrimSpace(value) || containsControlCharacter(value) {
+		return false
+	}
+	for _, r := range value {
+		switch r {
+		case '<', '>', '{', '}', '`', '"', '\'':
+			return false
+		}
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f' {
+			return false
+		}
+	}
+
+	separator := strings.Index(value, "://")
+	if separator == -1 {
+		return isOpaqueKeyReference(value)
+	}
+	if separator <= 0 || separator == len(value)-3 {
+		return false
+	}
+
+	scheme := strings.ToLower(value[:separator])
+	if !isReferenceScheme(scheme) {
+		return false
+	}
+	if _, forbidden := inlineReferenceSchemes[scheme]; forbidden {
+		return false
+	}
+	return value[separator+3:] != ""
+}
+
+func isOpaqueKeyReference(value string) bool {
+	if value == "" || len(value) > 256 || !isASCIIAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		char := value[index]
+		if !isASCIIAlphaNumeric(char) && char != '.' && char != '_' && char != ':' && char != '@' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isReferenceScheme(value string) bool {
+	if value == "" || !isASCIILowercase(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		char := value[index]
+		if !isASCIILowerAlphaNumeric(char) && char != '+' && char != '.' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
 			return false
 		}
 	}
@@ -1886,6 +2127,17 @@ func containsInlineCapsuleMaterial(value string) bool {
 		containsLongBase64Run(value)
 }
 
+func containsInlineIdentityMaterial(value string) bool {
+	lower := asciiLowercase(value)
+	return containsControlCharacter(value) ||
+		containsPEMBlockPattern(lower) ||
+		containsCapsulePrivateKeyPattern(lower) ||
+		containsIdentitySecretAssignment(lower, value) ||
+		containsSeedWordsPattern(lower) ||
+		containsLongHexRun(value) ||
+		containsLongBase64Run(value)
+}
+
 func containsCapsulePrivateKeyPattern(value string) bool {
 	return containsBoundedToken(value, []string{"private", "key"}) ||
 		containsOpenSSHPrivateKeyPattern(value) ||
@@ -1903,6 +2155,15 @@ func containsCapsuleSecretAssignment(value string) bool {
 		containsSecretAssignmentToken(value, []string{"refresh", "token"}) ||
 		containsSecretAssignmentToken(value, []string{"password"}) ||
 		containsSecretAssignmentToken(value, []string{"secret"})
+}
+
+func containsIdentitySecretAssignment(lower string, original string) bool {
+	return containsIdentitySecretAssignmentToken(lower, original, []string{"private", "key"}) ||
+		containsIdentitySecretAssignmentToken(lower, original, []string{"api", "key"}) ||
+		containsIdentitySecretAssignmentToken(lower, original, []string{"access", "token"}) ||
+		containsIdentitySecretAssignmentToken(lower, original, []string{"refresh", "token"}) ||
+		containsIdentitySecretAssignmentToken(lower, original, []string{"password"}) ||
+		containsIdentitySecretAssignmentToken(lower, original, []string{"secret"})
 }
 
 func containsOpenSSHPrivateKeyPattern(value string) bool {
@@ -1997,6 +2258,33 @@ func skipASCIILetters(value string, start int) int {
 		offset++
 	}
 	return offset
+}
+
+func containsIdentitySecretAssignmentToken(lower string, original string, token []string) bool {
+	if len(token) == 0 {
+		return false
+	}
+	first := token[0]
+	for start := strings.Index(lower, first); start != -1; start = nextStringIndex(lower, first, start+1) {
+		if start != 0 && isASCIIRegexWord(lower[start-1]) {
+			continue
+		}
+
+		afterIndex, ok := matchSeparatedToken(lower, token, start)
+		if !ok {
+			continue
+		}
+		for afterIndex < len(lower) && isASCIIRegexWhitespace(lower[afterIndex]) {
+			afterIndex++
+		}
+		if afterIndex < len(lower) && (lower[afterIndex] == ':' || lower[afterIndex] == '=') {
+			if lower[afterIndex] == ':' && strings.HasPrefix(original[afterIndex+1:], "//") {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func containsBoundedToken(value string, token []string) bool {
