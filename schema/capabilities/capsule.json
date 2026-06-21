@@ -1,0 +1,54 @@
+{
+  "capability": "capsule.registry",
+  "version": 1,
+  "fields": {
+    "desired": {
+      "required": true,
+      "type": "object",
+      "fields": {
+        "capsules": {
+          "items": {
+            "required": true,
+            "type": "object",
+            "fields": {
+              "id": {
+                "format": "capsuleId",
+                "forbiddenSchemePrefix": true,
+                "maxBytes": 255,
+                "noControlChars": true,
+                "noInlineCapsuleMaterial": true,
+                "required": true,
+                "trimmed": true,
+                "type": "string"
+              },
+              "integrity": {
+                "format": "sriIntegrity",
+                "required": true,
+                "type": "string"
+              },
+              "state": {
+                "required": true,
+                "type": "string",
+                "enum": ["installed", "disabled"]
+              },
+              "version": {
+                "format": "capsuleVersion",
+                "forbiddenSchemePrefix": true,
+                "maxBytes": 128,
+                "noControlChars": true,
+                "noInlineCapsuleMaterial": true,
+                "required": true,
+                "trimmed": true,
+                "type": "string"
+              }
+            }
+          },
+          "required": true,
+          "type": "array",
+          "uniqueBy": ["id"]
+        }
+      }
+    }
+  },
+  "crossFieldRules": []
+}

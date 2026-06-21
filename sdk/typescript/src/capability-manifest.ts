@@ -9,7 +9,8 @@ import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
  * not an embedded expression language.
  *
  * String formats are a closed, governed set. `posixUsername`, `groupName`,
- * `systemdUnitName`, `absolutePath`, and `rfc3339Instant` are structured capability-agent
+ * `systemdUnitName`, `absolutePath`, `rfc3339Instant`, `capsuleId`,
+ * `capsuleVersion`, and `sriIntegrity` are structured capability-agent
  * parity formats. `ipLiteral` and `hostnameOrIp`
  * are parity-safe only because schema/capabilities/formats/ip-conformance.json
  * is run by both the TypeScript RFC 5952 canonicalizer here and the Go netip
@@ -31,7 +32,10 @@ export type StringFieldFormat =
   | "groupName"
   | "systemdUnitName"
   | "absolutePath"
-  | "rfc3339Instant";
+  | "rfc3339Instant"
+  | "capsuleId"
+  | "capsuleVersion"
+  | "sriIntegrity";
 
 export interface StringFieldSchema {
   readonly type: "string";
@@ -42,10 +46,12 @@ export interface StringFieldSchema {
   readonly enum?: readonly string[];
   readonly lowercase?: boolean;
   readonly noControlChars?: boolean;
+  readonly noInlineCapsuleMaterial?: boolean;
   readonly noInlineMaterial?: boolean;
   readonly noInlineSecrets?: boolean;
   readonly nonEmpty?: boolean;
   readonly trimmed?: boolean;
+  readonly forbiddenSchemePrefix?: boolean;
   readonly format?: StringFieldFormat;
 }
 
@@ -203,7 +209,9 @@ interface CompiledStringFieldSchema {
   enumValues?: ReadonlySet<string>;
   lowercase: boolean;
   noControlChars: boolean;
+  noInlineCapsuleMaterial: boolean;
   noInlineMaterial: boolean;
+  forbiddenSchemePrefix: boolean;
   trimmed: boolean;
 }
 
@@ -287,6 +295,8 @@ const STRING_SCHEMA_FIELDS = new Set([
   "maxBytes",
   "maxLength",
   "minLength",
+  "forbiddenSchemePrefix",
+  "noInlineCapsuleMaterial",
   "noControlChars",
   "noInlineMaterial",
   "noInlineSecrets",
@@ -667,6 +677,12 @@ function parseStringFieldSchema(
     [...path, "noControlChars"],
     errors,
   );
+  const noInlineCapsuleMaterialValue = readOptionalBoolean(
+    value,
+    "noInlineCapsuleMaterial",
+    [...path, "noInlineCapsuleMaterial"],
+    errors,
+  );
   const noInlineMaterialValue = readOptionalBoolean(
     value,
     "noInlineMaterial",
@@ -681,9 +697,17 @@ function parseStringFieldSchema(
   );
   const nonEmptyValue = readOptionalBoolean(value, "nonEmpty", [...path, "nonEmpty"], errors);
   const trimmedValue = readOptionalBoolean(value, "trimmed", [...path, "trimmed"], errors);
+  const forbiddenSchemePrefixValue = readOptionalBoolean(
+    value,
+    "forbiddenSchemePrefix",
+    [...path, "forbiddenSchemePrefix"],
+    errors,
+  );
   const lowercase = lowercaseValue ?? false;
   const noControlChars = noControlCharsValue ?? false;
+  const noInlineCapsuleMaterial = noInlineCapsuleMaterialValue ?? false;
   const noInlineMaterial = (noInlineMaterialValue ?? false) || (noInlineSecretsValue ?? false);
+  const forbiddenSchemePrefix = forbiddenSchemePrefixValue ?? false;
   const trimmed = trimmedValue ?? false;
   const effectiveMinLength = nonEmptyValue === true && (minLength === undefined || minLength < 1) ? 1 : minLength;
 
@@ -694,7 +718,9 @@ function parseStringFieldSchema(
   const compiled: CompiledStringFieldSchema = {
     lowercase,
     noControlChars,
+    noInlineCapsuleMaterial,
     noInlineMaterial,
+    forbiddenSchemePrefix,
     required,
     trimmed,
     type: "string",
@@ -708,10 +734,12 @@ function parseStringFieldSchema(
     enum?: readonly string[];
     lowercase?: boolean;
     noControlChars?: boolean;
+    noInlineCapsuleMaterial?: boolean;
     noInlineMaterial?: boolean;
     noInlineSecrets?: boolean;
     nonEmpty?: boolean;
     trimmed?: boolean;
+    forbiddenSchemePrefix?: boolean;
     format?: StringFieldFormat;
   } = {
     required,
@@ -746,6 +774,9 @@ function parseStringFieldSchema(
   if (noControlCharsValue !== undefined) {
     manifest.noControlChars = noControlCharsValue;
   }
+  if (noInlineCapsuleMaterialValue !== undefined) {
+    manifest.noInlineCapsuleMaterial = noInlineCapsuleMaterialValue;
+  }
   if (noInlineMaterialValue !== undefined) {
     manifest.noInlineMaterial = noInlineMaterialValue;
   }
@@ -757,6 +788,9 @@ function parseStringFieldSchema(
   }
   if (trimmedValue !== undefined) {
     manifest.trimmed = trimmedValue;
+  }
+  if (forbiddenSchemePrefixValue !== undefined) {
+    manifest.forbiddenSchemePrefix = forbiddenSchemePrefixValue;
   }
 
   return {
@@ -1515,6 +1549,14 @@ function validateStringField(
     addError(errors, path, "Inline material is not allowed.");
   }
 
+  if (schema.noInlineCapsuleMaterial && containsInlineCapsuleMaterial(value)) {
+    addError(errors, path, "Inline capsule material is not allowed.");
+  }
+
+  if (schema.forbiddenSchemePrefix && hasInlineReferenceScheme(value)) {
+    addError(errors, path, "Forbidden scheme prefix is not allowed.");
+  }
+
   if (schema.noControlChars && containsControlCharacter(value)) {
     addError(errors, path, "Control characters are not allowed.");
   }
@@ -2133,7 +2175,10 @@ function isStringFieldFormat(value: string): value is StringFieldFormat {
     value === "groupName" ||
     value === "systemdUnitName" ||
     value === "absolutePath" ||
-    value === "rfc3339Instant"
+    value === "rfc3339Instant" ||
+    value === "capsuleId" ||
+    value === "capsuleVersion" ||
+    value === "sriIntegrity"
   );
 }
 
@@ -2167,6 +2212,12 @@ function normalizeStringFormat(
       return isCanonicalAbsolutePath(value) ? value : undefined;
     case "rfc3339Instant":
       return isRFC3339Instant(value, rawToken) ? value : undefined;
+    case "capsuleId":
+      return isCapsuleID(value) ? value : undefined;
+    case "capsuleVersion":
+      return isCapsuleVersion(value) ? value : undefined;
+    case "sriIntegrity":
+      return isValidSRI(value) ? value : undefined;
   }
 }
 
@@ -2438,6 +2489,253 @@ function isLeapYear(year: number): boolean {
   return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
+function isCapsuleID(value: string): boolean {
+  if (
+    utf8ByteLength(value) > 255 ||
+    goTrimSpace(value) !== value ||
+    containsControlCharacter(value) ||
+    containsInlineCapsuleMaterial(value) ||
+    hasInlineReferenceScheme(value)
+  ) {
+    return false;
+  }
+
+  return isReverseDNSCapsuleID(value) || isOpaqueCapsuleID(value);
+}
+
+function isCapsuleVersion(value: string): boolean {
+  if (
+    utf8ByteLength(value) > 128 ||
+    goTrimSpace(value) !== value ||
+    containsControlCharacter(value) ||
+    containsInlineCapsuleMaterial(value) ||
+    hasInlineReferenceScheme(value)
+  ) {
+    return false;
+  }
+
+  return isCapsuleVersionPattern(value);
+}
+
+function isReverseDNSCapsuleID(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  let labelStart = 0;
+  let labelCount = 0;
+
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index < value.length && value.charCodeAt(index) !== 46) {
+      continue;
+    }
+
+    if (!isReverseDNSCapsuleLabel(value, labelStart, index)) {
+      return false;
+    }
+
+    labelCount += 1;
+    labelStart = index + 1;
+  }
+
+  return labelCount >= 2;
+}
+
+function isReverseDNSCapsuleLabel(value: string, start: number, end: number): boolean {
+  const length = end - start;
+
+  if (length <= 0 || length > 63) {
+    return false;
+  }
+
+  for (let index = start; index < end; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (index === start || index === end - 1) {
+      if (!isAsciiLowerAlphaNumericCode(code)) {
+        return false;
+      }
+    } else if (!isAsciiLowerAlphaNumericCode(code) && code !== 45) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isOpaqueCapsuleID(value: string): boolean {
+  if (value.length < 3 || value.length > 160 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isOpaqueCapsuleIDCode(code)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isCapsuleVersionPattern(value: string): boolean {
+  if (value.length === 0 || value.length > 128 || !isAsciiAlphaNumericCode(value.charCodeAt(0))) {
+    return false;
+  }
+
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+
+    if (!isCapsuleVersionCode(code)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isValidSRI(value: string): boolean {
+  const separator = value.indexOf("-");
+
+  if (separator === -1 || value.indexOf("-", separator + 1) !== -1) {
+    return false;
+  }
+
+  const algorithm = value.slice(0, separator);
+  const digest = value.slice(separator + 1);
+  const expectedLength = sriDigestLength(algorithm);
+
+  if (expectedLength === undefined || !isSRIDigestToken(digest)) {
+    return false;
+  }
+
+  const decodedLength = digest.includes("=")
+    ? decodedPaddedBase64Length(digest)
+    : decodedRawBase64Length(digest);
+
+  return decodedLength === expectedLength;
+}
+
+function sriDigestLength(algorithm: string): number | undefined {
+  switch (algorithm) {
+    case "sha256":
+      return 32;
+    case "sha384":
+      return 48;
+    case "sha512":
+      return 64;
+    default:
+      return undefined;
+  }
+}
+
+function isSRIDigestToken(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  let padding = 0;
+
+  for (let index = value.length - 1; index >= 0 && value.charCodeAt(index) === 61; index -= 1) {
+    padding += 1;
+  }
+
+  if (padding > 2) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length - padding; index += 1) {
+    if (base64Digit(value.charCodeAt(index)) === undefined) {
+      return false;
+    }
+  }
+
+  for (let index = value.length - padding; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function decodedPaddedBase64Length(value: string): number | undefined {
+  if (value.length === 0 || value.length % 4 !== 0) {
+    return undefined;
+  }
+
+  let padding = 0;
+
+  if (value.endsWith("==")) {
+    padding = 2;
+  } else if (value.endsWith("=")) {
+    padding = 1;
+  }
+
+  const unpaddedLength = value.length - padding;
+
+  for (let index = 0; index < unpaddedLength; index += 1) {
+    if (base64Digit(value.charCodeAt(index)) === undefined) {
+      return undefined;
+    }
+  }
+
+  for (let index = unpaddedLength; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) {
+      return undefined;
+    }
+  }
+
+  if (padding > 0 && unpaddedLength < 2) {
+    return undefined;
+  }
+
+  return (value.length / 4) * 3 - padding;
+}
+
+function decodedRawBase64Length(value: string): number | undefined {
+  if (value.length === 0 || value.length % 4 === 1) {
+    return undefined;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (base64Digit(value.charCodeAt(index)) === undefined) {
+      return undefined;
+    }
+  }
+
+  const fullQuanta = Math.floor(value.length / 4);
+  const remainder = value.length % 4;
+
+  if (remainder === 0) {
+    return fullQuanta * 3;
+  }
+  if (remainder === 2) {
+    return fullQuanta * 3 + 1;
+  }
+  return fullQuanta * 3 + 2;
+}
+
+function base64Digit(code: number): number | undefined {
+  if (code >= 65 && code <= 90) {
+    return code - 65;
+  }
+  if (code >= 97 && code <= 122) {
+    return code - 71;
+  }
+  if (code >= 48 && code <= 57) {
+    return code + 4;
+  }
+  if (code === 43) {
+    return 62;
+  }
+  if (code === 47) {
+    return 63;
+  }
+  return undefined;
+}
+
 function isPOSIXName(value: string): boolean {
   if (value.length === 0 || value.length > 32) {
     return false;
@@ -2590,6 +2888,170 @@ function containsInlineServiceMaterial(value: string): boolean {
   }
 
   return false;
+}
+
+function containsInlineCapsuleMaterial(value: string): boolean {
+  const lower = asciiLowercase(value);
+
+  return (
+    lower.includes("-----begin") ||
+    containsCapsulePrivateKeyPattern(lower) ||
+    containsCapsuleSecretAssignment(lower) ||
+    containsSeedWordsPattern(lower) ||
+    containsLongHexRun(value) ||
+    containsLongBase64Run(value)
+  );
+}
+
+function containsCapsulePrivateKeyPattern(value: string): boolean {
+  return (
+    containsBoundedToken(value, ["private", "key"]) ||
+    containsOpenSSHPrivateKeyPattern(value) ||
+    containsBoundedLiteral(value, "age-secret-key") ||
+    containsBoundedLiteral(value, "xprv") ||
+    containsBoundedToken(value, ["seed", "phrase"]) ||
+    containsBoundedLiteral(value, "mnemonic") ||
+    containsBoundedToken(value, ["recovery", "phrase"])
+  );
+}
+
+function containsCapsuleSecretAssignment(value: string): boolean {
+  return (
+    containsSecretAssignmentToken(value, ["private", "key"]) ||
+    containsSecretAssignmentToken(value, ["api", "key"]) ||
+    containsSecretAssignmentToken(value, ["access", "token"]) ||
+    containsSecretAssignmentToken(value, ["refresh", "token"]) ||
+    containsSecretAssignmentToken(value, ["password"]) ||
+    containsSecretAssignmentToken(value, ["secret"])
+  );
+}
+
+function containsOpenSSHPrivateKeyPattern(value: string): boolean {
+  let start = value.indexOf("openssh");
+
+  while (start !== -1) {
+    const before = start === 0 ? undefined : value.charCodeAt(start - 1);
+    let offset = start + "openssh".length;
+
+    if (before !== undefined && isAsciiRegexWordCode(before)) {
+      start = value.indexOf("openssh", start + 1);
+      continue;
+    }
+
+    const firstSpace = readAsciiRegexWhitespaceRun(value, offset);
+
+    if (firstSpace !== undefined && value.startsWith("private", firstSpace)) {
+      offset = firstSpace + "private".length;
+      const secondSpace = readAsciiRegexWhitespaceRun(value, offset);
+
+      if (secondSpace !== undefined && value.startsWith("key", secondSpace)) {
+        offset = secondSpace + "key".length;
+        const after = offset >= value.length ? undefined : value.charCodeAt(offset);
+
+        if (after === undefined || !isAsciiRegexWordCode(after)) {
+          return true;
+        }
+      }
+    }
+
+    start = value.indexOf("openssh", start + 1);
+  }
+
+  return false;
+}
+
+function readAsciiRegexWhitespaceRun(value: string, start: number): number | undefined {
+  if (start >= value.length || !isAsciiRegexWhitespaceCode(value.charCodeAt(start))) {
+    return undefined;
+  }
+
+  let offset = start;
+
+  while (offset < value.length && isAsciiRegexWhitespaceCode(value.charCodeAt(offset))) {
+    offset += 1;
+  }
+
+  return offset;
+}
+
+function containsBoundedLiteral(value: string, literal: string): boolean {
+  let start = value.indexOf(literal);
+
+  while (start !== -1) {
+    const before = start === 0 ? undefined : value.charCodeAt(start - 1);
+    const afterIndex = start + literal.length;
+    const after = afterIndex >= value.length ? undefined : value.charCodeAt(afterIndex);
+
+    if (
+      (before === undefined || !isAsciiRegexWordCode(before)) &&
+      (after === undefined || !isAsciiRegexWordCode(after))
+    ) {
+      return true;
+    }
+
+    start = value.indexOf(literal, start + 1);
+  }
+
+  return false;
+}
+
+function containsSeedWordsPattern(value: string): boolean {
+  let start = 0;
+
+  while (start < value.length) {
+    if (!isAsciiLetterCode(value.charCodeAt(start))) {
+      start += 1;
+      continue;
+    }
+
+    const before = start === 0 ? undefined : value.charCodeAt(start - 1);
+
+    if (before !== undefined && isAsciiRegexWordCode(before)) {
+      start = skipAsciiLetters(value, start);
+      continue;
+    }
+
+    let offset = start;
+    let words = 0;
+
+    for (;;) {
+      const wordEnd = skipAsciiLetters(value, offset);
+      const wordLength = wordEnd - offset;
+
+      if (wordLength < 3 || wordLength > 12) {
+        break;
+      }
+
+      words += 1;
+      const after = wordEnd >= value.length ? undefined : value.charCodeAt(wordEnd);
+
+      if (words >= 12 && (after === undefined || !isAsciiRegexWordCode(after))) {
+        return true;
+      }
+
+      const nextWord = readAsciiRegexWhitespaceRun(value, wordEnd);
+
+      if (nextWord === undefined || nextWord >= value.length || !isAsciiLetterCode(value.charCodeAt(nextWord))) {
+        break;
+      }
+
+      offset = nextWord;
+    }
+
+    start = skipAsciiLetters(value, start);
+  }
+
+  return false;
+}
+
+function skipAsciiLetters(value: string, start: number): number {
+  let offset = start;
+
+  while (offset < value.length && isAsciiLetterCode(value.charCodeAt(offset))) {
+    offset += 1;
+  }
+
+  return offset;
 }
 
 function containsBoundedToken(value: string, token: readonly string[]): boolean {
@@ -3322,8 +3784,16 @@ function isAsciiAlphaNumericCode(code: number): boolean {
   );
 }
 
+function isAsciiLetterCode(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
 function isAsciiLowercaseCode(code: number): boolean {
   return code >= 97 && code <= 122;
+}
+
+function isAsciiLowerAlphaNumericCode(code: number): boolean {
+  return isAsciiDigitCode(code) || isAsciiLowercaseCode(code);
 }
 
 function isAsciiDigitCode(code: number): boolean {
@@ -3352,6 +3822,14 @@ function isAsciiRegexWhitespaceCode(code: number): boolean {
 
 function isSystemdUnitNameCode(code: number): boolean {
   return isAsciiAlphaNumericCode(code) || code === 58 || code === 46 || code === 95 || code === 64 || code === 45;
+}
+
+function isOpaqueCapsuleIDCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 46 || code === 95 || code === 58 || code === 45;
+}
+
+function isCapsuleVersionCode(code: number): boolean {
+  return isAsciiAlphaNumericCode(code) || code === 46 || code === 43 || code === 95 || code === 45;
 }
 
 function uniqueValueKey(value: CapabilityValue): string {

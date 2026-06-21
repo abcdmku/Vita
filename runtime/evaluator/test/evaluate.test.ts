@@ -131,6 +131,50 @@ test("valid time.set request evaluates to one operation", () => {
   });
 });
 
+test("valid capsule.registry request evaluates to one operation", () => {
+  const result = evaluateNodeConfig(
+    {
+      "capsule.registry": {
+        desired: {
+          capsules: [
+            {
+              id: "com.vita.notes",
+              version: "1.2.3",
+              integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+              state: "installed",
+            },
+          ],
+        },
+      },
+    },
+    REGISTRY,
+  );
+
+  if (!result.ok) {
+    assert.fail(`expected evaluation to pass: ${JSON.stringify(result.rejections)}`);
+  }
+
+  assert.deepEqual(result.plan, {
+    operations: [
+      {
+        capability: "capsule.registry",
+        request: {
+          desired: {
+            capsules: [
+              {
+                id: "com.vita.notes",
+                version: "1.2.3",
+                integrity: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                state: "installed",
+              },
+            ],
+          },
+        },
+      },
+    ],
+  });
+});
+
 test("unknown capability rejects at evaluation", () => {
   const result = evaluateNodeConfig(
     {

@@ -17,6 +17,9 @@ var structuredStringFormats = []string{
 	"groupName",
 	"systemdUnitName",
 	"absolutePath",
+	"capsuleId",
+	"capsuleVersion",
+	"sriIntegrity",
 }
 
 func TestStructuredFormatConformanceCorpus(t *testing.T) {
@@ -86,6 +89,25 @@ func TestStructuredFormatsComposeWithMaxLengthAndNoInlineSecrets(t *testing.T) {
 	posixNoInlineSecretsManifest.Fields["value"] = field
 	if err := Validate(posixNoInlineSecretsManifest, structuredRequestValueJSON(t, "x-----begin")); err == nil {
 		t.Fatal("Validate returned nil error for posixUsername with inline secret material")
+	}
+
+	noInlineCapsuleMaterialManifest := singleStringFormatManifest("capsuleVersion")
+	field = noInlineCapsuleMaterialManifest.Fields["value"]
+	field.NoInlineCapsuleMaterial = true
+	noInlineCapsuleMaterialManifest.Fields["value"] = field
+	if err := Validate(noInlineCapsuleMaterialManifest, structuredRequestValueJSON(t, "private_key")); err == nil {
+		t.Fatal("Validate returned nil error for inline capsule material")
+	}
+
+	forbiddenSchemePrefixManifest := singleStringFormatManifest("capsuleId")
+	field = forbiddenSchemePrefixManifest.Fields["value"]
+	field.ForbiddenSchemePrefix = true
+	forbiddenSchemePrefixManifest.Fields["value"] = field
+	if err := Validate(forbiddenSchemePrefixManifest, structuredRequestValueJSON(t, "data:abc")); err == nil {
+		t.Fatal("Validate returned nil error for forbidden scheme prefix")
+	}
+	if err := Validate(forbiddenSchemePrefixManifest, structuredRequestValueJSON(t, "capsule:abc")); err != nil {
+		t.Fatalf("Validate returned error for non-forbidden scheme prefix: %v", err)
 	}
 }
 

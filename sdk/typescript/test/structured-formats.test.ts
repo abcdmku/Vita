@@ -27,11 +27,14 @@ const STRUCTURED_FORMATS = Object.freeze([
   "groupName",
   "systemdUnitName",
   "absolutePath",
+  "capsuleId",
+  "capsuleVersion",
+  "sriIntegrity",
 ] satisfies readonly StructuredStringFieldFormat[]);
 
 type StructuredStringFieldFormat = Extract<
   StringFieldFormat,
-  "posixUsername" | "groupName" | "systemdUnitName" | "absolutePath"
+  "posixUsername" | "groupName" | "systemdUnitName" | "absolutePath" | "capsuleId" | "capsuleVersion" | "sriIntegrity"
 >;
 type Expectation = "accept" | "reject";
 
@@ -153,6 +156,35 @@ test("structured formats compose with maxLength and noInlineSecrets", () => {
   } satisfies CapabilityManifest);
 
   assert.deepEqual(rejectedPaths(validatePOSIXNoInlineSecrets({ value: "x-----begin" })), ["value"]);
+
+  const validateCapsuleMaterial = compileCapabilityValidator({
+    capability: "test.no-inline-capsule-material",
+    fields: Object.freeze({
+      value: Object.freeze({
+        noInlineCapsuleMaterial: true,
+        required: true,
+        type: "string",
+      }),
+    }),
+    crossFieldRules: Object.freeze([]),
+  } satisfies CapabilityManifest);
+
+  assert.deepEqual(rejectedPaths(validateCapsuleMaterial({ value: "private_key" })), ["value"]);
+
+  const validateForbiddenSchemePrefix = compileCapabilityValidator({
+    capability: "test.forbidden-scheme-prefix",
+    fields: Object.freeze({
+      value: Object.freeze({
+        forbiddenSchemePrefix: true,
+        required: true,
+        type: "string",
+      }),
+    }),
+    crossFieldRules: Object.freeze([]),
+  } satisfies CapabilityManifest);
+
+  assert.deepEqual(rejectedPaths(validateForbiddenSchemePrefix({ value: "data:abc" })), ["value"]);
+  assert.equal(validateForbiddenSchemePrefix({ value: "capsule:abc" }).ok, true);
 });
 
 function singleValueManifest(format: StringFieldFormat): CapabilityManifest {
@@ -217,8 +249,11 @@ function readStructuredFormatCorpus(): StructuredFormatCorpus {
 
   return Object.freeze({
     absolutePath: readRequiredVectorArray(corpus, "absolutePath"),
+    capsuleId: readRequiredVectorArray(corpus, "capsuleId"),
+    capsuleVersion: readRequiredVectorArray(corpus, "capsuleVersion"),
     groupName: readRequiredVectorArray(corpus, "groupName"),
     posixUsername: readRequiredVectorArray(corpus, "posixUsername"),
+    sriIntegrity: readRequiredVectorArray(corpus, "sriIntegrity"),
     systemdUnitName: readRequiredVectorArray(corpus, "systemdUnitName"),
   });
 }

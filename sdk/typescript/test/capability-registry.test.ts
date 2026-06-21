@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CAPSULE_MANIFEST,
   DEFAULT_CAPABILITY_MANIFESTS,
   HOSTNAME_MANIFEST,
   NODE_CONFIG_MANIFEST,
@@ -28,12 +29,14 @@ const GENERATED_PATH = resolve(
 test("default capability manifests are keyed by agent operation names", () => {
   assert.equal(Object.isFrozen(DEFAULT_CAPABILITY_MANIFESTS), true);
   assert.deepEqual(Object.keys(DEFAULT_CAPABILITY_MANIFESTS).sort(), [
+    "capsule.registry",
     "hostname.set",
     "node.config",
     "services.config",
     "time.set",
     "time.sync",
   ]);
+  assert.equal(DEFAULT_CAPABILITY_MANIFESTS["capsule.registry"], CAPSULE_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["hostname.set"], HOSTNAME_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["node.config"], NODE_CONFIG_MANIFEST);
   assert.equal(DEFAULT_CAPABILITY_MANIFESTS["services.config"], SERVICES_MANIFEST);
@@ -46,12 +49,13 @@ test("default capability manifests are keyed by agent operation names", () => {
 test("defaultCapabilityRegistry exposes every generated manifest", () => {
   const registry = defaultCapabilityRegistry();
 
+  assert.equal(registry.get("capsule.registry"), CAPSULE_MANIFEST);
   assert.equal(registry.get("hostname.set"), HOSTNAME_MANIFEST);
   assert.equal(registry.get("node.config"), NODE_CONFIG_MANIFEST);
   assert.equal(registry.get("services.config"), SERVICES_MANIFEST);
   assert.equal(registry.get("time.set"), TIME_MANIFEST);
   assert.equal(registry.get("time.sync"), TIMESYNC_MANIFEST);
-  assert.equal(registry.size, 5);
+  assert.equal(registry.size, 6);
 });
 
 test("generated capability manifests are fresh", () => {

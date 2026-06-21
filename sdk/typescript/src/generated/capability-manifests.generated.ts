@@ -1,6 +1,66 @@
-// DO NOT EDIT — generated from schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json
+// DO NOT EDIT — generated from schema/capabilities/capsule.json, schema/capabilities/hostname.json, schema/capabilities/node.config.json, schema/capabilities/services.json, schema/capabilities/time.json, schema/capabilities/timesync.json
 
 import type { CapabilityManifest } from "../capability-manifest.ts";
+
+export const CAPSULE_MANIFEST = Object.freeze({
+  capability: "capsule.registry",
+  version: 1,
+  fields: Object.freeze({
+    desired: Object.freeze({
+      fields: Object.freeze({
+        capsules: Object.freeze({
+          items: Object.freeze({
+            fields: Object.freeze({
+              version: Object.freeze({
+                format: "capsuleVersion",
+                required: true,
+                type: "string",
+                forbiddenSchemePrefix: true,
+                maxBytes: 128,
+                noControlChars: true,
+                noInlineCapsuleMaterial: true,
+                trimmed: true,
+              }),
+              id: Object.freeze({
+                format: "capsuleId",
+                required: true,
+                type: "string",
+                forbiddenSchemePrefix: true,
+                maxBytes: 255,
+                noControlChars: true,
+                noInlineCapsuleMaterial: true,
+                trimmed: true,
+              }),
+              integrity: Object.freeze({
+                format: "sriIntegrity",
+                required: true,
+                type: "string",
+              }),
+              state: Object.freeze({
+                required: true,
+                type: "string",
+                enum: Object.freeze([
+                  "installed",
+                  "disabled",
+                ]),
+              }),
+            }),
+            required: true,
+            type: "object",
+          }),
+          required: true,
+          type: "array",
+          uniqueBy: Object.freeze([
+            "id",
+          ]),
+        }),
+      }),
+      required: true,
+      type: "object",
+    }),
+  }),
+  crossFieldRules: Object.freeze([]),
+}) satisfies CapabilityManifest;
 
 export const HOSTNAME_MANIFEST = Object.freeze({
   capability: "hostname.set",
@@ -137,6 +197,7 @@ export const TIMESYNC_MANIFEST = Object.freeze({
 }) satisfies CapabilityManifest;
 
 export const DEFAULT_CAPABILITY_MANIFESTS = Object.freeze({
+  "capsule.registry": CAPSULE_MANIFEST,
   "hostname.set": HOSTNAME_MANIFEST,
   "node.config": NODE_CONFIG_MANIFEST,
   "services.config": SERVICES_MANIFEST,

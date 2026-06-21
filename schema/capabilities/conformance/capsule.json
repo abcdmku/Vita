@@ -1,0 +1,525 @@
+[
+  {
+    "name": "empty capsules accepts",
+    "request": {
+      "desired": {
+        "capsules": []
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "reverse DNS capsule accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "opaque capsule accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "capsule:local-search",
+            "version": "Release_2026",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "disabled"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha384 integrity accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "org.example.sha384",
+            "version": "2026.06.21",
+            "integrity": "sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha512 padded integrity accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "org.example.sha512-padded",
+            "version": "2.0.0",
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "sha512 raw integrity accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "org.example.sha512-raw",
+            "version": "2.0.1",
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "disabled"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "version max length accepts",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "org.example.version-edge",
+            "version": "va.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a",
+            "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "accept"
+  },
+  {
+    "name": "absent desired rejects",
+    "request": {},
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "null desired rejects",
+    "request": {
+      "desired": null
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "desired must be object rejects",
+    "request": {
+      "desired": []
+    },
+    "expect": "reject",
+    "rejectCode": "desired"
+  },
+  {
+    "name": "absent capsules rejects",
+    "request": {
+      "desired": {}
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules"
+  },
+  {
+    "name": "null capsules rejects",
+    "request": {
+      "desired": {
+        "capsules": null
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules"
+  },
+  {
+    "name": "capsules must be array rejects",
+    "request": {
+      "desired": {
+        "capsules": "com.vita.notes"
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules"
+  },
+  {
+    "name": "null capsule entry rejects",
+    "request": {
+      "desired": {
+        "capsules": [null]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0"
+  },
+  {
+    "name": "absent id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "absent version rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/version"
+  },
+  {
+    "name": "absent integrity rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/integrity"
+  },
+  {
+    "name": "absent state rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/state"
+  },
+  {
+    "name": "bad id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita/app",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "private key whitespace id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "private key",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "private key opaque id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "private_key",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "scheme prefixed id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "data:abc",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "control id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.\u0007notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/id"
+  },
+  {
+    "name": "bad version rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": ".1",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/version"
+  },
+  {
+    "name": "private version rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "private_key",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/version"
+  },
+  {
+    "name": "too long version rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "vb.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/version"
+  },
+  {
+    "name": "unsupported SRI algorithm rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/integrity"
+  },
+  {
+    "name": "sha256 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAA",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/integrity"
+  },
+  {
+    "name": "sha384 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/integrity"
+  },
+  {
+    "name": "sha512 wrong byte length rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "installed"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/integrity"
+  },
+  {
+    "name": "bad state rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "enabled"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/state"
+  },
+  {
+    "name": "duplicate id rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed"
+          },
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.4",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "state": "disabled"
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/1"
+  },
+  {
+    "name": "unknown top level key rejects",
+    "request": {
+      "desired": {
+        "capsules": []
+      },
+      "extra": true
+    },
+    "expect": "reject",
+    "rejectCode": "extra"
+  },
+  {
+    "name": "unknown desired key rejects",
+    "request": {
+      "desired": {
+        "capsules": [],
+        "extra": true
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/extra"
+  },
+  {
+    "name": "unknown capsule entry key rejects",
+    "request": {
+      "desired": {
+        "capsules": [
+          {
+            "id": "com.vita.notes",
+            "version": "1.2.3",
+            "integrity": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "state": "installed",
+            "reload": true
+          }
+        ]
+      }
+    },
+    "expect": "reject",
+    "rejectCode": "desired/capsules/0/reload"
+  },
+  {
+    "name": "duplicate top level JSON key rejects",
+    "request": "{\"desired\":{\"capsules\":[]},\"desired\":{\"capsules\":[]}}",
+    "expect": "reject"
+  },
+  {
+    "name": "duplicate capsule entry JSON key rejects",
+    "request": "{\"desired\":{\"capsules\":[{\"id\":\"com.vita.notes\",\"id\":\"com.vita.other\",\"version\":\"1.2.3\",\"integrity\":\"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"state\":\"installed\"}]}}",
+    "expect": "reject"
+  }
+]
