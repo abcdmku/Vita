@@ -21,6 +21,7 @@ import (
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	"github.com/vita/agent/capabilities/pdssync"
+	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/capabilities/timesync"
@@ -233,6 +234,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		identity.Name:   DecodeJSONRequest[identity.ApplyRequest],
 		network.Name:    DecodeJSONRequest[network.ApplyRequest],
 		pdssync.Name:    DecodeJSONRequest[pdssync.ApplyRequest],
+		services.Name:   DecodeJSONRequest[services.ApplyRequest],
 		storage.Name:    DecodeJSONRequest[storage.ApplyRequest],
 		timesync.Name:   DecodeJSONRequest[timesync.ApplyRequest],
 		update.Name:     DecodeJSONRequest[update.ApplyRequest],
@@ -249,6 +251,7 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		identity.Name:   func() capabilities.TypedRequest { return identity.ReadRequest{} },
 		network.Name:    func() capabilities.TypedRequest { return network.ReadRequest{} },
 		pdssync.Name:    func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
+		services.Name:   func() capabilities.TypedRequest { return services.ReadRequest{} },
 		storage.Name:    func() capabilities.TypedRequest { return storage.ReadRequest{} },
 		timesync.Name:   func() capabilities.TypedRequest { return timesync.ReadRequest{} },
 		update.Name:     func() capabilities.TypedRequest { return update.ReadRequest{} },

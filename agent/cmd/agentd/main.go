@@ -14,6 +14,7 @@ import (
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	"github.com/vita/agent/capabilities/pdssync"
+	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/capabilities/timesync"
@@ -47,6 +48,7 @@ func main() {
 		network.NewCapability(),
 		nodeconfig.NewCapability(),
 		pdssync.NewCapability(),
+		services.NewCapability(),
 		storage.NewCapability(),
 		nodetime.NewCapability(),
 		timesync.NewCapability(),
