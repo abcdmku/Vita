@@ -75,7 +75,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   way) and that Go rejects non-canonical SRI base64 `B=` (real Go `StdEncoding` is LENIENT — both accept). RULE:
   treat any probe claim about what a stdlib/toolchain DOES as a HYPOTHESIS → confirm with a ground-truth
   Go-in-Docker run; trust its CODE-STRUCTURE findings. (2 real, 2 false toolchain claims so far.)
-  **122 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
+  **P9-017 (update.plan) MIGRATED — 7th cap** (registry = 7; +update.plan). REUSED sriIntegrity +
+  forbiddenSchemePrefix from capsule (proving cross-cap reuse); built bundleRefString + bundleVersionString;
+  ground-truth cross-checked (manifest ≡ update.go validateBundleRef on all REF edges incl. 256/257 length,
+  forbidden schemes, NO-secret-scanner-on-ref). **7/13 caps migrated** (hostname, node.config, time.sync,
+  services, time.set, capsule, update). **Remaining 6 (roadmap's hardest):** accounts (posixAccount/GroupName
+  + notInEnum + dedupItems + multi-key-uniqueBy + shellAllowlistPath), identity (didPlc/Web + atprotoHandle +
+  keyReference + anyOfFormats + SECRET scanner variant), backup (exactlyOneOf cron-XOR-interval + opaqueRef +
+  cron5OrMacro + SECRET scanner), storage (4 enum-domain array invariants + canonicalAbsolutePath — HARDEST),
+  network (cidrLiteral + networkInterfaceName + integer-sentinel + item-level-forbid-unless), pdssync
+  (cidV1Multibase + did/handle + secretKeyNameDenylist). identity+pdssync share did/handle+anyOfFormats.
+  **123 contracts merged. Reviewer gate has blocked 70 real bugs.** Recent: P9-009 (ipLiteral/hostnameOrIp
   via the netip-authoritative + structured-TS + conformance-corpus template — cracked IP in 1 round),
   P9-010 (systemic bounded JSON dup-key scanner `jsonsafe` + DecodeStrict across 14 caps — the DoS audit,
   MERGED), P9-012 (structured formats: posixUsername/groupName/systemdUnitName/absolutePath, MERGED). In
