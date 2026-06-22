@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { planRootBuild, PINNED_MKOSI_IMAGE } from "./build-root.mjs";
 import { planUKI } from "./uki.mjs";
 import { planImageLayout } from "./image-layout.mjs";
+// NB: planVerity is imported dynamically in full mode only (verity.mjs pulls in a .ts helper) — see below.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../..");
@@ -46,6 +47,23 @@ if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MO
 
 function fail(msg) { console.error(`\n✖ ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
+
+// Full mode imports verity.mjs, which pulls in a .ts helper (safeNormalize). Node ≥23.6 strips types by default;
+// older needs --experimental-strip-types. Load planVerity HERE (before any build work), re-exec once under the
+// flag if the .ts load fails, so the user's plain `node …` invocation keeps working. Smoke never loads verity.mjs.
+let planVerity;
+if (MODE === "full") {
+  try {
+    ({ planVerity } = await import("./verity.mjs"));
+  } catch (e) {
+    if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
+        { stdio: "inherit", env: { ...process.env, VITA_STRIP_RETRY: "1" } });
+      process.exit(r.status ?? 1);
+    }
+    throw e;
+  }
+}
 
 // Run a step: in --dry-run just print it; otherwise spawn and fail-fast on nonzero exit.
 function run(label, executable, args, { cwd = REPO, env = process.env } = {}) {
@@ -159,28 +177,34 @@ const rootfs = join(OUT, "vita-debian-trixie-x86_64-root");
 log(`   rootfs → ${rootfs}/ (Format=directory)`);
 
 // ── FULL trusted-boot chain ─────────────────────────────────────────────────────────────────────────────────
-// Step 2: dm-verity — NOT yet emitted by a planner (P1-017 blocked). Compute the hash tree over the read-only
-// root and capture the root hash; it goes onto the kernel cmdline so the kernel verifies every block (spec §11).
-const verityHash = join(OUT, "vita-root.verity");
-log("\n── 2 · dm-verity (P1-017 — NOT yet built)");
-log("   base build is Format=directory (a rootfs dir); dm-verity needs the rootfs as a read-only BLOCK image");
-log("   (erofs/squashfs/raw) first, THEN:");
-log(`   $ veritysetup format ${rootfs}.img ${verityHash}   # -> Root hash: <ROOTHASH> -> goes on the UKI cmdline`);
-log("   The packing + root-hash→UKI binding IS P1-017 (blocked offline).");
-let roothash = "<ROOTHASH-pending-P1-017>";
+// Step 2: dm-verity — derived from the P1-017 planner (planVerity). For each A/B slot it emits the real
+// `veritysetup format <root ext4 image> <hash tree> --format 1 --hash sha256 …` command and that slot's UKI
+// cmdline (root=<verity-mapped device> roothash=<hex>, never root=LABEL). The root EXT4 image it formats is an
+// external precondition from P1-014's rootfs→image conversion, which build-and-boot does not yet execute — so a
+// REAL run stops here with that precise gap; --dry-run prints the full verity chain.
+const verityPlan = planVerity();
+log("\n── 2 · dm-verity (P1-017 planVerity — per-slot hash tree → root hash → UKI cmdline)");
+for (const slot of verityPlan.slots) {
+  const vs = slot.veritysetup;
+  log(`   [${slot.slot}] $ ${vs.executable} ${vs.args.join(" ")}`);
+  log(`   [${slot.slot}]   → captures "${vs.expectedStdoutField}" → cmdline: ${slot.uki.cmdline.template}`);
+}
+const verityRootImage = verityPlan.slots[0]?.dataImage?.path ?? "<root ext4 image>";
+let roothash = "${slot.rootHash}"; // resolved from veritysetup's "Root hash:" once the ext4 image exists
 if (!DRY) {
-  fail("full mode stops at dm-verity: P1-017 (pack rootfs→verity image + bind the root hash into the UKI cmdline) " +
-       "is not built yet. Run `--mode=smoke` for a boot NOW, or have the orchestrator build the P1-017 scaffold. " +
-       "`--dry-run` prints the full intended chain.");
+  fail("full mode stops at dm-verity: the verity plan is ready, but the root EXT4 image it formats\n" +
+       `       (${verityRootImage}) comes from P1-014's rootfs→image conversion, which build-and-boot does not yet\n` +
+       "       execute. NEXT WIRING STEP: convert the Format=directory rootfs → A/B ext4 images, then this step runs\n" +
+       "       veritysetup, captures the root hash, and binds it into each slot's UKI cmdline. `--mode=smoke` boots now.");
 }
 // (dry-run falls through to print the remaining intended steps.)
 
-// Step 3: UKI — derived from the uki planner; inject roothash=<…> into the cmdline.
-// NOTE: the planner's cmdline is still `root=LABEL=… ro` (not roothash-based) because P1-017/verity isn't
-// wired yet, so this injection is a no-op until P1-017 makes the UKI cmdline roothash-bearing. Until then the
-// UKI boots by label, not by verity root hash — i.e. NOT yet the tamper-evident boot (spec §11).
+// Step 3: UKI — derived from the uki planner. planVerity now supplies the verity-bound cmdline (root=<verity
+// device> roothash=<hex>), but the planUKI assembly still carries planUKI's own cmdline; consuming planVerity's
+// cmdline in planUKI (so the assembled UKI is roothash-bearing) is the P1-012↔P1-017 integration that follows
+// the rootfs→ext4 conversion. Until then this UKI boots by label, NOT by verity root hash (spec §11).
 if (MODE === "full" && !ukiStep.command.args.some((a) => a.includes("roothash="))) {
-  log("   ⚠ UKI cmdline is label-based; verity root-hash binding lands with P1-017 (boot is not yet verity-verified)");
+  log("   ⚠ planUKI cmdline is still label-based; bind planVerity's roothash cmdline into planUKI to complete verity boot");
 }
 const ukiArgs = ukiStep.command.args.map((a) => a.includes("roothash=") ? a.replace(/roothash=\S*/, `roothash=${roothash}`) : a);
 run("3 · assemble UKI (ukify, verity-bound cmdline)", ukiStep.command.executable, ukiArgs);
