@@ -114,6 +114,10 @@ diag() {
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Starting ' | tail -8
   echo "===== A start job is running / jobs ====="
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -iE 'start job|job .* running|dependency' | tail -8
+  echo "===== most-repeated lines (a respawn loop floods these) ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | sed -E 's/\[[0-9 .]+\]//' | sort | uniq -c | sort -rn | head -6
+  echo "===== multi-user / startup-finished / emergency (any case) ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -iE 'multi-user|startup finished|emergency|rescue|cannot|refus' | tail -6
   echo "===== last 10 lines ====="
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -10
 }
