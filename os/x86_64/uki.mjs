@@ -10,6 +10,14 @@ export const TEST_CERT_PATH_ENV = "VITA_TEST_SECUREBOOT_CERT_PATH";
 export const DEFAULT_UKI_CONFIG_TEXT = `# Vita x86_64 UKI deterministic assembly plan.
 # Kernel, initrd, and stub are external upstream inputs. Digest=unresolved
 # blocks assembly until the upstream image build supplies real sha256 pins.
+#
+# This plan emits PER-SLOT verity-bearing UKIs (root-a, root-b). Each slot's
+# cmdline binds root to THAT slot's dm-verity device plus its (unresolved)
+# verity root hash, so the assembled UKI boots the verity-mapped root and not
+# an unverified LABEL= partition. The root hash is an unresolved external
+# precondition: the build substitutes it (from \`veritysetup format\` output)
+# before ukify. Each slot's cmdline MUST equal planVerity's per-slot
+# \`slot.uki.cmdline.template\` (os/x86_64/verity.conf); no drift.
 
 [Paths]
 WorkRoot=/work
@@ -20,8 +28,6 @@ TestKeysRoot=/test-keys
 Config=/work/os/x86_64/uki.conf
 
 [UKI]
-Output=/out/vita-x86_64.unsigned.efi
-Cmdline=root=LABEL=vita-debian-trixie-x86_64-root ro systemd.volatile=no quiet
 OsRelease=/plan/uki.os-release
 SourceDateEpoch=1781308800
 Architecture=x86_64
@@ -37,6 +43,26 @@ Digest=unresolved
 [Stub]
 Path=/external/linuxx64.efi.stub
 Digest=unresolved
+
+[SlotRootA]
+Name=rootfs.0
+Slot=root-a
+RootLabel=vita-root-a
+VerityDevice=/dev/mapper/vita-root-a-verity
+CmdlineOptions=ro systemd.volatile=no quiet
+RootHash=unresolved
+Output=/out/uki/vita-root-a.verity.unsigned.efi
+SignedOutput=/out/uki/vita-root-a.verity.test-signed.efi
+
+[SlotRootB]
+Name=rootfs.1
+Slot=root-b
+RootLabel=vita-root-b
+VerityDevice=/dev/mapper/vita-root-b-verity
+CmdlineOptions=ro systemd.volatile=no quiet
+RootHash=unresolved
+Output=/out/uki/vita-root-b.verity.unsigned.efi
+SignedOutput=/out/uki/vita-root-b.verity.test-signed.efi
 
 [OsRelease]
 NAME=Vita
@@ -61,7 +87,6 @@ TestKeyPathEnv=VITA_TEST_SECUREBOOT_KEY_PATH
 TestCertPathEnv=VITA_TEST_SECUREBOOT_CERT_PATH
 KeyContainerPath=/test-keys/db.key
 CertContainerPath=/test-keys/db.crt
-SignedOutput=/out/vita-x86_64.test-signed.efi
 ProductionSigning=owner-only-out-of-band
 `;
 
@@ -81,6 +106,32 @@ const EXTERNAL_INPUT_SECTIONS = Object.freeze([
   ["kernel", "Kernel"],
   ["initrd", "Initrd"],
   ["stub", "Stub"],
+]);
+
+// Per-slot verity-bearing UKIs. The slot identity (name/slot/root label/verity
+// device) MUST cohere with os/x86_64/verity.conf + os/x86_64/image.conf: the
+// emitted cmdline equals planVerity's per-slot `slot.uki.cmdline.template`.
+const SLOT_SECTIONS = Object.freeze([
+  Object.freeze({
+    sectionName: "SlotRootA",
+    name: "rootfs.0",
+    slot: "root-a",
+    rootLabel: "vita-root-a",
+    verityDevice: "/dev/mapper/vita-root-a-verity",
+    ukiName: "uki-root-a",
+    outputPath: "/out/uki/vita-root-a.verity.unsigned.efi",
+    signedOutputPath: "/out/uki/vita-root-a.verity.test-signed.efi",
+  }),
+  Object.freeze({
+    sectionName: "SlotRootB",
+    name: "rootfs.1",
+    slot: "root-b",
+    rootLabel: "vita-root-b",
+    verityDevice: "/dev/mapper/vita-root-b-verity",
+    ukiName: "uki-root-b",
+    outputPath: "/out/uki/vita-root-b.verity.unsigned.efi",
+    signedOutputPath: "/out/uki/vita-root-b.verity.test-signed.efi",
+  }),
 ]);
 
 class ConfigValidationError extends Error {
@@ -104,7 +155,7 @@ export function planUKI(input = DEFAULT_UKI_PLAN_INPUT) {
   const unresolvedInputs = resolvedConfig.externalInputs.filter((entry) => !entry.pin.resolved);
   const verificationStatus =
     unresolvedInputs.length === 0 ? "pending-runtime-verification" : "blocked-unresolved-digest";
-  const assemblyBlockedBy =
+  const inputBlockedBy =
     unresolvedInputs.length === 0
       ? ["verify-external-uki-inputs:pending-runtime-verification"]
       : unresolvedInputs.map((entry) => `verify-external-uki-inputs:${entry.name}:unresolved-digest`);
@@ -146,53 +197,16 @@ export function planUKI(input = DEFAULT_UKI_PLAN_INPUT) {
     },
   ];
 
-  const ukifyArgs = [
-    "build",
-    "--linux",
-    resolvedConfig.externalInputs[0].path,
-    "--initrd",
-    resolvedConfig.externalInputs[1].path,
-    "--cmdline",
-    resolvedConfig.uki.cmdline,
-    "--os-release",
-    resolvedConfig.uki.osReleasePath,
-    "--stub",
-    resolvedConfig.externalInputs[2].path,
-    "--output",
-    resolvedConfig.uki.outputPath,
-  ];
-  const dockerArgs = [
-    "run",
-    "--rm",
-    "--pull=never",
-    "--network",
-    "none",
-    "-v",
-    `${mounts[0].hostPath}:${mounts[0].containerPath}:ro`,
-    "-v",
-    `${mounts[1].hostPath}:${mounts[1].containerPath}:ro`,
-    "-v",
-    `${mounts[2].hostPath}:${mounts[2].containerPath}:ro`,
-    "-v",
-    `${mounts[3].hostPath}:${mounts[3].containerPath}`,
-    "-w",
-    resolvedConfig.paths.planRoot,
-    "-e",
-    `SOURCE_DATE_EPOCH=${resolvedConfig.uki.sourceDateEpoch}`,
-    "-e",
-    "TZ=UTC",
-    "-e",
-    "LC_ALL=C.UTF-8",
-    resolvedConfig.tool.image,
-    resolvedConfig.tool.executable,
-    ...ukifyArgs,
-  ];
+  const slots = resolvedConfig.slots.map((slot) =>
+    buildSlotPlan(slot, resolvedConfig, normalizedInput.value.mountRoots, inputBlockedBy),
+  );
 
   return {
     schemaVersion: 1,
     target: "x86_64",
     deterministic: true,
     network: "none",
+    rootBinding: "verity-device",
     config: {
       path: UKI_CONFIG_PATH,
       containerPath: resolvedConfig.paths.configPath,
@@ -214,15 +228,12 @@ export function planUKI(input = DEFAULT_UKI_PLAN_INPUT) {
     inputs: {
       external: resolvedConfig.externalInputs,
       produced: producedInputs,
-      cmdline: {
-        value: resolvedConfig.uki.cmdline,
-        digest: sha256Text(`${resolvedConfig.uki.cmdline}\n`),
-      },
     },
     outputs: {
-      unsignedUKI: resolvedConfig.uki.outputPath,
-      testSignedUKI: resolvedConfig.signing.signedOutput,
+      unsignedUKIs: slots.map((slot) => slot.outputPath),
+      testSignedUKIs: slots.map((slot) => slot.signedOutputPath),
     },
+    slots,
     preconditions: [
       {
         id: "verify-external-uki-inputs",
@@ -234,33 +245,12 @@ export function planUKI(input = DEFAULT_UKI_PLAN_INPUT) {
           path: entry.path,
           pin: entry.pin,
         })),
-        blocks: ["assemble-uki"],
+        blocks: slots.map((slot) => `assemble-${slot.slot}-uki`),
       },
     ],
     steps: [
-      {
-        id: "assemble-uki",
-        kind: "container-command",
-        status: "blocked",
-        gatedBy: ["verify-external-uki-inputs"],
-        blockedBy: assemblyBlockedBy,
-        output: resolvedConfig.uki.outputPath,
-        command: {
-          executable: "docker",
-          args: dockerArgs,
-          ukifyArgs,
-        },
-      },
-      {
-        id: "declare-test-signing",
-        kind: "test-signing-declaration",
-        status: "declared-non-executable",
-        executable: false,
-        gatedBy: ["assemble-uki"],
-        blockedBy: ["runtime-test-key-paths-required", "production-signing-owner-only"],
-        input: resolvedConfig.uki.outputPath,
-        output: resolvedConfig.signing.signedOutput,
-      },
+      ...slots.map((slot) => slot.assembleStep),
+      ...slots.map((slot) => slot.signingStep),
     ],
     signing: {
       mode: "test-runtime-path",
@@ -295,16 +285,137 @@ export function planUKI(input = DEFAULT_UKI_PLAN_INPUT) {
         disposition: resolvedConfig.signing.productionSigning,
       },
     },
-    command: {
-      executable: "docker",
-      args: dockerArgs,
-      ukifyArgs,
-    },
   };
 }
 
 export function serializeUKIPlan(plan) {
   return `${stableStringify(plan)}\n`;
+}
+
+function buildSlotPlan(slot, resolvedConfig, mountRoots, inputBlockedBy) {
+  const cmdline = buildUKICmdline(slot.verityDevice, slot.cmdlineOptions, slot.rootHash, slot.name);
+  const assemblyBlockedBy = blockedByForSlotAssembly(slot, inputBlockedBy);
+
+  const ukifyArgs = [
+    "build",
+    "--linux",
+    resolvedConfig.externalInputs[0].path,
+    "--initrd",
+    resolvedConfig.externalInputs[1].path,
+    "--cmdline",
+    cmdline.template,
+    "--os-release",
+    resolvedConfig.uki.osReleasePath,
+    "--stub",
+    resolvedConfig.externalInputs[2].path,
+    "--output",
+    slot.outputPath,
+  ];
+  const dockerArgs = [
+    "run",
+    "--rm",
+    "--pull=never",
+    "--network",
+    "none",
+    "-v",
+    `${mountRoots.workspaceHostPath}:${resolvedConfig.paths.workRoot}:ro`,
+    "-v",
+    `${mountRoots.externalInputsHostPath}:${resolvedConfig.paths.externalRoot}:ro`,
+    "-v",
+    `${mountRoots.planInputsHostPath}:${resolvedConfig.paths.planRoot}:ro`,
+    "-v",
+    `${mountRoots.outputHostPath}:${resolvedConfig.paths.outputRoot}`,
+    "-w",
+    resolvedConfig.paths.planRoot,
+    "-e",
+    `SOURCE_DATE_EPOCH=${resolvedConfig.uki.sourceDateEpoch}`,
+    "-e",
+    "TZ=UTC",
+    "-e",
+    "LC_ALL=C.UTF-8",
+    resolvedConfig.tool.image,
+    resolvedConfig.tool.executable,
+    ...ukifyArgs,
+  ];
+
+  const command = {
+    executable: "docker",
+    args: dockerArgs,
+    ukifyArgs,
+  };
+
+  const assembleStep = {
+    id: `assemble-${slot.slot}-uki`,
+    kind: "container-command",
+    status: "blocked",
+    slot: slot.name,
+    gatedBy: ["verify-external-uki-inputs", "compute-verity-root-hashes"],
+    blockedBy: assemblyBlockedBy,
+    output: slot.outputPath,
+    command,
+  };
+  const signingStep = {
+    id: `declare-test-signing-${slot.slot}`,
+    kind: "test-signing-declaration",
+    status: "declared-non-executable",
+    executable: false,
+    slot: slot.name,
+    gatedBy: [`assemble-${slot.slot}-uki`],
+    blockedBy: ["runtime-test-key-paths-required", "production-signing-owner-only"],
+    input: slot.outputPath,
+    output: slot.signedOutputPath,
+  };
+
+  return {
+    name: slot.name,
+    slot: slot.slot,
+    rootLabel: slot.rootLabel,
+    verityDevice: slot.verityDevice,
+    ukiName: slot.ukiName,
+    rootHash: slot.rootHash,
+    cmdline,
+    outputPath: slot.outputPath,
+    signedOutputPath: slot.signedOutputPath,
+    command,
+    assembleStep,
+    signingStep,
+  };
+}
+
+// Mirror of verity.mjs:buildUKICmdline so the per-slot UKI cmdline is
+// byte-identical to planVerity's `slot.uki.cmdline.template`. The root hash is
+// an UNRESOLVED external precondition: the template carries the
+// `${<slotName>.rootHash}` placeholder until the build substitutes the real
+// hash captured from `veritysetup format`. We NEVER emit root=LABEL= or a raw
+// partition; root always points at the per-slot dm-verity device.
+function buildUKICmdline(verityDevice, cmdlineOptions, rootHash, slotName) {
+  const template = `root=${verityDevice} roothash=\${${slotName}.rootHash} ${cmdlineOptions}`;
+  if (!rootHash.resolved) {
+    return {
+      status: "blocked-unresolved-root-hash",
+      root: `root=${verityDevice}`,
+      roothash: rootHash,
+      template,
+    };
+  }
+
+  const value = `root=${verityDevice} roothash=${rootHash.hex} ${cmdlineOptions}`;
+  return {
+    status: "bound",
+    root: `root=${verityDevice}`,
+    roothash: rootHash,
+    template,
+    value,
+    digest: sha256Text(`${value}\n`),
+  };
+}
+
+function blockedByForSlotAssembly(slot, inputBlockedBy) {
+  const blockedBy = [...inputBlockedBy];
+  if (!slot.rootHash.resolved) {
+    blockedBy.push(`compute-verity-root-hashes:${slot.name}:unresolved-root-hash`);
+  }
+  return blockedBy;
 }
 
 function normalizeUKIPlanInput(input) {
@@ -504,10 +615,30 @@ function parseKeyValueConfig(text, label) {
 function resolveUKIConfig(config) {
   assertAllowedSettings(config, {
     Paths: ["WorkRoot", "ExternalRoot", "PlanRoot", "OutputRoot", "TestKeysRoot", "Config"],
-    UKI: ["Output", "Cmdline", "OsRelease", "SourceDateEpoch", "Architecture"],
+    UKI: ["OsRelease", "SourceDateEpoch", "Architecture"],
     Kernel: ["Path", "Digest"],
     Initrd: ["Path", "Digest"],
     Stub: ["Path", "Digest"],
+    SlotRootA: [
+      "Name",
+      "Slot",
+      "RootLabel",
+      "VerityDevice",
+      "CmdlineOptions",
+      "RootHash",
+      "Output",
+      "SignedOutput",
+    ],
+    SlotRootB: [
+      "Name",
+      "Slot",
+      "RootLabel",
+      "VerityDevice",
+      "CmdlineOptions",
+      "RootHash",
+      "Output",
+      "SignedOutput",
+    ],
     OsRelease: [...OS_RELEASE_KEYS],
     Tool: ["Image", "Executable"],
     Runtime: ["Network"],
@@ -520,7 +651,6 @@ function resolveUKIConfig(config) {
       "TestCertPathEnv",
       "KeyContainerPath",
       "CertContainerPath",
-      "SignedOutput",
       "ProductionSigning",
     ],
   });
@@ -572,32 +702,20 @@ function resolveUKIConfig(config) {
     root: paths.planRoot,
     allowRoot: false,
   });
-  const outputPath = validateCanonicalPosixPath(getSingleValue(config, "UKI", "Output"), {
-    label: "UKI.Output",
-    root: paths.outputRoot,
-    allowRoot: false,
-  });
-  const cmdline = getSingleValue(config, "UKI", "Cmdline");
-  if (cmdline.length === 0 || /[\u0000-\u001F\u007F]/u.test(cmdline)) {
-    throw new ConfigValidationError("UKI.Cmdline must be non-empty and contain no control characters");
-  }
 
-  const signedOutput = validateCanonicalPosixPath(getSingleValue(config, "Signing", "SignedOutput"), {
-    label: "Signing.SignedOutput",
-    root: paths.outputRoot,
-    allowRoot: false,
-  });
-  const signing = resolveSigning(config, paths, signedOutput);
+  const slots = SLOT_SECTIONS.map((expected) => resolveSlot(config, paths, expected));
+  assertUniqueSlotPaths(slots);
+
+  const signing = resolveSigning(config, paths);
 
   return {
     paths,
     uki: {
-      outputPath,
-      cmdline,
       osReleasePath,
       sourceDateEpoch,
       architecture,
     },
+    slots,
     externalInputs,
     osRelease: resolveOsRelease(config),
     tool: {
@@ -605,6 +723,50 @@ function resolveUKIConfig(config) {
       executable: toolExecutable,
     },
     signing,
+  };
+}
+
+function resolveSlot(config, paths, expected) {
+  const sectionName = expected.sectionName;
+  const name = getSingleValue(config, sectionName, "Name");
+  const slot = getSingleValue(config, sectionName, "Slot");
+  const rootLabel = getSingleValue(config, sectionName, "RootLabel");
+  const verityDevice = validateCanonicalPosixPath(getSingleValue(config, sectionName, "VerityDevice"), {
+    label: `${sectionName}.VerityDevice`,
+    root: "/dev/mapper",
+    allowRoot: false,
+  });
+  const cmdlineOptions = validateCmdlineOptions(getSingleValue(config, sectionName, "CmdlineOptions"), `${sectionName}.CmdlineOptions`);
+  const rootHash = parseRootHashPin(getSingleValue(config, sectionName, "RootHash"), `${sectionName}.RootHash`);
+  const outputPath = validateCanonicalPosixPath(getSingleValue(config, sectionName, "Output"), {
+    label: `${sectionName}.Output`,
+    root: paths.outputRoot,
+    allowRoot: false,
+  });
+  const signedOutputPath = validateCanonicalPosixPath(getSingleValue(config, sectionName, "SignedOutput"), {
+    label: `${sectionName}.SignedOutput`,
+    root: paths.outputRoot,
+    allowRoot: false,
+  });
+
+  assertExpected(name, expected.name, `${sectionName}.Name`);
+  assertExpected(slot, expected.slot, `${sectionName}.Slot`);
+  assertExpected(rootLabel, expected.rootLabel, `${sectionName}.RootLabel`);
+  assertExpected(verityDevice, expected.verityDevice, `${sectionName}.VerityDevice`);
+  assertExpected(outputPath, expected.outputPath, `${sectionName}.Output`);
+  assertExpected(signedOutputPath, expected.signedOutputPath, `${sectionName}.SignedOutput`);
+
+  return {
+    sectionName,
+    name,
+    slot,
+    rootLabel,
+    verityDevice,
+    cmdlineOptions,
+    rootHash,
+    ukiName: expected.ukiName,
+    outputPath,
+    signedOutputPath,
   };
 }
 
@@ -658,7 +820,7 @@ function resolvePaths(config) {
   };
 }
 
-function resolveSigning(config, paths, signedOutput) {
+function resolveSigning(config, paths) {
   const mode = getSingleValue(config, "Signing", "Mode");
   if (mode !== "test-runtime-path") {
     throw new ConfigValidationError(`Signing.Mode expected test-runtime-path, found ${mode}`);
@@ -708,7 +870,6 @@ function resolveSigning(config, paths, signedOutput) {
     testCertPathEnv,
     keyContainerPath,
     certContainerPath,
-    signedOutput,
     productionSigning,
   };
 }
@@ -840,6 +1001,28 @@ function assertDistinctMountRoots(entries) {
   }
 }
 
+function assertUniqueSlotPaths(slots) {
+  const names = new Set();
+  const slotIds = new Set();
+  const verityDevices = new Set();
+  const outputPaths = new Set();
+  const signedOutputPaths = new Set();
+  for (const slot of slots) {
+    assertUnique(names, slot.name, `${slot.sectionName}.Name`);
+    assertUnique(slotIds, slot.slot, `${slot.sectionName}.Slot`);
+    assertUnique(verityDevices, slot.verityDevice, `${slot.sectionName}.VerityDevice`);
+    assertUnique(outputPaths, slot.outputPath, `${slot.sectionName}.Output`);
+    assertUnique(signedOutputPaths, slot.signedOutputPath, `${slot.sectionName}.SignedOutput`);
+  }
+}
+
+function assertUnique(set, value, label) {
+  if (set.has(value)) {
+    throw new ConfigValidationError(`${label} must be unique`);
+  }
+  set.add(value);
+}
+
 function parseDigestPin(value, label) {
   if (value === "unresolved") {
     return {
@@ -859,6 +1042,25 @@ function parseDigestPin(value, label) {
   };
 }
 
+function parseRootHashPin(value, label) {
+  if (value === "unresolved") {
+    return {
+      algorithm: "sha256",
+      required: true,
+      resolved: false,
+      status: "unresolved",
+    };
+  }
+
+  const hex = validateSha256Hex(value, label);
+  return {
+    algorithm: "sha256",
+    required: true,
+    resolved: true,
+    hex,
+  };
+}
+
 function validateDigestPinnedImage(value, label) {
   const atIndex = value.lastIndexOf("@");
   if (atIndex <= 0 || atIndex === value.length - 1) {
@@ -873,13 +1075,23 @@ function validateSha256Digest(value, label) {
   }
 
   const hex = value.slice("sha256:".length);
-  if (isPlaceholderDigest(hex)) {
+  if (isPlaceholderHex(hex)) {
     throw new ConfigValidationError(`${label} must not use a placeholder or sentinel digest`);
   }
   return value;
 }
 
-function isPlaceholderDigest(hex) {
+function validateSha256Hex(value, label) {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new ConfigValidationError(`${label} must be exactly 64 lowercase hex characters`);
+  }
+  if (isPlaceholderHex(value)) {
+    throw new ConfigValidationError(`${label} must not use a placeholder or sentinel digest`);
+  }
+  return value;
+}
+
+function isPlaceholderHex(hex) {
   if (/^([0-9a-f])\1{63}$/.test(hex)) {
     return true;
   }
@@ -901,6 +1113,34 @@ function isPlaceholderDigest(hex) {
     "cafebabe".repeat(8),
   ]);
   return obviousSequences.has(hex);
+}
+
+function validateCmdlineOptions(value, label) {
+  if (value.length === 0 || /[\u0000-\u001F\u007F]/u.test(value)) {
+    throw new ConfigValidationError(`${label} must be non-empty and contain no control characters`);
+  }
+  const tokens = value.split(/\s+/).filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    throw new ConfigValidationError(`${label} must contain at least one token`);
+  }
+  for (const token of tokens) {
+    if (token.startsWith("root=")) {
+      throw new ConfigValidationError(`${label} must not set root=; the planner binds root to the verity device`);
+    }
+    if (token.startsWith("roothash=")) {
+      throw new ConfigValidationError(`${label} must not set roothash=; the planner binds the slot root hash`);
+    }
+    if (token.startsWith("verity.")) {
+      throw new ConfigValidationError(`${label} must not invent verity.* cmdline tokens`);
+    }
+  }
+  return tokens.join(" ");
+}
+
+function assertExpected(actual, expected, label) {
+  if (actual !== expected) {
+    throw new ConfigValidationError(`${label} expected ${expected}, found ${actual}`);
+  }
 }
 
 function assertTestReference(value, label) {
