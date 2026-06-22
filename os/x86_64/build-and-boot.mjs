@@ -20,7 +20,7 @@
 //   VITA_OVMF_CODE / VITA_OVMF_VARS  OVMF firmware paths for QEMU (defaults to common Debian locations)
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -179,7 +179,21 @@ log(`\n✓ full build complete → ${imageRaw}` + (NO_SIGN ? " (UNSIGNED)" : " (
 
 function bootQemu(image, { secureBoot }) {
   const ovmfCode = process.env.VITA_OVMF_CODE ?? "/usr/share/OVMF/OVMF_CODE.fd";
+  const ovmfVarsTemplate = process.env.VITA_OVMF_VARS_TEMPLATE ?? "/usr/share/OVMF/OVMF_VARS.fd";
   const ovmfVars = process.env.VITA_OVMF_VARS ?? join(OUT, "OVMF_VARS.fd");
+  // QEMU needs a WRITABLE copy of the UEFI vars; seed it from the read-only system template once.
+  if (ovmfVars !== ovmfVarsTemplate) {
+    if (DRY) {
+      log(`   (seed writable UEFI vars: cp ${ovmfVarsTemplate} ${ovmfVars})`);
+    } else if (!existsSync(ovmfVars)) {
+      if (!existsSync(ovmfVarsTemplate))
+        fail(`OVMF vars template not found at ${ovmfVarsTemplate} — \`apt install ovmf\` or set VITA_OVMF_VARS_TEMPLATE ` +
+             `(newer Debian uses /usr/share/OVMF/OVMF_VARS_4M.fd + OVMF_CODE_4M.fd — set VITA_OVMF_CODE/VITA_OVMF_VARS_TEMPLATE)`);
+      copyFileSync(ovmfVarsTemplate, ovmfVars);
+    }
+  }
+  if (!DRY && !existsSync(ovmfCode))
+    fail(`OVMF code not found at ${ovmfCode} — set VITA_OVMF_CODE (e.g. /usr/share/OVMF/OVMF_CODE_4M.fd on newer Debian)`);
   run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"})`, "qemu-system-x86_64", [
     "-machine", "q35", "-m", "2048", "-cpu", "host", "-enable-kvm",
     "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
