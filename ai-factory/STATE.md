@@ -250,8 +250,12 @@ password yet (login reached, not passable — add autologin/RootPassword if a sh
 EXACT paths verity.conf + image.conf consume. R2 dual-gate: independent verify + Codex APPROVE (round 2 — round 1
 revised for the host-dependent-features reproducibility hole). **build-and-boot full mode now executes**: step 1
 rootfs → step 1.5 `mkfs.ext4 -d` per slot (host-path-mapped) → step 2 `veritysetup format` over the ext4 images,
-CAPTURING each slot's root hash. **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs dispatched
-(Codex, in flight):** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+CAPTURING each slot's root hash. **VERIFICATION AUTOMATED (2026-06-22):** `tools/wsl-verify.sh` drives the WSL
+"Borg51" Ubuntu (= this machine's build host) as root (passwordless `wsl -u root`) — headless QEMU + serial
+marker → confirms multi-user boot; modes tests|build|boot|smoke|full. No more paste-driven loops. **CODEX
+CONNECTIVITY DOWN (reconnect errors) → both arcs REBUILDING via Opus subagents** (Agent isolation:worktree,
+branch from CURRENT main so no stale clobber; gate = Opus adversarial probe + my verify + wsl-verify build/boot;
+switch back to Codex when it recovers). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
 `root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
 gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
 boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
