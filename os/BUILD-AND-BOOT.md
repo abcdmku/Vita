@@ -3,8 +3,18 @@
 How to turn the in-repo build *plans* into a booting image on a **Linux host**. This environment (Windows,
 unprivileged Docker, no QEMU, ghcr pull `denied`) can't run it; this is the turnkey guide for a host that can.
 
+**One-script executor:** [`os/x86_64/build-and-boot.mjs`](x86_64/build-and-boot.mjs) runs the whole pipeline,
+deriving its mkosi/ukify commands from the planners below. Try it first with `--dry-run` (prints every command,
+needs nothing installed):
+```sh
+node os/x86_64/build-and-boot.mjs --dry-run --mode=full     # inspect the full chain
+node os/x86_64/build-and-boot.mjs --mode=smoke              # on a Linux host: rootfs -> unsigned disk -> QEMU
+VITA_SB_KEY=… VITA_SB_CERT=… node os/x86_64/build-and-boot.mjs --mode=full   # full trusted boot
+```
+The manual steps below explain each stage the script automates.
+
 The repo files are deterministic **planners** (no-I/O, per spec §8.2): they emit the exact commands but don't
-execute them. This runbook is the executor.
+execute them. The script (and this runbook) is the executor.
 
 - `os/x86_64/build-root.mjs` → the `docker run … mkosi …` rootfs build
 - `os/x86_64/uki.mjs` → the `ukify` UKI build
