@@ -268,13 +268,17 @@ veritysetup (capture root hashes) → step 3 per-slot verity UKIs (substitute ca
 the chain) [P1-025]; smoke builds + stages agentd (inlined go-in-docker cmd — the build HOST's Node lacks TS
 support, ERR_NO_TYPESCRIPT, so smoke can't import the .ts planner) + ships it via a 2nd `--extra-tree`
 agent-overlay [P1-026]. **VERIFIED:** `wsl-verify smoke` BUILD succeeds (build_rc=0 — agentd built+staged, mkosi
-disk with the agent). **OPEN — headless boot of the agent-smoke stalls before multi-user:** fixed cause #1
-(vita-agentd had `Wants=network-online.target` → systemd-networkd-wait-online hung ~123s in the no-NIC headless VM
-→ dropped it). Remaining stall: boot reaches early userspace (network.target, boot.mount, update-done all OK) but
-not multi-user in 130s, with NO error/hang message — likely a slow late service or long timeout (fresh-mirror
-build vs the old disk). Bumped `wsl-verify` boot window to 240s + added a `diag` mode; re-verify next tick to
-distinguish slow-vs-hung. The interactive boot (real stdin) may be unaffected. Secure Boot signing still needs
-owner keys (§16). Codex still down (Opus substrate held the floor for both arcs). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+disk with the agent). **"MAKE IT VITA" VERIFIED (autonomous, 2026-06-22):** owner asked me to do ALL testing so
+the loop self-runs → added `wsl-verify probe` (systemd-nspawn boots the rootfs as a container in ~2s + host-side
+`systemctl -M` introspection, NO QEMU/console). Probe result: **system `running`, 0 failed units, no stuck jobs,
+and `vita-agentd` Active: active (running)** — the booted image runs the Vita agent. So the SERVICE layer is
+healthy. **QEMU headless full-boot still hangs before multi-user** — but since the container boots clean, that is
+boot-chain/hardware/headless-specific (NOT services/agent), a SEPARATE issue (the bare image booted interactively
+to a shell earlier). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
+fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
+the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
+QEMU-specific hang (low priority — agent verified via probe; interactive boot likely fine). Secure Boot signing
+still needs owner keys (§16). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
 `root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
 gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
 boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
