@@ -107,8 +107,14 @@ function nativeArgs(extra = []) {
     .map((a) => (a === "/work/os/x86_64" ? HERE : a === CONTAINER_OUT ? OUT : a))
     .concat(["--cache-dir", CACHE], extra);
 }
+// The committed config pins a snapshot.debian.org mirror for reproducibility, but exact-midnight snapshot
+// timestamps often 404 (not real snapshot points). Smoke is non-reproducible by nature → default to the live
+// Debian mirror so packages resolve; full keeps the committed config unless VITA_MIRROR is set. Always logged.
+const MIRROR = process.env.VITA_MIRROR ?? (MODE === "smoke" ? "https://deb.debian.org/debian" : "");
 function runMkosi(label, extra = []) {
-  return useNative ? run(label, "mkosi", nativeArgs(extra)) : run(label, "docker", dockerBuild(extra));
+  const e = [...extra, ...(MIRROR ? ["--mirror", MIRROR] : [])];
+  if (MIRROR) log(`   (mirror override: --mirror ${MIRROR})`);
+  return useNative ? run(label, "mkosi", nativeArgs(e)) : run(label, "docker", dockerBuild(e));
 }
 // Discover the actual artifact mkosi produced (named after Output= [+ ImageVersion]); robust to mkosi's naming.
 function findOutput(suffix) {
