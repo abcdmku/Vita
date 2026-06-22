@@ -83,11 +83,34 @@ build_full() {
   ls -l "$REPO"/os/x86_64/out/converted/ "$REPO"/os/x86_64/out/verity/ 2>&1 | tail -12
 }
 
+agent_build() {
+  echo "===== P1-026 agentd reproducible build (go-in-docker --env passthrough) ====="
+  mkdir -p "$REPO"/os/x86_64/out/agent
+  # The exact command planAgentImage() emits. A bash array keeps the -ldflags value as one quoted arg.
+  local cmd=(node tools/build/go-in-docker.mjs --dir agent
+    --env CGO_ENABLED=0 --env GOOS=linux --env GOARCH=amd64 --env SOURCE_DATE_EPOCH=1781308800
+    build -trimpath -buildvcs=false -ldflags "-s -w -buildid=" -o /work/os/x86_64/out/agent/agentd ./cmd/agentd)
+  "${cmd[@]}" || { echo "RESULT: FAIL (build error)"; return 1; }
+  local bin="$REPO"/os/x86_64/out/agent/agentd
+  echo "--- file ---"; file "$bin"
+  local h1 h2
+  h1=$(sha256sum "$bin" | cut -d' ' -f1)
+  "${cmd[@]}" >/dev/null 2>&1   # rebuild to check byte-reproducibility
+  h2=$(sha256sum "$bin" | cut -d' ' -f1)
+  echo "sha256 run1=$h1 run2=$h2"
+  if file "$bin" | grep -q "statically linked" && [ "$h1" = "$h2" ]; then
+    echo "RESULT: PASS (agentd static + byte-reproducible)"
+  else
+    echo "RESULT: FAIL (not static and/or not reproducible)"; return 1
+  fi
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
   boot)  boot_headless;;
   smoke) build_smoke && boot_headless || echo "RESULT: FAIL";;
+  agent) agent_build;;
   full)  build_full;;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac

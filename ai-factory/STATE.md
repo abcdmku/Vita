@@ -257,12 +257,16 @@ CONNECTIVITY DOWN (reconnect errors) → both arcs REBUILT via Opus subagents** 
 Opus adversarial probe + my verify + wsl-verify; switch back to Codex when it recovers).
 **P1-025 MERGED (5c18bb3):** per-slot verity-bearing UKIs; dual-gate (Opus probe REVISE — test-rename had dropped 3
 P1-012 assertions; I restored digest-resolution-flip + control-char-path + per-slot-SignedOutput cases → 14/14,
-typecheck clean). **P1-026 (Vita agentd) VERIFIED, probe running:** acceptance 8/8, typecheck clean, and **agentd
-COMPILES via go-in-docker in WSL** (`/home/borg/Vita/agent/agentd`, ELF x86-64). Open risk the probe is judging:
-`go-in-docker.mjs` doesn't forward CGO_ENABLED/GOOS/SOURCE_DATE_EPOCH, so the plan's flags may be inert →
-non-reproducible binary; the build-and-boot wiring must export them. **REMAINING:** wire build-and-boot step 3
-(per-slot verity UKIs, substitute captured roothash → ukify per slot) + the agent overlay (`--extra-tree`); then
-`wsl-verify full` = the verity-verified boot end-to-end. Secure Boot signing still needs owner keys (§16). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+typecheck clean). **P1-026 (Vita agentd) MERGED (a193fdb):** planAgentImage + agent-overlay (binary, vita-agentd.service via
+mode-120000 wants-symlink, tmpfiles). Dual-gate: acceptance 8/8 + Opus probe REVISE (B1: reproducible env sat in
+an INERT `environment` field — go-in-docker never forwarded CGO_ENABLED/GOOS/GOARCH/SOURCE_DATE_EPOCH → a
+dynamically-linked, non-reproducible binary). **B1 FIXED + PROVEN:** taught `go-in-docker.mjs` a `--env KEY=VAL`
+passthrough, planAgentImage emits those flags (test asserts they reach the container); `wsl-verify agent` now
+reports **agentd statically linked + stripped + byte-reproducible** (sha256 run1==run2). `wsl-verify.sh` gained an
+`agent` mode. **REMAINING (orchestrator wiring, next):** build-and-boot — step 3 per-slot verity UKIs (substitute
+captured roothash → ukify per slot, P1-025) + run planAgentImage's build → stage binary → `--extra-tree`
+agent-overlay (P1-026); then `wsl-verify full` = verity-verified boot end-to-end + agent runs at boot. Secure Boot
+signing still needs owner keys (§16). Codex still down (Opus substrate held the floor for both arcs). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
 `root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
 gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
 boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
