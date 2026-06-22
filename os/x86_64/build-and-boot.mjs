@@ -48,22 +48,24 @@ if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MO
 function fail(msg) { console.error(`\n✖ ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
 
-// Full mode imports verity.mjs, which pulls in a .ts helper (safeNormalize). Node ≥23.6 strips types by default;
-// older needs --experimental-strip-types. Load planVerity HERE (before any build work), re-exec once under the
-// flag if the .ts load fails, so the user's plain `node …` invocation keeps working. Smoke never loads verity.mjs.
-let planVerity, planRootfsImage;
-if (MODE === "full") {
-  try {
+// The os planners pull in a .ts helper (safeNormalize). Node ≥23.6 strips types by default; older needs
+// --experimental-strip-types — so load them HERE (before any build work) and re-exec once under the flag if the
+// .ts load fails, keeping the user's plain `node …` invocation working. planAgentImage loads in BOTH modes (the
+// Vita agent ships in every image); planVerity/planRootfsImage are full-mode only.
+let planVerity, planRootfsImage, planAgentImage;
+try {
+  ({ planAgentImage } = await import("./agent-image.mjs"));
+  if (MODE === "full") {
     ({ planVerity } = await import("./verity.mjs"));
     ({ planRootfsImage } = await import("./rootfs-image.mjs"));
-  } catch (e) {
-    if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
-      const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
-        { stdio: "inherit", env: { ...process.env, VITA_STRIP_RETRY: "1" } });
-      process.exit(r.status ?? 1);
-    }
-    throw e;
   }
+} catch (e) {
+  if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
+    const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
+      { stdio: "inherit", env: { ...process.env, VITA_STRIP_RETRY: "1" } });
+    process.exit(r.status ?? 1);
+  }
+  throw e;
 }
 
 // Run a step: in --dry-run just print it; otherwise spawn and fail-fast on nonzero exit.
@@ -90,8 +92,12 @@ const ukiPlan = planUKI();
 const layoutPlan = planImageLayout();
 
 const mkosiCmd = rootPlan.command;                                   // { executable:"docker", args:[…] }
-const ukiStep = ukiPlan.steps.find((s) => s.id === "assemble-uki");  // { command:{ executable, args } }
-if (!mkosiCmd?.args || !ukiStep?.command?.args) fail("planner shape changed — re-wire build-and-boot.mjs");
+if (!mkosiCmd?.args) fail("planner shape changed — re-wire build-and-boot.mjs (rootPlan.command)");
+// planUKI is per-slot (P1-025): each slot carries its own ukify command + verity cmdline. Only full mode uses it
+// (smoke uses mkosi's own UKI), so validate the per-slot shape only there — don't block smoke.
+if (MODE === "full" && !(ukiPlan.slots?.length && ukiPlan.slots.every((s) => Array.isArray(s.command?.ukifyArgs)))) {
+  fail("planner shape changed — re-wire build-and-boot.mjs (planUKI per-slot UKIs)");
+}
 
 log(`Vita build-and-boot — mode=${MODE}${DRY ? " (dry-run)" : ""}`);
 log(`  repo=${REPO}\n  out=${OUT}\n  cache=${CACHE}\n  mkosi=${PINNED_MKOSI_IMAGE}`);
@@ -145,6 +151,26 @@ function findOutput(suffix) {
   return join(OUT, hit);
 }
 
+// Build the Vita agentd (P1-026) reproducibly via its plan's go-in-docker command, then stage the binary into
+// the committed agent-overlay so mkosi's --extra-tree ships /usr/lib/vita/agentd + vita-agentd.service into the
+// rootfs. planAgentImage is the deterministic spec; here we execute it. go-in-docker mounts cwd(=REPO) at /work,
+// so the plan's `-o /work/os/x86_64/out/agent/agentd` lands at OUT/agent/agentd on the host. Returns the overlay
+// path for --extra-tree (engine-mapped: host dir for native mkosi; the /work mount for docker).
+function installAgentOverlay() {
+  const overlayHost = join(HERE, "agent-overlay");
+  const plan = planAgentImage();
+  run("1a · build vita agentd (reproducible static binary)", plan.build.executable, plan.build.args);
+  if (!DRY) {
+    const built = join(OUT, "agent", "agentd");
+    if (!existsSync(built)) fail(`agentd build did not produce ${built} — check the go-in-docker step`);
+    const binDest = join(overlayHost, "usr", "lib", "vita", "agentd");
+    mkdirSync(dirname(binDest), { recursive: true });
+    copyFileSync(built, binDest);
+    log(`   staged agentd → ${binDest}`);
+  }
+  return useNative ? overlayHost : "/work/os/x86_64/agent-overlay";
+}
+
 log(`  engine=${useNative ? "host-native mkosi" : `docker ${PINNED_MKOSI_IMAGE}`}`);
 
 // ── Step 0: ensure the mkosi engine is available (docker pull only; native skips the registry) ─────────────
@@ -170,9 +196,10 @@ if (MODE === "smoke") {
   // unlike --autologin), AND set a root password (root/vita) as a fallback. Smoke/test only — full image gets
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
   const smokeOverlay = useNative ? join(HERE, "smoke-overlay") : "/work/os/x86_64/smoke-overlay";
+  const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", `--extra-tree=${smokeOverlay}`, "--root-password=vita",
-     "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
+    ["--format", "disk", "--bootable=yes", `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
+     "--root-password=vita", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
@@ -210,7 +237,7 @@ for (const step of rootfsImagePlan.steps) {
 const verityPlan = planVerity();
 log("\n── 2 · dm-verity (veritysetup format over the ext4 images, capture root hash)");
 if (!DRY) mkdirSync(join(OUT, "verity"), { recursive: true });
-let roothash = "${slot.rootHash}";
+const slotRootHashes = {};   // slot.slot ("root-a"/"root-b") -> captured verity root hash hex
 for (const slot of verityPlan.slots) {
   const vs = slot.veritysetup;
   const args = vs.args.map(mapHost);
@@ -224,26 +251,27 @@ for (const slot of verityPlan.slots) {
     process.stdout.write(out);
     const m = /Root hash:\s*([0-9a-f]+)/i.exec(out);
     if (!m) fail(`2 · ${slot.slot}: could not parse "Root hash:" from veritysetup output`);
-    if (slot.slot === "root-a") roothash = m[1];
+    slotRootHashes[slot.slot] = m[1];
     log(`   [${slot.slot}] root hash = ${m[1]}`);
   }
 }
-if (!DRY) {
-  fail("full mode: rootfs → ext4 converted + verity hash trees formatted + root hashes captured ✓. FINAL WIRING\n" +
-       "       GAP: bind each slot's root hash into its UKI cmdline (planUKI must consume planVerity's roothash\n" +
-       "       cmdline) so the assembled UKI is verity-bearing, then sign (VITA_SB_KEY). `--dry-run` shows the rest.");
-}
-// (dry-run falls through to print the remaining intended steps.)
 
-// Step 3: UKI — derived from the uki planner. planVerity now supplies the verity-bound cmdline (root=<verity
-// device> roothash=<hex>), but the planUKI assembly still carries planUKI's own cmdline; consuming planVerity's
-// cmdline in planUKI (so the assembled UKI is roothash-bearing) is the P1-012↔P1-017 integration that follows
-// the rootfs→ext4 conversion. Until then this UKI boots by label, NOT by verity root hash (spec §11).
-if (MODE === "full" && !ukiStep.command.args.some((a) => a.includes("roothash="))) {
-  log("   ⚠ planUKI cmdline is still label-based; bind planVerity's roothash cmdline into planUKI to complete verity boot");
+// Step 3: assemble the PER-SLOT verity-bearing UKIs (P1-025 planUKI). Each slot's ukify --cmdline is
+// root=/dev/mapper/vita-root-<slot>-verity roothash=<the captured hash> — substitute the captured hash into the
+// cmdline's `${name.rootHash}` placeholder (this is the verity binding). NOTE: ukify also needs the kernel/initrd
+// (+ systemd-boot stub) external inputs (P1-012 preconditions); build-and-boot does not yet EXTRACT them from the
+// built rootfs, so a REAL run stops here — `--dry-run` prints the full per-slot UKI chain.
+log("\n── 3 · assemble per-slot verity UKIs (ukify, P1-025)");
+for (const slot of ukiPlan.slots) {
+  const hex = slotRootHashes[slot.slot] ?? `\${${slot.name}.rootHash}`;
+  const ukifyArgs = slot.command.args.map((a) => mapHost(a).split(`\${${slot.name}.rootHash}`).join(hex));
+  log(`   [${slot.slot}] $ ${slot.command.executable} ${ukifyArgs.join(" ")}`);
 }
-const ukiArgs = ukiStep.command.args.map((a) => a.includes("roothash=") ? a.replace(/roothash=\S*/, `roothash=${roothash}`) : a);
-run("3 · assemble UKI (ukify, verity-bound cmdline)", ukiStep.command.executable, ukiArgs);
+if (!DRY) {
+  fail("full mode: ext4 + verity root hashes captured ✓; per-slot verity UKIs ready (shown via --dry-run). The\n" +
+       "       verity binding (root hash → UKI cmdline) is now wired. NEXT GAP: extract the kernel/initrd (+ stub)\n" +
+       "       from the built rootfs for ukify, then Secure Boot sign (VITA_SB_KEY).");
+}
 
 // Step 4: A/B GPT layout — image-layout planner is declarative; materialize its repart config and run repart.
 log("\n── 4 · GPT + RAUC A/B layout (systemd-repart from image-layout.mjs)");

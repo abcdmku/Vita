@@ -7,6 +7,8 @@ node_modules/
 out/
 **/dist/
 *.tsbuildinfo
+# agentd binary staged into the agent overlay by build-and-boot (a build artifact, not source)
+os/x86_64/agent-overlay/usr/lib/vita/
 
 # worker / loop runtime artifacts
 .codex-output/
