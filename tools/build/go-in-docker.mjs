@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Run `go <args>` inside the pinned golang Linux container against a module dir under the cwd.
-// Usage: node tools/build/go-in-docker.mjs [--dir <subdir>] <go-args...>
+// Usage: node tools/build/go-in-docker.mjs [--dir <subdir>] [--env KEY=VALUE ...] <go-args...>
 //   e.g. node tools/build/go-in-docker.mjs --dir agent test ./...
+//        node tools/build/go-in-docker.mjs --dir agent --env CGO_ENABLED=0 --env SOURCE_DATE_EPOCH=1 build ./cmd/agentd
 //
 // This is the canonical Go build/test path for OS-layer code: Linux-native (matches the target),
 // reproducible, and independent of the host's Go PATH. The whole cwd (worktree root) is mounted at
@@ -12,8 +13,22 @@ import { spawnSync } from "node:child_process";
 
 let args = process.argv.slice(2);
 let dir = ".";
-if (args[0] === "--dir") {
-  dir = args[1] ?? ".";
+const extraEnv = [];
+// Parse leading [--dir <subdir>] and repeatable [--env KEY=VALUE] flags; the rest are go args. --env pins
+// reproducibility-relevant vars (CGO_ENABLED, GOOS, GOARCH, SOURCE_DATE_EPOCH) INTO the container — the bare
+// `-e GOFLAGS` below does not cover them, so without this a build silently inherits container defaults
+// (e.g. CGO on → a dynamically-linked, non-reproducible binary).
+while (args[0] === "--dir" || args[0] === "--env") {
+  if (args[0] === "--dir") {
+    dir = args[1] ?? ".";
+  } else {
+    const kv = args[1] ?? "";
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(kv)) {
+      console.error(`--env expects KEY=VALUE, got: ${kv}`);
+      process.exit(2);
+    }
+    extraEnv.push("-e", kv);
+  }
   args = args.slice(2);
 }
 if (args.length === 0) {
@@ -32,6 +47,7 @@ const run = spawnSync(
     "-v", "vita-go-mod-cache:/go/pkg/mod",
     "-w", workdir,
     "-e", "GOFLAGS=-buildvcs=false",
+    ...extraEnv,
     image,
     "go", ...args,
   ],
