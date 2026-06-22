@@ -80,52 +80,66 @@ if (!DRY) { mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: t
 // ── Step 0: pull the pinned mkosi image (the plan uses --pull=never, so it must be present) ─────────────────
 run("0 · pull mkosi image", "docker", ["pull", PINNED_MKOSI_IMAGE]);
 
-// ── Step 1: build the read-only Debian rootfs ───────────────────────────────────────────────────────────────
-// The planner's args are hermetic (--network none, --pull=never, ro mount). For a REAL build we must let
-// packages in and let mkosi write/create devices: mount the cache, allow network for the fetch, and run
-// privileged. We derive the planned `mkosi …` tail and re-wrap the docker invocation so the plan stays the
-// source of truth for the mkosi flags while we adjust only the container execution policy.
-const mkosiTail = mkosiCmd.args.slice(mkosiCmd.args.indexOf("mkosi")); // ["mkosi","--directory",…,"--output-dir",…]
-const buildArgs = [
-  "run", "--rm", "--privileged",
-  "-v", `${REPO}:/work`,                       // rw (planner used :ro; a real build needs to write workspace caches)
-  "-v", `${OUT}:/output`,
-  "-v", `${CACHE}:/var/cache/mkosi`,           // persistent Debian package cache (populated on first run)
-  "-w", "/work/os/x86_64",
-  "-e", `SOURCE_DATE_EPOCH=${rootPlan.environment?.SOURCE_DATE_EPOCH ?? "1781308800"}`,
-  "-e", "TZ=UTC", "-e", "LC_ALL=C.UTF-8",
-  PINNED_MKOSI_IMAGE,
-  ...mkosiTail,
-  "--cache-dir", "/var/cache/mkosi",
-];
-run("1 · build rootfs (mkosi, privileged, cached)", "docker", buildArgs);
-
-const rootfs = join(OUT, "vita-debian-trixie-x86_64-root");
-log(`   rootfs → ${rootfs}`);
+// ── mkosi execution policy ──────────────────────────────────────────────────────────────────────────────────
+// The planner's args are hermetic (--network none, --pull=never, ro mount). For a REAL build we let packages
+// in and let mkosi write/create devices: privileged, rw workspace, persistent cache, and the output mounted at
+// the planner's OWN --output-dir (so artifacts land on the host). We keep the planner as the source of truth
+// for the mkosi flags (mkosiTail) and adjust only the container execution policy + optional format overrides.
+const mkosiTail = mkosiCmd.args.slice(mkosiCmd.args.indexOf("mkosi")); // ["mkosi","--directory",…,"--output-dir","/out"]
+const CONTAINER_OUT = mkosiTail[mkosiTail.indexOf("--output-dir") + 1] ?? "/out";
+function dockerBuild(extraMkosiFlags = []) {
+  return [
+    "run", "--rm", "--privileged",
+    "-v", `${REPO}:/work`,                     // rw (planner used :ro; a real build writes workspace caches)
+    "-v", `${OUT}:${CONTAINER_OUT}`,           // output at the planner's own --output-dir, so it lands on host
+    "-v", `${CACHE}:/var/cache/mkosi`,         // persistent Debian package cache (populated on first run)
+    "-w", "/work/os/x86_64",
+    "-e", `SOURCE_DATE_EPOCH=${rootPlan.environment?.SOURCE_DATE_EPOCH ?? "1781308800"}`,
+    "-e", "TZ=UTC", "-e", "LC_ALL=C.UTF-8",
+    PINNED_MKOSI_IMAGE,
+    ...mkosiTail, "--cache-dir", "/var/cache/mkosi",
+    ...extraMkosiFlags,
+  ];
+}
+// Discover the actual artifact mkosi produced (named after Output= [+ ImageVersion]); robust to mkosi's naming.
+function findOutput(suffix) {
+  if (DRY || !existsSync(OUT)) return join(OUT, `<mkosi-output${suffix}>`);
+  const hit = readdirSync(OUT).find((f) => f.endsWith(suffix));
+  if (!hit) fail(`no '${suffix}' artifact in ${OUT} — check the mkosi build step output`);
+  return join(OUT, hit);
+}
 
 if (MODE === "smoke") {
-  // ── Smoke: pack rootfs into a bootable disk (unsigned, no verity) and boot it. Fastest "see it run". ──────
-  run("2s · pack bootable disk (mkosi --format disk, smoke)", "docker",
-    ["run", "--rm", "--privileged", "-v", `${REPO}:/work`, "-v", `${OUT}:/output`, "-w", "/work/os/x86_64",
-     PINNED_MKOSI_IMAGE, "mkosi", "--directory", "/work/os/x86_64", "--output-dir", "/output",
-     "--format", "disk", "--bootable=yes", "-f"]);
-  if (!NO_BOOT) bootQemu(join(OUT, "vita.raw"), { secureBoot: false });
+  // ── Smoke: ONE build straight to a bootable disk (overrides base Format=directory/Bootable=no), then boot.
+  run("1 · build bootable disk (mkosi --format disk, smoke)", "docker", dockerBuild(["--format", "disk", "--bootable=yes"]));
+  const disk = findOutput(".raw");
+  log(`   disk → ${disk}`);
+  if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
   process.exit(0);
 }
+
+// ── FULL: build the read-only Debian rootfs (the planner's canonical Format=directory build) ────────────────
+run("1 · build rootfs (mkosi directory, privileged, cached)", "docker", dockerBuild());
+const rootfs = join(OUT, "vita-debian-trixie-x86_64-root");
+log(`   rootfs → ${rootfs}/ (Format=directory)`);
 
 // ── FULL trusted-boot chain ─────────────────────────────────────────────────────────────────────────────────
 // Step 2: dm-verity — NOT yet emitted by a planner (P1-017 blocked). Compute the hash tree over the read-only
 // root and capture the root hash; it goes onto the kernel cmdline so the kernel verifies every block (spec §11).
 const verityHash = join(OUT, "vita-root.verity");
-log("\n── 2 · dm-verity (P1-017 not yet in a planner — host veritysetup; capture root hash)");
-log(`   $ veritysetup format ${rootfs}.img ${verityHash}   # -> Root hash: <ROOTHASH>`);
-let roothash = "<ROOTHASH-from-veritysetup>";
+log("\n── 2 · dm-verity (P1-017 — NOT yet built)");
+log("   base build is Format=directory (a rootfs dir); dm-verity needs the rootfs as a read-only BLOCK image");
+log("   (erofs/squashfs/raw) first, THEN:");
+log(`   $ veritysetup format ${rootfs}.img ${verityHash}   # -> Root hash: <ROOTHASH> -> goes on the UKI cmdline`);
+log("   The packing + root-hash→UKI binding IS P1-017 (blocked offline).");
+let roothash = "<ROOTHASH-pending-P1-017>";
 if (!DRY) {
-  const r = run("2 · veritysetup format", "veritysetup", ["format", `${rootfs}.img`, verityHash]);
-  const m = /Root hash:\s*([0-9a-f]+)/i.exec(r.stdout?.toString?.() ?? "");
-  if (m) roothash = m[1]; else fail("could not parse veritysetup root hash — check the rootfs image step");
+  fail("full mode stops at dm-verity: P1-017 (pack rootfs→verity image + bind the root hash into the UKI cmdline) " +
+       "is not built yet. Run `--mode=smoke` for a boot NOW, or have the orchestrator build the P1-017 scaffold. " +
+       "`--dry-run` prints the full intended chain.");
 }
+// (dry-run falls through to print the remaining intended steps.)
 
 // Step 3: UKI — derived from the uki planner; inject roothash=<…> into the cmdline.
 // NOTE: the planner's cmdline is still `root=LABEL=… ro` (not roothash-based) because P1-017/verity isn't
