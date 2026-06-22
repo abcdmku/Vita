@@ -250,9 +250,15 @@ password yet (login reached, not passable — add autologin/RootPassword if a sh
 EXACT paths verity.conf + image.conf consume. R2 dual-gate: independent verify + Codex APPROVE (round 2 — round 1
 revised for the host-dependent-features reproducibility hole). **build-and-boot full mode now executes**: step 1
 rootfs → step 1.5 `mkfs.ext4 -d` per slot (host-path-mapped) → step 2 `veritysetup format` over the ext4 images,
-CAPTURING each slot's root hash. **NEXT (final) GAP:** bind the captured root hash into the UKI cmdline (planUKI
-must consume planVerity's `roothash=` cmdline) so the assembled UKI is verity-bearing, then Secure Boot sign
-(needs owner keys §16). Full mode is now QEMU-testable through verity-format on Borg51, NO keys. **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
+CAPTURING each slot's root hash. **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs dispatched
+(Codex, in flight):** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+`root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
+gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
+boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
+flags) + `os/x86_64/agent-overlay/` (binary /usr/lib/vita/agentd + `vita-agentd.service` + tmpfiles
+/var/lib/vita-agent) → `--extra-tree` so the booted image runs the Vita agent at boot (loopback :8786). Both R2,
+both avoid build-and-boot.mjs (orchestrator wires post-merge). After both: only Secure Boot signing needs owner
+keys (§16). Full mode is QEMU-testable through verity-format TODAY on Borg51, NO keys. **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
 `planVerity()` (verity.mjs/conf/test) per the correct design — `veritysetup format --format 1` over the produced
 ext4 image artifacts → root hash (unresolved external precondition) → systemd `roothash=` on each slot's UKI
 cmdline, `root=`→verity-mapped device. Dual-gate: independent design check + acceptance 8/8 + Codex R2 review
