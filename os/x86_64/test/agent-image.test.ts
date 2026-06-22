@@ -339,7 +339,8 @@ test("the systemd unit content is enabled and binds loopback through ambient cap
   assert.match(unitText, /^Type=simple$/mu);
   assert.match(unitText, /^ExecStart=\/usr\/lib\/vita\/agentd$/mu);
   // Loopback-only daemon: must NOT order behind network-online.target (it hangs headless/no-NIC boots ~120s).
-  assert.doesNotMatch(unitText, /network-online\.target/u);
+  // Match directive lines only — a comment may still mention it.
+  assert.doesNotMatch(unitText, /^(?:After|Wants)=network-online\.target$/mu);
   assert.match(unitText, /^Restart=on-failure$/mu);
   assert.match(unitText, /^RestartSec=5s$/mu);
   assert.match(unitText, /^AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME$/mu);
