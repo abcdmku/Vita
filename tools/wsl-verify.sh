@@ -54,14 +54,14 @@ boot_headless() {
   cp "$vars" "$REPO"/os/x86_64/out/OVMF_VARS.fd
   local log="$REPO"/os/x86_64/out/serial.log
   : > "$log"
-  timeout 260 qemu-system-x86_64 -machine q35 -m 2048 -cpu host -enable-kvm \
+  timeout 120 qemu-system-x86_64 -machine q35 -m 2048 -cpu host -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file="$code" \
     -drive if=pflash,format=raw,file="$REPO"/os/x86_64/out/OVMF_VARS.fd \
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 agent="" i
   # "fully up" = systemd reached the Multi-User target (or the login/root shell appeared).
-  for i in $(seq 1 240); do
+  for i in $(seq 1 90); do
     if grep -qE 'Reached target[^|]*Multi-User|Startup finished in|root@localhost|bash-5\.[0-9]+[#$]' "$log" 2>/dev/null; then
       ok=1; echo "userspace-up marker found at ~${i}s"; break
     fi

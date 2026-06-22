@@ -203,8 +203,12 @@ if (MODE === "smoke") {
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
   const smokeOverlay = useNative ? join(HERE, "smoke-overlay") : "/work/os/x86_64/smoke-overlay";
   const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
+  // --incremental: mkosi caches the package-installed rootfs, so re-builds only re-apply the overlays/cmdline
+  // (seconds) instead of re-installing all of Debian (~5 min). Smoke is iterate-fast; full keeps it off for
+  // byte-reproducibility. Override with VITA_INCREMENTAL=0.
+  const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental"];
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
+    ["--format", "disk", "--bootable=yes", ...incremental, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
      "--root-password=vita", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
