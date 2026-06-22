@@ -20,6 +20,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "linux-image-amd64",
   "systemd",
   "systemd-boot",
+  "systemd-boot-efi",
   "systemd-sysv",
   "udev",
   "util-linux",
@@ -55,6 +56,7 @@ Packages=
     linux-image-amd64
     systemd
     systemd-boot
+    systemd-boot-efi
     systemd-sysv
     udev
     util-linux

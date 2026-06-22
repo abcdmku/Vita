@@ -87,6 +87,7 @@ const expectedPackageAllowlist = [
   "linux-image-amd64",
   "systemd",
   "systemd-boot",
+  "systemd-boot-efi",
   "systemd-sysv",
   "udev",
   "util-linux",
