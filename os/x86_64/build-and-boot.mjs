@@ -207,9 +207,13 @@ if (MODE === "smoke") {
   // (seconds) instead of re-installing all of Debian (~5 min). Smoke is iterate-fast; full keeps it off for
   // byte-reproducibility. Override with VITA_INCREMENTAL=0.
   const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental=yes"];
+  // VITA_BOOT_DEBUG=1 bakes systemd debug logging into the cmdline so a headless boot prints WHY it stalls
+  // (job queue / unmet dependencies / device waits) to the serial — a one-shot diagnostic, off by default.
+  const cmdline = "console=tty0 console=ttyS0,115200 rw" +
+    (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
-     "--root-password=vita", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
+     "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
