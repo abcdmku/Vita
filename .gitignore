@@ -26,6 +26,11 @@ ai-factory/task-contracts/*.review.json
 *.key
 *.pem
 secrets/
+# Secure Boot TEST keystore (throwaway QEMU-demo PK/KEK/db + rogue pair). The *.key rule above
+# catches db.key/rogue.key but NOT db.crt/rogue.crt or any staged .auth/.esl — anchor the whole
+# dir so nothing in the keystore is ever trackable, regardless of extension. These are TEST-ONLY,
+# per-host, never the production signing / N-of-M recovery keys (those are withheld from agents).
+os/x86_64/.secureboot/
 
 # os cruft
 .DS_Store
