@@ -338,8 +338,8 @@ test("the systemd unit content is enabled and binds loopback through ambient cap
   const unitText = await readFile(serviceUnitUrl, "utf8");
   assert.match(unitText, /^Type=simple$/mu);
   assert.match(unitText, /^ExecStart=\/usr\/lib\/vita\/agentd$/mu);
-  assert.match(unitText, /^After=network-online\.target$/mu);
-  assert.match(unitText, /^Wants=network-online\.target$/mu);
+  // Loopback-only daemon: must NOT order behind network-online.target (it hangs headless/no-NIC boots ~120s).
+  assert.doesNotMatch(unitText, /network-online\.target/u);
   assert.match(unitText, /^Restart=on-failure$/mu);
   assert.match(unitText, /^RestartSec=5s$/mu);
   assert.match(unitText, /^AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME$/mu);

@@ -5,8 +5,8 @@
 [Unit]
 Description=Vita system agent
 Documentation=https://vita.local/agent
-After=network-online.target
-Wants=network-online.target
+# Loopback-only daemon (binds 127.0.0.1): deliberately NOT ordered after network-online.target — waiting on it
+# hangs headless/no-NIC boots ~120s (systemd-networkd-wait-online times out), which blocked multi-user.
 
 [Service]
 Type=simple
