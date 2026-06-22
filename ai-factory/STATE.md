@@ -244,12 +244,15 @@ mirror=HOST root (mkosi appends `/debian`); `systemd-boot-efi` EXPLICIT (apt `In
 password yet (login reached, not passable — add autologin/RootPassword if a shell is wanted). Commits 3932ec6…a6aadcf.
 
 ## 🔧 FULL-MODE (verity-verified boot) — IN PROGRESS.
-`--mode=full` stops at dm-verity because the root EXT4 image `planVerity` formats has no producer. **P1-024
-(rootfs dir → deterministic ext4 root image) AUTHORED + DISPATCHED to Codex (in flight)** — `planRootfsImage()`
-emits the `mkfs.ext4 -d` conversion at the EXACT paths verity.conf + image.conf consume. After merge: WIRE it into
-build-and-boot full mode between step 1 (rootfs) and step 2 (verity), then a real `veritysetup format` runs →
-roothash → UKI cmdline → verity-verified boot (QEMU-testable on Borg51, NO keys). Secure Boot signing (step 3)
-still needs owner keys (§16). **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
+**P1-024 (rootfs dir → deterministic ext4 root image) MERGED + WIRED (b7795f2 + build-and-boot wiring):**
+`planRootfsImage()` (rootfs-image.{mjs,conf} + pinned mke2fs.conf + test) emits the byte-reproducible `mkfs.ext4
+-d` conversion (pinned `MKE2FS_CONFIG` + full explicit ext4 feature set, no journal, fixed UUID/seed/size) at the
+EXACT paths verity.conf + image.conf consume. R2 dual-gate: independent verify + Codex APPROVE (round 2 — round 1
+revised for the host-dependent-features reproducibility hole). **build-and-boot full mode now executes**: step 1
+rootfs → step 1.5 `mkfs.ext4 -d` per slot (host-path-mapped) → step 2 `veritysetup format` over the ext4 images,
+CAPTURING each slot's root hash. **NEXT (final) GAP:** bind the captured root hash into the UKI cmdline (planUKI
+must consume planVerity's `roothash=` cmdline) so the assembled UKI is verity-bearing, then Secure Boot sign
+(needs owner keys §16). Full mode is now QEMU-testable through verity-format on Borg51, NO keys. **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
 `planVerity()` (verity.mjs/conf/test) per the correct design — `veritysetup format --format 1` over the produced
 ext4 image artifacts → root hash (unresolved external precondition) → systemd `roothash=` on each slot's UKI
 cmdline, `root=`→verity-mapped device. Dual-gate: independent design check + acceptance 8/8 + Codex R2 review
