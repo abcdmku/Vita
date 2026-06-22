@@ -206,7 +206,7 @@ if (MODE === "smoke") {
   // --incremental: mkosi caches the package-installed rootfs, so re-builds only re-apply the overlays/cmdline
   // (seconds) instead of re-installing all of Debian (~5 min). Smoke is iterate-fast; full keeps it off for
   // byte-reproducibility. Override with VITA_INCREMENTAL=0.
-  const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental"];
+  const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental=yes"];
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
      "--root-password=vita", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);

@@ -122,12 +122,56 @@ diag() {
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -10
 }
 
+# Fast, fully-introspectable boot WITHOUT QEMU: build the rootfs as a directory (base config is Format=directory)
+# with the smoke + agent overlays, boot it in a systemd-nspawn container (~seconds), then introspect from the host
+# (systemctl list-jobs/status/--failed). Catches service/agent hangs + verifies the agent without an interactive
+# console — so the loop can self-verify. (Container env differs from QEMU for hardware/mount units; QEMU smoke
+# remains the full-chain check.)
+probe() {
+  echo "===== nspawn service probe (no QEMU) ====="
+  systemctl start systemd-machined 2>/dev/null
+  cd "$REPO" || return 1   # agentd build needs cwd=REPO: go-in-docker mounts cwd at /work, so --dir agent => /work/agent
+  mkdir -p os/x86_64/out/agent os/x86_64/agent-overlay/usr/lib/vita
+  echo "--- build agentd ---"
+  node tools/build/go-in-docker.mjs --dir agent \
+    --env CGO_ENABLED=0 --env GOOS=linux --env GOARCH=amd64 --env SOURCE_DATE_EPOCH=1781308800 \
+    build -trimpath -buildvcs=false -ldflags "-s -w -buildid=" -o /work/os/x86_64/out/agent/agentd ./cmd/agentd \
+    || { echo "RESULT: FAIL (agentd build)"; return 1; }
+  cp os/x86_64/out/agent/agentd os/x86_64/agent-overlay/usr/lib/vita/agentd
+  echo "--- build rootfs directory (incremental) + overlays ---"
+  cd os/x86_64 || return 1
+  mkosi --directory . --force --incremental=yes --cache-dir "$PWD"/.cache --output-dir out \
+    --extra-tree "$PWD"/smoke-overlay --extra-tree "$PWD"/agent-overlay --root-password=vita \
+    --mirror https://deb.debian.org 2>&1 | tail -4 || { echo "RESULT: FAIL (mkosi directory)"; return 1; }
+  local root="$PWD"/out/vita-debian-trixie-x86_64-root M=vitaprobe
+  [ -d "$root" ] || { echo "RESULT: FAIL (no rootfs dir $root)"; return 1; }
+  machinectl terminate "$M" 2>/dev/null; sleep 1
+  echo "--- boot $M (systemd-nspawn) ---"
+  systemd-nspawn --quiet -b -D "$root" --machine="$M" </dev/null >/tmp/nspawn-$M.log 2>&1 &
+  local i state=""
+  for i in $(seq 1 45); do
+    state=$(systemctl -M "$M" is-system-running 2>/dev/null || true)
+    case "$state" in running|degraded) break;; esac
+    sleep 1
+  done
+  echo "is-system-running: ${state:-<none>} (after ~${i}s)"
+  echo "--- list-jobs (any still 'running'/'waiting' = the hang) ---"; systemctl -M "$M" list-jobs --no-pager 2>&1 | head
+  echo "--- failed units ---"; systemctl -M "$M" list-units --state=failed --no-pager 2>&1 | head
+  echo "--- vita-agentd ---"; systemctl -M "$M" status vita-agentd --no-pager 2>&1 | head -14
+  machinectl poweroff "$M" 2>/dev/null; sleep 2; machinectl terminate "$M" 2>/dev/null
+  case "$state" in
+    running|degraded) echo "RESULT: PASS (system up; see vita-agentd above)";;
+    *) echo "RESULT: FAIL (system never came up — list-jobs shows the stuck unit)";;
+  esac
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
   boot)  boot_headless;;
   smoke) build_smoke && boot_headless || echo "RESULT: FAIL";;
   agent) agent_build;;
+  probe) probe;;
   diag)  diag;;
   full)  build_full;;
   *) echo "unknown mode: $MODE"; exit 2;;
