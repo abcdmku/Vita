@@ -48,24 +48,23 @@ if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MO
 function fail(msg) { console.error(`\n✖ ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
 
-// The os planners pull in a .ts helper (safeNormalize). Node ≥23.6 strips types by default; older needs
-// --experimental-strip-types — so load them HERE (before any build work) and re-exec once under the flag if the
-// .ts load fails, keeping the user's plain `node …` invocation working. planAgentImage loads in BOTH modes (the
-// Vita agent ships in every image); planVerity/planRootfsImage are full-mode only.
-let planVerity, planRootfsImage, planAgentImage;
-try {
-  ({ planAgentImage } = await import("./agent-image.mjs"));
-  if (MODE === "full") {
+// Full mode imports the verity/rootfs-image planners, which pull in a .ts helper (safeNormalize). Older Node
+// needs --experimental-strip-types — re-exec once under the flag if the .ts load fails. IMPORTANT: the build
+// HOST's Node may lack TS support entirely (ERR_NO_TYPESCRIPT, even with the flag), so SMOKE must not import any
+// .ts-bearing planner — the agentd build command is inlined in installAgentOverlay() for exactly that reason.
+let planVerity, planRootfsImage;
+if (MODE === "full") {
+  try {
     ({ planVerity } = await import("./verity.mjs"));
     ({ planRootfsImage } = await import("./rootfs-image.mjs"));
+  } catch (e) {
+    if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
+        { stdio: "inherit", env: { ...process.env, VITA_STRIP_RETRY: "1" } });
+      process.exit(r.status ?? 1);
+    }
+    throw e;
   }
-} catch (e) {
-  if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
-    const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
-      { stdio: "inherit", env: { ...process.env, VITA_STRIP_RETRY: "1" } });
-    process.exit(r.status ?? 1);
-  }
-  throw e;
 }
 
 // Run a step: in --dry-run just print it; otherwise spawn and fail-fast on nonzero exit.
@@ -158,8 +157,15 @@ function findOutput(suffix) {
 // path for --extra-tree (engine-mapped: host dir for native mkosi; the /work mount for docker).
 function installAgentOverlay() {
   const overlayHost = join(HERE, "agent-overlay");
-  const plan = planAgentImage();
-  run("1a · build vita agentd (reproducible static binary)", plan.build.executable, plan.build.args);
+  // Mirrors planAgentImage() / agent-image.conf (the deterministic spec, pinned by os/x86_64/test/agent-image.test.ts).
+  // Inlined rather than imported because build-and-boot runs on the build host, whose Node may lack TS support and
+  // so cannot load the .ts-importing planner. go-in-docker mounts cwd(=REPO) at /work → the -o lands at OUT/agent/agentd.
+  const buildArgs = [
+    "tools/build/go-in-docker.mjs", "--dir", "agent",
+    "--env", "CGO_ENABLED=0", "--env", "GOOS=linux", "--env", "GOARCH=amd64", "--env", "SOURCE_DATE_EPOCH=1781308800",
+    "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -buildid=", "-o", "/work/os/x86_64/out/agent/agentd", "./cmd/agentd",
+  ];
+  run("1a · build vita agentd (reproducible static binary)", "node", buildArgs);
   if (!DRY) {
     const built = join(OUT, "agent", "agentd");
     if (!existsSync(built)) fail(`agentd build did not produce ${built} — check the go-in-docker step`);
