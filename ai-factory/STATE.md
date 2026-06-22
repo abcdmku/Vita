@@ -253,9 +253,16 @@ rootfs → step 1.5 `mkfs.ext4 -d` per slot (host-path-mapped) → step 2 `verit
 CAPTURING each slot's root hash. **VERIFICATION AUTOMATED (2026-06-22):** `tools/wsl-verify.sh` drives the WSL
 "Borg51" Ubuntu (= this machine's build host) as root (passwordless `wsl -u root`) — headless QEMU + serial
 marker → confirms multi-user boot; modes tests|build|boot|smoke|full. No more paste-driven loops. **CODEX
-CONNECTIVITY DOWN (reconnect errors) → both arcs REBUILDING via Opus subagents** (Agent isolation:worktree,
-branch from CURRENT main so no stale clobber; gate = Opus adversarial probe + my verify + wsl-verify build/boot;
-switch back to Codex when it recovers). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+CONNECTIVITY DOWN (reconnect errors) → both arcs REBUILT via Opus subagents** (Agent isolation:worktree; gate =
+Opus adversarial probe + my verify + wsl-verify; switch back to Codex when it recovers).
+**P1-025 MERGED (5c18bb3):** per-slot verity-bearing UKIs; dual-gate (Opus probe REVISE — test-rename had dropped 3
+P1-012 assertions; I restored digest-resolution-flip + control-char-path + per-slot-SignedOutput cases → 14/14,
+typecheck clean). **P1-026 (Vita agentd) VERIFIED, probe running:** acceptance 8/8, typecheck clean, and **agentd
+COMPILES via go-in-docker in WSL** (`/home/borg/Vita/agent/agentd`, ELF x86-64). Open risk the probe is judging:
+`go-in-docker.mjs` doesn't forward CGO_ENABLED/GOOS/SOURCE_DATE_EPOCH, so the plan's flags may be inert →
+non-reproducible binary; the build-and-boot wiring must export them. **REMAINING:** wire build-and-boot step 3
+(per-slot verity UKIs, substitute captured roothash → ukify per slot) + the agent overlay (`--extra-tree`); then
+`wsl-verify full` = the verity-verified boot end-to-end. Secure Boot signing still needs owner keys (§16). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
 `root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
 gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
 boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
