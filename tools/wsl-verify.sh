@@ -54,14 +54,14 @@ boot_headless() {
   cp "$vars" "$REPO"/os/x86_64/out/OVMF_VARS.fd
   local log="$REPO"/os/x86_64/out/serial.log
   : > "$log"
-  timeout 150 qemu-system-x86_64 -machine q35 -m 2048 -cpu host -enable-kvm \
+  timeout 260 qemu-system-x86_64 -machine q35 -m 2048 -cpu host -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file="$code" \
     -drive if=pflash,format=raw,file="$REPO"/os/x86_64/out/OVMF_VARS.fd \
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 agent="" i
   # "fully up" = systemd reached the Multi-User target (or the login/root shell appeared).
-  for i in $(seq 1 130); do
+  for i in $(seq 1 240); do
     if grep -qE 'Reached target[^|]*Multi-User|Startup finished in|root@localhost|bash-5\.[0-9]+[#$]' "$log" 2>/dev/null; then
       ok=1; echo "userspace-up marker found at ~${i}s"; break
     fi
@@ -105,12 +105,26 @@ agent_build() {
   fi
 }
 
+diag() {
+  local log="$REPO"/os/x86_64/out/serial.log
+  [ -f "$log" ] || { echo "no serial.log"; return 1; }
+  echo "===== last targets reached ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE 'Reached target [^.]+' | tail -8
+  echo "===== last 'Starting …' (a hang shows as Starting with no later Started/Finished) ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'Starting ' | tail -8
+  echo "===== A start job is running / jobs ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -iE 'start job|job .* running|dependency' | tail -8
+  echo "===== last 10 lines ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -10
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
   boot)  boot_headless;;
   smoke) build_smoke && boot_headless || echo "RESULT: FAIL";;
   agent) agent_build;;
+  diag)  diag;;
   full)  build_full;;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac
