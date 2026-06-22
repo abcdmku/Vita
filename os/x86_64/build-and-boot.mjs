@@ -168,7 +168,8 @@ if (MODE === "smoke") {
   // --autologin: passwordless root auto-login on the consoles (tty1/ttyS0/hvc0). Smoke is a throwaway test VM,
   // so this is the easy way in; the production/full image gets real auth, never autologin.
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", "--autologin=yes", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
+    ["--format", "disk", "--bootable=yes", "--autologin=yes", "--root-password=vita",
+     "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
