@@ -235,12 +235,21 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 (safeNormalize retrofit — see Lessons).
 
 
-## 🔧 BOOT CHAIN UN-BLOCKED (2026-06-21): owner gave a Linux host (Borg51) + a runnable build path.
-The OS build is now reachable: `os/BUILD-AND-BOOT.md` + the one-script executor `os/x86_64/build-and-boot.mjs`
-(`--mode=smoke|full --dry-run`) derive mkosi/ukify commands from the planners + fill host steps (pull → cached
-privileged build → verity → UKI → A/B repart → sbsign → rauc → qemu). Smoke (rootfs→unsigned disk→QEMU) runs on
-Borg51 today; the user is iterating real builds (mkosi native engine + live deb.debian.org mirror; chasing the
-bootloader/ESP gap next). **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
+## 🎉 SMOKE OS BOOTS (2026-06-21): the Vita image BUILDS + BOOTS end-to-end in QEMU on Borg51.
+First-ever compile+boot: `os/x86_64/build-and-boot.mjs --mode=smoke` (host-native mkosi → trixie rootfs → UKI →
+ESP → `vita-debian-trixie-x86_64-root.raw`) reaches the **Debian 13 `localhost login:` on ttyS0**. Gotchas closed
+(all in [[vita-boot-chain-blocked]] memory): ghcr-denied→native mkosi; snapshot-404→live `deb.debian.org`;
+mirror=HOST root (mkosi appends `/debian`); `systemd-boot-efi` EXPLICIT (apt `Install-Recommends=false`); OVMF
+`_4M.fd` auto-detect; `console=ttyS0` baked into the smoke UKI (`--kernel-command-line`). Smoke has no root
+password yet (login reached, not passable — add autologin/RootPassword if a shell is wanted). Commits 3932ec6…a6aadcf.
+
+## 🔧 FULL-MODE (verity-verified boot) — IN PROGRESS.
+`--mode=full` stops at dm-verity because the root EXT4 image `planVerity` formats has no producer. **P1-024
+(rootfs dir → deterministic ext4 root image) AUTHORED + DISPATCHED to Codex (in flight)** — `planRootfsImage()`
+emits the `mkfs.ext4 -d` conversion at the EXACT paths verity.conf + image.conf consume. After merge: WIRE it into
+build-and-boot full mode between step 1 (rootfs) and step 2 (verity), then a real `veritysetup format` runs →
+roothash → UKI cmdline → verity-verified boot (QEMU-testable on Borg51, NO keys). Secure Boot signing (step 3)
+still needs owner keys (§16). **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
 `planVerity()` (verity.mjs/conf/test) per the correct design — `veritysetup format --format 1` over the produced
 ext4 image artifacts → root hash (unresolved external precondition) → systemd `roothash=` on each slot's UKI
 cmdline, `root=`→verity-mapped device. Dual-gate: independent design check + acceptance 8/8 + Codex R2 review
