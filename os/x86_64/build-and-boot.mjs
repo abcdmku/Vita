@@ -51,10 +51,11 @@ function log(msg) { console.log(msg); }
 // Full mode imports verity.mjs, which pulls in a .ts helper (safeNormalize). Node ≥23.6 strips types by default;
 // older needs --experimental-strip-types. Load planVerity HERE (before any build work), re-exec once under the
 // flag if the .ts load fails, so the user's plain `node …` invocation keeps working. Smoke never loads verity.mjs.
-let planVerity;
+let planVerity, planRootfsImage;
 if (MODE === "full") {
   try {
     ({ planVerity } = await import("./verity.mjs"));
+    ({ planRootfsImage } = await import("./rootfs-image.mjs"));
   } catch (e) {
     if (e?.code === "ERR_UNKNOWN_FILE_EXTENSION" && !process.env.VITA_STRIP_RETRY) {
       const r = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(import.meta.url), ...argv],
@@ -183,25 +184,52 @@ const rootfs = join(OUT, "vita-debian-trixie-x86_64-root");
 log(`   rootfs → ${rootfs}/ (Format=directory)`);
 
 // ── FULL trusted-boot chain ─────────────────────────────────────────────────────────────────────────────────
-// Step 2: dm-verity — derived from the P1-017 planner (planVerity). For each A/B slot it emits the real
-// `veritysetup format <root ext4 image> <hash tree> --format 1 --hash sha256 …` command and that slot's UKI
-// cmdline (root=<verity-mapped device> roothash=<hex>, never root=LABEL). The root EXT4 image it formats is an
-// external precondition from P1-014's rootfs→image conversion, which build-and-boot does not yet execute — so a
-// REAL run stops here with that precise gap; --dry-run prints the full verity chain.
+// Step 1.5: convert the Format=directory rootfs → deterministic per-slot ext4 images (P1-024 planRootfsImage) —
+// the images planVerity formats + planImageLayout places in the A/B partitions. The planner emits CONTAINER paths;
+// map them to host paths (rootfs from step 1; outputs under out/converted; the pinned mke2fs.conf from the repo).
+const convertedDir = join(OUT, "converted");
+const mapHost = (p) => p
+  .replace("/external/p1-011/vita-debian-trixie-x86_64-root", rootfs)
+  .replace("/external/p1-014/converted", convertedDir)
+  .replace("/out/verity", join(OUT, "verity"))   // planVerity's hash-tree output dir (container /out → host OUT)
+  .replace("/work/os/x86_64", join(REPO, "os/x86_64"));
+const rootfsImagePlan = planRootfsImage();
+log("\n── 1.5 · convert rootfs → ext4 images (mkfs.ext4 -d, deterministic, P1-024)");
+if (!DRY) mkdirSync(convertedDir, { recursive: true });
+for (const step of rootfsImagePlan.steps) {
+  const args = step.command.args.map(mapHost);
+  const env = { ...process.env, ...step.command.environment, MKE2FS_CONFIG: mapHost(step.command.environment.MKE2FS_CONFIG) };
+  run(`1.5 · ${step.id}`, step.command.executable, args, { env });
+}
+
+// Step 2: dm-verity (P1-017 planVerity) — run `veritysetup format <ext4> <hashtree> --format 1 …` over the
+// step-1.5 images and CAPTURE each slot's root hash (stdout piped); the slot cmdline is
+// root=<verity-mapped device> roothash=<hex> (never root=LABEL).
 const verityPlan = planVerity();
-log("\n── 2 · dm-verity (P1-017 planVerity — per-slot hash tree → root hash → UKI cmdline)");
+log("\n── 2 · dm-verity (veritysetup format over the ext4 images, capture root hash)");
+if (!DRY) mkdirSync(join(OUT, "verity"), { recursive: true });
+let roothash = "${slot.rootHash}";
 for (const slot of verityPlan.slots) {
   const vs = slot.veritysetup;
-  log(`   [${slot.slot}] $ ${vs.executable} ${vs.args.join(" ")}`);
-  log(`   [${slot.slot}]   → captures "${vs.expectedStdoutField}" → cmdline: ${slot.uki.cmdline.template}`);
+  const args = vs.args.map(mapHost);
+  log(`   [${slot.slot}] $ ${vs.executable} ${args.join(" ")}`);
+  log(`   [${slot.slot}]   cmdline → ${slot.uki.cmdline.template}`);
+  if (!DRY) {
+    const r = spawnSync(vs.executable, args, { cwd: REPO, stdio: ["inherit", "pipe", "inherit"] });
+    if (r.error) fail(`2 · ${slot.slot} ${vs.executable}: ${r.error.message}` + (r.error.code === "ENOENT" ? " (install cryptsetup-bin)" : ""));
+    if (r.status !== 0) fail(`2 · ${slot.slot} veritysetup format: exited ${r.status}`);
+    const out = r.stdout?.toString?.() ?? "";
+    process.stdout.write(out);
+    const m = /Root hash:\s*([0-9a-f]+)/i.exec(out);
+    if (!m) fail(`2 · ${slot.slot}: could not parse "Root hash:" from veritysetup output`);
+    if (slot.slot === "root-a") roothash = m[1];
+    log(`   [${slot.slot}] root hash = ${m[1]}`);
+  }
 }
-const verityRootImage = verityPlan.slots[0]?.dataImage?.path ?? "<root ext4 image>";
-let roothash = "${slot.rootHash}"; // resolved from veritysetup's "Root hash:" once the ext4 image exists
 if (!DRY) {
-  fail("full mode stops at dm-verity: the verity plan is ready, but the root EXT4 image it formats\n" +
-       `       (${verityRootImage}) comes from P1-014's rootfs→image conversion, which build-and-boot does not yet\n` +
-       "       execute. NEXT WIRING STEP: convert the Format=directory rootfs → A/B ext4 images, then this step runs\n" +
-       "       veritysetup, captures the root hash, and binds it into each slot's UKI cmdline. `--mode=smoke` boots now.");
+  fail("full mode: rootfs → ext4 converted + verity hash trees formatted + root hashes captured ✓. FINAL WIRING\n" +
+       "       GAP: bind each slot's root hash into its UKI cmdline (planUKI must consume planVerity's roothash\n" +
+       "       cmdline) so the assembled UKI is verity-bearing, then sign (VITA_SB_KEY). `--dry-run` shows the rest.");
 }
 // (dry-run falls through to print the remaining intended steps.)
 
