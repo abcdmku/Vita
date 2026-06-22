@@ -287,7 +287,28 @@ it booted as a normal ro root (veritysetup.target is reached regardless; not pro
 `VerityMatchKey`) — for `--verity` to build the hash partition and bake `roothash=` onto the UKI cmdline. **NEXT
 (step 2): author those mkosi.repart verity defs → rebuild VITA_VERITY=1 → confirm a verity hash partition exists +
 the UKI cmdline carries roothash= + the booted root is `/dev/mapper/...-verity` (a boot-time root-source probe).**
-Then step 3 (A/B + RAUC). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
+Then step 3 (A/B + RAUC).
+
+**STEP 4(a) — SECURE BOOT ENFORCEMENT PROVEN (branch `task/P1-027-secureboot`, owner said "do step 4"; key
+source = TEST pair I generate, §16-safe, gitignored).** Designed + adversarially verified via workflow
+wf_0bc24eac-1fd (11 agents; its 3/3-refute pass caught a fatal unwinnable-matrix bug — negatives gated on a
+nonce a rejected kernel can never print — now fixed). mkosi 26 has full SB (`--secure-boot*`); sbsign/ukify/OVMF
+secboot all present on host; `virt-fw-vars` (python3-virt-firmware) installed for enrollment. **END-TO-END PROOF
+on the host:** offline-enroll db.crt (PK=KEK=db) into a copy of OVMF_VARS_4M.fd via `virt-fw-vars --set-pk/--add-kek
+/--add-db --sb`, boot OVMF_CODE_4M.secboot.fd. POSITIVE (db-signed UKI) → boots to multi-user; NEGATIVE (one byte
+flipped, SAME enrolled vars) → NO kernel + firmware `BdsDxe: ... Access Denied -- rejected probably by Secure Boot`.
+**Key decisions/findings:** (1) enrollment = OFFLINE `virt-fw-vars`, NOT mkosi auto-enroll — `--bootloader=uki`
+(needed so the KERNEL is signed) removes systemd-boot, and auto-enroll is an sd-boot feature → it never staged keys
+(ESP had only /EFI/BOOT/BOOTX64.EFI = the db-signed UKI, no /loader/keys). (2) reject witness = `Access Denied`
+(already in sb_has_reject). (3) UKI lives at /EFI/BOOT/BOOTX64.EFI; harness extraction bug was case-sensitive
+`-name '*.efi'` vs `BOOTX64.EFI` → use `-iname`. **Committed so far:** VITA_SECURE_BOOT=1 toggle, .secboot/blank-vars
+guards, KVM→TCG fallback, the SB-state-probe witness + committed 120000 enablement symlink, gitignored test
+keystore (-days, no openssl>=3.2 dep), the 4 adversarial must-fixes. **NEXT (step 4a finish):** rewrite secboot()
++ bootQemu around the PROVEN virt-fw-vars flow (drop auto-enroll + boot1/boot2; single enforcing boot off enrolled
+vars; -iname/BOOTX64 extraction; positive = boots + the negatives-rejected-on-identical-vars contrast is the proof,
+not the flaky in-guest witness), re-run the matrix to GREEN, then R3 reviewer + merge. Secure Boot SIGNING with the
+owner's REAL keys (vs this TEST pair) + RAUC bundle signing + N-of-M recovery (step 4b–d) still need owner keys (§16).
+`wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
 QEMU-specific hang (low priority — agent verified via probe; interactive boot likely fine). Secure Boot signing
