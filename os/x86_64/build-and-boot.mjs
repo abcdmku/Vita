@@ -163,7 +163,10 @@ if (useNative) {
 
 if (MODE === "smoke") {
   // ── Smoke: ONE build straight to a bootable disk (overrides base Format=directory/Bootable=no), then boot.
-  runMkosi("1 · build bootable disk (mkosi --format disk, smoke)", ["--format", "disk", "--bootable=yes"]);
+  // Bake a serial console into the smoke UKI so the kernel/login is visible on QEMU's `-serial mon:stdio`
+  // (-nographic). ttyS0 last = primary console (getty/login spawns there); tty0 kept for a VGA head too.
+  runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
+    ["--format", "disk", "--bootable=yes", "--kernel-command-line", "console=tty0 console=ttyS0,115200 rw"]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
