@@ -209,13 +209,19 @@ if (MODE === "smoke") {
   const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental=yes"];
   // VITA_BOOT_DEBUG=1 bakes systemd debug logging into the cmdline so a headless boot prints WHY it stalls
   // (job queue / unmet dependencies / device waits) to the serial — a one-shot diagnostic, off by default.
-  // systemd.firstboot=off: skip the interactive First Boot Wizard. Without it, systemd-firstboot.service prompts
-  // for locale/timezone and waits forever on a headless console — holding back sysinit.target → multi-user never
-  // reached (confirmed via VITA_BOOT_DEBUG). A test/VM image is pre-seeded (root pw set), so no wizard is wanted.
-  const cmdline = "console=tty0 console=ttyS0,115200 rw systemd.firstboot=off" +
+  // systemd.firstboot=off: skip the interactive First Boot Wizard (it waits forever on a headless console →
+  // holds back sysinit → multi-user; confirmed via VITA_BOOT_DEBUG). Test/VM image is pre-seeded.
+  // VITA_VERITY=1: build a dm-verity-protected root (mkosi-native, unsigned `hash` — no keys; signing = step 4).
+  // A verity root is read-only, so systemd.volatile=overlay gives a writable / overlay. The deterministic
+  // verity/uki/image-layout planners remain the SPEC; mkosi does the actual verity build (it runs on the host,
+  // unlike the .ts-importing planners). This is step 2's pragmatic path.
+  const verityMode = process.env.VITA_VERITY === "1";
+  const verity = verityMode ? ["--verity=hash"] : [];
+  const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
+  const cmdline = `console=tty0 console=ttyS0,115200 ${rootOpts} systemd.firstboot=off` +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", ...incremental, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
+    ["--format", "disk", "--bootable=yes", ...incremental, ...verity, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
