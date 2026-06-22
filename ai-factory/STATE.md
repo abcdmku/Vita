@@ -235,6 +235,15 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 (safeNormalize retrofit — see Lessons).
 
 
+## 🔧 BOOT CHAIN UN-BLOCKED (2026-06-21): owner gave a Linux host (Borg51) + a runnable build path.
+The OS build is now reachable: `os/BUILD-AND-BOOT.md` + the one-script executor `os/x86_64/build-and-boot.mjs`
+(`--mode=smoke|full --dry-run`) derive mkosi/ukify commands from the planners + fill host steps (pull → cached
+privileged build → verity → UKI → A/B repart → sbsign → rauc → qemu). Smoke (rootfs→unsigned disk→QEMU) runs on
+Borg51 today; the user is iterating real builds. **P1-017 (dm-verity scaffold) UN-BLOCKED + in flight** (Codex)
+— deterministic `planVerity()` per the documented correct design (veritysetup over image artifacts → root hash
+→ systemd `roothash=` on the UKI cmdline, `root=`→verity-mapped device, `safeNormalize`); after merge, WIRE it
+into build-and-boot step-2 + validate `--mode=full` on Borg51. Signing keys remain owner-supplied (§16).
+
 ## 🎉 ADR-0007 MIGRATION COMPLETE (2026-06-21): ALL 13 CAPABILITIES MIGRATED.
 The config→plan→apply evaluator now covers the ENTIRE capability surface — whole-node apply is fully
 manifest-driven. Registry (13): hostname.set, node.config, time.sync, services.config, time.set,
