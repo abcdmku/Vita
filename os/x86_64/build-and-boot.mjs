@@ -110,7 +110,9 @@ function nativeArgs(extra = []) {
 // The committed config pins a snapshot.debian.org mirror for reproducibility, but exact-midnight snapshot
 // timestamps often 404 (not real snapshot points). Smoke is non-reproducible by nature → default to the live
 // Debian mirror so packages resolve; full keeps the committed config unless VITA_MIRROR is set. Always logged.
-const MIRROR = process.env.VITA_MIRROR ?? (MODE === "smoke" ? "https://deb.debian.org/debian" : "");
+// NB: mkosi appends the archive name (/debian, /debian-debug, /debian-security), so this is the HOST root —
+// NOT ".../debian" (that produced a 404ing .../debian/debian).
+const MIRROR = process.env.VITA_MIRROR ?? (MODE === "smoke" ? "https://deb.debian.org" : "");
 function runMkosi(label, extra = []) {
   const e = [...extra, ...(MIRROR ? ["--mirror", MIRROR] : [])];
   if (MIRROR) log(`   (mirror override: --mirror ${MIRROR})`);
