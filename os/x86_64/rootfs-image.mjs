@@ -10,6 +10,28 @@ export const DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH = "1781308800";
 export const DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE = 4096;
 export const DEFAULT_ROOTFS_IMAGE_INODE_SIZE = 256;
 export const DEFAULT_ROOTFS_IMAGE_BYTES_PER_INODE = 16384;
+export const DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT = `# Vita pinned mke2fs baseline for deterministic P1-024 rootfs images.
+
+[defaults]
+\tbase_features = sparse_super,large_file,filetype,resize_inode,dir_index,ext_attr
+\tdefault_mntopts = acl,user_xattr
+\tenable_periodic_fsck = 0
+\tblocksize = 4096
+\tinode_size = 256
+\tinode_ratio = 16384
+\treserved_ratio = 0
+
+[fs_types]
+\text4 = {
+\t\tfeatures = extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize
+\t\tblocksize = 4096
+\t\tinode_size = 256
+\t\tinode_ratio = 16384
+\t\treserved_ratio = 0
+\t\tlazy_itable_init = 0
+\t\tlazy_journal_init = 0
+\t}
+`;
 export const DEFAULT_ROOTFS_IMAGE_CONFIG_TEXT = `# Vita x86_64 deterministic rootfs directory -> ext4 image conversion plan.
 # Converts the P1-011 Format=directory rootfs into the ext4 images consumed by image.conf and verity.conf.
 
@@ -30,13 +52,14 @@ Digest=unresolved
 
 [Ext4]
 Executable=mkfs.ext4
+Mke2fsConfig=/work/os/x86_64/mke2fs.conf
 SourceDateEpoch=1781308800
 BlockSize=4096
 InodeSize=256
 BytesPerInode=16384
 ReservedBlockPercentage=0
 RootOwner=0:0
-Features=^has_journal
+Features=sparse_super,large_file,filetype,resize_inode,dir_index,ext_attr,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize
 ExtendedOptions=lazy_itable_init=0,lazy_journal_init=0
 Network=none
 
@@ -85,7 +108,30 @@ const DEFAULT_ROOTFS_IMAGE_PLAN_INPUT = Object.freeze({
 });
 
 const ROOTFS_IMAGE_CONFIG_PATH = "os/x86_64/rootfs-image.conf";
+const ROOTFS_IMAGE_MKE2FS_CONFIG_PATH = "os/x86_64/mke2fs.conf";
+const ROOTFS_IMAGE_MKE2FS_CONFIG_CONTAINER_PATH = "/work/os/x86_64/mke2fs.conf";
 const ROOT_DIRECTORY_OUTPUT_NAME = "vita-debian-trixie-x86_64-root";
+const ROOTFS_IMAGE_BASE_FEATURES = Object.freeze([
+  "sparse_super",
+  "large_file",
+  "filetype",
+  "resize_inode",
+  "dir_index",
+  "ext_attr",
+]);
+const ROOTFS_IMAGE_EXT4_FEATURES = Object.freeze([
+  "extent",
+  "huge_file",
+  "flex_bg",
+  "metadata_csum",
+  "64bit",
+  "dir_nlink",
+  "extra_isize",
+]);
+const ROOTFS_IMAGE_FEATURES = Object.freeze([
+  ...ROOTFS_IMAGE_BASE_FEATURES,
+  ...ROOTFS_IMAGE_EXT4_FEATURES,
+]);
 const ROOT_IMAGE_SECTIONS = Object.freeze([
   Object.freeze({
     sectionName: "RootImageRootA",
@@ -147,6 +193,11 @@ export function planRootfsImage(input = DEFAULT_ROOTFS_IMAGE_PLAN_INPUT) {
       path: ROOTFS_IMAGE_CONFIG_PATH,
       containerPath: resolvedConfig.paths.configPath,
       digest: configDigest,
+      mke2fsConfig: {
+        path: ROOTFS_IMAGE_MKE2FS_CONFIG_PATH,
+        containerPath: resolvedConfig.ext4.mke2fsConfig,
+        digest: sha256Text(DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT),
+      },
     },
     mounts,
     tool: {
@@ -161,14 +212,21 @@ export function planRootfsImage(input = DEFAULT_ROOTFS_IMAGE_PLAN_INPUT) {
       SOURCE_DATE_EPOCH: resolvedConfig.ext4.sourceDateEpoch,
       TZ: "UTC",
       LC_ALL: "C.UTF-8",
+      MKE2FS_CONFIG: resolvedConfig.ext4.mke2fsConfig,
     },
     parameters: {
+      mke2fsConfig: {
+        path: ROOTFS_IMAGE_MKE2FS_CONFIG_PATH,
+        containerPath: resolvedConfig.ext4.mke2fsConfig,
+      },
       sourceDateEpoch: resolvedConfig.ext4.sourceDateEpoch,
       blockSize: resolvedConfig.ext4.blockSize,
       inodeSize: resolvedConfig.ext4.inodeSize,
       bytesPerInode: resolvedConfig.ext4.bytesPerInode,
       reservedBlockPercentage: resolvedConfig.ext4.reservedBlockPercentage,
       rootOwner: resolvedConfig.ext4.rootOwner,
+      baseFeatures: ROOTFS_IMAGE_BASE_FEATURES,
+      ext4Features: ROOTFS_IMAGE_EXT4_FEATURES,
       features: resolvedConfig.ext4.features,
       extendedOptions: resolvedConfig.ext4.extendedOptions,
       journal: "disabled",
@@ -408,6 +466,7 @@ function resolveRootfsImageConfig(config) {
     RootDirectory: ["Name", "Contract", "OutputName", "Format", "Path", "Digest"],
     Ext4: [
       "Executable",
+      "Mke2fsConfig",
       "SourceDateEpoch",
       "BlockSize",
       "InodeSize",
@@ -455,7 +514,7 @@ function resolveRootfsImageConfig(config) {
 
   const paths = resolvePaths(config);
   const rootDirectory = resolveRootDirectory(config, paths);
-  const ext4 = resolveExt4(config);
+  const ext4 = resolveExt4(config, paths);
   const rootImages = resolveRootImages(config, paths, rootDirectory, ext4);
   assertUniqueRootImages(rootImages);
 
@@ -540,11 +599,18 @@ function resolveRootDirectory(config, paths) {
   };
 }
 
-function resolveExt4(config) {
+function resolveExt4(config, paths) {
   const executable = getSingleValue(config, "Ext4", "Executable");
   if (executable !== "mkfs.ext4") {
     throw new ConfigValidationError(`Ext4.Executable expected mkfs.ext4, found ${executable}`);
   }
+
+  const mke2fsConfig = validateCanonicalPosixPath(getSingleValue(config, "Ext4", "Mke2fsConfig"), {
+    label: "Ext4.Mke2fsConfig",
+    root: paths.workRoot,
+    allowRoot: false,
+  });
+  assertExpected(mke2fsConfig, ROOTFS_IMAGE_MKE2FS_CONFIG_CONTAINER_PATH, "Ext4.Mke2fsConfig");
 
   const sourceDateEpoch = getSingleValue(config, "Ext4", "SourceDateEpoch");
   if (sourceDateEpoch !== DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH) {
@@ -577,9 +643,10 @@ function resolveExt4(config) {
   }
 
   const features = getCommaList(config, "Ext4", "Features");
-  if (features.length !== 1 || features[0] !== "^has_journal") {
-    throw new ConfigValidationError("Ext4.Features expected ^has_journal");
+  if (features.includes("has_journal") || features.includes("^has_journal")) {
+    throw new ConfigValidationError("Ext4.Features must use the full pinned feature set without has_journal");
   }
+  assertArrayEquals(features, ROOTFS_IMAGE_FEATURES, "Ext4.Features");
 
   const extendedOptions = getCommaList(config, "Ext4", "ExtendedOptions");
   assertArrayEquals(extendedOptions, ["lazy_itable_init=0", "lazy_journal_init=0"], "Ext4.ExtendedOptions");
@@ -591,6 +658,7 @@ function resolveExt4(config) {
 
   return {
     executable,
+    mke2fsConfig,
     sourceDateEpoch,
     blockSize,
     inodeSize,
@@ -696,6 +764,7 @@ function buildMkfsCommand(ext4, rootDirectory, image) {
       SOURCE_DATE_EPOCH: ext4.sourceDateEpoch,
       TZ: "UTC",
       LC_ALL: "C.UTF-8",
+      MKE2FS_CONFIG: ext4.mke2fsConfig,
     },
     sourceDirectory: rootDirectory.path,
     output: image.path,

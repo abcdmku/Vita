@@ -72,6 +72,7 @@ type MkfsCommand = {
     readonly SOURCE_DATE_EPOCH: string;
     readonly TZ: "UTC";
     readonly LC_ALL: "C.UTF-8";
+    readonly MKE2FS_CONFIG: string;
   };
   readonly sourceDirectory: string;
   readonly output: string;
@@ -136,6 +137,11 @@ type RootfsImagePlan = {
     readonly path: "os/x86_64/rootfs-image.conf";
     readonly containerPath: string;
     readonly digest: `sha256:${string}`;
+    readonly mke2fsConfig: {
+      readonly path: "os/x86_64/mke2fs.conf";
+      readonly containerPath: string;
+      readonly digest: `sha256:${string}`;
+    };
   };
   readonly mounts: readonly {
     readonly name: string;
@@ -155,15 +161,22 @@ type RootfsImagePlan = {
     readonly SOURCE_DATE_EPOCH: string;
     readonly TZ: "UTC";
     readonly LC_ALL: "C.UTF-8";
+    readonly MKE2FS_CONFIG: string;
   };
   readonly parameters: {
+    readonly mke2fsConfig: {
+      readonly path: "os/x86_64/mke2fs.conf";
+      readonly containerPath: string;
+    };
     readonly sourceDateEpoch: string;
     readonly blockSize: 4096;
     readonly inodeSize: 256;
     readonly bytesPerInode: 16384;
     readonly reservedBlockPercentage: 0;
     readonly rootOwner: "0:0";
-    readonly features: readonly ["^has_journal"];
+    readonly baseFeatures: readonly string[];
+    readonly ext4Features: readonly string[];
+    readonly features: readonly string[];
     readonly extendedOptions: readonly ["lazy_itable_init=0", "lazy_journal_init=0"];
     readonly journal: "disabled";
     readonly hashSeedPolicy: "fixed-per-image-uuid";
@@ -184,6 +197,7 @@ type RootfsImageModule = {
   readonly planRootfsImage: (input?: unknown) => RootfsImagePlan;
   readonly serializeRootfsImagePlan: (plan: RootfsImagePlan) => string;
   readonly DEFAULT_ROOTFS_IMAGE_CONFIG_TEXT: string;
+  readonly DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT: string;
   readonly DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH: string;
   readonly DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE: number;
   readonly DEFAULT_ROOTFS_IMAGE_INODE_SIZE: number;
@@ -212,8 +226,28 @@ const rootfsImageModuleUrl = new URL("../rootfs-image.mjs", import.meta.url);
 const imageLayoutModuleUrl = new URL("../image-layout.mjs", import.meta.url);
 const verityModuleUrl = new URL("../verity.mjs", import.meta.url);
 const rootfsImageConfigUrl = new URL("../rootfs-image.conf", import.meta.url);
+const mke2fsConfigUrl = new URL("../mke2fs.conf", import.meta.url);
 const imageConfigUrl = new URL("../image.conf", import.meta.url);
 const verityConfigUrl = new URL("../verity.conf", import.meta.url);
+
+const pinnedBaseFeatures = [
+  "sparse_super",
+  "large_file",
+  "filetype",
+  "resize_inode",
+  "dir_index",
+  "ext_attr",
+] as const;
+const pinnedExt4Features = [
+  "extent",
+  "huge_file",
+  "flex_bg",
+  "metadata_csum",
+  "64bit",
+  "dir_nlink",
+  "extra_isize",
+] as const;
+const pinnedFeatures = [...pinnedBaseFeatures, ...pinnedExt4Features] as const;
 
 const defaultMountRoots = {
   workspaceHostPath: "/repo",
@@ -232,6 +266,7 @@ const downstreamMountRoots = {
 test("planRootfsImage is byte deterministic and matches the committed config text", async () => {
   const rootfsImage = await loadRootfsImageModule();
   const input = await readPlanInput();
+  const mke2fsConfigText = await readMke2fsConfigText();
   const firstPlan = rootfsImage.planRootfsImage(input);
   const secondPlan = rootfsImage.planRootfsImage(input);
   const defaultPlan = rootfsImage.planRootfsImage();
@@ -248,24 +283,43 @@ test("planRootfsImage is byte deterministic and matches the committed config tex
   assert.equal(firstPlan.network, "none");
   assert.equal(firstPlan.config.path, "os/x86_64/rootfs-image.conf");
   assert.equal(firstPlan.config.digest, sha256(input.configText));
+  assert.equal(mke2fsConfigText, rootfsImage.DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT);
+  assert.deepEqual(firstPlan.config.mke2fsConfig, {
+    path: "os/x86_64/mke2fs.conf",
+    containerPath: "/work/os/x86_64/mke2fs.conf",
+    digest: sha256(mke2fsConfigText),
+  });
 });
 
 test("ext4 mke2fs parameters, environment, and no-journal policy are pinned", async () => {
   const rootfsImage = await loadRootfsImageModule();
   const plan = rootfsImage.planRootfsImage(await readPlanInput());
+  const configText = await readConfigText();
+  const mke2fsConfigText = await readMke2fsConfigText();
 
   assert.deepEqual(plan.parameters, {
+    mke2fsConfig: {
+      path: "os/x86_64/mke2fs.conf",
+      containerPath: "/work/os/x86_64/mke2fs.conf",
+    },
     sourceDateEpoch: "1781308800",
     blockSize: 4096,
     inodeSize: 256,
     bytesPerInode: 16384,
     reservedBlockPercentage: 0,
     rootOwner: "0:0",
-    features: ["^has_journal"],
+    baseFeatures: pinnedBaseFeatures,
+    ext4Features: pinnedExt4Features,
+    features: pinnedFeatures,
     extendedOptions: ["lazy_itable_init=0", "lazy_journal_init=0"],
     journal: "disabled",
     hashSeedPolicy: "fixed-per-image-uuid",
   });
+  assertMke2fsConfigPins(mke2fsConfigText);
+  assert.throws(
+    () => rootfsImage.planRootfsImage(planInput(replaceConfigSetting(configText, "Ext4", "Features", "^has_journal"))),
+    /Ext4\.Features must use the full pinned feature set without has_journal/u,
+  );
   assert.equal(plan.parameters.sourceDateEpoch, rootfsImage.DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH);
   assert.equal(plan.parameters.blockSize, rootfsImage.DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE);
   assert.equal(plan.parameters.inodeSize, rootfsImage.DEFAULT_ROOTFS_IMAGE_INODE_SIZE);
@@ -274,6 +328,7 @@ test("ext4 mke2fs parameters, environment, and no-journal policy are pinned", as
     SOURCE_DATE_EPOCH: "1781308800",
     TZ: "UTC",
     LC_ALL: "C.UTF-8",
+    MKE2FS_CONFIG: "/work/os/x86_64/mke2fs.conf",
   });
   assert.equal(plan.tool.executable, "mkfs.ext4");
   assert.equal(plan.tool.network, "none");
@@ -327,14 +382,14 @@ test("each slot emits a deterministic mkfs.ext4 -d command for the P1-011 root d
     assert.equal(argValue(command.args, "-m"), "0");
     assert.equal(argValue(command.args, "-L"), image.rootLabel);
     assert.equal(argValue(command.args, "-U"), image.filesystemUuid);
-    assert.equal(argValue(command.args, "-O"), "^has_journal");
+    assert.equal(argValue(command.args, "-O"), pinnedFeatures.join(","));
     assert.match(argValue(command.args, "-E"), /(?:^|,)root_owner=0:0(?:,|$)/u);
     assert.match(argValue(command.args, "-E"), new RegExp(`(?:^|,)hash_seed=${image.hashSeed}(?:,|$)`, "u"));
     assert.match(argValue(command.args, "-E"), /(?:^|,)lazy_itable_init=0(?:,|$)/u);
     assert.match(argValue(command.args, "-E"), /(?:^|,)lazy_journal_init=0(?:,|$)/u);
     assert.equal(command.args.at(-2), image.path);
     assert.equal(command.args.at(-1), String(image.blockCount));
-    assert.doesNotMatch(command.args.join(" "), /(?:^| )-j(?: |$)|has_journal(?!\b)|root=LABEL=/u);
+    assert.doesNotMatch(command.args.join(" "), /(?:^| )-j(?: |$)|(?:^|[,\s])\^?has_journal(?:[,\s]|$)|root=LABEL=/u);
     assert.deepEqual(command.environment, plan.environment);
   }
 
@@ -431,6 +486,7 @@ test("canonical path validation rejects traversal, mount escapes, and path drift
     ["RootImageRootB", "Output", "/external/p1-014/converted/../root-b.ext4", /RootImageRootB\.Output must not contain \. or \.\. segments/u],
     ["Paths", "OutputRoot", "/external/../converted", /Paths\.OutputRoot must not contain \. or \.\. segments/u],
     ["Paths", "ExternalRoot", "//external", /Paths\.ExternalRoot must not contain empty or duplicate-slash segments/u],
+    ["Ext4", "Mke2fsConfig", "/work/os/x86_64/../mke2fs.conf", /Ext4\.Mke2fsConfig must not contain \. or \.\. segments/u],
   ] as const;
 
   for (const [section, key, value, message] of invalidConfigPaths) {
@@ -465,6 +521,10 @@ test("canonical path validation rejects traversal, mount escapes, and path drift
     () => rootfsImage.planRootfsImage(planInput(replaceConfigSetting(configText, "RootImageRootA", "Output", "/external/p1-014/converted/drift.ext4"))),
     /RootImageRootA\.Output expected \/external\/p1-014\/converted\/vita-root-a\.rootfs\.ext4/u,
   );
+  assert.throws(
+    () => rootfsImage.planRootfsImage(planInput(replaceConfigSetting(configText, "Ext4", "Mke2fsConfig", "/work/os/x86_64/mke2fs.conf.drift"))),
+    /Ext4\.Mke2fsConfig expected \/work\/os\/x86_64\/mke2fs\.conf/u,
+  );
 });
 
 test("planRootfsImage rejects partial, accessor-bearing, cyclic, and hostile inputs through safeNormalize", async () => {
@@ -473,15 +533,19 @@ test("planRootfsImage rejects partial, accessor-bearing, cyclic, and hostile inp
 
   assert.throws(() => rootfsImage.planRootfsImage({ configText: "partial" }), /missing required field mountRoots/u);
 
+  let topLevelAccessorInvoked = false;
   const accessorInput = {};
   Object.defineProperty(accessorInput, "configText", {
     get() {
-      assert.fail("top-level accessor must not be invoked");
+      topLevelAccessorInvoked = true;
+      return configText;
     },
     enumerable: true,
   });
   assert.throws(() => rootfsImage.planRootfsImage(accessorInput), /rootfs image plan input normalization failed/u);
+  assert.equal(topLevelAccessorInvoked, false);
 
+  let nestedAccessorInvoked = false;
   const accessorMountRoots = {};
   Object.defineProperty(accessorMountRoots, "workspaceHostPath", {
     value: "/repo",
@@ -497,7 +561,8 @@ test("planRootfsImage rejects partial, accessor-bearing, cyclic, and hostile inp
   });
   Object.defineProperty(accessorMountRoots, "outputHostPath", {
     get() {
-      assert.fail("nested accessor must not be invoked");
+      nestedAccessorInvoked = true;
+      return "/repo/os/x86_64/upstream-inputs/p1-014/converted";
     },
     enumerable: true,
   });
@@ -505,15 +570,19 @@ test("planRootfsImage rejects partial, accessor-bearing, cyclic, and hostile inp
     () => rootfsImage.planRootfsImage({ configText, mountRoots: accessorMountRoots }),
     /rootfs image plan input normalization failed/u,
   );
+  assert.equal(nestedAccessorInvoked, false);
 
+  let hostileIteratorInvoked = false;
   const hostileIteratorMountRoots: Record<PropertyKey, unknown> = { ...defaultMountRoots };
   hostileIteratorMountRoots[Symbol.iterator] = () => {
-    assert.fail("hostile iterator must not be invoked");
+    hostileIteratorInvoked = true;
+    return [][Symbol.iterator]();
   };
   assert.throws(
     () => rootfsImage.planRootfsImage({ configText, mountRoots: hostileIteratorMountRoots }),
     /rootfs image plan input normalization failed/u,
   );
+  assert.equal(hostileIteratorInvoked, false);
 
   const cyclicMountRoots: Record<string, unknown> = { ...defaultMountRoots };
   cyclicMountRoots["self"] = cyclicMountRoots;
@@ -522,15 +591,18 @@ test("planRootfsImage rejects partial, accessor-bearing, cyclic, and hostile inp
     /rootfs image plan input normalization failed/u,
   );
 
+  let proxyOwnKeysInvoked = false;
   const proxyInput = new Proxy(
     { configText, mountRoots: defaultMountRoots },
     {
       ownKeys() {
-        assert.fail("proxy ownKeys must not be trusted");
+        proxyOwnKeysInvoked = true;
+        return ["configText", "mountRoots"];
       },
     },
   );
   assert.throws(() => rootfsImage.planRootfsImage(proxyInput), /rootfs image plan input normalization failed/u);
+  assert.equal(proxyOwnKeysInvoked, false);
 });
 
 async function readPlanInput(): Promise<RootfsImagePlanInput> {
@@ -539,6 +611,10 @@ async function readPlanInput(): Promise<RootfsImagePlanInput> {
 
 async function readConfigText(): Promise<string> {
   return readFile(rootfsImageConfigUrl, "utf8");
+}
+
+async function readMke2fsConfigText(): Promise<string> {
+  return readFile(mke2fsConfigUrl, "utf8");
 }
 
 function planInput(configText: string): RootfsImagePlanInput {
@@ -558,6 +634,7 @@ function asRootfsImageModule(value: unknown): RootfsImageModule {
   const planRootfsImage = record["planRootfsImage"];
   const serializeRootfsImagePlan = record["serializeRootfsImagePlan"];
   const defaultConfigText = record["DEFAULT_ROOTFS_IMAGE_CONFIG_TEXT"];
+  const defaultMke2fsConfigText = record["DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT"];
   const sourceDateEpoch = record["DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH"];
   const blockSize = record["DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE"];
   const inodeSize = record["DEFAULT_ROOTFS_IMAGE_INODE_SIZE"];
@@ -575,6 +652,7 @@ function asRootfsImageModule(value: unknown): RootfsImageModule {
     serializeRootfsImagePlan: (plan: RootfsImagePlan) =>
       (serializeRootfsImagePlan as (plan: RootfsImagePlan) => string)(plan),
     DEFAULT_ROOTFS_IMAGE_CONFIG_TEXT: asString(defaultConfigText, "DEFAULT_ROOTFS_IMAGE_CONFIG_TEXT"),
+    DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT: asString(defaultMke2fsConfigText, "DEFAULT_ROOTFS_IMAGE_MKE2FS_CONFIG_TEXT"),
     DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH: asString(sourceDateEpoch, "DEFAULT_ROOTFS_IMAGE_SOURCE_DATE_EPOCH"),
     DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE: asNumber(blockSize, "DEFAULT_ROOTFS_IMAGE_BLOCK_SIZE"),
     DEFAULT_ROOTFS_IMAGE_INODE_SIZE: asNumber(inodeSize, "DEFAULT_ROOTFS_IMAGE_INODE_SIZE"),
@@ -701,6 +779,24 @@ function assertResolvedPin(pin: DigestPin): asserts pin is ResolvedDigestPin {
   assert.match(pin.digest, /^sha256:[0-9a-f]{64}$/u);
 }
 
+function assertMke2fsConfigPins(configText: string): void {
+  assert.match(
+    configText,
+    new RegExp(`^\\s*base_features = ${escapeRegExp(pinnedBaseFeatures.join(","))}$`, "mu"),
+  );
+  assert.match(
+    configText,
+    new RegExp(`^\\s*features = ${escapeRegExp(pinnedExt4Features.join(","))}$`, "mu"),
+  );
+  assert.match(configText, /^\s*blocksize = 4096$/mu);
+  assert.match(configText, /^\s*inode_size = 256$/mu);
+  assert.match(configText, /^\s*inode_ratio = 16384$/mu);
+  assert.match(configText, /^\s*reserved_ratio = 0$/mu);
+  assert.match(configText, /^\s*lazy_itable_init = 0$/mu);
+  assert.match(configText, /^\s*lazy_journal_init = 0$/mu);
+  assert.doesNotMatch(configText, /(?:^|[,=\s])\^?has_journal(?:[,\s]|$)/u);
+}
+
 function extractConfigSetting(configText: string, section: string, key: string): string {
   const lines = configText.split("\n");
   let inSection = false;
@@ -746,4 +842,8 @@ function replaceConfigSetting(configText: string, section: string, key: string, 
 
 function sha256(value: string): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
