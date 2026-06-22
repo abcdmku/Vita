@@ -239,10 +239,16 @@ P6-001/002 (capsule, simulation). Reviews: `ai-factory/evaluation/reviews/`. Fai
 The OS build is now reachable: `os/BUILD-AND-BOOT.md` + the one-script executor `os/x86_64/build-and-boot.mjs`
 (`--mode=smoke|full --dry-run`) derive mkosi/ukify commands from the planners + fill host steps (pull → cached
 privileged build → verity → UKI → A/B repart → sbsign → rauc → qemu). Smoke (rootfs→unsigned disk→QEMU) runs on
-Borg51 today; the user is iterating real builds. **P1-017 (dm-verity scaffold) UN-BLOCKED + in flight** (Codex)
-— deterministic `planVerity()` per the documented correct design (veritysetup over image artifacts → root hash
-→ systemd `roothash=` on the UKI cmdline, `root=`→verity-mapped device, `safeNormalize`); after merge, WIRE it
-into build-and-boot step-2 + validate `--mode=full` on Borg51. Signing keys remain owner-supplied (§16).
+Borg51 today; the user is iterating real builds (mkosi native engine + live deb.debian.org mirror; chasing the
+bootloader/ESP gap next). **P1-017 (dm-verity scaffold) MERGED + WIRED (95ba8ce + 5536a81):** deterministic
+`planVerity()` (verity.mjs/conf/test) per the correct design — `veritysetup format --format 1` over the produced
+ext4 image artifacts → root hash (unresolved external precondition) → systemd `roothash=` on each slot's UKI
+cmdline, `root=`→verity-mapped device. Dual-gate: independent design check + acceptance 8/8 + Codex R2 review
+(caught `--type`→`--format`, a real veritysetup-arg bug). Wired into `build-and-boot.mjs` step 2 (full mode prints
+the real verity chain; dynamic import + strip-types re-exec since verity.mjs pulls a .ts helper). **NEXT
+BOOT-CHAIN GAP:** the root EXT4 image planVerity formats comes from P1-014's rootfs→image conversion, which
+build-and-boot doesn't yet execute — wire that (Format=directory rootfs → A/B ext4 images) to make `--mode=full`
+runnable. Signing keys remain owner-supplied (§16).
 
 ## 🎉 ADR-0007 MIGRATION COMPLETE (2026-06-21): ALL 13 CAPABILITIES MIGRATED.
 The config→plan→apply evaluator now covers the ENTIRE capability surface — whole-node apply is fully
