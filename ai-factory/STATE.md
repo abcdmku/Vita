@@ -272,9 +272,12 @@ disk with the agent). **"MAKE IT VITA" VERIFIED (autonomous, 2026-06-22):** owne
 the loop self-runs → added `wsl-verify probe` (systemd-nspawn boots the rootfs as a container in ~2s + host-side
 `systemctl -M` introspection, NO QEMU/console). Probe result: **system `running`, 0 failed units, no stuck jobs,
 and `vita-agentd` Active: active (running)** — the booted image runs the Vita agent. So the SERVICE layer is
-healthy. **QEMU headless full-boot still hangs before multi-user** — but since the container boots clean, that is
-boot-chain/hardware/headless-specific (NOT services/agent), a SEPARATE issue (the bare image booted interactively
-to a shell earlier). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
+healthy. **STEP 1 DONE — QEMU boot FIXED + agent verified in a real VM (b410e02):** owner signed off "do 1-3"
+(replan). `VITA_BOOT_DEBUG=1` debug boot root-caused the headless hang: `sysinit.target: held back, waiting for:
+systemd-firstboot.service` — the interactive First Boot Wizard waits forever on the absent headless stdin → blocks
+sysinit → multi-user. Fix: `systemd.firstboot=off` on the smoke cmdline. Result: **smoke boots to multi-user in
+~8s, `Started vita-agentd.service`** — the integrated image boots in QEMU AND runs the Vita agent. Both "make it
+vita" and "boots in a VM" now verified for real (not just nspawn). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
 QEMU-specific hang (low priority — agent verified via probe; interactive boot likely fine). Secure Boot signing
