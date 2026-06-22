@@ -19,6 +19,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "kmod",
   "linux-image-amd64",
   "systemd",
+  "systemd-boot",
   "systemd-sysv",
   "udev",
   "util-linux",
@@ -53,6 +54,7 @@ Packages=
     kmod
     linux-image-amd64
     systemd
+    systemd-boot
     systemd-sysv
     udev
     util-linux

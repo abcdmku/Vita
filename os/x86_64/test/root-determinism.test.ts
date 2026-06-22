@@ -86,6 +86,7 @@ const expectedPackageAllowlist = [
   "kmod",
   "linux-image-amd64",
   "systemd",
+  "systemd-boot",
   "systemd-sysv",
   "udev",
   "util-linux",
