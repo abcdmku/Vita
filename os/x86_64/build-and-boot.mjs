@@ -236,8 +236,18 @@ if (!NO_BOOT) bootQemu(imageRaw, { secureBoot: !NO_SIGN });
 log(`\n✓ full build complete → ${imageRaw}` + (NO_SIGN ? " (UNSIGNED)" : " (signed)"));
 
 function bootQemu(image, { secureBoot }) {
-  const ovmfCode = process.env.VITA_OVMF_CODE ?? "/usr/share/OVMF/OVMF_CODE.fd";
-  const ovmfVarsTemplate = process.env.VITA_OVMF_VARS_TEMPLATE ?? "/usr/share/OVMF/OVMF_VARS.fd";
+  // Auto-detect OVMF firmware: Debian trixie ships ONLY the 4M variants; older Debian + other distros differ.
+  const firstExisting = (paths) => paths.find((p) => existsSync(p)) ?? paths[0];
+  const ovmfCode = process.env.VITA_OVMF_CODE ?? firstExisting([
+    "/usr/share/OVMF/OVMF_CODE_4M.fd",     // Debian trixie / newer
+    "/usr/share/OVMF/OVMF_CODE.fd",        // older Debian/Ubuntu
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",   // Fedora/RHEL/Arch
+  ]);
+  const ovmfVarsTemplate = process.env.VITA_OVMF_VARS_TEMPLATE ?? firstExisting([
+    "/usr/share/OVMF/OVMF_VARS_4M.fd",
+    "/usr/share/OVMF/OVMF_VARS.fd",
+    "/usr/share/edk2/ovmf/OVMF_VARS.fd",
+  ]);
   const ovmfVars = process.env.VITA_OVMF_VARS ?? join(OUT, "OVMF_VARS.fd");
   // QEMU needs a WRITABLE copy of the UEFI vars; seed it from the read-only system template once.
   if (ovmfVars !== ovmfVarsTemplate) {
