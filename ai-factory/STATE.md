@@ -277,7 +277,17 @@ healthy. **STEP 1 DONE — QEMU boot FIXED + agent verified in a real VM (b410e0
 systemd-firstboot.service` — the interactive First Boot Wizard waits forever on the absent headless stdin → blocks
 sysinit → multi-user. Fix: `systemd.firstboot=off` on the smoke cmdline. Result: **smoke boots to multi-user in
 ~8s, `Started vita-agentd.service`** — the integrated image boots in QEMU AND runs the Vita agent. Both "make it
-vita" and "boots in a VM" now verified for real (not just nspawn). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
+vita" and "boots in a VM" now verified for real (not just nspawn). **STEP 2 IN PROGRESS — verity path chosen +
+first finding (aaf45e8):** mkosi 26 has NATIVE dm-verity (`--verity`, `--verity-key`/`--verity-certificate` for
+signing=step 4) → use mkosi for the actual verity build (it runs on the host; the .ts-importing planners do NOT —
+they stay the deterministic SPEC). Added `VITA_VERITY=1` (--verity=hash + `ro systemd.volatile=overlay`). BUT the
+flag alone is a NO-OP: the built disk has only ESP + a plain `Linux root` partition — NO verity hash partition, so
+it booted as a normal ro root (veritysetup.target is reached regardless; not proof). **mkosi needs explicit
+`os/.../mkosi.repart/` partition defs** — a root `Verity=data` paired with a `Verity=hash` partition (+ matching
+`VerityMatchKey`) — for `--verity` to build the hash partition and bake `roothash=` onto the UKI cmdline. **NEXT
+(step 2): author those mkosi.repart verity defs → rebuild VITA_VERITY=1 → confirm a verity hash partition exists +
+the UKI cmdline carries roothash= + the booted root is `/dev/mapper/...-verity` (a boot-time root-source probe).**
+Then step 3 (A/B + RAUC). `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
 QEMU-specific hang (low priority — agent verified via probe; interactive boot likely fine). Secure Boot signing
