@@ -36,6 +36,7 @@ const opt = (k, d) => { const a = argv.find((x) => x.startsWith(`${k}=`)); retur
 
 const DRY = has("--dry-run");
 const MODE = opt("--mode", "smoke");
+const MKOSI = opt("--mkosi", process.env.VITA_MKOSI ?? "auto"); // auto | native | docker
 const NO_BOOT = has("--no-boot");
 const NO_SIGN = has("--no-sign");
 const OUT = resolve(opt("--out", join(HERE, "out")));
@@ -77,17 +78,16 @@ log(`Vita build-and-boot — mode=${MODE}${DRY ? " (dry-run)" : ""}`);
 log(`  repo=${REPO}\n  out=${OUT}\n  cache=${CACHE}\n  mkosi=${PINNED_MKOSI_IMAGE}`);
 if (!DRY) { mkdirSync(OUT, { recursive: true }); mkdirSync(CACHE, { recursive: true }); }
 
-// ── Step 0: pull the pinned mkosi image (the plan uses --pull=never, so it must be present) ─────────────────
-run("0 · pull mkosi image", "docker", ["pull", PINNED_MKOSI_IMAGE]);
-
-// ── mkosi execution policy ──────────────────────────────────────────────────────────────────────────────────
-// The planner's args are hermetic (--network none, --pull=never, ro mount). For a REAL build we let packages
-// in and let mkosi write/create devices: privileged, rw workspace, persistent cache, and the output mounted at
-// the planner's OWN --output-dir (so artifacts land on the host). We keep the planner as the source of truth
-// for the mkosi flags (mkosiTail) and adjust only the container execution policy + optional format overrides.
-const mkosiTail = mkosiCmd.args.slice(mkosiCmd.args.indexOf("mkosi")); // ["mkosi","--directory",…,"--output-dir","/out"]
+// ── mkosi engine: native host `mkosi` (recommended — no registry) OR the pinned docker container ────────────
+// We keep the planner as the source of truth for the mkosi FLAGS (mkosiTail) and adjust only the execution
+// engine + container policy. The ghcr image pull is frequently `denied` (pinned digest not anonymously
+// pullable), so native mkosi (`pipx install mkosi`) is the reliable path and the default when present.
+const mkosiTail = mkosiCmd.args.slice(mkosiCmd.args.indexOf("mkosi")); // ["mkosi","--directory","/work/os/x86_64","--force","--output-dir","/out"]
 const CONTAINER_OUT = mkosiTail[mkosiTail.indexOf("--output-dir") + 1] ?? "/out";
-function dockerBuild(extraMkosiFlags = []) {
+const mkosiPresent = !DRY && spawnSync("mkosi", ["--version"], { stdio: "ignore" }).error === undefined;
+const useNative = MKOSI === "native" || (MKOSI === "auto" && mkosiPresent);
+
+function dockerBuild(extra = []) {
   return [
     "run", "--rm", "--privileged",
     "-v", `${REPO}:/work`,                     // rw (planner used :ro; a real build writes workspace caches)
@@ -98,8 +98,17 @@ function dockerBuild(extraMkosiFlags = []) {
     "-e", "TZ=UTC", "-e", "LC_ALL=C.UTF-8",
     PINNED_MKOSI_IMAGE,
     ...mkosiTail, "--cache-dir", "/var/cache/mkosi",
-    ...extraMkosiFlags,
+    ...extra,
   ];
+}
+// Native: the SAME planner flags, container paths re-pointed to host paths.
+function nativeArgs(extra = []) {
+  return mkosiTail.slice(1)
+    .map((a) => (a === "/work/os/x86_64" ? HERE : a === CONTAINER_OUT ? OUT : a))
+    .concat(["--cache-dir", CACHE], extra);
+}
+function runMkosi(label, extra = []) {
+  return useNative ? run(label, "mkosi", nativeArgs(extra)) : run(label, "docker", dockerBuild(extra));
 }
 // Discover the actual artifact mkosi produced (named after Output= [+ ImageVersion]); robust to mkosi's naming.
 function findOutput(suffix) {
@@ -109,9 +118,26 @@ function findOutput(suffix) {
   return join(OUT, hit);
 }
 
+log(`  engine=${useNative ? "host-native mkosi" : `docker ${PINNED_MKOSI_IMAGE}`}`);
+
+// ── Step 0: ensure the mkosi engine is available (docker pull only; native skips the registry) ─────────────
+if (useNative) {
+  log("\n── 0 · mkosi engine = host-native (no registry pull)");
+} else {
+  log("\n── 0 · pull mkosi image (docker engine)");
+  log(`   $ docker pull ${PINNED_MKOSI_IMAGE}`);
+  if (!DRY) {
+    const r = spawnSync("docker", ["pull", PINNED_MKOSI_IMAGE], { stdio: "inherit" });
+    if (r.status !== 0) fail(
+      "mkosi image pull failed (ghcr 'denied' — the pinned digest isn't anonymously pullable). Fix EITHER:\n" +
+      "     • host-native (recommended):  pipx install mkosi   (or: sudo apt install mkosi)  — then re-run; auto-detected\n" +
+      "     • or docker:  docker login ghcr.io   with a GitHub PAT (read:packages), then re-run");
+  }
+}
+
 if (MODE === "smoke") {
   // ── Smoke: ONE build straight to a bootable disk (overrides base Format=directory/Bootable=no), then boot.
-  run("1 · build bootable disk (mkosi --format disk, smoke)", "docker", dockerBuild(["--format", "disk", "--bootable=yes"]));
+  runMkosi("1 · build bootable disk (mkosi --format disk, smoke)", ["--format", "disk", "--bootable=yes"]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
@@ -120,7 +146,7 @@ if (MODE === "smoke") {
 }
 
 // ── FULL: build the read-only Debian rootfs (the planner's canonical Format=directory build) ────────────────
-run("1 · build rootfs (mkosi directory, privileged, cached)", "docker", dockerBuild());
+runMkosi("1 · build rootfs (mkosi directory, privileged, cached)");
 const rootfs = join(OUT, "vita-debian-trixie-x86_64-root");
 log(`   rootfs → ${rootfs}/ (Format=directory)`);
 
