@@ -209,7 +209,10 @@ if (MODE === "smoke") {
   const incremental = process.env.VITA_INCREMENTAL === "0" ? [] : ["--incremental=yes"];
   // VITA_BOOT_DEBUG=1 bakes systemd debug logging into the cmdline so a headless boot prints WHY it stalls
   // (job queue / unmet dependencies / device waits) to the serial — a one-shot diagnostic, off by default.
-  const cmdline = "console=tty0 console=ttyS0,115200 rw" +
+  // systemd.firstboot=off: skip the interactive First Boot Wizard. Without it, systemd-firstboot.service prompts
+  // for locale/timezone and waits forever on a headless console — holding back sysinit.target → multi-user never
+  // reached (confirmed via VITA_BOOT_DEBUG). A test/VM image is pre-seeded (root pw set), so no wizard is wanted.
+  const cmdline = "console=tty0 console=ttyS0,115200 rw systemd.firstboot=off" +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,

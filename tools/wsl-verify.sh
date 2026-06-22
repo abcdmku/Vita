@@ -118,8 +118,12 @@ diag() {
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | sed -E 's/\[[0-9 .]+\]//' | sort | uniq -c | sort -rn | head -6
   echo "===== multi-user / startup-finished / emergency (any case) ====="
   sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -iE 'multi-user|startup finished|emergency|rescue|cannot|refus' | tail -6
-  echo "===== last 10 lines ====="
-  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -10
+  echo "===== boot-stall signals (debug: cycles / unstartable / waits) ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'ordering cycle|breaking ordering|deleting job|unable to|isolat|found ordering cycle|job .* finished.*(failed|dependency)|installed new job .*(multi-user|sysinit|basic)' | tail -14
+  echo "===== device/mount activity ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'waiting for|timed out|\.device|\.mount.*(job|Waiting)|dev-disk' | tail -10
+  echo "===== last 12 lines ====="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" | tail -12
 }
 
 # Fast, fully-introspectable boot WITHOUT QEMU: build the rootfs as a directory (base config is Format=directory)
