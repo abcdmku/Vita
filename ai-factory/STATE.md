@@ -263,10 +263,18 @@ an INERT `environment` field — go-in-docker never forwarded CGO_ENABLED/GOOS/G
 dynamically-linked, non-reproducible binary). **B1 FIXED + PROVEN:** taught `go-in-docker.mjs` a `--env KEY=VAL`
 passthrough, planAgentImage emits those flags (test asserts they reach the container); `wsl-verify agent` now
 reports **agentd statically linked + stripped + byte-reproducible** (sha256 run1==run2). `wsl-verify.sh` gained an
-`agent` mode. **REMAINING (orchestrator wiring, next):** build-and-boot — step 3 per-slot verity UKIs (substitute
-captured roothash → ukify per slot, P1-025) + run planAgentImage's build → stage binary → `--extra-tree`
-agent-overlay (P1-026); then `wsl-verify full` = verity-verified boot end-to-end + agent runs at boot. Secure Boot
-signing still needs owner keys (§16). Codex still down (Opus substrate held the floor for both arcs). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
+`agent` mode. **WIRING DONE (build-and-boot, committed 9301fab…3b4e2e4):** step 1.5 ext4 convert → step 2 per-slot
+veritysetup (capture root hashes) → step 3 per-slot verity UKIs (substitute captured roothash; full dry-run shows
+the chain) [P1-025]; smoke builds + stages agentd (inlined go-in-docker cmd — the build HOST's Node lacks TS
+support, ERR_NO_TYPESCRIPT, so smoke can't import the .ts planner) + ships it via a 2nd `--extra-tree`
+agent-overlay [P1-026]. **VERIFIED:** `wsl-verify smoke` BUILD succeeds (build_rc=0 — agentd built+staged, mkosi
+disk with the agent). **OPEN — headless boot of the agent-smoke stalls before multi-user:** fixed cause #1
+(vita-agentd had `Wants=network-online.target` → systemd-networkd-wait-online hung ~123s in the no-NIC headless VM
+→ dropped it). Remaining stall: boot reaches early userspace (network.target, boot.mount, update-done all OK) but
+not multi-user in 130s, with NO error/hang message — likely a slow late service or long timeout (fresh-mirror
+build vs the old disk). Bumped `wsl-verify` boot window to 240s + added a `diag` mode; re-verify next tick to
+distinguish slow-vs-hung. The interactive boot (real stdin) may be unaffected. Secure Boot signing still needs
+owner keys (§16). Codex still down (Opus substrate held the floor for both arcs). **OWNER (2026-06-22): "make it vita and trusted boot" — both arcs in flight:** **P1-025** (trusted boot) = per-slot verity-bearing UKIs so planUKI's cmdline is
 `root=/dev/mapper/vita-root-{a,b}-verity roothash=<unresolved>` coherent with planVerity (closes the UKI-binding
 gap; after merge wire build-and-boot step 3 to substitute the captured roothash + ukify per slot → verity-verified
 boot, QEMU-testable NO keys). **P1-026** (make it Vita) = deterministic `agentd` build (go-in-docker, reproducible
