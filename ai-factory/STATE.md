@@ -95,8 +95,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     on vendoring `klauspost/compress` (orchestrator dep-bootstrap); the .tar.zst bundle is plain-tar today (works, SRI
     covers it).** Minor: the transport stale-socket test fails under Docker-as-root (env artifact, passes via the real
     socket on boot). Filed hardening SO_PEERCRED = DONE (P1-048). safe-normalize direct node:util = DONE (P1-036).
-    NEXT FRONTIERS: P1-051 dep-vendoring; then OCI/WASM capsule runtimes (new staging+sandbox each) OR the next spec
-    phase. See [[vita-verification-pipeline]] for the host-verify/go-in-docker/Windows-acceptance lessons banked here.
+    P1-051 (zstd) DONE — wave 4 = 100% (7/7). **WAVE 5 OCI FOUNDATION COMPLETE + BOOT-VERIFIED (ADR-0010, owner signed
+    off "do them all"): THE NODE RUNS OCI CONTAINERS.** P1-052 launcher (OCI rootfs as a hardened transient unit via
+    systemd `RootDirectory=`, DynamicUser/root=ro/health=OK) + P1-053 fetch (content-addressed: outer SRI + full digest
+    graph; DoS/traversal/whiteout-safe assembly) — one boot shows VITA-CAPSULE-OCI-FETCH verified=OK +
+    VITA-CAPSULE-OCI-EXECUTED root=ro health=OK (cabea11). Wave-5 wins: host-verify caught the RootDirectory FAILSAFE
+    (fix = MountAPIVFS=yes + DynamicUser rootfs read/exec perms); adversarial review caught a decompression-bomb
+    fail-open (fix = stack-wide maxBytesReader). REMAINING wave-5 (owner greenlit ALL): **crun-as-executor (P1-054, full
+    OCI fidelity — needs ORCHESTRATOR to stage the crun binary first, à la the zstd vendor bootstrap)**; **microVM/nspawn
+    (P1-055, strong isolation)**; **the cgroup-enforcement-vs-HOSTILE-image gate (ADR-0010 slice 5) before ANY untrusted
+    OCI**. NEXT after OCI = WASM runtime, then the next spec phase. See [[vita-verification-pipeline]] for the
+    host-verify/go-in-docker/Windows-acceptance lessons.
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
