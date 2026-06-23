@@ -101,11 +101,18 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     graph; DoS/traversal/whiteout-safe assembly) — one boot shows VITA-CAPSULE-OCI-FETCH verified=OK +
     VITA-CAPSULE-OCI-EXECUTED root=ro health=OK (cabea11). Wave-5 wins: host-verify caught the RootDirectory FAILSAFE
     (fix = MountAPIVFS=yes + DynamicUser rootfs read/exec perms); adversarial review caught a decompression-bomb
-    fail-open (fix = stack-wide maxBytesReader). REMAINING wave-5 (owner greenlit ALL): **crun-as-executor (P1-054, full
-    OCI fidelity — needs ORCHESTRATOR to stage the crun binary first, à la the zstd vendor bootstrap)**; **microVM/nspawn
-    (P1-055, strong isolation)**; **the cgroup-enforcement-vs-HOSTILE-image gate (ADR-0010 slice 5) before ANY untrusted
-    OCI**. NEXT after OCI = WASM runtime, then the next spec phase. See [[vita-verification-pipeline]] for the
-    host-verify/go-in-docker/Windows-acceptance lessons.
+    fail-open (fix = stack-wide maxBytesReader). **WAVE 5 RESOLVED + WAVE 6 STARTED (2026-06-23), all boot-verified on
+    green main (50770c3→69f356f):** THREE capsule runtimes RUN — ts-service (Deno), OCI via systemd `RootDirectory=`
+    (P1-052/053 + the P1-054 cgroup-enforcement gate: a hostile OCI image is throttled, node survives), and **WASM via
+    pinned wasmtime v36.0.11 (P1-058 — the most-contained class, measured health)**. crun-as-executor (P1-056) +
+    microVM/nspawn (P1-055) are **DEFERRED** (3 attempts + review each; both heavy container-managers that don't fit the
+    strict hardening yet — crun: rootless needs userns/mount the jail forbids; nspawn: workload output not reaching
+    agentd's journal; honest rejects, NOT merged, branches preserved, revisitable — see ADR-0010). **WAVE 6 networking
+    (ADR-0011): S1 (P1-057) DONE** — manifest network grants parsed+validated (reusing node-policy validators), capsules
+    still network-mute. KEY LESSON: `res=success`→`res=failed` is the BENIGN short-lived-workload signature (the agentd
+    stop after the health check), common to OCI/WASM — not a failure; the false-`health=OK` crun bug was the real catch.
+    **NEXT: networking S2 (per-capsule netns + loopback-only), then S3 default-deny egress (nft), S4 ingress, S5 the
+    hostile-network enforcement gate** — the Phase-4 exit (FR-011). See [[vita-verification-pipeline]].
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
