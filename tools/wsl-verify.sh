@@ -171,16 +171,17 @@ probe() {
 }
 
 # ── Secure Boot adversarial matrix ──────────────────────────────────────────────────────────────────
-# Proves OUR TEST key is the enforced root of trust. Six rows, tri-state PASS/FAIL/INVALID:
-#   POS    db-signed UKI + auto-enroll, blank Setup-Mode vars -> 2 boots (enroll, then enforce);
-#          PASS only if VITA-SB-STATE=enabled AND a userspace marker AND no firmware reject.
-#   CTRL   identical second positive boot off the now-User-Mode vars (regression control = boots).
-#   N1     unsigned UKI               -> firmware rejects (no kernel start).
-#   N2     db-signed-then-tampered    -> firmware rejects.
-#   N3     rogue-key-signed UKI       -> firmware rejects (key not enrolled).
-#   CTRLMS Vita-db-signed UKI on the MS code+vars pair -> REJECTED (proves db != MS-trusted).
-# Each row: FRESH writable vars, FRESH per-row serial log, per-run nonce in cmdline; offline sbverify
-# gate proves a well-formed-but-untrusted artifact exists BEFORE qemu (missing artifact => INVALID).
+# Proves OUR TEST key is the enforced root of trust. virt-fw-vars enrolls PK=KEK=db (db.crt) into a
+# fresh OVMF varstore OFFLINE (User Mode = enforcing); every row then boots off a copy of that one store:
+#   POS    db-signed UKI -> boots to userspace (serial anchor: the enrolled rig boots a GOOD image).
+#   N1     unsigned UKI            -> firmware rejects (no kernel start + a firmware reject witness).
+#   N2     db-signed-then-tampered -> firmware rejects.
+#   N3     rogue-key-signed UKI    -> firmware rejects (key not enrolled).
+#   CTRLMS Vita-db-signed UKI on the MS code+vars pair -> REJECTED (db != MS-trusted; REQUIRED row).
+# Enforcement is proven by the POS-boots / negatives-rejected contrast on the SAME enrolled store (a
+# non-enforcing store would let the negatives boot -> they'd FAIL). N1/N2/N3 + CTRLMS boot in PARALLEL.
+# Each row: FRESH vars copy + FRESH per-row serial log; an offline sbverify tri-state gate proves a
+# well-formed-but-untrusted artifact exists BEFORE qemu (missing artifact => INVALID, never PASS).
 SBDIR="$REPO/os/x86_64/.secureboot"
 SBWORK="$REPO/os/x86_64/out/sb"
 SBCODE_SB=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
@@ -345,8 +346,10 @@ secboot() {
   }
 
   echo "----- build POSITIVE (db-signed UKI, --bootloader=uki) -----"
+  rm -f "$REPO"/os/x86_64/out/*.raw   # so a STALE disk from a prior run can't masquerade as this build's output
   VITA_SECURE_BOOT=1 VITA_SB_NONCE="$nonce" \
     node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -6
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "RESULT: FAIL (positive SB build failed)"; return 1; }
   local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
   [ -f "$disk" ] || { echo "RESULT: FAIL (positive build produced no disk)"; return 1; }
   echo "disk=$disk"
@@ -404,11 +407,14 @@ secboot() {
   [ "$n3_invalid" = 0 ] && sb_launch N3 "$disk_n3" "$SBCODE_SB" "$VENROLL" 120
   if [ -f "$SBCODE_MS" ] && [ -f "$SBVARS_MS" ]; then do_ctrlms=1; sb_launch CTRLMS "$disk" "$SBCODE_MS" "$SBVARS_MS" 120; fi
   wait
-  local r_n1=INVALID r_n2=INVALID r_n3=INVALID r_ctrlms=PASS
+  local r_n1=INVALID r_n2=INVALID r_n3=INVALID r_ctrlms=INVALID
   [ "$n1_invalid" = 0 ] && r_n1=$(sb_classify_negative "$SBWORK/serial-N1.log")
   [ "$n2_invalid" = 0 ] && r_n2=$(sb_classify_negative "$SBWORK/serial-N2.log")
   [ "$n3_invalid" = 0 ] && r_n3=$(sb_classify_negative "$SBWORK/serial-N3.log")
-  if [ "$do_ctrlms" = 1 ]; then r_ctrlms=$(sb_classify_negative "$SBWORK/serial-CTRLMS.log"); else echo "  CTRLMS=SKIP (no MS OVMF pair)"; fi
+  # CTRLMS is a REQUIRED cross-check (db must NOT be MS-trusted). A missing MS OVMF pair is a hard FAIL,
+  # not a silent skip-pass — the acceptance host has it; a host without it cannot prove this row.
+  if [ "$do_ctrlms" = 1 ]; then r_ctrlms=$(sb_classify_negative "$SBWORK/serial-CTRLMS.log")
+  else r_ctrlms=FAIL; echo "  CTRLMS=FAIL (MS OVMF pair $SBCODE_MS / $SBVARS_MS absent — required cross-check cannot run)"; fi
 
   echo "----- MATRIX -----"
   printf '  %-8s %s\n' POS "$r_pos" N1 "$r_n1" N2 "$r_n2" N3 "$r_n3" CTRLMS "$r_ctrlms"

@@ -12,7 +12,8 @@ ConditionPathExists=/sys/firmware/efi/efivars
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/lib/vita/sb-state-probe.sh
+# Invoked via /bin/bash so it runs regardless of the file's exec bit (the overlay ships it 0644).
+ExecStart=/bin/bash /usr/lib/vita/sb-state-probe.sh
 StandardOutput=journal+console
 StandardError=journal+console
 
