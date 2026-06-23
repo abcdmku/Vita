@@ -106,7 +106,7 @@ boot_ts() {
   # WHOLE control plane ran: eval/preview/explain + connect/state + APPLY commit&reject + capsule preview/apply + FETCH
   # (SRI-verified, P1-045) + capsule.execute (hardened transient unit, W4-S1) + per-capsule VOLUME (P1-046) + PDS r/w.
   for i in $(seq 1 150); do
-    if grep -qa 'VITA-CAPSULE-VOLUME:.*mounted=OK' "$log" 2>/dev/null \
+    if grep -qa 'VITA-CAPSULE-EXECUTED:' "$log" 2>/dev/null \
        && grep -qa 'VITA-PDS-WRITE: outcome=committed' "$log" 2>/dev/null \
        && grep -qa 'VITA-APPLY: outcome=rejected' "$log" 2>/dev/null; then
       ok=1; echo "full chain late-markers present at ~${i}s"; break
@@ -130,8 +130,8 @@ boot_ts() {
   # PASS = the FULL on-device control plane THROUGH RUNNING A CAPSULE: ...+ PDS read/write + capsule.execute (the node
   # spawns a hardened transient-unit workload, W4-S1) + its fail-closed reject + FETCH (SRI-verified, P1-045) + a
   # per-capsule persistent VOLUME mounted into the unit (P1-046). Node proposes; agent validates+spawns.
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$vo" ]; then
-    echo "RESULT: PASS (full control-plane on-device: fetch(SRI)+capsule.execute(hardened)+persistent volume — the node fetched, ran, and gave durable state to a capsule)"
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ]; then
+    echo "RESULT: PASS (full control-plane on-device: fetch(SRI)+capsule.execute(hardened) — P1-046 volume reverted pending fix)"
   else
     echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
     sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -28
