@@ -1,12 +1,15 @@
 # Vita /var mount. Explicit because gpt-auto only mounts a DPS /var when its UUID is machine-id-keyed.
-# nofail + short device-timeout: the vita-data partition exists ONLY in VITA_VERITY builds (repart-verity).
-# On a plain (non-verity) smoke image the device is absent, so nofail makes the mount skip quickly instead of
-# hanging boot ~90s on dev-disk-by-label-vita-data.device (plain smoke's rw root already provides a writable /var).
+# The vita-data partition exists ONLY in VITA_VERITY builds (repart-verity). On a plain (non-verity) smoke image the
+# device is absent, so ConditionPathExists SKIPS the unit entirely (condition unmet = success-skip, NOT a failure):
+# a *failed* var.mount cascades to every RequiresMountsFor=/var/... dependent (e.g. vita-agentd's StateDirectory),
+# cancelling them; a *skipped* var.mount does not, and those units fall back to /var on the rw root. nofail + a short
+# device-timeout are belt-and-suspenders for the (shouldn't-happen) case where the node exists but is slow.
 [Unit]
 Description=Vita persistent data partition (/var)
 DefaultDependencies=no
 Before=local-fs.target umount.target
 Conflicts=umount.target
+ConditionPathExists=/dev/disk/by-label/vita-data
 
 [Mount]
 What=/dev/disk/by-label/vita-data
