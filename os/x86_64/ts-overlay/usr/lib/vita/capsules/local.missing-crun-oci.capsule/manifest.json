@@ -1,0 +1,26 @@
+{
+  "id": "local.missing-crun-oci.capsule",
+  "version": "1.0.0",
+  "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  "packageClass": "oci-service",
+  "runtime": {
+    "oci": {
+      "executor": "crun",
+      "image": {
+        "digest": "sha256:18e9c68df2dba5b2e4967e8f1cf6e060c7defeda9e974fc88a4e91fd34687809",
+        "entrypoint": [
+          "/init"
+        ],
+        "env": [
+          "VITA_EXECUTOR=crun"
+        ]
+      }
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  }
+}

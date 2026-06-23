@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -21,6 +22,13 @@ import (
 const (
 	hostileOCICapsuleID = "local.hostile-oci.capsule"
 
+	defaultCrunPath      = "/usr/lib/vita/bin/crun"
+	defaultOCIBundleRoot = "/run/vita-capsules/oci-bundles"
+	defaultOCIPathEnv    = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+	ociExecutorRootDirectory = "rootdir"
+	ociExecutorCrun          = "crun"
+
 	ociLimitValueEnforced    = "enforced"
 	ociLimitValueNotEnforced = "not_enforced"
 	ociLimitValueUnknown     = "unknown"
@@ -32,7 +40,8 @@ const (
 )
 
 type OCIExecution struct {
-	Image OCIImageExecution `json:"image"`
+	Executor string            `json:"executor,omitempty"`
+	Image    OCIImageExecution `json:"image"`
 }
 
 func (e *OCIExecution) UnmarshalJSON(raw []byte) error {
@@ -48,12 +57,19 @@ func (e *OCIExecution) UnmarshalJSON(raw []byte) error {
 		return &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 
+	executor, err := optionalOCIExecutorField(fields, "executor")
+	if err != nil {
+		return err
+	}
 	var image OCIImageExecution
 	if err := requiredObjectField(fields, "image", &image); err != nil {
 		return err
 	}
 
-	out := OCIExecution{Image: image}
+	out := OCIExecution{
+		Executor: executor,
+		Image:    image,
+	}
 	if err := out.Validate(); err != nil {
 		return err
 	}
@@ -63,12 +79,23 @@ func (e *OCIExecution) UnmarshalJSON(raw []byte) error {
 }
 
 func (e OCIExecution) Validate() error {
+	if !validOCIExecutor(e.normalizedExecutor()) {
+		return &ExecuteInvalidRequestError{Code: "invalid_executor", Reason: "runtime.oci.executor must be rootdir or crun"}
+	}
 	return e.Image.Validate()
+}
+
+func (e OCIExecution) normalizedExecutor() string {
+	if e.Executor == "" {
+		return ociExecutorRootDirectory
+	}
+	return e.Executor
 }
 
 type OCIImageExecution struct {
 	Digest     string   `json:"digest"`
 	Entrypoint []string `json:"entrypoint"`
+	Env        []string `json:"env,omitempty"`
 }
 
 func (e *OCIImageExecution) UnmarshalJSON(raw []byte) error {
@@ -92,10 +119,15 @@ func (e *OCIImageExecution) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	env, err := optionalOCIEnvField(fields, "env")
+	if err != nil {
+		return err
+	}
 
 	out := OCIImageExecution{
 		Digest:     digest,
 		Entrypoint: entrypoint,
+		Env:        env,
 	}
 	if err := out.Validate(); err != nil {
 		return err
@@ -117,6 +149,11 @@ func (e OCIImageExecution) Validate() error {
 			return &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: fmt.Sprintf("runtime.oci.image.entrypoint[%d]: %v", i, err)}
 		}
 	}
+	for i, env := range e.Env {
+		if err := validateOCIEnvElement(env); err != nil {
+			return &ExecuteInvalidRequestError{Code: "invalid_env", Reason: fmt.Sprintf("runtime.oci.image.env[%d]: %v", i, err)}
+		}
+	}
 	return nil
 }
 
@@ -125,6 +162,17 @@ func composeOCITransientUnit(manifest ExecutionManifest) (transientUnit, error) 
 		return transientUnit{}, err
 	}
 
+	switch manifest.Runtime.OCI.normalizedExecutor() {
+	case ociExecutorRootDirectory:
+		return composeOCIRootDirectoryTransientUnit(manifest)
+	case ociExecutorCrun:
+		return composeOCICrunTransientUnit(manifest)
+	default:
+		return transientUnit{}, &ExecuteInvalidRequestError{Code: "invalid_executor", Reason: "runtime.oci.executor must be rootdir or crun"}
+	}
+}
+
+func composeOCIRootDirectoryTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	unitName := capsuleUnitName(manifest.ID)
 	limits := manifest.ResourceLimits
 	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
@@ -153,6 +201,187 @@ func composeOCITransientUnit(manifest ExecutionManifest) (transientUnit, error) 
 		Properties: properties,
 		Volumes:    volumes,
 	}, nil
+}
+
+func composeOCICrunTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
+	unitName := capsuleUnitName(manifest.ID)
+	runtimeDir := capsuleRuntimeDirectory(manifest.ID)
+	limits := manifest.ResourceLimits
+	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
+	if err != nil {
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	bundlePath := ociBundleDirectory(manifest)
+	properties := hardenedTransientUnitProperties(manifest, false)
+	properties = append(properties,
+		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
+		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
+		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
+		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
+		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
+	)
+	if len(volumes) > 0 {
+		properties = append(properties,
+			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
+			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
+		)
+	}
+
+	return transientUnit{
+		Name:       unitName,
+		Argv:       crunArgv(manifest, bundlePath, runtimeDir),
+		Properties: properties,
+		Volumes:    volumes,
+		OCIConfig: &generatedOCIConfig{
+			BundlePath: bundlePath,
+			Spec:       authoredOCIRuntimeSpec(manifest),
+		},
+	}, nil
+}
+
+func crunArgv(manifest ExecutionManifest, bundlePath string, runtimeDir string) []string {
+	return []string{
+		defaultCrunPath,
+		"--rootless",
+		"--root",
+		path.Join("/run", runtimeDir, "crun"),
+		"run",
+		"--bundle",
+		bundlePath,
+		"--no-new-keyring",
+		manifest.ID,
+	}
+}
+
+type generatedOCIConfig struct {
+	BundlePath string
+	Spec       authoredOCISpec
+}
+
+type authoredOCISpec struct {
+	OCIVersion string             `json:"ociVersion"`
+	Process    authoredOCIProcess `json:"process"`
+	Root       authoredOCIRoot    `json:"root"`
+}
+
+type authoredOCIProcess struct {
+	Terminal        bool                    `json:"terminal"`
+	Args            []string                `json:"args"`
+	Env             []string                `json:"env"`
+	Cwd             string                  `json:"cwd"`
+	NoNewPrivileges bool                    `json:"noNewPrivileges"`
+	Capabilities    authoredOCICapabilities `json:"capabilities"`
+}
+
+type authoredOCICapabilities struct {
+	Bounding    []string `json:"bounding"`
+	Effective   []string `json:"effective"`
+	Inheritable []string `json:"inheritable"`
+	Permitted   []string `json:"permitted"`
+	Ambient     []string `json:"ambient"`
+}
+
+type authoredOCIRoot struct {
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly"`
+}
+
+func authoredOCIRuntimeSpec(manifest ExecutionManifest) authoredOCISpec {
+	env := []string{defaultOCIPathEnv}
+	env = append(env, manifest.Runtime.OCI.Image.Env...)
+
+	return authoredOCISpec{
+		OCIVersion: "1.0.2",
+		Process: authoredOCIProcess{
+			Terminal:        false,
+			Args:            append([]string(nil), manifest.Runtime.OCI.Image.Entrypoint...),
+			Env:             env,
+			Cwd:             "/",
+			NoNewPrivileges: true,
+			Capabilities: authoredOCICapabilities{
+				Bounding:    []string{},
+				Effective:   []string{},
+				Inheritable: []string{},
+				Permitted:   []string{},
+				Ambient:     []string{},
+			},
+		},
+		Root: authoredOCIRoot{
+			Path:     ociRootDirectory(manifest),
+			Readonly: true,
+		},
+	}
+}
+
+func stageGeneratedOCIConfig(config *generatedOCIConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.BundlePath == "" {
+		return &ExecuteInvalidRequestError{Reason: "oci bundle path is required"}
+	}
+	if !path.IsAbs(config.BundlePath) || path.Clean(config.BundlePath) != config.BundlePath {
+		return &ExecuteInvalidRequestError{Reason: "oci bundle path must be a clean absolute path"}
+	}
+
+	raw, err := json.MarshalIndent(config.Spec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("render oci config: %w", err)
+	}
+	raw = append(raw, '\n')
+	return atomicWriteOCIConfig(path.Join(config.BundlePath, "config.json"), raw)
+}
+
+func atomicWriteOCIConfig(target string, content []byte) error {
+	dir := path.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create oci bundle directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return fmt.Errorf("secure oci bundle directory: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create oci config temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	closed := false
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			if !closed {
+				_ = tmp.Close()
+			}
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("secure oci config temp file: %w", err)
+	}
+	written, err := tmp.Write(content)
+	if err != nil {
+		return fmt.Errorf("write oci config temp file: %w", err)
+	}
+	if written != len(content) {
+		return fmt.Errorf("write oci config temp file: %w", io.ErrShortWrite)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync oci config temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		closed = true
+		return fmt.Errorf("close oci config temp file: %w", err)
+	}
+	closed = true
+
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("replace oci config: %w", err)
+	}
+	cleanupTemp = false
+	return nil
 }
 
 type OCILimitsStatus struct {
@@ -497,6 +726,45 @@ func requiredOCIEntrypointField(fields map[string]json.RawMessage, key string) (
 	return entrypoint, nil
 }
 
+func optionalOCIExecutorField(fields map[string]json.RawMessage, key string) (string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", &ExecuteInvalidRequestError{Code: "invalid_executor", Reason: "runtime.oci." + key + " must be rootdir or crun"}
+	}
+
+	var executor string
+	if err := decodeSingleJSONValue(raw, &executor); err != nil {
+		return "", &ExecuteInvalidRequestError{Code: "invalid_executor", Reason: "runtime.oci." + key + " must be a string"}
+	}
+	return executor, nil
+}
+
+func optionalOCIEnvField(fields map[string]json.RawMessage, key string) ([]string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_env", Reason: "runtime.oci.image." + key + " must be an env list"}
+	}
+
+	var env []string
+	if err := decodeSingleJSONValue(raw, &env); err != nil {
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_env", Reason: "runtime.oci.image." + key + " must be an env list"}
+	}
+	if env == nil {
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_env", Reason: "runtime.oci.image." + key + " must be an env list"}
+	}
+	return env, nil
+}
+
+func validOCIExecutor(value string) bool {
+	return value == ociExecutorRootDirectory || value == ociExecutorCrun
+}
+
 func validOCIDigest(value string) bool {
 	algorithm, encoded, ok := strings.Cut(value, ":")
 	if !ok || algorithm != "sha256" || len(encoded) != 64 || encoded != strings.ToLower(encoded) {
@@ -528,6 +796,26 @@ func validateOCIArgvElement(value string, entrypoint bool) error {
 	return nil
 }
 
+func validateOCIEnvElement(value string) error {
+	if value == "" {
+		return errors.New("must not be empty")
+	}
+	if controlCharacter.MatchString(value) {
+		return errors.New("must not contain control characters")
+	}
+	key, _, ok := strings.Cut(value, "=")
+	if !ok || key == "" {
+		return errors.New("must be KEY=VALUE")
+	}
+	if !safeOCIEnvKey(key) {
+		return errors.New("has an unsupported key")
+	}
+	if containsInlineCapsuleMaterial(value) {
+		return errors.New("must not contain inline secret material")
+	}
+	return nil
+}
+
 func worldReadableExecutable(mode os.FileMode) bool {
 	return mode.Perm()&0o005 == 0o005
 }
@@ -546,12 +834,32 @@ func safeOCIArgvToken(value string) bool {
 	return true
 }
 
+func safeOCIEnvKey(value string) bool {
+	for i, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r == '_':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func ociBundleDirectory(manifest ExecutionManifest) string {
+	return path.Join(defaultOCIBundleRoot, capsuleRuntimeDirectory(manifest.ID))
+}
+
 var (
 	ociExecutionFields = map[string]struct{}{
-		"image": {},
+		"executor": {},
+		"image":    {},
 	}
 	ociImageExecutionFields = map[string]struct{}{
 		"digest":     {},
 		"entrypoint": {},
+		"env":        {},
 	}
 )

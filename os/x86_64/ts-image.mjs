@@ -20,6 +20,8 @@
 //
 // Offline / air-gapped: set VITA_DENO_ZIP=/path/to/deno-x86_64-unknown-linux-gnu.zip to stage from
 // a local copy instead of downloading (still sha256-verified against the pin).
+// Set VITA_CRUN_BIN=/path/to/crun-1.21-linux-amd64 to stage the pinned crun runtime from a local
+// copy instead of downloading it (also sha256-verified against os/x86_64/agent-image.conf).
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -31,10 +33,13 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const CONFIG_PATH = join(HERE, "ts-image.conf");
+const AGENT_CONFIG_PATH = join(HERE, "agent-image.conf");
 const OVERLAY_ROOT = join(HERE, "ts-overlay");
+const AGENT_OVERLAY_ROOT = join(HERE, "agent-overlay");
 const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs"),
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.hostile-oci.capsule", "rootfs"),
+  join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.crun-oci.capsule", "rootfs"),
 ]);
 
 function fail(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
@@ -69,6 +74,20 @@ function loadPin() {
   // Map the container install path (/usr/...) onto the committed overlay tree on the host.
   const binaryRel = i.Binary.replace(/^\//, "");          // usr/lib/vita/deno
   const binaryHostPath = join(OVERLAY_ROOT, binaryRel);
+  return { ...r, binary: i.Binary, binaryMode: i.BinaryMode, binaryHostPath };
+}
+
+function loadCrunPin() {
+  if (!existsSync(AGENT_CONFIG_PATH)) fail(`missing ${AGENT_CONFIG_PATH}`);
+  const conf = parseConf(readFileSync(AGENT_CONFIG_PATH, "utf8"));
+  const r = conf.CrunRuntime ?? {};
+  const i = conf.CrunInstall ?? {};
+  for (const [k, v] of Object.entries({ Version: r.Version, Asset: r.Asset, Url: r.Url, Sha256: r.Sha256, Binary: i.Binary, BinaryMode: i.BinaryMode })) {
+    if (!v) fail(`agent-image.conf missing required crun key ${k}`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(r.Sha256)) fail(`agent-image.conf CrunRuntime.Sha256 must be 64 lowercase hex chars, got: ${r.Sha256}`);
+  const binaryRel = i.Binary.replace(/^\//, "");
+  const binaryHostPath = join(AGENT_OVERLAY_ROOT, binaryRel);
   return { ...r, binary: i.Binary, binaryMode: i.BinaryMode, binaryHostPath };
 }
 
@@ -125,6 +144,30 @@ async function stage(pin) {
   }
 }
 
+async function stageCrun(pin) {
+  mkdirSync(dirname(pin.binaryHostPath), { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "vita-crun-"));
+  try {
+    let binPath = process.env.VITA_CRUN_BIN;
+    if (binPath) {
+      if (!existsSync(binPath)) fail(`VITA_CRUN_BIN set but not found: ${binPath}`);
+      log(`   using local crun binary (offline): ${binPath}`);
+    } else {
+      binPath = await downloadTo(pin.Url, join(work, pin.Asset));
+    }
+    const got = sha256File(binPath);
+    if (got !== pin.Sha256) {
+      fail(`sha256 MISMATCH for ${pin.Asset}\n   expected ${pin.Sha256}\n   got      ${got}\n   (refusing to stage an unverified OCI runtime)`);
+    }
+    log(`   crun sha256 OK: ${got}`);
+    copyFileSync(binPath, pin.binaryHostPath);
+    chmodSync(pin.binaryHostPath, parseInt(pin.binaryMode, 8));
+    log(`   staged crun ${pin.Version} → ${pin.binaryHostPath} (mode ${pin.binaryMode})`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 function stageBakedOCIRootfs() {
   for (const rootfsPath of BAKED_OCI_ROOTFS_PATHS) {
     const initPath = join(rootfsPath, "init");
@@ -146,8 +189,12 @@ function chmodDirectories(root) {
 async function main() {
   const argv = process.argv.slice(2);
   const pin = loadPin();
+  const crunPin = loadCrunPin();
   if (argv.includes("--print")) {
-    log(JSON.stringify({ name: pin.Name, version: pin.Version, asset: pin.Asset, url: pin.Url, sha256: pin.Sha256, binary: pin.binary, binaryHostPath: pin.binaryHostPath }, null, 2));
+    log(JSON.stringify({
+      deno: { name: pin.Name, version: pin.Version, asset: pin.Asset, url: pin.Url, sha256: pin.Sha256, binary: pin.binary, binaryHostPath: pin.binaryHostPath },
+      crun: { name: crunPin.Name, version: crunPin.Version, asset: crunPin.Asset, url: crunPin.Url, sha256: crunPin.Sha256, binary: crunPin.binary, binaryHostPath: crunPin.binaryHostPath },
+    }, null, 2));
     return;
   }
   if (argv.includes("--check")) {
@@ -156,11 +203,16 @@ async function main() {
     const size = readFileSync(pin.binaryHostPath).length;
     if (size === 0) fail(`staged binary is empty: ${pin.binaryHostPath}`);
     log(`   staged binary present: ${pin.binaryHostPath} (${size} bytes)`);
+    if (!existsSync(crunPin.binaryHostPath)) fail(`no staged crun binary at ${crunPin.binaryHostPath} — run without --check to stage it`);
+    const crunGot = sha256File(crunPin.binaryHostPath);
+    if (crunGot !== crunPin.Sha256) fail(`staged crun sha256 mismatch: expected ${crunPin.Sha256}, got ${crunGot}`);
+    log(`   staged crun present: ${crunPin.binaryHostPath} (sha256 ${crunGot})`);
     return;
   }
-  log(`Vita ts-image — stage pinned Deno ${pin.Version} into ${REPO ? "ts-overlay" : ""}`);
+  log(`Vita ts-image — stage pinned Deno ${pin.Version} and crun ${crunPin.Version}`);
   await stage(pin);
-  log("\n✓ deno staged. Now build with mkosi --extra-tree=os/x86_64/ts-overlay (see build-and-boot wiring).");
+  await stageCrun(crunPin);
+  log("\n✓ deno + crun staged. Now build with mkosi --extra-tree=os/x86_64/{agent-overlay,ts-overlay} (see build-and-boot wiring).");
 }
 
 main().catch((e) => fail(e?.stack ?? String(e)));

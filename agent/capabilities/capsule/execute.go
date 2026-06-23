@@ -939,6 +939,7 @@ type transientUnit struct {
 	Argv       []string
 	Properties []systemdProperty
 	Volumes    []capsulestorage.VolumeMount
+	OCIConfig  *generatedOCIConfig
 }
 
 type transientUnitStatus struct {
@@ -1007,6 +1008,10 @@ type systemdRunLauncher struct {
 }
 
 func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transientUnit) (transientUnitStatus, error) {
+	if err := stageGeneratedOCIConfig(unit.OCIConfig); err != nil {
+		return transientUnitStatus{}, err
+	}
+
 	args := []string{"--unit", unit.Name, "--collect"}
 	for _, property := range unit.Properties {
 		args = append(args, "--property="+property.Name+"="+property.Value)

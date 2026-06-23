@@ -70,6 +70,9 @@ const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
 const CAPSULE_OCI_EXECUTED_MARKER = "VITA-CAPSULE-OCI-EXECUTED";
 const CAPSULE_OCI_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-OCI-EXECUTE-REJECT";
 const CAPSULE_OCI_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-OCI-EXECUTE-ERROR";
+const CAPSULE_OCI_CRUN_MARKER = "VITA-CAPSULE-OCI-CRUN";
+const CAPSULE_OCI_CRUN_REJECT_MARKER = "VITA-CAPSULE-OCI-CRUN-REJECT";
+const CAPSULE_OCI_CRUN_ERROR_MARKER = "VITA-CAPSULE-OCI-CRUN-ERROR";
 const CAPSULE_OCI_LIMITS_MARKER = "VITA-CAPSULE-OCI-LIMITS";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
@@ -103,6 +106,18 @@ const MISSING_OCI_CAPSULE_ENTRY = Object.freeze({
   state: "installed",
   version: "1.0.0",
 }) satisfies CapsuleEntry;
+const CRUN_OCI_CAPSULE_ENTRY = Object.freeze({
+  id: "local.crun-oci.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
+const MISSING_CRUN_OCI_CAPSULE_ENTRY = Object.freeze({
+  id: "local.missing-crun-oci.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
 const HOSTILE_OCI_CAPSULE_ENTRY = Object.freeze({
   id: "local.hostile-oci.capsule",
   integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
@@ -113,6 +128,8 @@ const OCI_CAPSULE_REGISTRY = Object.freeze([
   ON_DEVICE_CAPSULE_ENTRY,
   OCI_CAPSULE_ENTRY,
   MISSING_OCI_CAPSULE_ENTRY,
+  CRUN_OCI_CAPSULE_ENTRY,
+  MISSING_CRUN_OCI_CAPSULE_ENTRY,
   HOSTILE_OCI_CAPSULE_ENTRY,
 ]) satisfies readonly CapsuleEntry[];
 const STATE_JSON_HEADERS = Object.freeze({
@@ -324,6 +341,36 @@ const FORCED_MISSING_OCI_CAPSULE_EXECUTE_PLAN = Object.freeze({
   ]),
 }) satisfies AgentApplyPlan;
 
+const CRUN_OCI_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: CRUN_OCI_CAPSULE_ENTRY.id,
+          integrity: CRUN_OCI_CAPSULE_ENTRY.integrity,
+          version: CRUN_OCI_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_MISSING_CRUN_OCI_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: MISSING_CRUN_OCI_CAPSULE_ENTRY.id,
+          integrity: MISSING_CRUN_OCI_CAPSULE_ENTRY.integrity,
+          version: MISSING_CRUN_OCI_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
 const HOSTILE_OCI_LIMITS_EXECUTE_PLAN = Object.freeze({
   operations: Object.freeze([
     Object.freeze({
@@ -522,6 +569,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -543,6 +591,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
       emit(formatOCILimitsFailureMarker());
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -556,6 +605,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -595,6 +645,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -613,6 +664,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -630,6 +682,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   await emitForcedCapsuleRejectMarker(agentTransport);
   await emitCapsuleOCIFetchMarkers(agentTransport);
   await emitOCICapsuleMarkers(agentTransport);
+  await emitCrunOCICapsuleMarkers(agentTransport);
   await emitHostileOCILimitsMarker(agentTransport);
 }
 
@@ -1017,6 +1070,46 @@ async function emitOCICapsuleMarkers(agentTransport: AgentTransport): Promise<vo
   await emitForcedOCICapsuleExecuteRejectMarker(client);
 }
 
+async function emitCrunOCICapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const registryResult = await client.apply(OCI_CAPSULE_REGISTRY_PLAN);
+
+    if (registryResult.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=${agentApplyResultReason(registryResult)} status=FAILSAFE`);
+      return;
+    }
+
+    const result = await client.apply(CRUN_OCI_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=${agentApplyResultReason(result)} status=FAILSAFE`);
+      await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    const state = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+
+    if (!state.ok || state.status.id !== CRUN_OCI_CAPSULE_ENTRY.id) {
+      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
+      await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    emit(formatCrunOCICapsuleMarker(state.status));
+  } catch (cause) {
+    const reason = agentClientErrorReason(cause, "transport_failed");
+    emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+    return;
+  }
+
+  await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
+}
+
 async function emitHostileOCILimitsMarker(agentTransport: AgentTransport): Promise<void> {
   const client = createAgentClient({
     baseUrl: AGENTD_BASE_URL,
@@ -1079,6 +1172,32 @@ async function emitForcedOCICapsuleExecuteRejectMarker(
   }
 
   emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitForcedCrunOCICapsuleExecuteRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_MISSING_CRUN_OCI_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_CRUN_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_OCI_CRUN_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 type CapsuleExecuteReadResult =
@@ -1294,6 +1413,17 @@ function formatOCICapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `unit=${status.unit} ` +
     `uid=${status.dynamicUid} ` +
     "root=ro " +
+    `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function formatCrunOCICapsuleMarker(status: CapsuleExecuteStatus): string {
+  return (
+    `${CAPSULE_OCI_CRUN_MARKER}: ` +
+    `id=${status.id} ` +
+    "runtime=crun " +
+    "rootless=yes " +
     `health=${status.health} ` +
     "status=OK"
   );

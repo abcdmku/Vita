@@ -1087,7 +1087,23 @@ func cloneTransientUnit(unit transientUnit) transientUnit {
 		Argv:       argv,
 		Properties: properties,
 		Volumes:    volumes,
+		OCIConfig:  cloneGeneratedOCIConfig(unit.OCIConfig),
 	}
+}
+
+func cloneGeneratedOCIConfig(config *generatedOCIConfig) *generatedOCIConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	cloned.Spec.Process.Args = cloneStrings(config.Spec.Process.Args)
+	cloned.Spec.Process.Env = cloneStrings(config.Spec.Process.Env)
+	cloned.Spec.Process.Capabilities.Bounding = cloneStrings(config.Spec.Process.Capabilities.Bounding)
+	cloned.Spec.Process.Capabilities.Effective = cloneStrings(config.Spec.Process.Capabilities.Effective)
+	cloned.Spec.Process.Capabilities.Inheritable = cloneStrings(config.Spec.Process.Capabilities.Inheritable)
+	cloned.Spec.Process.Capabilities.Permitted = cloneStrings(config.Spec.Process.Capabilities.Permitted)
+	cloned.Spec.Process.Capabilities.Ambient = cloneStrings(config.Spec.Process.Capabilities.Ambient)
+	return &cloned
 }
 
 func propertyValues(properties []systemdProperty) map[string][]string {

@@ -62,6 +62,19 @@ StateDir=/var/lib/vita-agent
 StateDirMode=0700
 StateDirOwner=root:root
 
+[CrunRuntime]
+# crun — pinned static OCI runtime used only by opt-in runtime.oci.executor=crun capsules.
+Name=crun
+Version=1.21
+Asset=crun-1.21-linux-amd64
+Url=https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-amd64
+Sha256=322c6c94b33a749ccd9f6f5ad48b0dd976eef559bbcfe15afd507a289dcdbe91
+
+[CrunInstall]
+Binary=/usr/lib/vita/bin/crun
+BinaryMode=0755
+BinaryOwner=root:root
+
 [Service]
 Unit=vita-agentd.service
 UnitPath=/usr/lib/systemd/system/vita-agentd.service
@@ -90,6 +103,11 @@ const AGENT_IMAGE_CONFIG_PATH = "os/x86_64/agent-image.conf";
 const AGENT_IMAGE_BUILDER = "tools/build/go-in-docker.mjs";
 const AGENT_OVERLAY_RELATIVE_PATH = "os/x86_64/agent-overlay";
 const AGENT_AMBIENT_CAPABILITIES = Object.freeze(["CAP_SYS_ADMIN", "CAP_SYS_TIME"]);
+const CRUN_VERSION = "1.21";
+const CRUN_ASSET = "crun-1.21-linux-amd64";
+const CRUN_URL = "https://github.com/containers/crun/releases/download/1.21/crun-1.21-linux-amd64";
+const CRUN_SHA256 = "322c6c94b33a749ccd9f6f5ad48b0dd976eef559bbcfe15afd507a289dcdbe91";
+const CRUN_BINARY = "/usr/lib/vita/bin/crun";
 const CONTROL_CHAR_PATTERN = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F]", "u");
 const PATH_CONTROL_CHAR_PATTERN = new RegExp("[\\u0000-\\u001F\\u007F]", "u");
 
@@ -135,6 +153,9 @@ export function planAgentImage(input = DEFAULT_AGENT_IMAGE_PLAN_INPUT) {
     },
     build: buildCommand,
     install,
+    runtimeArtifacts: {
+      crun: resolvedConfig.crun,
+    },
     overlay: {
       relativePath: AGENT_OVERLAY_RELATIVE_PATH,
       extraTree: AGENT_OVERLAY_RELATIVE_PATH,
@@ -388,6 +409,8 @@ function resolveAgentImageConfig(config) {
       "StateDirMode",
       "StateDirOwner",
     ],
+    CrunRuntime: ["Name", "Version", "Asset", "Url", "Sha256"],
+    CrunInstall: ["Binary", "BinaryMode", "BinaryOwner"],
     Service: [
       "Unit",
       "UnitPath",
@@ -405,6 +428,7 @@ function resolveAgentImageConfig(config) {
   const paths = resolvePaths(config);
   const build = resolveBuild(config, paths);
   const install = resolveInstall(config);
+  const crun = resolveCrun(config);
   const service = resolveService(config, install);
   const tmpfiles = resolveTmpfiles(config, install);
 
@@ -412,6 +436,7 @@ function resolveAgentImageConfig(config) {
     paths,
     build,
     install,
+    crun,
     service,
     tmpfiles,
   };
@@ -592,6 +617,51 @@ function resolveInstall(config) {
       path: stateDir,
       mode: stateDirMode,
       owner: stateDirOwner,
+    },
+  };
+}
+
+function resolveCrun(config) {
+  const name = getSingleValue(config, "CrunRuntime", "Name");
+  assertExpected(name, "crun", "CrunRuntime.Name");
+
+  const version = getSingleValue(config, "CrunRuntime", "Version");
+  assertExpected(version, CRUN_VERSION, "CrunRuntime.Version");
+
+  const asset = getSingleValue(config, "CrunRuntime", "Asset");
+  assertExpected(asset, CRUN_ASSET, "CrunRuntime.Asset");
+
+  const url = getSingleValue(config, "CrunRuntime", "Url");
+  assertExpected(url, CRUN_URL, "CrunRuntime.Url");
+
+  const sha256 = getSingleValue(config, "CrunRuntime", "Sha256");
+  assertExpected(sha256, CRUN_SHA256, "CrunRuntime.Sha256");
+  validateSha256Hex(sha256, "CrunRuntime.Sha256");
+
+  const binaryPath = validateCanonicalPosixPath(getSingleValue(config, "CrunInstall", "Binary"), {
+    label: "CrunInstall.Binary",
+    root: "/usr",
+    allowRoot: false,
+  });
+  assertExpected(binaryPath, CRUN_BINARY, "CrunInstall.Binary");
+
+  const binaryMode = validateMode(getSingleValue(config, "CrunInstall", "BinaryMode"), "CrunInstall.BinaryMode");
+  assertExpected(binaryMode, "0755", "CrunInstall.BinaryMode");
+
+  const binaryOwner = validateOwner(getSingleValue(config, "CrunInstall", "BinaryOwner"), "CrunInstall.BinaryOwner");
+  assertExpected(binaryOwner, "root:root", "CrunInstall.BinaryOwner");
+
+  return {
+    name,
+    version,
+    asset,
+    url,
+    sha256,
+    binary: {
+      kind: "binary",
+      path: binaryPath,
+      mode: binaryMode,
+      owner: binaryOwner,
     },
   };
 }
@@ -814,6 +884,13 @@ function validateMode(value, label) {
 function validateOwner(value, label) {
   if (!/^[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*$/.test(value)) {
     throw new ConfigValidationError(`${label} must be a user:group owner pair`);
+  }
+  return value;
+}
+
+function validateSha256Hex(value, label) {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new ConfigValidationError(`${label} must be a 64-character lowercase sha256 hex digest`);
   }
   return value;
 }
