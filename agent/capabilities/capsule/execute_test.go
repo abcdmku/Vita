@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/network"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	capsulestorage "github.com/vita/agent/storage/capsules"
 )
@@ -442,6 +443,182 @@ func TestExecutionManifestDecodesAndValidatesDataVolumes(t *testing.T) {
 	invalid := strings.Replace(string(raw), `"persistence":"persistent"`, `"persistence":"ephemeral"`, 1)
 	if err := json.Unmarshal([]byte(invalid), &manifest); err == nil {
 		t.Fatal("Unmarshal accepted an unsupported ephemeral volume")
+	}
+}
+
+func TestExecutionManifestDecodesAndValidatesNetwork(t *testing.T) {
+	if _, ok := executionManifestFields["network"]; !ok {
+		t.Fatal("executionManifestFields is missing network")
+	}
+
+	raw := []byte(networkManifestJSON(executeEntry()))
+	var manifest ExecutionManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("Unmarshal valid network manifest returned error: %v", err)
+	}
+	if manifest.Network == nil {
+		t.Fatal("Network = nil, want parsed network grants")
+	}
+	if len(manifest.Network.Ingress) != 1 {
+		t.Fatalf("Network.Ingress length = %d, want 1", len(manifest.Network.Ingress))
+	}
+	if len(manifest.Network.Egress) != 1 {
+		t.Fatalf("Network.Egress length = %d, want 1", len(manifest.Network.Egress))
+	}
+	ingress := manifest.Network.Ingress[0]
+	if ingress.Protocol != network.ProtoTCP || ingress.Port != 8787 || ingress.SourceCIDR != "127.0.0.1/32" || ingress.Interface != "lo" {
+		t.Fatalf("Network.Ingress[0] = %#v, want canonical loopback tcp grant", ingress)
+	}
+	egress := manifest.Network.Egress[0]
+	if egress.Protocol != network.ProtoTCP || !reflect.DeepEqual(egress.Ports, []int{443}) || egress.Interface != "eth0" {
+		t.Fatalf("Network.Egress[0] = %#v, want tcp 443 eth0 grant", egress)
+	}
+	wantDestinations := []string{"203.0.113.10/32", "2001:db8::/32"}
+	if !reflect.DeepEqual(egress.Destinations, wantDestinations) {
+		t.Fatalf("Network.Egress[0].Destinations = %#v, want %#v", egress.Destinations, wantDestinations)
+	}
+}
+
+func TestExecutionManifestRejectsInvalidNetworkGrants(t *testing.T) {
+	base := networkManifestJSON(executeEntry())
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "host-bit smuggled cidr",
+			raw:  strings.Replace(base, `"sourceCidr":"127.0.0.1/32"`, `"sourceCidr":"10.0.0.5/24"`, 1),
+		},
+		{
+			name: "wide-open cidr without unsafe flag",
+			raw:  strings.Replace(base, `"sourceCidr":"127.0.0.1/32"`, `"sourceCidr":"0.0.0.0/0"`, 1),
+		},
+		{
+			name: "hostname egress destination",
+			raw:  strings.Replace(base, `"203.0.113.10"`, `"example.com"`, 1),
+		},
+		{
+			name: "bad port",
+			raw:  strings.Replace(base, `"ports":[443]`, `"ports":[0]`, 1),
+		},
+		{
+			name: "bad interface",
+			raw:  strings.Replace(base, `"interface":"eth0"`, `"interface":"bad iface"`, 1),
+		},
+		{
+			name: "bad protocol",
+			raw:  strings.Replace(base, `"protocol":"tcp"`, `"protocol":"http"`, 1),
+		},
+		{
+			name: "bad direction",
+			raw:  strings.Replace(base, `"name":"health"`, `"direction":"egress","name":"health"`, 1),
+		},
+		{
+			name: "control character in name",
+			raw:  strings.Replace(base, `"name":"health"`, "\"name\":\"health\\ncheck\"", 1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var manifest ExecutionManifest
+			err := json.Unmarshal([]byte(tt.raw), &manifest)
+			if err == nil {
+				t.Fatal("Unmarshal accepted invalid network grant")
+			}
+			var invalid *ExecuteInvalidRequestError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("Unmarshal error = %T %v, want ExecuteInvalidRequestError", err, err)
+			}
+		})
+	}
+}
+
+func TestFileExecutionManifestStoreLoadsNetworkFromDisk(t *testing.T) {
+	entry := executeEntry()
+	root := t.TempDir()
+	baseDir := filepath.Join(root, entry.ID)
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "manifest.json"), []byte(networkManifestJSON(entry)), 0o644); err != nil {
+		t.Fatalf("WriteFile manifest returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "main.ts"), []byte("console.log('ok');\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile entrypoint returned error: %v", err)
+	}
+
+	manifest, err := (fileExecutionManifestStore{root: root}).Load(context.Background(), entry.ID)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if manifest.Network == nil || len(manifest.Network.Ingress) != 1 || len(manifest.Network.Egress) != 1 {
+		t.Fatalf("Network = %#v, want parsed ingress and egress grants", manifest.Network)
+	}
+	if filepath.Clean(manifest.baseDir) != filepath.Clean(baseDir) {
+		t.Fatalf("baseDir = %q, want %q", manifest.baseDir, baseDir)
+	}
+}
+
+func TestExecutionManifestAbsentNetworkIsUnchanged(t *testing.T) {
+	raw := []byte(`{
+		"id":"local.test.capsule",
+		"version":"1.0.0",
+		"integrity":"` + validSHA256SRI + `",
+		"packageClass":"ts-service",
+		"runtime":{"typescript":{"entrypoint":"main.ts"}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32}
+	}`)
+	var manifest ExecutionManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("Unmarshal manifest without network returned error: %v", err)
+	}
+	if manifest.Network != nil {
+		t.Fatalf("Network = %#v, want nil for absent network", manifest.Network)
+	}
+}
+
+func TestExecuteWithNetworkGrantsReportsCountsWithoutWideningSandbox(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	manifest := executeManifest(entry)
+	manifest.Network = validExecutionNetwork()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		status: transientUnitStatus{DynamicUID: "61408"},
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{
+			entry.ID: manifest,
+		},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+
+	props := propertyValues(launcher.starts[0].Properties)
+	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX")
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse := response.(ExecuteReadResponse)
+	if readResponse.Last == nil || readResponse.Last.Network == nil {
+		t.Fatalf("Last.Network = %#v, want network count status", readResponse.Last)
+	}
+	if readResponse.Last.Network.Ingress != 1 || readResponse.Last.Network.Egress != 1 {
+		t.Fatalf("Last.Network = %#v, want ingress=1 egress=1", readResponse.Last.Network)
 	}
 }
 
@@ -1067,6 +1244,49 @@ func ociManifestJSON(entry CapsuleEntry) string {
 		"runtime":{"oci":{"image":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entrypoint":["/init"]}}},
 		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32}
 	}`
+}
+
+func networkManifestJSON(entry CapsuleEntry) string {
+	return `{
+		"id":"` + entry.ID + `",
+		"version":"` + entry.Version + `",
+		"integrity":"` + entry.Integrity + `",
+		"packageClass":"ts-service",
+		"runtime":{"typescript":{"entrypoint":"main.ts"}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32},
+		"network":{
+			"ingress":[
+				{"name":"health","protocol":"tcp","port":8787,"sourceCidr":"127.0.0.1/32","interface":"lo","public":false}
+			],
+			"egress":[
+				{"name":"api","protocol":"tcp","destinations":["203.0.113.10","2001:db8::/32"],"ports":[443],"interface":"eth0"}
+			]
+		}
+	}`
+}
+
+func validExecutionNetwork() *ExecutionNetwork {
+	return &ExecutionNetwork{
+		Ingress: []ExecutionNetworkIngressRule{
+			{
+				Name:       "health",
+				Protocol:   network.ProtoTCP,
+				Port:       8787,
+				SourceCIDR: "127.0.0.1/32",
+				Interface:  "lo",
+				Public:     false,
+			},
+		},
+		Egress: []ExecutionNetworkEgressRule{
+			{
+				Name:         "api",
+				Protocol:     network.ProtoTCP,
+				Destinations: []string{"203.0.113.10/32"},
+				Ports:        []int{443},
+				Interface:    "eth0",
+			},
+		},
+	}
 }
 
 func executeApply(entry CapsuleEntry) ExecuteApplyRequest {

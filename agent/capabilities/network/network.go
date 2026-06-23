@@ -374,7 +374,15 @@ func normalizeCIDR(value string) (netip.Prefix, error) {
 	if err != nil {
 		return netip.Prefix{}, errors.New("must be a CIDR prefix")
 	}
-	return prefix.Masked(), nil
+	masked := prefix.Masked()
+	if prefix != masked {
+		return netip.Prefix{}, errors.New("must be a canonical CIDR prefix")
+	}
+	return masked, nil
+}
+
+func NormalizeCIDR(value string) (netip.Prefix, error) {
+	return normalizeCIDR(value)
 }
 
 var interfaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
@@ -386,8 +394,16 @@ func validInterfaceName(value string) bool {
 		interfaceNamePattern.MatchString(value)
 }
 
+func ValidInterfaceName(value string) bool {
+	return validInterfaceName(value)
+}
+
 func sourceCoversAll(prefix netip.Prefix) bool {
 	return prefix.Bits() == 0 && prefix.Addr().IsUnspecified()
+}
+
+func SourceCoversAll(prefix netip.Prefix) bool {
+	return sourceCoversAll(prefix)
 }
 
 func renderPolicy(policy Policy) []byte {

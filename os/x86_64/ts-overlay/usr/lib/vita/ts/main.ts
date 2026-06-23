@@ -71,6 +71,8 @@ const CAPSULE_OCI_EXECUTED_MARKER = "VITA-CAPSULE-OCI-EXECUTED";
 const CAPSULE_OCI_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-OCI-EXECUTE-REJECT";
 const CAPSULE_OCI_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-OCI-EXECUTE-ERROR";
 const CAPSULE_OCI_LIMITS_MARKER = "VITA-CAPSULE-OCI-LIMITS";
+const CAPSULE_NET_PARSE_MARKER = "VITA-CAPSULE-NET-PARSE";
+const CAPSULE_NET_REJECT_MARKER = "VITA-CAPSULE-NET-REJECT";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
@@ -109,11 +111,21 @@ const HOSTILE_OCI_CAPSULE_ENTRY = Object.freeze({
   state: "installed",
   version: "1.0.0",
 }) satisfies CapsuleEntry;
+const INVALID_NET_CAPSULE_ENTRY = Object.freeze({
+  id: "local.invalid-net.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
 const OCI_CAPSULE_REGISTRY = Object.freeze([
   ON_DEVICE_CAPSULE_ENTRY,
   OCI_CAPSULE_ENTRY,
   MISSING_OCI_CAPSULE_ENTRY,
   HOSTILE_OCI_CAPSULE_ENTRY,
+]) satisfies readonly CapsuleEntry[];
+const CAPSULE_NET_REGISTRY = Object.freeze([
+  ON_DEVICE_CAPSULE_ENTRY,
+  INVALID_NET_CAPSULE_ENTRY,
 ]) satisfies readonly CapsuleEntry[];
 const STATE_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
@@ -275,6 +287,34 @@ const FORCED_INVALID_CAPSULE_EXECUTE_PLAN = Object.freeze({
           id: "local.missing.capsule",
           integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
           version: ON_DEVICE_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const CAPSULE_NET_REGISTRY_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: "capsule.registry",
+      request: Object.freeze({
+        desired: Object.freeze({
+          capsules: CAPSULE_NET_REGISTRY,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_INVALID_CAPSULE_NET_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: INVALID_NET_CAPSULE_ENTRY.id,
+          integrity: INVALID_NET_CAPSULE_ENTRY.integrity,
+          version: INVALID_NET_CAPSULE_ENTRY.version,
         }),
       }),
     }),
@@ -926,6 +966,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     }
 
     emit(formatCapsuleExecutedMarker(state.status));
+    emit(formatCapsuleNetworkParseMarker(state.status));
     const volume = capsuleVolumeStatus(state.status);
     if (volume === undefined) {
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=volume_state_missing status=FAILSAFE`);
@@ -947,7 +988,41 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     return;
   }
 
+  await emitForcedCapsuleNetworkRejectMarker(client);
   await emitForcedCapsuleExecuteRejectMarker(client);
+}
+
+async function emitForcedCapsuleNetworkRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const registryResult = await client.apply(CAPSULE_NET_REGISTRY_PLAN);
+
+    if (registryResult.outcome !== "committed") {
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${agentApplyResultReason(registryResult)} status=FAILSAFE`);
+      return;
+    }
+
+    const result = await client.apply(FORCED_INVALID_CAPSULE_NET_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_NET_REJECT_MARKER}: reason=not_rejected status=FAILSAFE`);
 }
 
 async function emitForcedCapsuleExecuteRejectMarker(
@@ -1097,7 +1172,13 @@ interface CapsuleExecuteStatus {
   readonly health: "OK";
   readonly status: "OK";
   readonly volumes: readonly CapsuleVolumeStatus[];
+  readonly network?: CapsuleNetworkStatus;
   readonly ociLimits?: CapsuleOCILimitsStatus;
+}
+
+interface CapsuleNetworkStatus {
+  readonly ingress: number;
+  readonly egress: number;
 }
 
 interface CapsuleVolumeStatus {
@@ -1150,6 +1231,7 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
   const health = readStringField(last, "health");
   const status = readStringField(last, "status");
   const volumes = parseCapsuleVolumeStatuses(last["volumes"]);
+  const network = parseCapsuleNetworkStatus(last["network"]);
   const ociLimits = parseCapsuleOCILimitsStatus(last["ociLimits"]);
 
   if (
@@ -1172,11 +1254,18 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
     volumes,
   } satisfies CapsuleExecuteStatus;
 
+  const statusWithNetwork = network === undefined
+    ? executeStatus
+    : {
+        ...executeStatus,
+        network,
+      } satisfies CapsuleExecuteStatus;
+
   if (ociLimits !== undefined) {
     return {
       ok: true,
       status: {
-        ...executeStatus,
+        ...statusWithNetwork,
         ociLimits,
       },
     };
@@ -1184,7 +1273,28 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
 
   return {
     ok: true,
-    status: executeStatus,
+    status: statusWithNetwork,
+  };
+}
+
+function parseCapsuleNetworkStatus(value: unknown): CapsuleNetworkStatus | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const ingress = readNonNegativeIntegerField(value, "ingress");
+  const egress = readNonNegativeIntegerField(value, "egress");
+
+  if (ingress === undefined || egress === undefined) {
+    return undefined;
+  }
+
+  return {
+    egress,
+    ingress,
   };
 }
 
@@ -1283,6 +1393,26 @@ function formatCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `unit=${status.unit} ` +
     `uid=${status.dynamicUid} ` +
     `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function formatCapsuleNetworkParseMarker(status: CapsuleExecuteStatus): string {
+  if (status.network === undefined) {
+    return (
+      `${CAPSULE_NET_PARSE_MARKER}: ` +
+      `id=${status.id} ` +
+      "egress=0 " +
+      "ingress=0 " +
+      "status=FAILSAFE"
+    );
+  }
+
+  return (
+    `${CAPSULE_NET_PARSE_MARKER}: ` +
+    `id=${status.id} ` +
+    `egress=${status.network.egress} ` +
+    `ingress=${status.network.ingress} ` +
     "status=OK"
   );
 }
