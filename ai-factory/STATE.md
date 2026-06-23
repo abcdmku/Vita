@@ -35,7 +35,12 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     VITA-PREVIEW) dispatched to an Opus builder** (Codex will cross-review). Follow-up noted: make safe-normalize's
     proxy guardian structurally fail-CLOSED via the direct `node:util` import (proven-working as shipped on the pinned
     Deno). NEXT slices: apply + a persistent PDS on the /var partition; then capsules.
-  - **NEXT (wave 1):** P1-032 installer still in round-5 codex↔opus cross-review (converging).
+  - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
+    re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
+    safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
+    unresolvable), no lazy unmount, e2fsck-fatal, unknown-target-size fatal, grows only vita-data. **The 4 original
+    install-wave gaps (persistence, RAUC, on-device TS runtime, installer) are DONE — the node is installable + boots
+    a usable TS OS.** Remaining for a complete node: **capsules + PDS** (wave 2/3), and on-device apply (agentd wiring).
 - **Codex usage-limit window (~23:57–00:30 UTC):** per the owner, the loop did NOT idle — it switched the
   worker substrate to **Opus 4.8 subagents** (builders) with **independent Opus reviewers** as the R2/R3
   gate substitute (Codex `npm run review` was also down), + orchestrator independent verification. Landed
