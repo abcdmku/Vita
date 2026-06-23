@@ -31,10 +31,13 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     pure P9-001 evaluator (byte-identical vendoring + a proxy-resolver swap proven equivalent under Deno by the Opus
     cross-reviewer) runs at boot under the unprivileged Deno sandbox: serial shows `VITA-EVAL: caps=13 ops=3
     planHash=cb1cc2e0… status=OK` + `VITA-EVAL-REJECT` (fail-closed). Codex-built, Opus-cross-reviewed (approve),
-    `wsl-verify ts` now guards both VITA-TS + VITA-EVAL. **P1-034 (on-device PREVIEW: normalize+diff+explain →
-    VITA-PREVIEW) dispatched to an Opus builder** (Codex will cross-review). Follow-up noted: make safe-normalize's
-    proxy guardian structurally fail-CLOSED via the direct `node:util` import (proven-working as shipped on the pinned
-    Deno). NEXT slices: apply + a persistent PDS on the /var partition; then capsules.
+    `wsl-verify ts` guards VITA-TS + VITA-EVAL + VITA-PREVIEW. **P1-034 (on-device config-change PREVIEW) MERGED +
+    HOST-VERIFIED** — diffs the evaluator's TransactionPlans by capability (re-scoped from a wrong-model round-1; 4
+    codex↔opus rounds hardened the diff fail-closed via a `safeNormalize` whole-envelope gate that rejects throwing
+    AND lying-Proxy inputs). Serial: `VITA-PREVIEW: added=1 removed=1 changed=1` + `VITA-PREVIEW-NOOP`. Follow-up
+    noted: make safe-normalize's proxy guardian structurally fail-CLOSED via the direct `node:util` import
+    (proven-working as shipped on the pinned Deno). **NEXT FRONTIER (R3): on-device APPLY (TS runtime → the agentd
+    privileged executor), a persistent PDS on /var, then capsules — mapping that surface now to author the contracts.**
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
