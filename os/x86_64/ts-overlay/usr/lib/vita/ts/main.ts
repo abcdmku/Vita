@@ -1,89 +1,191 @@
-// Vita on-device TypeScript entrypoint (P1-030) — the first TS code that runs ON the device.
+// Vita on-device TypeScript entrypoint (P1-033).
 //
-// This is the proof-of-life slice: it runs under the pinned, vendored Deno runtime
-// (/usr/lib/vita/deno) as the vita-ts.service oneshot at boot, and prints a single grep-able
-// marker to the serial console so a host boot log proves the TypeScript layer actually ran:
+// Runs under the pinned, vendored Deno runtime as the vita-ts.service oneshot at boot.
+// It keeps the original VITA-TS proof marker, then exercises the real deterministic
+// config -> TransactionPlan evaluator vendored under ./vita/.
 //
-//   VITA-TS: hello from Deno <version> ...
-//
-// It is NOT a hello-world: it imports a REAL piece of the Vita control plane — the strict,
-// fail-closed Semantic Versioning utility vendored verbatim from sdk/typescript/src/semver.ts —
-// and exercises it (parse + precedence compare) so the marker is only emitted after genuine
-// control-plane TS has executed correctly on-device.
-//
-// Determinism / supply chain (CLAUDE.md §6, spec §9.3):
+// Determinism / supply chain:
 //   - NO remote imports. Every import is a relative path to a vendored file under this overlay.
-//   - The Deno binary is version- + sha256-pinned and staged from a verified download
-//     (see os/x86_64/ts-image.conf + os/x86_64/ts-image.mjs); it is never fetched at boot.
-//   - This file reads no untrusted input and performs no network I/O.
-//
-// Run model: `deno run` with NO --allow-* flags. The control-plane logic here is pure, so it
-// needs zero permissions; Deno's default-deny sandbox is the on-device least-privilege posture.
+//   - NO filesystem or network access. The evaluator is pure control-plane logic.
+//   - The representative configs below are fixed literals, so the emitted plan hash is stable.
 
-// Deno runtime globals (`Deno.*`) used below resolve differently in the two typecheck lanes, by
-// DESIGN — and the Node-only shim is deliberately NOT referenced from here so it stays invisible to
-// Deno's own checker:
-//   - `deno check` (AUTHORITATIVE, run against Deno's real lib; config at os/x86_64/deno.json, which
-//     lives OUTSIDE this overlay so it is not copied into the image rootfs by --extra-tree):
-//     Deno provides the real `Deno` global. The Node shim (vendor/deno.shim.d.ts) is EXCLUDED in
-//     deno.json and is not pulled in by any triple-slash here, so Deno never sees a second
-//     declaration of `Deno.version` (the round-2 duplicate/incompatible-ambient-const risk is gone).
-//   - The repo-wide Node `tsc` lane (root tsconfig.json include "os/**/*.ts") has no `Deno` global.
-//     It picks up the ambient shim automatically because the include glob also matches the sibling
-//     vendor/deno.shim.d.ts — no triple-slash reference and no root tsconfig edit are needed. That
-//     keeps this production entrypoint IN the Node lane's coverage while the shim never reaches Deno.
+import { evaluateNodeConfig } from "./vita/evaluate.ts";
+import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
+import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
-import {
-  compareSemver,
-  isValidSemver,
-  parseSemver,
-} from "./vendor/semver.ts";
+const TS_MARKER = "VITA-TS";
+const EVAL_MARKER = "VITA-EVAL";
+const REJECT_MARKER = "VITA-EVAL-REJECT";
 
-const MARKER = "VITA-TS";
+const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
+  Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
+);
 
-// Write the marker to BOTH stdout (captured by the journal -> console for a oneshot service)
-// and directly to /dev/console as a belt-and-suspenders path, so it is visible on the QEMU
-// serial regardless of how the service's stdout is wired. Failure to open /dev/console is
-// non-fatal (e.g. when run by hand under a normal shell) — stdout still carries the marker.
+const VALID_CONFIG = Object.freeze({
+  "hostname.set": Object.freeze({
+    desired: "vita-node-7",
+  }),
+  "node.config": Object.freeze({
+    desired: Object.freeze({
+      mode: "normal",
+      remoteAccess: "disabled",
+    }),
+  }),
+  "time.sync": Object.freeze({
+    desired: Object.freeze({
+      enabled: true,
+      servers: Object.freeze(["Pool.NTP.Org", "2001:0db8::1"]),
+    }),
+  }),
+});
+
+const INVALID_CONFIG = Object.freeze({
+  "time.sync": Object.freeze({
+    desired: Object.freeze({
+      enabled: true,
+      servers: Object.freeze([]),
+    }),
+  }),
+});
+
 function emit(line: string): void {
   console.log(line);
-  try {
-    // Deno.writeTextFileSync needs --allow-write; we run with no perms, so guard it and ignore
-    // a PermissionDenied / NotFound. The journal+console wiring (service StandardOutput) is the
-    // primary path; this is only an extra hop on hosts where it happens to be permitted.
-    Deno.writeTextFileSync("/dev/console", line + "\n", { append: true });
-  } catch {
-    // ignore — stdout already carried the marker
-  }
 }
 
 function main(): number {
-  // Exercise the REAL control-plane semver utility so the marker proves genuine TS ran.
-  const a = parseSemver("1.2.3");
-  const b = parseSemver("1.10.0");
-  if (!a.ok || !b.ok) {
-    emit(`${MARKER}: FAIL semver parse (${a.ok ? "b" : "a"})`);
+  emit(`${TS_MARKER}: hello from Deno ${Deno.version.deno} status=OK`);
+
+  const valid = evaluateNodeConfig(VALID_CONFIG, CAPABILITY_REGISTRY);
+
+  if (!valid.ok) {
+    const first = valid.rejections[0];
+    const code = first?.code ?? "NO_REJECTION";
+    emit(`${EVAL_MARKER}: caps=${CAPABILITY_REGISTRY.size} ops=0 planHash=0 status=FAIL code=${code}`);
     return 1;
   }
 
-  // Precedence: 1.2.3 < 1.10.0 (numeric minor compare, not lexical) — the canonical SemVer §11
-  // gotcha. If the vendored control-plane code is wired correctly this is exactly -1.
-  const cmp = compareSemver(a.value, b.value);
-  const prereleaseRejected = !isValidSemver("1.2.3.4"); // invalid -> must be rejected fail-closed
-
-  const ok = cmp === -1 && prereleaseRejected;
-  const denoVersion = Deno.version.deno;
-
-  // The single grep-able witness the host boot check greps for. Keep "VITA-TS:" as the stable
-  // prefix; the trailing fields are diagnostic.
+  const canonicalPlan = stableStringify(valid.plan);
   emit(
-    `${MARKER}: hello from Deno ${denoVersion} ` +
-      `| control-plane semver: 1.2.3 < 1.10.0 => ${cmp} ` +
-      `| invalid-rejected=${prereleaseRejected} ` +
-      `| status=${ok ? "OK" : "MISMATCH"}`,
+    `${EVAL_MARKER}: caps=${CAPABILITY_REGISTRY.size} ` +
+      `ops=${valid.plan.operations.length} ` +
+      `planHash=${fnv1a64Hex(canonicalPlan)} ` +
+      "status=OK",
   );
 
-  return ok ? 0 : 1;
+  const invalid = evaluateNodeConfig(INVALID_CONFIG, CAPABILITY_REGISTRY);
+
+  if (invalid.ok) {
+    emit(`${REJECT_MARKER}: code=NOT_REJECTED status=FAIL`);
+    return 1;
+  }
+
+  const firstRejection = invalid.rejections[0];
+  const rejectionCode = firstRejection?.code ?? "NO_REJECTION";
+  emit(`${REJECT_MARKER}: code=${rejectionCode} status=OK`);
+
+  return firstRejection === undefined ? 1 : 0;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    const items: string[] = [];
+
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+
+      if (item !== undefined) {
+        items.push(stableStringify(item));
+      }
+    }
+
+    return `[${items.join(",")}]`;
+  }
+
+  if (!isJsonObject(value)) {
+    return JSON.stringify(null);
+  }
+
+  const keys = Object.keys(value).sort(compareStrings);
+  const entries: string[] = [];
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key !== undefined) {
+      entries.push(`${JSON.stringify(key)}:${stableStringify(value[key])}`);
+    }
+  }
+
+  return `{${entries.join(",")}}`;
+}
+
+function fnv1a64Hex(input: string): string {
+  let hash = 0xcbf29ce484222325n;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const codePoint = input.codePointAt(index);
+
+    if (codePoint === undefined) {
+      continue;
+    }
+
+    if (codePoint > 0xffff) {
+      index += 1;
+    }
+
+    hash = writeUtf8Byte(hash, codePoint);
+  }
+
+  return hash.toString(16).padStart(16, "0");
+}
+
+function writeUtf8Byte(hash: bigint, codePoint: number): bigint {
+  if (codePoint <= 0x7f) {
+    return fnvStep(hash, codePoint);
+  }
+
+  if (codePoint <= 0x7ff) {
+    return fnvStep(fnvStep(hash, 0xc0 | (codePoint >> 6)), 0x80 | (codePoint & 0x3f));
+  }
+
+  if (codePoint <= 0xffff) {
+    return fnvStep(
+      fnvStep(fnvStep(hash, 0xe0 | (codePoint >> 12)), 0x80 | ((codePoint >> 6) & 0x3f)),
+      0x80 | (codePoint & 0x3f),
+    );
+  }
+
+  return fnvStep(
+    fnvStep(
+      fnvStep(fnvStep(hash, 0xf0 | (codePoint >> 18)), 0x80 | ((codePoint >> 12) & 0x3f)),
+      0x80 | ((codePoint >> 6) & 0x3f),
+    ),
+    0x80 | (codePoint & 0x3f),
+  );
+}
+
+function fnvStep(hash: bigint, byte: number): bigint {
+  return ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
+}
+
+function compareStrings(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+
+  if (left > right) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 Deno.exit(main());
