@@ -202,12 +202,21 @@ func statOCIEntrypointDirectories(rootfs string, entrypointPath string) error {
 }
 
 func ociEntrypointHostPath(manifest ExecutionManifest) (string, error) {
-	if err := manifest.Runtime.ValidateForPackageClass(executePackageClassOCIService); err != nil {
+	if err := validateOCIBackedRuntime(manifest); err != nil {
 		return "", err
 	}
 	entrypoint := manifest.Runtime.OCI.Image.Entrypoint[0]
 	cleaned := path.Clean(entrypoint)
 	return path.Join(ociRootDirectory(manifest), strings.TrimPrefix(cleaned, "/")), nil
+}
+
+func validateOCIBackedRuntime(manifest ExecutionManifest) error {
+	switch manifest.PackageClass {
+	case executePackageClassOCIService, executePackageClassMicroVMService:
+		return manifest.Runtime.ValidateForPackageClass(manifest.PackageClass)
+	default:
+		return &ExecuteInvalidRequestError{Reason: supportedPackageClassMessage()}
+	}
 }
 
 func ociRootDirectory(manifest ExecutionManifest) string {

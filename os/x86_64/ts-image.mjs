@@ -34,6 +34,8 @@ const CONFIG_PATH = join(HERE, "ts-image.conf");
 const OVERLAY_ROOT = join(HERE, "ts-overlay");
 const OCI_ROOTFS_PATH = join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs");
 const OCI_INIT_PATH = join(OCI_ROOTFS_PATH, "init");
+const MICROVM_ROOTFS_PATH = join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.microvm.capsule", "rootfs");
+const MICROVM_INIT_PATH = join(MICROVM_ROOTFS_PATH, "init");
 
 function fail(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
@@ -124,11 +126,16 @@ async function stage(pin) {
 }
 
 function stageBakedOCIRootfs() {
-  if (!existsSync(OCI_ROOTFS_PATH)) fail(`baked OCI rootfs missing: ${OCI_ROOTFS_PATH}`);
-  if (!existsSync(OCI_INIT_PATH)) fail(`baked OCI entrypoint missing: ${OCI_INIT_PATH}`);
-  chmodDirectories(OCI_ROOTFS_PATH);
-  chmodSync(OCI_INIT_PATH, 0o755);
-  log(`   staged baked OCI rootfs ${OCI_ROOTFS_PATH} (dirs 0755, init 0755)`);
+  stageBakedRootfs("OCI", OCI_ROOTFS_PATH, OCI_INIT_PATH);
+  stageBakedRootfs("microvm", MICROVM_ROOTFS_PATH, MICROVM_INIT_PATH);
+}
+
+function stageBakedRootfs(label, rootfsPath, initPath) {
+  if (!existsSync(rootfsPath)) fail(`baked ${label} rootfs missing: ${rootfsPath}`);
+  if (!existsSync(initPath)) fail(`baked ${label} entrypoint missing: ${initPath}`);
+  chmodDirectories(rootfsPath);
+  chmodSync(initPath, 0o755);
+  log(`   staged baked ${label} rootfs ${rootfsPath} (dirs 0755, init 0755)`);
 }
 
 function chmodDirectories(root) {

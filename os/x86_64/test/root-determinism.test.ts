@@ -91,6 +91,7 @@ const expectedPackageAllowlist = [
   "systemd-sysv",
   "udev",
   "util-linux",
+  "systemd-container",
 ] as const;
 
 test("planRootBuild is deterministic with its default pure inputs", async () => {

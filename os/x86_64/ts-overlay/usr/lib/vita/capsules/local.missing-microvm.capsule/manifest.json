@@ -1,0 +1,22 @@
+{
+  "id": "local.missing-microvm.capsule",
+  "version": "1.0.0",
+  "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  "packageClass": "microvm-service",
+  "runtime": {
+    "oci": {
+      "image": {
+        "digest": "sha256:93056d053347799089cac1bc9c225d224e31822b3cbfbaded42753f41274f57b",
+        "entrypoint": [
+          "/init"
+        ]
+      }
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  }
+}

@@ -24,6 +24,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "systemd-sysv",
   "udev",
   "util-linux",
+  "systemd-container",
 ]);
 
 const COMMON_CONFIG_TEXT = `# Vita immutable Debian root baseline.
@@ -74,6 +75,10 @@ Architecture=x86-64
 
 [Output]
 Output=vita-debian-trixie-x86_64-root
+
+[Content]
+Packages=
+    systemd-container
 `;
 
 const DEFAULT_ROOT_BUILD_INPUT = Object.freeze({
@@ -351,6 +356,7 @@ function resolveMkosiConfig(commonConfig, archConfig) {
     Include: ["Include"],
     Distribution: ["Architecture"],
     Output: ["Output"],
+    Content: ["Packages"],
   });
 
   const include = getSingleValue(archConfig, "Include", "Include");
@@ -372,7 +378,10 @@ function resolveMkosiConfig(commonConfig, archConfig) {
   const bootable = getNoBoolean(commonConfig, "Content", "Bootable");
   const cleanPackageMetadata = getYesBoolean(commonConfig, "Content", "CleanPackageMetadata");
   const withNetwork = getNoBoolean(commonConfig, "Content", "WithNetwork");
-  const packages = getListValue(commonConfig, "Content", "Packages");
+  const packages = [
+    ...getListValue(commonConfig, "Content", "Packages"),
+    ...getOptionalListValue(archConfig, "Content", "Packages"),
+  ];
   const environment = getEnvironment(commonConfig);
 
   assertEquals(distribution, "debian", "Distribution.Distribution");
@@ -435,6 +444,25 @@ function getListValue(config, sectionName, key) {
   const values = getRawValues(config, sectionName, key);
   const tokens = [];
   for (const value of values) {
+    const parts = value.split(/\s+/).filter((part) => part.length > 0);
+    for (const part of parts) {
+      tokens.push(part);
+    }
+  }
+  if (tokens.length === 0) {
+    throw new ConfigValidationError(`${config.label} requires at least one value for ${sectionName}.${key}`);
+  }
+  return tokens;
+}
+
+function getOptionalListValue(config, sectionName, key) {
+  const section = config.sections.get(sectionName);
+  if (section === undefined || !section.has(key)) {
+    return [];
+  }
+
+  const tokens = [];
+  for (const value of section.get(key)) {
     const parts = value.split(/\s+/).filter((part) => part.length > 0);
     for (const part of parts) {
       tokens.push(part);

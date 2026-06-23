@@ -30,11 +30,13 @@ const (
 
 	defaultCapsuleRoot = "/usr/lib/vita/capsules"
 	defaultDenoPath    = "/usr/lib/vita/deno"
+	defaultNspawnPath  = "/usr/bin/systemd-nspawn"
 	systemdRunPath     = "/usr/bin/systemd-run"
 	systemctlPath      = "/usr/bin/systemctl"
 
-	executePackageClassTSService  = "ts-service"
-	executePackageClassOCIService = "oci-service"
+	executePackageClassTSService      = "ts-service"
+	executePackageClassOCIService     = "oci-service"
+	executePackageClassMicroVMService = "microvm-service"
 
 	maxCPUQuotaCores = 64
 	maxMemoryMiB     = 1024 * 1024
@@ -217,10 +219,13 @@ func (e *ExecuteStartError) ApplyErrorCode() string {
 }
 
 func executeStartFailureCode(manifest ExecutionManifest, unit transientUnit, err error) string {
-	if manifest.PackageClass == executePackageClassOCIService {
+	if manifest.PackageClass == executePackageClassOCIService || manifest.PackageClass == executePackageClassMicroVMService {
 		var startErr *transientUnitStartError
 		if errors.As(err, &startErr) && startErr.Code != "" {
 			return startErr.Code
+		}
+		if manifest.PackageClass == executePackageClassMicroVMService {
+			return "microvm_start_failed"
 		}
 		return "oci_start_failed"
 	}
@@ -582,9 +587,9 @@ func (m ExecutionManifest) Validate() error {
 		return &ExecuteInvalidRequestError{Reason: "manifest.integrity must be a real SRI integrity"}
 	}
 	switch m.PackageClass {
-	case executePackageClassTSService, executePackageClassOCIService:
+	case executePackageClassTSService, executePackageClassOCIService, executePackageClassMicroVMService:
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: supportedPackageClassMessage()}
 	}
 	if err := m.Runtime.ValidateForPackageClass(m.PackageClass); err != nil {
 		return err
@@ -681,8 +686,15 @@ func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
 		if err := r.TypeScript.Validate(); err == nil {
 			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for oci-service"}
 		}
+	case executePackageClassMicroVMService:
+		if err := r.OCI.Validate(); err != nil {
+			return err
+		}
+		if err := r.TypeScript.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for microvm-service"}
+		}
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: supportedPackageClassMessage()}
 	}
 	return nil
 }
@@ -1263,8 +1275,10 @@ func statExecutionManifestArtifacts(manifest ExecutionManifest) error {
 		}
 	case executePackageClassOCIService:
 		return statOCIManifestArtifacts(manifest)
+	case executePackageClassMicroVMService:
+		return statOCIManifestArtifacts(manifest)
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: supportedPackageClassMessage()}
 	}
 	return nil
 }
@@ -1275,9 +1289,15 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		return composeTypeScriptTransientUnit(manifest)
 	case executePackageClassOCIService:
 		return composeOCITransientUnit(manifest)
+	case executePackageClassMicroVMService:
+		return composeMicroVMTransientUnit(manifest)
 	default:
-		return transientUnit{}, &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: supportedPackageClassMessage()}
 	}
+}
+
+func supportedPackageClassMessage() string {
+	return "manifest.packageClass must be ts-service, oci-service, or microvm-service"
 }
 
 func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, error) {

@@ -70,6 +70,9 @@ const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
 const CAPSULE_OCI_EXECUTED_MARKER = "VITA-CAPSULE-OCI-EXECUTED";
 const CAPSULE_OCI_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-OCI-EXECUTE-REJECT";
 const CAPSULE_OCI_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-OCI-EXECUTE-ERROR";
+const CAPSULE_MICROVM_MARKER = "VITA-CAPSULE-MICROVM";
+const CAPSULE_MICROVM_REJECT_MARKER = "VITA-CAPSULE-MICROVM-REJECT";
+const CAPSULE_MICROVM_ERROR_MARKER = "VITA-CAPSULE-MICROVM-ERROR";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
@@ -102,10 +105,24 @@ const MISSING_OCI_CAPSULE_ENTRY = Object.freeze({
   state: "installed",
   version: "1.0.0",
 }) satisfies CapsuleEntry;
+const MICROVM_CAPSULE_ENTRY = Object.freeze({
+  id: "local.microvm.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
+const MISSING_MICROVM_CAPSULE_ENTRY = Object.freeze({
+  id: "local.missing-microvm.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
 const OCI_CAPSULE_REGISTRY = Object.freeze([
   ON_DEVICE_CAPSULE_ENTRY,
   OCI_CAPSULE_ENTRY,
   MISSING_OCI_CAPSULE_ENTRY,
+  MICROVM_CAPSULE_ENTRY,
+  MISSING_MICROVM_CAPSULE_ENTRY,
 ]) satisfies readonly CapsuleEntry[];
 const STATE_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
@@ -316,6 +333,36 @@ const FORCED_MISSING_OCI_CAPSULE_EXECUTE_PLAN = Object.freeze({
   ]),
 }) satisfies AgentApplyPlan;
 
+const MICROVM_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: MICROVM_CAPSULE_ENTRY.id,
+          integrity: MICROVM_CAPSULE_ENTRY.integrity,
+          version: MICROVM_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_MISSING_MICROVM_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: MISSING_MICROVM_CAPSULE_ENTRY.id,
+          integrity: MISSING_MICROVM_CAPSULE_ENTRY.integrity,
+          version: MISSING_MICROVM_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
 // Config-change PREVIEW (P1-034): evaluate a CURRENT and a DESIRED config via the
 // real evaluator, then diff the two TransactionPlans by capability. The CURRENT
 // config is the same valid baseline as VALID_CONFIG; the DESIRED config differs in
@@ -499,6 +546,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -519,6 +567,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     }
@@ -531,6 +580,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
@@ -569,6 +619,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -586,6 +637,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -602,6 +654,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   await emitForcedCapsuleRejectMarker(agentTransport);
   await emitCapsuleOCIFetchMarkers(agentTransport);
   await emitOCICapsuleMarkers(agentTransport);
+  await emitMicroVMCapsuleMarkers(agentTransport);
 }
 
 async function emitCapsulePreviewMarker(
@@ -1014,6 +1067,71 @@ async function emitForcedOCICapsuleExecuteRejectMarker(
   emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
 }
 
+async function emitMicroVMCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const registryResult = await client.apply(OCI_CAPSULE_REGISTRY_PLAN);
+
+    if (registryResult.outcome !== "committed") {
+      emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const result = await client.apply(MICROVM_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_MICROVM_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      await emitForcedMicroVMCapsuleRejectMarker(client);
+      return;
+    }
+
+    const state = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+
+    if (!state.ok || state.status.id !== MICROVM_CAPSULE_ENTRY.id) {
+      emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedMicroVMCapsuleRejectMarker(client);
+      return;
+    }
+
+    emit(formatMicroVMCapsuleMarker(state.status));
+  } catch {
+    emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  await emitForcedMicroVMCapsuleRejectMarker(client);
+}
+
+async function emitForcedMicroVMCapsuleRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_MISSING_MICROVM_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_MICROVM_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_MICROVM_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
+}
+
 type CapsuleExecuteReadResult =
   | {
       readonly ok: true;
@@ -1176,6 +1294,17 @@ function formatOCICapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `unit=${status.unit} ` +
     `uid=${status.dynamicUid} ` +
     "root=ro " +
+    `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function formatMicroVMCapsuleMarker(status: CapsuleExecuteStatus): string {
+  return (
+    `${CAPSULE_MICROVM_MARKER}: ` +
+    `id=${status.id} ` +
+    "isolation=nspawn " +
+    "pid1=own " +
     `health=${status.health} ` +
     "status=OK"
   );
