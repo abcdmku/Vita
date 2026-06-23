@@ -20,5 +20,8 @@
     "os/**/*.ts",
     "agent/**/*.ts"
   ],
-  "exclude": ["node_modules", ".vita-worktrees", "**/dist"]
+  "//4": "ts-overlay/** is ON-DEVICE Deno code (uses Deno.* globals, not Node) staged into the rootfs",
+  "//5": "and run by the pinned Deno runtime on-device (P1-030). It is intentionally NOT part of this",
+  "//6": "Node typecheck lane; Deno type-checks it via `deno check` (see os/x86_64/ts-image.conf).",
+  "exclude": ["node_modules", ".vita-worktrees", "**/dist", "os/x86_64/ts-overlay/**"]
 }

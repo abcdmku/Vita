@@ -1,0 +1,44 @@
+# Vita on-device TypeScript runtime (P1-030) — run TS on the device via the pinned Deno runtime.
+#
+# This is the heart of "Vita is a TS OS": at boot it runs /usr/lib/vita/ts/main.ts under the
+# version- + sha256-pinned, vendored Deno binary at /usr/lib/vita/deno and prints a grep-able
+# marker ("VITA-TS: hello from Deno <version> ...") to the serial console so a host boot log
+# proves the TypeScript control-plane layer actually executed on-device.
+#
+# Type=oneshot: it runs once, prints, and exits (the first slice is proof-of-life, not a daemon).
+# RemainAfterExit=yes so `systemctl status` shows it as active after it finishes.
+# StandardOutput/Error=journal+console mirrors the smoke sb-state probe so the marker lands on the
+# serial even under the autologin getty (same reliable wiring used by vita-sb-state.service).
+#
+# Determinism / least privilege (spec §9.3, §8.2):
+#   - `deno run` is invoked with NO --allow-* flags: Deno's default-deny sandbox is the on-device
+#     least-privilege posture. main.ts is pure (parse + compare a vendored semver), needs nothing.
+#   - --no-remote forbids any network module fetch; --cached-only forbids touching the module
+#     cache. Combined with the vendored relative imports this guarantees no remote imports at boot.
+#   - The Deno binary itself is staged from a verified, pinned download at BUILD time, never fetched
+#     here (see os/x86_64/ts-image.conf / ts-image.mjs).
+[Unit]
+Description=Vita on-device TypeScript runtime (Deno)
+Documentation=https://vita.local/ts
+# Run after multi-user basics are up; deliberately NOT ordered after network-online.target (no
+# network is needed and waiting on it hangs headless/no-NIC boots ~120s — same rationale as agentd).
+After=vita-agentd.service
+Wants=vita-agentd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Invoke the pinned, vendored runtime explicitly (not a PATH lookup) so we run exactly the staged
+# binary. No --allow-* flags -> Deno's default sandbox. --no-remote/--cached-only forbid any network
+# or cache module resolution so only the vendored relative imports under /usr/lib/vita/ts can load.
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet /usr/lib/vita/ts/main.ts
+StandardOutput=journal+console
+StandardError=journal+console
+# A read-only verity root has no writable HOME/cache; point Deno's dirs at /run (tmpfs) so it never
+# tries to create a cache under a read-only path. We pass --cached-only so nothing is actually
+# written, but DENO_DIR keeps Deno from erroring on a missing/RO default cache location.
+Environment=DENO_DIR=/run/vita-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
+RuntimeDirectory=vita-deno
+
+[Install]
+WantedBy=multi-user.target

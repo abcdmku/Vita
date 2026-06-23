@@ -9,6 +9,9 @@ out/
 *.tsbuildinfo
 # agentd binary staged into the agent overlay by build-and-boot (a build artifact, not source)
 os/x86_64/agent-overlay/usr/lib/vita/
+# Deno runtime binary staged into the ts overlay by ts-image.mjs (a build artifact, not source).
+# Anchored to the FILE so the committed TS sources under ts-overlay/usr/lib/vita/ts/ stay tracked.
+os/x86_64/ts-overlay/usr/lib/vita/deno
 
 # worker / loop runtime artifacts
 .codex-output/
