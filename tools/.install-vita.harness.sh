@@ -4,10 +4,18 @@
 # loopback images (no real hardware) plus every safety guard. Prints "ASSERT n/N pass" and exits 0
 # only if ALL assertions pass.
 #
-# Round-3 additions (the 3 new cases the reviewer asked for):
+# Round-3 additions:
 #   (a) findmnt absent  -> installer exits 2 (no write)
 #   (b) busy target whose plain umount FAILS -> exits 3 (no dd, no lazy-detach)
 #   (c) e2fsck serious failure -> abort BEFORE resize2fs
+# Round-4 additions (the 3 BLOCKING fixes the reviewer asked for):
+#   FIX 1 (fail-closed system-disk check):
+#     - GROUP L2: Btrfs-subvol root '/dev/loopN[/@]' is STRIPPED and the backing disk refused.
+#     - GROUP L3: overlay/live-media '/' that can't be resolved -> FAIL-CLOSED abort (not skipped).
+#     - GROUP L4: overlay '/' + a critical mount ('/etc') on the target -> refused.
+#   FIX 3 (real post-P1-029 verity layout):
+#     - GROUP G:  ESP+root+verity+vita-data image -> vita-data GROWS; root + hash UNTOUCHED.
+#     - GROUP G2: legacy ESP+root+verity (NO vita-data) image -> growth SKIPPED; nothing grown.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,18 +64,39 @@ build_full_image() {
   mke2fs -F -t ext4 -L vita-data "${d}p2" >/dev/null 2>&1
   losetup -d "$d"; echo "$img"
 }
-# Build a verity-style image: ESP + ext4 root + a LAST partition that is NOT vita-data (the hash).
+# Build the REAL current verity layout (post-P1-029): ESP + ext4 root + root-verity HASH + a LAST
+# ext4 vita-data partition (os/x86_64/repart-verity/{00-esp,10-root,20-root-verity,40-data}.conf).
+# This is what `VITA_VERITY=1` builds NOW, so the installer MUST grow vita-data (the last partition)
+# while leaving root + the verity hash untouched.
 build_verity_image() {
-  local img="$WORK/vita-verity.raw"; truncate -s 40M "$img"
+  local img="$WORK/vita-verity.raw"; truncate -s 48M "$img"
   local d; d="$(losetup --find --show --partscan "$img")"; LOOPS+=("$d")
   sgdisk -o "$d" >/dev/null
-  sgdisk -n 1:2048:+8M -t 1:EF00 -c 1:vita-esp        "$d" >/dev/null
-  sgdisk -n 2:0:+12M   -t 2:8300 -c 2:vita-root       "$d" >/dev/null
-  sgdisk -n 3:0:0      -t 3:8300 -c 3:vita-root-verity "$d" >/dev/null
+  sgdisk -n 1:2048:+8M -t 1:EF00 -c 1:vita-esp         "$d" >/dev/null
+  sgdisk -n 2:0:+12M   -t 2:8300 -c 2:vita-root        "$d" >/dev/null
+  sgdisk -n 3:0:+4M    -t 3:8300 -c 3:vita-root-verity "$d" >/dev/null
+  sgdisk -n 4:0:0      -t 4:8300 -c 4:vita-data        "$d" >/dev/null   # LAST partition (growable)
   partprobe "$d" 2>/dev/null || true; sleep 0.5
   mkfs.vfat "${d}p1" >/dev/null 2>&1
   mke2fs -F -t ext4 -L vita-root "${d}p2" >/dev/null 2>&1
-  # leave p3 as raw (the "hash" partition) - deliberately NOT ext4, NOT vita-data
+  # p3 = the dm-verity HASH partition: deliberately NOT ext4, NOT vita-data (raw bytes).
+  dd if=/dev/urandom of="${d}p3" bs=1M count=1 status=none 2>/dev/null || true
+  # p4 = the persistent ext4 vita-data (FileSystemLabel=vita-data in the real 40-data.conf).
+  mke2fs -F -t ext4 -L vita-data "${d}p4" >/dev/null 2>&1
+  losetup -d "$d"; echo "$img"
+}
+# Build a NO-DATA image (legacy/older shape): ESP + ext4 root + raw root-verity hash, NO vita-data.
+# The installer must SKIP growth on this one (never grow root or the verity hash).
+build_nodata_image() {
+  local img="$WORK/vita-nodata.raw"; truncate -s 40M "$img"
+  local d; d="$(losetup --find --show --partscan "$img")"; LOOPS+=("$d")
+  sgdisk -o "$d" >/dev/null
+  sgdisk -n 1:2048:+8M -t 1:EF00 -c 1:vita-esp         "$d" >/dev/null
+  sgdisk -n 2:0:+12M   -t 2:8300 -c 2:vita-root        "$d" >/dev/null
+  sgdisk -n 3:0:0      -t 3:8300 -c 3:vita-root-verity "$d" >/dev/null   # LAST = the hash, NOT data
+  partprobe "$d" 2>/dev/null || true; sleep 0.5
+  mkfs.vfat "${d}p1" >/dev/null 2>&1
+  mke2fs -F -t ext4 -L vita-root "${d}p2" >/dev/null 2>&1
   dd if=/dev/urandom of="${d}p3" bs=1M count=1 status=none 2>/dev/null || true
   losetup -d "$d"; echo "$img"
 }
@@ -79,8 +108,9 @@ run() { # run <expected_exit> -- <cmd...>  ; sets RC and OUT
 }
 
 note "Build synthetic images"
-FULL_IMG="$(build_full_image)";  echo "  full image:   $FULL_IMG ($(stat -c%s "$FULL_IMG") bytes)"
-VERITY_IMG="$(build_verity_image)"; echo "  verity image: $VERITY_IMG ($(stat -c%s "$VERITY_IMG") bytes)"
+FULL_IMG="$(build_full_image)";   echo "  full image:    $FULL_IMG ($(stat -c%s "$FULL_IMG") bytes)"
+VERITY_IMG="$(build_verity_image)"; echo "  verity image:  $VERITY_IMG ($(stat -c%s "$VERITY_IMG") bytes)  [ESP+root+verity+vita-data]"
+NODATA_IMG="$(build_nodata_image)"; echo "  no-data image: $NODATA_IMG ($(stat -c%s "$NODATA_IMG") bytes)  [ESP+root+verity, NO vita-data]"
 
 ############################################################################################
 note "GROUP A - argument / usage guards (no writes)"
@@ -175,20 +205,50 @@ if [ "${FSB:-0}" -gt 20000 ]; then ok "F6 ext4 filesystem resized (block count $
 if sgdisk -v "$TGT_F" >/dev/null 2>&1; then ok "F7 sgdisk -v clean after install"; else bad "F7 sgdisk -v reported problems"; fi
 
 ############################################################################################
-note "GROUP G - verity image: growth SKIPPED, hash partition untouched"
+note "GROUP G - REAL verity layout (ESP+root+verity+vita-data): vita-data GROWS, root+hash untouched"
+# This is the post-P1-029 layout. The installer MUST grow the LAST partition (vita-data, #4) and
+# leave the root (#2) and verity HASH (#3) partitions byte/extent identical.
 TGT_G="$(mkloop 200M)"
-# capture the verity image's last partition (hash) bytes to prove it is byte-identical after install
-OUT="$(bash "$INSTALLER" "$TGT_G" --yes --grow-fs --image "$VERITY_IMG" 2>&1)"; RC=$?
-assert_eq 0 "$RC" "G1 verity write -> exit 0"
-assert_contains "$OUT" "no partition labeled 'vita-data'" "G2 growth SKIPPED (no vita-data)"
-assert_contains "$OUT" "RESULT: PASS" "G3 RESULT: PASS"
-partprobe "$TGT_G" 2>/dev/null || true; sleep 0.5
-# The hash partition (#3) must NOT have been grown: compare its sector count to the image's.
+# Capture the image's pre-install last-sectors for root(#2) and hash(#3) to prove they don't change.
 IMGLD="$(losetup --find --show --partscan "$VERITY_IMG")"; LOOPS+=("$IMGLD"); partprobe "$IMGLD" 2>/dev/null || true; sleep 0.3
+IMG_P2_LAST="$(sgdisk -i 2 "$IMGLD" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
 IMG_P3_LAST="$(sgdisk -i 3 "$IMGLD" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
-TGT_P3_LAST="$(sgdisk -i 3 "$TGT_G" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
 losetup -d "$IMGLD" 2>/dev/null || true
-assert_eq "$IMG_P3_LAST" "$TGT_P3_LAST" "G4 verity HASH partition NOT grown (same last sector)"
+OUT="$(bash "$INSTALLER" "$TGT_G" --yes --grow-fs --image "$VERITY_IMG" 2>&1)"; RC=$?
+assert_eq 0 "$RC" "G1 verity+data write+grow -> exit 0"
+assert_contains "$OUT" "vita-data partition = #4" "G2 installer identified vita-data as partition #4"
+assert_not_contains "$OUT" "no partition labeled 'vita-data'" "G3 growth NOT skipped (vita-data present)"
+assert_contains "$OUT" "RESULT: PASS" "G4 RESULT: PASS"
+partprobe "$TGT_G" 2>/dev/null || true; sleep 0.5
+# vita-data (#4) GREW to (nearly) fill 200M: end sector should be well past the ~48M image.
+DATA_END_G="$(sgdisk -i 4 "$TGT_G" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
+if [ "${DATA_END_G:-0}" -gt 300000 ]; then ok "G5 vita-data grew on verity image (last sector $DATA_END_G > 300000)"; else bad "G5 vita-data did NOT grow on verity image (last sector ${DATA_END_G:-?})"; fi
+# vita-data name preserved
+NM_G="$(sgdisk -i 4 "$TGT_G" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'.*/\1/p")"
+assert_eq "vita-data" "$NM_G" "G6 vita-data name preserved after grow"
+# root (#2) and verity HASH (#3) must be UNTOUCHED (same last sector as the image).
+TGT_P2_LAST="$(sgdisk -i 2 "$TGT_G" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
+TGT_P3_LAST="$(sgdisk -i 3 "$TGT_G" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
+assert_eq "$IMG_P2_LAST" "$TGT_P2_LAST" "G7 root partition NOT grown (same last sector)"
+assert_eq "$IMG_P3_LAST" "$TGT_P3_LAST" "G8 verity HASH partition NOT grown (same last sector)"
+# ext4 filesystem on vita-data was resized
+FSB_G="$(dumpe2fs -h "${TGT_G}p4" 2>/dev/null | sed -n 's/^Block count:[[:space:]]*\([0-9]*\).*/\1/p')"
+if [ "${FSB_G:-0}" -gt 20000 ]; then ok "G9 vita-data ext4 resized (block count $FSB_G)"; else bad "G9 vita-data ext4 NOT resized (block count ${FSB_G:-?})"; fi
+
+############################################################################################
+note "GROUP G2 - NO-DATA image (ESP+root+verity, no vita-data): growth SKIPPED, nothing grown"
+TGT_GN="$(mkloop 200M)"
+IMGLD2="$(losetup --find --show --partscan "$NODATA_IMG")"; LOOPS+=("$IMGLD2"); partprobe "$IMGLD2" 2>/dev/null || true; sleep 0.3
+IMG_ND_P3_LAST="$(sgdisk -i 3 "$IMGLD2" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
+losetup -d "$IMGLD2" 2>/dev/null || true
+OUT="$(bash "$INSTALLER" "$TGT_GN" --yes --grow-fs --image "$NODATA_IMG" 2>&1)"; RC=$?
+assert_eq 0 "$RC" "GN1 no-data write -> exit 0"
+assert_contains "$OUT" "no partition labeled 'vita-data'" "GN2 growth SKIPPED (no vita-data partition)"
+assert_contains "$OUT" "RESULT: PASS" "GN3 RESULT: PASS"
+partprobe "$TGT_GN" 2>/dev/null || true; sleep 0.5
+# The LAST partition (#3, the hash) must NOT have grown.
+TGT_ND_P3_LAST="$(sgdisk -i 3 "$TGT_GN" 2>/dev/null | sed -n 's/^Last sector: \([0-9]*\).*/\1/p')"
+assert_eq "$IMG_ND_P3_LAST" "$TGT_ND_P3_LAST" "GN4 last (hash) partition NOT grown when no vita-data"
 
 ############################################################################################
 note "GROUP H - --no-grow leaves data at image size"
@@ -306,27 +366,162 @@ assert_eq 0 "$RC" "K4 [NEW c] e2fsck rc=1 (corrected) is benign -> exit 0"
 if [ -e "$TRIP" ]; then ok "K5 [NEW c] resize2fs WAS called after a benign fsck"; else bad "K5 [NEW c] resize2fs not called after benign fsck"; fi
 
 ############################################################################################
-note "GROUP L - system-disk refusal (stacked) still fires (regression guard for FIX 1's sibling)"
-# We cannot safely point at the live root here, but we CAN prove the refusal logic by faking
-# findmnt to claim '/' is backed by our loop target. Shim findmnt -> emit the loop dev for --target /.
+# Helper: build a shim dir with all base tools symlinked, ready for a custom findmnt/lsblk override.
+make_shim_dir() {
+  local sd; sd="$(mktemp -d "$WORK/shim.XXXXXX")"
+  for t in bash dd sgdisk sfdisk lsblk blockdev readlink id awk sed stat wc head tail grep cat env tr cut sort mountpoint losetup umount mke2fs e2fsck resize2fs mkfs.vfat truncate sleep dirname basename ls dumpe2fs partprobe md5sum blkid udevadm touch printf chmod realpath; do
+    src="$(command -v "$t" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$sd/$t"
+  done
+  echo "$sd"
+}
+# zero64 DEV -> echoes count of non-zero bytes in the GPT header area (proves no write when 0).
+zero64() { dd if="$1" bs=1 count=64 skip=512 status=none 2>/dev/null | tr -d '\0' | wc -c; }
+
+############################################################################################
+note "GROUP L - system-disk refusal: plain /dev source (regression guard)"
+# Fake findmnt so '/' is backed by our loop target. Honor BOTH `-o SOURCE` and `-o TARGET` queries.
 TGT_L="$(mkloop 80M)"
-SHIM4="$WORK/shim4"; mkdir -p "$SHIM4"
-for t in bash dd sgdisk sfdisk lsblk blockdev readlink id awk sed stat wc head tail grep cat env tr cut sort mountpoint losetup umount mke2fs e2fsck resize2fs mkfs.vfat truncate sleep dirname basename ls dumpe2fs partprobe md5sum blkid udevadm touch printf chmod; do
-  src="$(command -v "$t" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$SHIM4/$t"
-done
+SHIM4="$(make_shim_dir)"
 cat > "$SHIM4/findmnt" <<EF
 #!/bin/bash
-# Pretend / is backed by the loop target (so the installer must REFUSE it).
-for a in "\$@"; do case "\$a" in /) echo "$TGT_L";; esac; done
-exit 0
+# Parse: findmnt -no SOURCE|TARGET --target <path>. For path '/', SOURCE = the loop target.
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;;
+    -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;;
+    -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /) [ "\$col" = SOURCE ] && echo "$TGT_L"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+esac
+exit 1   # any other path: not a mountpoint
 EF
 chmod +x "$SHIM4/findmnt"
 OUT="$(PATH="$SHIM4" bash "$INSTALLER" "$TGT_L" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
 assert_eq 1 "$RC" "L1 system-disk (/) target -> exit 1 refusal"
 assert_contains "$OUT" "RUNNING system" "L2 refusal message"
-# Prove no write: GPT area still zero.
-Z="$(dd if="$TGT_L" bs=1 count=64 skip=512 status=none 2>/dev/null | tr -d '\0' | wc -c)"
-assert_eq 0 "$Z" "L3 system-disk refusal wrote nothing"
+assert_eq 0 "$(zero64 "$TGT_L")" "L3 system-disk refusal wrote nothing"
+
+############################################################################################
+note "GROUP L2 [NEW] - Btrfs subvolume root '/dev/loopN[/@]' is STRIPPED + refused (FIX 1)"
+# findmnt for a Btrfs subvol returns SOURCE like '/dev/loopN[/@]'. The installer must strip the
+# trailing '[...]' and STILL resolve+refuse the backing disk (target). Pre-strip it would fail `[ -b ]`
+# and protect nothing -> fail OPEN. This proves it now fails CLOSED.
+TGT_L2="$(mkloop 80M)"
+SHIM5="$(make_shim_dir)"
+cat > "$SHIM5/findmnt" <<EF
+#!/bin/bash
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /) [ "\$col" = SOURCE ] && echo "${TGT_L2}[/@]"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+esac
+exit 1
+EF
+chmod +x "$SHIM5/findmnt"
+OUT="$(PATH="$SHIM5" bash "$INSTALLER" "$TGT_L2" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L2a [NEW] btrfs-subvol '[/@]' source -> exit 1 refusal (stripped + resolved)"
+assert_contains "$OUT" "RUNNING system" "L2b [NEW] refusal message"
+assert_eq 0 "$(zero64 "$TGT_L2")" "L2c [NEW] btrfs-subvol refusal wrote nothing"
+
+############################################################################################
+note "GROUP L3 [NEW] - overlay/live-media root that can't be resolved -> FAIL-CLOSED abort (FIX 1)"
+# Live media often mount '/' as an 'overlay'. The old code skipped non-/dev sources -> NO protected
+# disk -> could wipe the running disk. Now: an overlay '/' whose lower/upper layers can't be resolved
+# to a physical disk must ABORT (fail-closed), NOT silently skip. We provide an overlay source for '/'
+# but no resolvable mountinfo lowerdir (so resolution yields nothing) -> must refuse to proceed.
+TGT_L3="$(mkloop 80M)"
+SHIM6="$(make_shim_dir)"
+cat > "$SHIM6/findmnt" <<EF
+#!/bin/bash
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /) [ "\$col" = SOURCE ] && echo "overlay"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+esac
+exit 1   # /boot,/boot/efi,/etc not separate mounts; swap none
+EF
+chmod +x "$SHIM6/findmnt"
+OUT="$(PATH="$SHIM6" bash "$INSTALLER" "$TGT_L3" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L3a [NEW] overlay '/' unresolvable -> exit 1 (fail-closed abort)"
+assert_contains "$OUT" "could not resolve the physical disk" "L3b [NEW] fail-closed message"
+assert_eq 0 "$(zero64 "$TGT_L3")" "L3c [NEW] fail-closed wrote nothing"
+
+############################################################################################
+note "GROUP L4 [NEW] - critical mount '/etc' on the target while '/' is a (bare) overlay -> refused"
+# Here '/' is a bare overlay (the SOURCE alone is opaque) but the resolvable critical mount '/etc'
+# lives on the target disk. The installer must REFUSE the target. Because the bare overlay '/' is
+# itself unresolvable, the FAIL-CLOSED guard ('could not resolve...') may fire before the explicit
+# 'RUNNING system' refusal - BOTH are valid hard refusals (exit 1, no write) that protect the system,
+# so we accept either message. The load-bearing guarantees are: exit 1 AND nothing written.
+TGT_L4="$(mkloop 80M)"
+SHIM7="$(make_shim_dir)"
+cat > "$SHIM7/findmnt" <<EF
+#!/bin/bash
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /)    [ "\$col" = SOURCE ] && echo "overlay"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+  /etc) [ "\$col" = SOURCE ] && echo "$TGT_L4"; [ "\$col" = TARGET ] && echo "/etc"; exit 0 ;;
+esac
+exit 1
+EF
+chmod +x "$SHIM7/findmnt"
+OUT="$(PATH="$SHIM7" bash "$INSTALLER" "$TGT_L4" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L4a [NEW] overlay '/' + '/etc' on target -> exit 1 refusal"
+# Accept either hard-refusal message (system-disk OR fail-closed-unresolvable); both protect the system.
+case "$OUT" in
+  *"RUNNING system"*|*"could not resolve the physical disk"*) ok "L4b [NEW] hard refusal (system-disk or fail-closed)";;
+  *) bad "L4b [NEW] expected a hard refusal message, got: $OUT";;
+esac
+assert_eq 0 "$(zero64 "$TGT_L4")" "L4c [NEW] refusal wrote nothing"
+
+############################################################################################
+note "GROUP L5 [NEW] - non-root critical mount ('/etc') on target, '/' elsewhere -> RUNNING-system refusal"
+# Clean test of the 'a critical mount resolves to the target' path WITHOUT a fail-closed mask: '/'
+# resolves to a DIFFERENT (benign) loop disk, but '/etc' resolves to the target. The installer must
+# refuse with the explicit 'RUNNING system' message (RESOLVE_FAILED is empty here).
+TGT_L5="$(mkloop 80M)"
+OTHER_L5="$(mkloop 32M)"   # a benign disk that backs '/' (NOT the target)
+SHIM8="$(make_shim_dir)"
+cat > "$SHIM8/findmnt" <<EF
+#!/bin/bash
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /)    [ "\$col" = SOURCE ] && echo "$OTHER_L5"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+  /etc) [ "\$col" = SOURCE ] && echo "$TGT_L5";  [ "\$col" = TARGET ] && echo "/etc"; exit 0 ;;
+esac
+exit 1
+EF
+chmod +x "$SHIM8/findmnt"
+OUT="$(PATH="$SHIM8" bash "$INSTALLER" "$TGT_L5" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L5a [NEW] '/etc' on target -> exit 1 refusal"
+assert_contains "$OUT" "RUNNING system" "L5b [NEW] explicit RUNNING-system refusal (no fail-closed mask)"
+assert_eq 0 "$(zero64 "$TGT_L5")" "L5c [NEW] refusal wrote nothing"
 
 ############################################################################################
 printf '\n===== ASSERT %d pass / %d fail (total %d) =====\n' "$PASS" "$FAIL" "$((PASS+FAIL))"

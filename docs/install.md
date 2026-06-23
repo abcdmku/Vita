@@ -3,11 +3,14 @@
 This guide takes you from a freshly built Vita image to a machine that boots Vita from its own
 disk. The flow is:
 
-1. **Build** the bootable image on a Linux build host.
+1. **Build** the bootable image on a Linux build host. *If you will enroll a Secure Boot key (step 4),
+   build a SIGNED image* (`VITA_SECURE_BOOT=1`) so the signature matches the cert you enroll.
 2. **Boot a live Linux** environment on (or next to) the target machine.
 3. **Write** the image to the target disk with [`tools/install-vita.sh`](../tools/install-vita.sh).
 4. **Enroll the Vita Secure Boot key** in the *target machine's* UEFI firmware (a manual,
    one-time firmware step - see [section 4](#4-enroll-the-secure-boot-key-firmware-manual-one-time)).
+   The cert you enroll must be the one that signed the image in step 1, or boot unsigned with Secure
+   Boot disabled.
 
 > WARNING: **Writing the image ERASES the entire target disk.** `install-vita.sh` is built to be hard
 > to misfire (it refuses any physical disk backing the running system, demands an explicit `--yes`,
@@ -24,15 +27,21 @@ filesystem tarball. Two shapes exist depending on build mode:
 
 | Mode | Partitions (in order) | Notes |
 |------|-----------------------|-------|
-| `smoke` (+`VITA_VERITY=1`) | `vita-esp` (vfat) / `vita-root` (ext4) / `vita-root-verity` (hash) | Fast iterate/boot image. **No `vita-data`** - the installer does NOT grow it. |
+| `smoke` (+`VITA_VERITY=1`) | `vita-esp` (vfat) / `vita-root` (ext4) / `vita-root-verity` (hash) / **`vita-data`** (ext4) | Fast iterate/boot image. Since P1-029 it ships a growable `vita-data` partition (mounted at `/var`); the installer grows it. |
 | `full` | `vita-esp` / `vita-root-a` / `vita-root-b` / `vita-recovery` / **`vita-data`** | A/B + recovery + a growable data partition. |
+
+> **`vita-data` is the LAST partition in both layouts.** The verity layout's data partition is
+> defined by [`os/x86_64/repart-verity/40-data.conf`](../os/x86_64/repart-verity/40-data.conf)
+> (`FileSystemLabel=vita-data`, mounted at `/var`); it lands *after* the root + root-verity-hash
+> partitions, so growing it never disturbs the dm-verity tree.
 
 The `.raw` is **content-sized** - it is only as large as the data it carries, so its GPT *backup*
 header lands in the middle of a larger target disk and the trailing space is unallocated. The
 installer fixes both: it relocates the backup GPT to the end of the target and grows the partition
-**labeled `vita-data`** (full mode only) to fill the disk. On smoke/verity images there is no
-`vita-data` partition, so the installer **skips growth** entirely and never touches the root or
-verity-hash partitions.
+**labeled `vita-data`** (present in **both** verity and full images) to fill the disk. It identifies
+that partition explicitly by label and **never** grows or `resize2fs`-es the root or verity-hash
+partitions. (Only a legacy image that ships *no* `vita-data` partition causes the installer to skip
+growth entirely.)
 
 ---
 
@@ -41,16 +50,37 @@ verity-hash partitions.
 You need a privileged Linux host with `mkosi` (and, for `full` mode, `cryptsetup`/`veritysetup`).
 See [`tools/wsl-verify.sh`](../tools/wsl-verify.sh) for the exact host setup the project uses.
 
-```bash
-# Smoke image (fast; verity-protected root; no growable data partition):
-VITA_VERITY=1 node os/x86_64/build-and-boot.mjs --mode=smoke --no-boot
+**If you intend to enroll a Secure Boot key (section 4), build a SIGNED image now** - an unsigned
+image will *not* be trusted by the cert you enroll, so Secure Boot would refuse to boot it. The
+signed build signs the UKI with the owner's **db** key (`db.key`/`db.crt`) - the **same** cert you
+will enroll into firmware in section 4. Generate the throwaway test keystore first if you do not
+have a production key (it is gitignored - keys never ship):
 
-# Or a full A/B + data image (has the growable vita-data partition):
-node os/x86_64/build-and-boot.mjs --mode=full --no-sign   # (signing covered in section 4)
+```bash
+# 0) (test/dev) make the throwaway SB keystore at os/x86_64/.secureboot/{db.key,db.crt}:
+bash tools/secureboot-test-keys.sh
+
+# SIGNED verity image (the Secure Boot path - section 4 enrolls db.crt to match this signature):
+VITA_SECURE_BOOT=1 VITA_VERITY=1 node os/x86_64/build-and-boot.mjs --mode=smoke --no-boot
+#   uses os/x86_64/.secureboot/db.key + db.crt by default; override with
+#   VITA_TEST_SECUREBOOT_KEY_PATH / VITA_TEST_SECUREBOOT_CERT_PATH (e.g. a production key/cert).
+
+# Or a SIGNED full A/B + data image (per-slot UKIs signed via VITA_SB_KEY / VITA_SB_CERT):
+VITA_SB_KEY=os/x86_64/.secureboot/db.key VITA_SB_CERT=os/x86_64/.secureboot/db.crt \
+  node os/x86_64/build-and-boot.mjs --mode=full --no-boot
 ```
 
+> **Unsigned / dev path (no Secure Boot).** If you are NOT going to enroll a key - you will boot
+> with Secure Boot *disabled* (section 4, "If you can't enroll a custom key") - you can build
+> unsigned instead: `VITA_VERITY=1 node os/x86_64/build-and-boot.mjs --mode=smoke --no-boot` or
+> `node os/x86_64/build-and-boot.mjs --mode=full --no-sign`. Do **not** mix this with an enrolled
+> key: an unsigned image plus an enrolled cert will fail Secure Boot. Match the build to the boot
+> mode you intend.
+
 The artifact lands at `os/x86_64/out/<name>.raw`. Copy that file onto a USB stick (or keep it on
-the build host if the build host is also where you'll run the installer).
+the build host if the build host is also where you'll run the installer). Whichever image you build,
+the disk-write steps below are identical; only the firmware step (section 4) differs by whether the
+image is signed.
 
 ---
 
@@ -126,12 +156,12 @@ What it does, in order:
 2. **Repair GPT** - `sgdisk --move-second-header` relocates the backup GPT to the disk end and fixes
    the alternate-LBA pointers (otherwise firmware warns and the trailing space is unusable).
 3. **Grow `vita-data`** - finds the partition whose GPT label (or ext4 filesystem label) is
-   `vita-data`, recreates it from its original start to the disk end, preserving its type GUID,
-   unique GUID, and name. With `--grow-fs`, it first runs `e2fsck -fy` and then `resize2fs` the
-   ext4. **A serious `e2fsck` failure (errors left uncorrected, or an operational error) is FATAL**:
-   the installer aborts (exit 3) **before** `resize2fs` rather than resize a corrupt filesystem.
-   **If there is no `vita-data` partition (smoke/verity images), this step is SKIPPED** - the root
-   and verity-hash partitions are never grown or resized.
+   `vita-data` (present in **both** verity and full images), recreates it from its original start to
+   the disk end, preserving its type GUID, unique GUID, and name. With `--grow-fs`, it first runs
+   `e2fsck -fy` and then `resize2fs` the ext4. **A serious `e2fsck` failure (errors left uncorrected,
+   or an operational error) is FATAL**: the installer aborts (exit 3) **before** `resize2fs` rather
+   than resize a corrupt filesystem. The root and verity-hash partitions are **never** grown or
+   resized. **Only a legacy image that ships no `vita-data` partition makes this step SKIP entirely.**
 4. **Verify** - `sgdisk -v` (GPT integrity; **FATAL** - a failure here makes the run exit 3 and it
    will NOT print PASS) + `sfdisk -l` (final table), and asserts the target now has >=2 partitions
    including an EFI System Partition. Prints `RESULT: PASS` or `RESULT: FAIL`.
@@ -158,24 +188,33 @@ What it does, in order:
 
 ### 3.5 Grow now, or grow on first boot?
 
-You have two equivalent ways to claim the rest of the disk for `vita-data` (full-mode images only):
+You have two equivalent ways to claim the rest of the disk for `vita-data` (both verity and full
+images ship this partition):
 
 - **Grow at install time** (default; add `--grow-fs` to also size the filesystem). Simplest - the
   disk is fully provisioned before it ever boots.
 - **Grow on first boot via `systemd-repart`.** Pass `--no-grow` to the installer and instead let
-  the OS expand the data partition itself on first boot. For this the image must ship a `repart.d`
-  drop-in for the data partition with `GrowFileSystem=yes` and no fixed size cap. The full-mode
-  layout already routes through `systemd-repart` (`os/x86_64/build-and-boot.mjs` step 4), so this is
-  the natural path once the data partition's repart definition lands; until then, prefer the
-  install-time grow above.
+  the OS expand the data partition itself on first boot. For this the image's `repart.d` definition
+  for `vita-data` must allow growth (no fixed size cap;
+  [`os/x86_64/repart-verity/40-data.conf`](../os/x86_64/repart-verity/40-data.conf) uses
+  `Weight=1000` and `SizeMinBytes` only, so repart expands it to fill the disk). Both layouts route
+  through `systemd-repart` at build time (`os/x86_64/build-and-boot.mjs`), so first-boot growth is a
+  natural path; the install-time grow above is simply the eager version of the same thing.
 
 ### Safety guarantees (why this is hard to misfire)
 
 - **Refuses any physical disk backing the running system.** It resolves the whole *stack* (partition
   -> dm-crypt -> LVM -> md -> ... -> physical disk) for `/`, `/boot`, `/boot/efi`, `/etc`, and any
-  active swap, and aborts if the target is any of those physical disks. `findmnt` (which resolves
-  those disks) is a **required** tool: if it is absent the installer exits **before writing** rather
-  than fall back to a weakened check.
+  active swap, and aborts if the target is any of those physical disks. It also handles the awkward
+  roots: **Btrfs subvolumes** (whose `findmnt` source looks like `/dev/sda2[/@]` - the `[...]` suffix
+  is stripped before resolving), and **live-media roots** mounted as `overlay` or a **squashfs on a
+  loop device** (it follows the overlay's lower/upper layers and the loop's backing file back to the
+  real disk). `findmnt` + `losetup` (which resolve those disks) are **required** tools: if either is
+  absent the installer exits **before writing** rather than fall back to a weakened check.
+- **Fail-closed when a system mount can't be resolved.** If `/`, `/boot`, `/boot/efi`, `/etc`, or an
+  active swap is mounted but the installer cannot resolve it to a physical disk, it **aborts** rather
+  than proceed with an incomplete protected-disk set (which could let it overwrite the running
+  system's disk). It never "skips" an unresolvable critical mount.
 - **Fail-closed on a busy target.** If a node on the target cannot be unmounted, it aborts before
   writing rather than `dd`-ing over a mounted filesystem. It uses a **plain `umount` (never a lazy
   `umount -l`)** so it cannot detach a still-active filesystem and write over it, and it re-verifies
@@ -197,6 +236,13 @@ them, **its UEFI firmware must trust that key** - and enrolling a key into firmw
 you perform in the machine's UEFI setup. **There is no way around this from software on a fresh
 machine**; Secure Boot's whole point is that the firmware owner decides what to trust.
 
+> **This step only makes sense for a SIGNED image.** You must have built with `VITA_SECURE_BOOT=1`
+> (verity) or `VITA_SB_KEY`/`VITA_SB_CERT` (full) in [section 1](#1-build-the-image-on-a-linux-build-host),
+> signing with the **same** `db.key`/`db.crt` whose `db.crt` you enroll below. Enrolling a cert and
+> then booting an *unsigned* image will fail Secure Boot (the firmware trusts the cert but the image
+> carries no matching signature). If you built unsigned, either rebuild signed or use the
+> "disable Secure Boot" fallback at the end of this section.
+
 > Honest expectations: this is the one step that *cannot* be fully automated by the installer. Every
 > vendor's UEFI setup looks different, and some consumer firmwares hide or restrict custom-key
 > enrollment. Budget a few minutes of poking around the firmware menus, and keep a fallback in mind
@@ -205,12 +251,15 @@ machine**; Secure Boot's whole point is that the firmware owner decides what to 
 ### The certificate
 
 The public certificate to enroll is the owner's Secure Boot **db** cert (referred to as
-`vita-db.crt`). For the project's throwaway/test keystore this is generated by
-[`tools/secureboot-test-keys.sh`](../tools/secureboot-test-keys.sh) at
-`os/x86_64/.secureboot/db.crt` (gitignored - keys never ship). For a real deployment, use the
-owner's production db certificate. The installer copies the whole image onto the disk, so you can
-also place a copy of `vita-db.crt` onto the ESP (e.g. `/EFI/vita/vita-db.crt`) before/after writing
-so the firmware's "enroll from file" browser can find it on the freshly installed disk.
+`vita-db.crt`) - the **same cert that signed the image in [section 1](#1-build-the-image-on-a-linux-build-host)**.
+For the project's throwaway/test keystore this is `os/x86_64/.secureboot/db.crt`, generated by
+[`tools/secureboot-test-keys.sh`](../tools/secureboot-test-keys.sh) (gitignored - keys never ship)
+and consumed by the signed build (`VITA_SECURE_BOOT=1`). For a real deployment, use the owner's
+production db key/cert for both signing and enrollment. The installer copies the whole image onto the
+disk, so you can also place a copy of `db.crt` onto the ESP (e.g. `/EFI/vita/vita-db.crt`)
+before/after writing so the firmware's "enroll from file" browser can find it on the freshly
+installed disk. **The signature on the image and the cert you enroll must come from the same
+key-pair, or Secure Boot will reject the image.**
 
 ### Steps (general - exact labels vary by vendor)
 
@@ -239,8 +288,10 @@ This mirrors how the project enrolls the key for QEMU testing (offline, via `vir
 ## 5. First boot
 
 Move the disk back into the target machine (if you wrote it via an external dock), set the firmware
-to boot from it, and power on. On `full` images with a verity'd root, the root is read-only and a
-writable overlay is provided; persistent state lives on the grown `vita-data` partition.
+to boot from it, and power on. On verity images the root is read-only (dm-verity), and persistent
+state lives on the grown `vita-data` partition, mounted at `/var` (see
+[`os/x86_64/repart-verity/40-data.conf`](../os/x86_64/repart-verity/40-data.conf)); full images add
+A/B + recovery on top of the same data partition.
 
 ---
 
@@ -251,11 +302,12 @@ writable overlay is provided; persistent state lives on the grown `vita-data` pa
 | `RESULT: FAIL (expected >=2 partitions incl. an ESP)` | Wrong/corrupt `--image`, or the write was interrupted. Re-run; check `sfdisk -l /dev/sdX`. |
 | `RESULT: FAIL` after "could not unmount" | A partition on the target is busy/mounted. Unmount it (`umount`), close any LVM/dm mapping, and re-run. The installer refuses to write a busy disk. |
 | `sgdisk -v reported GPT integrity problems` (exit 3) | The post-write GPT check failed (fail-closed). Re-run the installer; if it persists the image or disk is bad. |
-| Installer refuses with "physical disk backing the RUNNING system" | You pointed it at a disk the live environment is using (root/boot/swap, possibly through LVM/dm-crypt). Use the *other* disk. |
-| `vita-data` skipped: "no partition labeled 'vita-data'" | Expected for smoke/verity images - they have no growable data partition. Use a full-mode image if you want a grown data partition. |
+| Installer refuses with "physical disk backing the RUNNING system" | You pointed it at a disk the live environment is using (root/boot/swap, possibly through LVM/dm-crypt/overlay/squashfs). Use the *other* disk. |
+| Installer aborts: "could not resolve the physical disk(s) backing the running system" | Fail-closed safety: a system mount (`/`, `/boot`, `/etc`, swap...) is mounted but couldn't be traced to a disk. Run on a live environment that isn't using the target, or inspect `findmnt` / `lsblk -s` for that mount. |
+| `vita-data` skipped: "no partition labeled 'vita-data'" | Only happens on a legacy image with no data partition. Current verity *and* full images ship `vita-data`; rebuild a current image (`VITA_VERITY=1 ...` or `--mode=full`). |
 | Firmware: "GPT backup at wrong location" | The backup-header relocation didn't run - don't use `--keep-backup-gap`; re-run the installer. |
-| Machine boots to firmware, not Vita | Secure Boot key not enrolled (section 4) **or** Secure Boot left on without the key. Enroll the key or disable Secure Boot. |
-| Data partition is small / didn't grow | You used `--no-grow` and first-boot repart isn't configured yet, or the image is a smoke image (no `vita-data`). Use a full-mode image with the default grow (and `--grow-fs`). |
+| Machine boots to firmware, not Vita | Secure Boot key not enrolled (section 4) **or** Secure Boot left on without the key **or** you wrote an *unsigned* image while Secure Boot is enabled. Build a signed image (`VITA_SECURE_BOOT=1 VITA_VERITY=1 ...`) and enroll the matching `db.crt`, or disable Secure Boot. |
+| Data partition is small / didn't grow | You used `--no-grow` and first-boot repart hasn't run, or it's a legacy image with no `vita-data`. Use a current image with the default grow (and `--grow-fs`). |
 
 ---
 

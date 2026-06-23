@@ -2,8 +2,12 @@
 # Vita installer - write the built Vita GPT disk image onto a REAL target block device (P1-032).
 #
 # Vita's bootable artifact (os/x86_64/build-and-boot.mjs) is a self-contained GPT raw disk:
-#   smoke/verity:  ESP (vfat) + root (ext4, dm-verity data) + root-verity (hash)
-#   full:          ESP + root-a + root-b + recovery + data        (the data partition grows to fill)
+#   smoke/verity (VITA_VERITY=1):  ESP (vfat) + root (ext4, dm-verity data) + root-verity (hash)
+#                                  + vita-data (ext4, persistent /var)   <- the LAST, growable part
+#   full:                          ESP + root-a + root-b + recovery + vita-data  (data grows to fill)
+# Since P1-029 the verity layout (os/x86_64/repart-verity/40-data.conf) ALSO ships a vita-data
+# partition (FileSystemLabel=vita-data, mounted at /var), so the installer grows it on verity images
+# too. Older images that carry NO vita-data partition simply skip growth (root/verity are never grown).
 # This script writes that whole .raw byte-for-byte onto a target disk (/dev/sdX), repairs the GPT
 # backup header (the .raw is sized to its content, so the backup header lands mid-disk), and - for
 # images that carry a growable data partition - grows the vita-data partition to fill the rest of
@@ -12,7 +16,9 @@
 #
 # THIS IS A DESTRUCTIVE OPERATION. It overwrites the entire target disk. Safety is the whole point:
 #   - refuses to write to ANY physical disk backing the running system (root/boot/swap, through
-#     dm-crypt/LVM/md stacks - the FULL parent chain is resolved, not just one hop),
+#     dm-crypt/LVM/md/overlay/squashfs stacks - the FULL parent chain is resolved, not just one hop;
+#     Btrfs-subvol and live-media overlay/squashfs roots are resolved too, and an UNRESOLVABLE
+#     critical mount ABORTS rather than proceeds unprotected - fail-closed),
 #   - requires the EXACT target path AND an explicit --yes,
 #   - shows the target's model/size/partitions and (without --yes) makes you type the device to confirm,
 #   - --dry-run prints every action and writes NOTHING,
@@ -83,21 +89,32 @@ die_tool() { echo "ERROR: $*" >&2; exit 2; }       # exit 2: missing required to
 die_io()   { echo "ERROR: $*" >&2; exit 3; }       # exit 3: write / verify failure
 warn()     { echo "WARN: $*" >&2; }
 info()     { echo "  $*"; }
-# Print a command and, unless --dry-run, run it. EVERY mutation of the target goes through this.
+# Print a command and, unless --dry-run, run it. Returns the command's status so best-effort callers
+# can append `|| warn`/`|| true` (e.g. blockdev --rereadpt). EVERY mutation goes through runcmd or
+# (for must-succeed mutations) runcmd_io below.
 runcmd() {
   echo "    \$ $*"
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
   "$@"
+}
+# Like runcmd, but a NON-ZERO status is FATAL with the documented write-failure code (exit 3, via
+# die_io) instead of whatever raw status `set -e` would otherwise surface. Use for the mutations the
+# exit-code table promises map to 3 (dd write, GPT relocation, the grow sgdisk, resize2fs). This
+# keeps the documented exit codes honest regardless of the tool's own exit value.
+runcmd_io() {
+  echo "    \$ $*"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  "$@" || die_io "command failed (exit $?): $* - failing closed (write/verify failure)."
 }
 need() { command -v "$1" >/dev/null 2>&1 || die_tool "missing required tool: $1 (install it; exit 2)"; }
 
 # -- preconditions -----------------------------------------------------------------------------------
 [ -n "$TARGET" ] || { echo "ERROR: no target device given" >&2; usage 1; }
 
-# Required tools. findmnt is part of the SAFETY boundary (it resolves the running system's disks so
-# we can refuse them) - it MUST be present or we cannot fail-closed, so it is required, not optional.
-# (resize2fs/e2fsck only needed for --grow-fs.)
-for t in dd sgdisk sfdisk lsblk blockdev findmnt; do
+# Required tools. findmnt + losetup are part of the SAFETY boundary (they resolve the running
+# system's disks - incl. squashfs-on-loop live media - so we can refuse them); they MUST be present
+# or we cannot fail-closed, so they are required, not optional. (resize2fs/e2fsck only for --grow-fs.)
+for t in dd sgdisk sfdisk lsblk blockdev findmnt losetup; do
   command -v "$t" >/dev/null 2>&1 || die_tool "missing required tool: $t - install gdisk/util-linux (exit 2)"
 done
 if [ "$DO_GROW_FS" = 1 ]; then need resize2fs; need e2fsck; need blkid; fi
@@ -133,13 +150,29 @@ fi
 # unprotected. Instead we walk the FULL dependency chain down to every physical (TYPE=disk/loop)
 # ancestor.
 #
+# `findmnt -no SOURCE` does NOT always return a bare /dev node:
+#   - Btrfs subvolume roots report `/dev/nvme0n1p2[/@]` (a `[<subvol>]` suffix) - the bracketed
+#     string is NOT a path and would fail `[ -b ]`, so we STRIP the trailing `[...]` first.
+#   - Live media report `overlay` (a stacked filesystem) or a squashfs on a loop device whose real
+#     backing is a file on a USB stick. A naive `case /dev/*) ... *) skip` would protect NOTHING for
+#     these and then happily wipe the disk the live system is running from.
+# We resolve all of these to their real physical disks, and - crucially - FAIL CLOSED: if a critical
+# running-system mount (/ /boot /boot/efi /etc, or active swap) is mounted but cannot be resolved to
+# any physical disk, we ABORT rather than proceed with an unprotected disk set.
+#
 # `lsblk -s` prints the inverse (parents) tree: starting at a leaf node, it lists the node and all
 # of its ancestors. With `-no NAME,TYPE` we get every ancestor's name+type; we keep the terminal
 # physical ones (TYPE=disk, and TYPE=loop since the installer also accepts loop devices as whole-disk
 # targets). This catches dm-crypt/LVM/md/multipath stacks and plain partitions alike.
+strip_subvol() {
+  # findmnt SOURCE for a Btrfs subvolume looks like `/dev/sda2[/@root]`. Strip the trailing `[...]`
+  # so the result is a real device node. Leaves a bare `/dev/sda2` (or a non-/dev source) untouched.
+  printf '%s' "${1%%[*}"
+}
 physical_disks_of_node() {
   # $1 = a /dev/... node (partition, dm-*, md*, disk, loop, ...). Prints zero or more "/dev/<disk>".
-  local node="$1" name type
+  local node name type
+  node="$(strip_subvol "$1")"
   [ -b "$node" ] || return 0
   # lsblk -s walks toward the parents (physical devices) from the given node.
   while read -r name type; do
@@ -152,19 +185,77 @@ physical_disks_of_node() {
     fi
   done < <(lsblk -s -no NAME,TYPE "$node" 2>/dev/null || true)
 }
+loop_backing_disks() {
+  # $1 = a loop device (/dev/loopN). Resolve the HOST file it is backed by, then the physical disk(s)
+  # that host file lives on. Live media often run root off a squashfs on such a loop. Prints disks.
+  local lp="$1" bf bdev
+  [ -b "$lp" ] || return 0
+  bf="$(losetup -nO BACK-FILE "$lp" 2>/dev/null | head -1 || true)"
+  [ -n "$bf" ] && [ -e "$bf" ] || return 0
+  # The backing file lives on some filesystem -> resolve THAT filesystem's source to physical disks.
+  bdev="$(findmnt -no SOURCE --target "$bf" 2>/dev/null | head -1 || true)"
+  [ -n "$bdev" ] || return 0
+  resolve_source_disks "$bdev"
+}
+overlay_lower_disks() {
+  # $1 = the overlay mountpoint path. Read its mount options from /proc/self/mountinfo and resolve
+  # every lowerdir/upperdir/workdir component back to the physical disk(s) hosting it. Live media
+  # frequently mount / as an overlay whose lower layers sit on the install medium.
+  local mp="$1" opts dir d
+  [ -r /proc/self/mountinfo ] || return 0
+  # mountinfo line:  ID PARENT MAJ:MIN ROOT MOUNTPOINT OPTS... - FSTYPE SOURCE SUPER-OPTS
+  # Find the line whose MOUNTPOINT ($5) is $mp, then grab the SUPER-OPTS field (3 past the '-'),
+  # which carries overlay's lowerdir=/upperdir=/workdir= settings.
+  opts="$(awk -v mp="$mp" '$5==mp { for(i=7;i<=NF;i++) if($i=="-"){ print $(i+3); exit } }' /proc/self/mountinfo 2>/dev/null || true)"
+  [ -n "$opts" ] || return 0
+  # Extract each lowerdir/upperdir/workdir path (colon- and comma-separated) and map to disks.
+  printf '%s' "$opts" | tr ',' '\n' | sed -n 's/^\(lowerdir\|upperdir\|workdir\)=//p' | tr ':' '\n' \
+  | while read -r dir; do
+      [ -n "$dir" ] && [ -e "$dir" ] || continue
+      d="$(findmnt -no SOURCE --target "$dir" 2>/dev/null | head -1 || true)"
+      [ -n "$d" ] || continue
+      resolve_source_disks "$d"
+    done
+}
+resolve_source_disks() {
+  # $1 = a findmnt SOURCE value (may be /dev/..., /dev/...[subvol], overlay, a loop, tmpfs, ...).
+  # Prints every physical disk backing it (zero or more lines). Recursion-safe (loop/overlay call
+  # back into this).
+  local src node
+  src="$1"
+  [ -n "$src" ] || return 0
+  node="$(strip_subvol "$src")"
+  case "$node" in
+    /dev/loop*) loop_backing_disks "$node"; physical_disks_of_node "$node" ;;
+    /dev/*)     physical_disks_of_node "$node" ;;
+    overlay|overlayfs) : ;;  # handled by caller via the mountpoint (overlay_lower_disks) - SOURCE alone is opaque
+    *)          : ;;          # tmpfs/ramfs/etc carry no physical disk
+  esac
+}
 disks_for_path() {
   # $1 = a filesystem path (e.g. /, /boot) -> every physical disk backing it (zero or more lines).
-  local path="$1" src
+  # Handles /dev nodes, Btrfs-subvol suffixes, overlay roots (live media), and squashfs-on-loop.
+  local path="$1" src mp
   src="$(findmnt -no SOURCE --target "$path" 2>/dev/null | head -1 || true)"
   [ -n "$src" ] || return 0
-  # SOURCE may be a /dev node, or a non-block source (overlay, tmpfs) -> skip those.
-  case "$src" in
-    /dev/*) physical_disks_of_node "$src" ;;
-    *) : ;;  # not a block-backed mount; nothing to protect here
+  case "$(strip_subvol "$src")" in
+    overlay|overlayfs)
+      # Resolve the overlay's lower/upper layers to disks. Need the real mountpoint for mountinfo.
+      mp="$(findmnt -no TARGET --target "$path" 2>/dev/null | head -1 || true)"
+      [ -n "$mp" ] && overlay_lower_disks "$mp"
+      ;;
+    *) resolve_source_disks "$src" ;;
   esac
+}
+# Is a path actually a mountpoint that backs the running system (i.e. resolvable & present)? We use
+# this to decide WHICH paths must fail-closed: a path that is not a mount (e.g. /boot/efi on a system
+# that has none) is simply skipped, but a path that IS mounted yet resolves to NO disk is an ABORT.
+path_is_mounted() {
+  findmnt -no SOURCE --target "$1" >/dev/null 2>&1
 }
 
 PROTECTED_DISKS=""
+RESOLVE_FAILED=""   # accumulates critical mounts we could NOT resolve to any physical disk
 # NB: each helper may print multiple lines; collect them all. Must end with `return 0` so the
 # function never returns non-zero under `set -e`.
 add_protected() {
@@ -174,24 +265,54 @@ add_protected() {
   done
   return 0
 }
+# Resolve a CRITICAL running-system path and FAIL CLOSED if it is mounted but yields no disk.
+# (A path that is not a mountpoint at all - e.g. no separate /boot - is fine to skip.)
+protect_critical() {
+  local path="$1" disks
+  disks="$(disks_for_path "$path")"
+  if [ -n "$disks" ]; then
+    add_protected "$disks"
+  elif path_is_mounted "$path"; then
+    # Mounted, but we could not resolve a backing physical disk. Do NOT proceed unprotected.
+    RESOLVE_FAILED="$RESOLVE_FAILED $path"
+  fi
+  return 0
+}
 # findmnt is a REQUIRED tool (asserted above): if it were absent we would already have exited 2
 # BEFORE any disk write. We therefore never fail open here - the running-system-disk set is always
 # resolved before we touch the target.
-add_protected "$(disks_for_path /)"
-add_protected "$(disks_for_path /boot)"
-add_protected "$(disks_for_path /boot/efi)"
-add_protected "$(disks_for_path /etc)"      # catches systems where / is overlay but /etc is real
-# Active swap devices, too (overwriting them corrupts the running system). Resolve the full stack.
+protect_critical /
+protect_critical /boot
+protect_critical /boot/efi
+protect_critical /etc           # catches systems where / is overlay but /etc is real
+# Active swap devices, too (overwriting them corrupts the running system). Resolve the full stack;
+# a swap entry we cannot resolve to a disk is also an ABORT (it could be on the target).
 if [ -r /proc/swaps ]; then
   while read -r dev _rest; do
-    case "$dev" in /dev/*) add_protected "$(physical_disks_of_node "$dev")" ;; esac
+    case "$dev" in
+      /dev/*)
+        sd="$(physical_disks_of_node "$dev")"
+        if [ -n "$sd" ]; then add_protected "$sd"; else RESOLVE_FAILED="$RESOLVE_FAILED swap:$dev"; fi
+        ;;
+      "") : ;;
+      *)  : ;;   # swapfile (not a /dev node) -> backed by a filesystem; its disk is caught via that fs
+    esac
   done < <(tail -n +2 /proc/swaps 2>/dev/null || true)
+fi
+
+# FAIL CLOSED: if any critical running-system mount could not be resolved to a physical disk, we have
+# an incomplete protected set and could wipe the running system's disk. Abort rather than risk it.
+if [ -n "${RESOLVE_FAILED# }" ]; then
+  die "REFUSING: could not resolve the physical disk(s) backing the running system for:${RESOLVE_FAILED}
+       Without a complete protected-disk set this installer cannot guarantee it will not overwrite the
+       running system. ABORTING (fail-closed). Inspect 'findmnt' / 'lsblk -s' for those mounts, or run
+       the installer from a live environment that is NOT using the target disk."
 fi
 
 for pd in $PROTECTED_DISKS; do
   if [ "$(readlink -f "$pd" 2>/dev/null || echo "$pd")" = "$TARGET" ]; then
     die "REFUSING: $TARGET is a physical disk backing the RUNNING system (root/boot/swap, possibly
-       through an LVM/dm-crypt/md stack). Installing onto it would destroy this machine.
+       through an LVM/dm-crypt/md/overlay/squashfs stack). Installing onto it would destroy this machine.
        Boot a live USB and target the OTHER disk, or pass an external disk."
   fi
 done
@@ -272,7 +393,7 @@ $(printf '%s\n' "$still" | sed 's/^/         /')
   fi
 fi
 # dd: 4 MiB blocks, conv=fsync so the data is durable before we touch the GPT. status=progress for feedback.
-runcmd dd if="$IMAGE" of="$TARGET" bs=4M conv=fsync oflag=direct status=progress
+runcmd_io dd if="$IMAGE" of="$TARGET" bs=4M conv=fsync oflag=direct status=progress
 # Re-read the partition table the image carries.
 runcmd blockdev --rereadpt "$TARGET" || warn "blockdev --rereadpt failed (kernel may already have it); continuing"
 command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
@@ -283,18 +404,21 @@ if [ "$RELOCATE_BACKUP" = 1 ]; then
   # sgdisk --move-second-header moves the backup GPT to the very end of the (larger) target and fixes
   # the header's alternate-LBA pointers. Without this, firmware/tools see a 'GPT backup at wrong
   # location' warning and the trailing space is unusable.
-  runcmd sgdisk --move-second-header "$TARGET"
+  runcmd_io sgdisk --move-second-header "$TARGET"
 else
   warn "--keep-backup-gap: leaving the backup GPT mid-disk (firmware may warn; trailing space unusable)."
 fi
 
 # -- 3 . grow ONLY the vita-data partition to fill the disk (optional) -------------------------------
 echo "===== 3 . grow vita-data partition ====="
-# The growable persistent partition is vita-data (full-mode layout). On smoke/verity images the LAST
-# partition is root-verity (the dm-verity HASH tree) - growing or resize2fs-ing THAT corrupts it, and
-# the root partition must never be resized either. So we identify the data partition explicitly by its
-# GPT PartitionLabel `vita-data` (preferred) or, failing that, an ext4 filesystem LABEL `vita-data`.
-# If no vita-data partition exists, we SKIP growth entirely (never touch root/verity/any other part).
+# The growable persistent partition is vita-data. Both layouts ship it: the full A/B layout, AND the
+# verity layout since P1-029 (os/x86_64/repart-verity/40-data.conf - vita-data is the LAST partition,
+# after ESP + root + root-verity). We grow it on EITHER. The dm-verity HASH partition (root-verity)
+# and the read-only root partition must NEVER be grown or resize2fs'd (that corrupts the verity tree
+# / the roothash-covered root), so we identify the data partition EXPLICITLY by its GPT PartitionLabel
+# `vita-data` (preferred) or, failing that, an ext4 filesystem LABEL `vita-data` (40-data.conf sets
+# both). If no vita-data partition exists (older/legacy images), we SKIP growth entirely - never
+# touching root/verity/any other partition.
 #
 # Find the partition NUMBER whose PARTLABEL or LABEL == vita-data on a given device (image or target).
 vita_data_partnum() {
@@ -330,9 +454,10 @@ if [ "$DO_GROW" = 1 ]; then
   DATA_PARTNUM="$(vita_data_partnum "$GROW_SRC")"
   if [ -z "${DATA_PARTNUM:-}" ]; then
     warn "no partition labeled 'vita-data' found on $GROW_SRC - SKIPPING growth."
-    warn "  (This is expected for smoke/verity images whose last partition is root-verity; the verity"
-    warn "   HASH partition and the root partition are NEVER grown. Use a full-mode image, or rely on"
-    warn "   systemd-repart first-boot growth.)"
+    warn "  (Current full AND verity images DO ship a vita-data partition (P1-029), so this normally"
+    warn "   means a legacy/older image without one. The verity HASH and root partitions are NEVER"
+    warn "   grown. If you expected growth, rebuild a current image, or rely on systemd-repart first-boot"
+    warn "   growth.)"
   else
     info "vita-data partition = #$DATA_PARTNUM"
     # delete+create does NOT preserve type/GUID/name, so capture them first and restore them on the new
@@ -348,7 +473,8 @@ if [ "$DO_GROW" = 1 ]; then
       warn "could not read the vita-data partition's start sector; skipping grow (nothing touched)."
     else
       # Delete and recreate from the SAME start sector to the disk end (0 = max), restoring type/name/GUID.
-      runcmd sgdisk \
+      # FATAL on failure (exit 3): a half-applied grow must not be silently accepted.
+      runcmd_io sgdisk \
         --delete="$DATA_PARTNUM" \
         --new="$DATA_PARTNUM:$P_START:0" \
         ${P_TYPE:+--typecode="$DATA_PARTNUM:$P_TYPE"} \
@@ -412,7 +538,7 @@ if [ "$DO_GROW" = 1 ]; then
           fi
           [ "$fsck_rc" -eq 0 ] || warn "e2fsck corrected errors on $PART_DEV (rc=$fsck_rc); filesystem is now consistent - proceeding to resize2fs."
         fi
-        runcmd resize2fs "$PART_DEV"
+        runcmd_io resize2fs "$PART_DEV"
       else
         info "(filesystem NOT grown; pass --grow-fs to resize2fs now, or let systemd-repart grow it on first boot)"
       fi
@@ -432,14 +558,12 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 # GPT integrity check is FATAL: if sgdisk -v reports problems we fail closed (do NOT print PASS).
+# We want BOTH sgdisk's output (for the report) AND its exit status (the real signal). `set -o
+# pipefail` (top of file) makes the pipe below carry sgdisk's failing status even though `sed` is
+# last, so a single piped invocation is sufficient - no need for a redundant second run.
 echo "  --- sgdisk -v (GPT integrity; FATAL on failure) ---"
 if ! sgdisk -v "$TARGET" 2>&1 | sed 's/^/  /'; then
-  die_io "sgdisk -v reported GPT integrity problems on $TARGET - failing closed."
-fi
-# `sgdisk -v` prints findings but its exit status is the real signal; the pipe above masks it, so run
-# it once more capturing the status explicitly to be certain.
-if ! sgdisk -v "$TARGET" >/dev/null 2>&1; then
-  die_io "sgdisk -v exited non-zero (GPT integrity problems) on $TARGET - failing closed."
+  die_io "sgdisk -v reported GPT integrity problems on $TARGET (pipefail preserved its non-zero status) - failing closed."
 fi
 echo "  --- sfdisk -l (final partition table) ---"
 sfdisk -l "$TARGET" | sed 's/^/  /'
