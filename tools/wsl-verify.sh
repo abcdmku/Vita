@@ -96,26 +96,28 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for VITA-STATE (the LAST marker — order: TS->EVAL->PREVIEW->EXPLAIN->CONNECT->STATE). Its SUCCESS form proves
-  # the full on-device chain incl. the unprivileged runtime READING agentd's state over the unix socket (P1-035 S1 +
-  # P1-038 S2). (VITA-STATE-ERROR does NOT match 'VITA-STATE:' so a failed read correctly times out -> FAIL.)
+  # Wait for a COMMITTED apply (the LAST marker — order ...->CONNECT->STATE->APPLY). Its presence proves the full
+  # on-device control-plane chain incl. the unprivileged runtime driving a real agentd APPLY (P1-035 S1 + P1-038 S2 +
+  # P1-039 S3). 'outcome=committed' (not just VITA-APPLY:) so a failed/rejected-only apply correctly times out -> FAIL.
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-STATE:' "$log" 2>/dev/null; then ok=1; echo "VITA-STATE marker found at ~${i}s"; break; fi
+    if grep -qa 'VITA-APPLY: outcome=committed' "$log" 2>/dev/null; then ok=1; echo "VITA-APPLY committed at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn st
+  local ts ev pv ex cn st ac ar
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
-  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $ex"; echo "  $cn"; echo "  $st"
-  # PASS requires runtime + evaluator + preview + explain + connect + READ of agentd state (VITA-STATE success).
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ]; then
-    echo "RESULT: PASS (runtime + evaluator + preview + explain + agentd connect + state read — full chain on-device)"
+  ac=$(grep -a 'VITA-APPLY: outcome=committed' "$log" | tail -1); ar=$(grep -a 'VITA-APPLY: outcome=rejected' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar"; do echo "  $m"; done
+  # PASS = the whole chain + a COMMITTED apply AND a REJECTED apply (proves agentd applies a benign plan AND fails
+  # closed on an invalid one — the unprivileged->privileged mutation boundary works correctly).
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ar" ]; then
+    echo "RESULT: PASS (full control-plane on-device: evaluate->preview->explain->connect->read->APPLY commit + reject)"
   else
-    echo "RESULT: FAIL (missing a marker above; failures show VITA-CONNECT-ERROR / VITA-STATE-ERROR)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|vita-explain|vita-connect|vita-state|agentd|deno' | tail -16
+    echo "RESULT: FAIL (missing a marker above; failures show *-ERROR or a missing committed/rejected apply)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply)|agentd|deno' | tail -18
     return 1
   fi
 }
