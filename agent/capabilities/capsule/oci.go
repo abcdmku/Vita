@@ -94,11 +94,11 @@ func (e OCIImageExecution) Validate() error {
 		return &ExecuteInvalidRequestError{Reason: "runtime.oci.image.digest must be a sha256 OCI digest"}
 	}
 	if len(e.Entrypoint) == 0 {
-		return &ExecuteInvalidRequestError{Reason: "runtime.oci.image.entrypoint is required"}
+		return &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "runtime.oci.image.entrypoint is required"}
 	}
 	for i, arg := range e.Entrypoint {
 		if err := validateOCIArgvElement(arg, i == 0); err != nil {
-			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("runtime.oci.image.entrypoint[%d]: %v", i, err)}
+			return &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: fmt.Sprintf("runtime.oci.image.entrypoint[%d]: %v", i, err)}
 		}
 	}
 	return nil
@@ -119,6 +119,7 @@ func composeOCITransientUnit(manifest ExecutionManifest) (transientUnit, error) 
 	properties := hardenedTransientUnitProperties(manifest, false)
 	properties = append(properties,
 		systemdProperty{Name: "RootDirectory", Value: ociRootDirectory(manifest)},
+		systemdProperty{Name: "MountAPIVFS", Value: "yes"},
 		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
 		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
 		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
@@ -143,32 +144,61 @@ func statOCIManifestArtifacts(manifest ExecutionManifest) error {
 	info, err := os.Stat(rootfs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return &ExecuteInvalidRequestError{Reason: "capsule oci rootfs is absent"}
+			return &ExecuteInvalidRequestError{Code: "rootfs_absent", Reason: "capsule oci rootfs is absent"}
 		}
 		return fmt.Errorf("stat capsule oci rootfs: %w", err)
 	}
 	if !info.IsDir() {
-		return &ExecuteInvalidRequestError{Reason: "capsule oci rootfs must be a directory"}
+		return &ExecuteInvalidRequestError{Code: "rootfs_inaccessible", Reason: "capsule oci rootfs must be a directory"}
+	}
+	if !worldReadableExecutable(info.Mode()) {
+		return &ExecuteInvalidRequestError{Code: "permission_denied", Reason: "capsule oci rootfs must be world-readable and executable"}
 	}
 
 	entrypointPath, err := ociEntrypointHostPath(manifest)
 	if err != nil {
 		return err
 	}
+	if err := statOCIEntrypointDirectories(rootfs, entrypointPath); err != nil {
+		return err
+	}
 	info, err = os.Stat(entrypointPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return &ExecuteInvalidRequestError{Reason: "capsule oci entrypoint is absent"}
+			return &ExecuteInvalidRequestError{Code: "exec_failed", Reason: "capsule oci entrypoint is absent"}
 		}
 		return fmt.Errorf("stat capsule oci entrypoint: %w", err)
 	}
 	if info.IsDir() {
-		return &ExecuteInvalidRequestError{Reason: "capsule oci entrypoint must be a file"}
+		return &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "capsule oci entrypoint must be a file"}
 	}
-	if info.Mode().Perm()&0o111 == 0 {
-		return &ExecuteInvalidRequestError{Reason: "capsule oci entrypoint must be executable"}
+	if !worldReadableExecutable(info.Mode()) {
+		return &ExecuteInvalidRequestError{Code: "permission_denied", Reason: "capsule oci entrypoint must be world-readable and executable"}
 	}
 	return nil
+}
+
+func statOCIEntrypointDirectories(rootfs string, entrypointPath string) error {
+	parent := path.Dir(entrypointPath)
+	for {
+		if parent == rootfs || parent == "." || parent == "/" {
+			return nil
+		}
+		info, err := os.Stat(parent)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return &ExecuteInvalidRequestError{Code: "exec_failed", Reason: "capsule oci entrypoint directory is absent"}
+			}
+			return fmt.Errorf("stat capsule oci entrypoint directory: %w", err)
+		}
+		if !info.IsDir() {
+			return &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "capsule oci entrypoint path parent must be a directory"}
+		}
+		if !worldReadableExecutable(info.Mode()) {
+			return &ExecuteInvalidRequestError{Code: "permission_denied", Reason: "capsule oci entrypoint directory must be world-readable and executable"}
+		}
+		parent = path.Dir(parent)
+	}
 }
 
 func ociEntrypointHostPath(manifest ExecutionManifest) (string, error) {
@@ -191,15 +221,15 @@ func ociRootDirectory(manifest ExecutionManifest) string {
 func requiredOCIEntrypointField(fields map[string]json.RawMessage, key string) ([]string, error) {
 	raw, ok := fields[key]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, &ExecuteInvalidRequestError{Reason: "runtime.oci.image." + key + " is required"}
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "runtime.oci.image." + key + " is required"}
 	}
 
 	var entrypoint []string
 	if err := decodeSingleJSONValue(raw, &entrypoint); err != nil {
-		return nil, &ExecuteInvalidRequestError{Reason: "runtime.oci.image." + key + " must be an argv list"}
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "runtime.oci.image." + key + " must be an argv list"}
 	}
 	if entrypoint == nil {
-		return nil, &ExecuteInvalidRequestError{Reason: "runtime.oci.image." + key + " must be an argv list"}
+		return nil, &ExecuteInvalidRequestError{Code: "invalid_entrypoint", Reason: "runtime.oci.image." + key + " must be an argv list"}
 	}
 	return entrypoint, nil
 }
@@ -233,6 +263,10 @@ func validateOCIArgvElement(value string, entrypoint bool) error {
 		return errors.New("must be a clean absolute in-rootfs path")
 	}
 	return nil
+}
+
+func worldReadableExecutable(mode os.FileMode) bool {
+	return mode.Perm()&0o005 == 0o005
 }
 
 func safeOCIArgvToken(value string) bool {

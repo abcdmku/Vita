@@ -173,10 +173,18 @@ type ExecuteCapability struct {
 
 type ExecuteInvalidRequestError struct {
 	Reason string
+	Code   string
 }
 
 func (e *ExecuteInvalidRequestError) Error() string {
 	return fmt.Sprintf("invalid capsule execute request: %s", e.Reason)
+}
+
+func (e *ExecuteInvalidRequestError) ApplyErrorCode() string {
+	if e == nil || e.Code == "" {
+		return "capsule_execute_rejected"
+	}
+	return e.Code
 }
 
 type ExecuteStartError struct {
@@ -206,6 +214,20 @@ func (e *ExecuteStartError) ApplyErrorCode() string {
 		return "capsule_start_failed"
 	}
 	return e.Code
+}
+
+func executeStartFailureCode(manifest ExecutionManifest, unit transientUnit, err error) string {
+	if manifest.PackageClass == executePackageClassOCIService {
+		var startErr *transientUnitStartError
+		if errors.As(err, &startErr) && startErr.Code != "" {
+			return startErr.Code
+		}
+		return "oci_start_failed"
+	}
+	if len(unit.Volumes) > 0 {
+		return "capsule_volume_start_failed"
+	}
+	return "capsule_start_failed"
 }
 
 func NewExecuteCapability() *ExecuteCapability {
@@ -314,8 +336,8 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
-		code := "capsule_start_failed"
-		if len(unit.Volumes) > 0 {
+		code := executeStartFailureCode(manifest, unit, err)
+		if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
 			code = "capsule_volume_start_failed"
 			log.Printf("VITA-CAPSULE-VOLUME-ERROR: reason=%s status=FAILSAFE", code)
 		}
@@ -901,6 +923,55 @@ type transientUnitStatus struct {
 	DynamicUID string
 }
 
+type transientUnitDiagnostics struct {
+	ActiveState    string
+	SubState       string
+	Result         string
+	ExecMainCode   string
+	ExecMainStatus string
+}
+
+type transientUnitStartError struct {
+	Code        string
+	Unit        string
+	Diagnostics transientUnitDiagnostics
+	Err         error
+}
+
+func (e *transientUnitStartError) Error() string {
+	if e == nil {
+		return "transient unit start failed"
+	}
+	detail := "transient unit start failed"
+	if e.Unit != "" {
+		detail = "transient unit " + e.Unit + " start failed"
+	}
+	if e.Code != "" {
+		detail += ": " + e.Code
+	}
+	if e.Diagnostics != (transientUnitDiagnostics{}) {
+		detail += fmt.Sprintf(
+			" (active=%s sub=%s result=%s execCode=%s execStatus=%s)",
+			e.Diagnostics.ActiveState,
+			e.Diagnostics.SubState,
+			e.Diagnostics.Result,
+			e.Diagnostics.ExecMainCode,
+			e.Diagnostics.ExecMainStatus,
+		)
+	}
+	if e.Err != nil {
+		detail += ": " + e.Err.Error()
+	}
+	return detail
+}
+
+func (e *transientUnitStartError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type transientUnitLauncher interface {
 	StartTransientUnit(context.Context, transientUnit) (transientUnitStatus, error)
 	StopTransientUnit(context.Context, string) error
@@ -921,15 +992,16 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	args = append(args, unit.Argv...)
 
 	if output, err := exec.CommandContext(ctx, l.systemdRun, args...).CombinedOutput(); err != nil {
-		return transientUnitStatus{}, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output)))
+		return transientUnitStatus{}, l.startError(ctx, unit.Name, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output))))
 	}
 
 	if output, err := exec.CommandContext(ctx, l.systemctl, "is-active", "--quiet", unit.Name).CombinedOutput(); err != nil {
+		startErr := l.startError(ctx, unit.Name, fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))))
 		cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
-		return transientUnitStatus{}, errors.Join(
-			fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))),
-			cleanupErr,
-		)
+		if cleanupErr != nil {
+			startErr.Err = errors.Join(startErr.Err, cleanupErr)
+		}
+		return transientUnitStatus{}, startErr
 	}
 
 	uid, err := l.dynamicUID(ctx, unit.Name)
@@ -939,6 +1011,19 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	}
 
 	return transientUnitStatus{DynamicUID: uid}, nil
+}
+
+func (l systemdRunLauncher) startError(ctx context.Context, unit string, cause error) *transientUnitStartError {
+	diagnostics, err := l.unitDiagnostics(ctx, unit)
+	if err != nil {
+		cause = errors.Join(cause, err)
+	}
+	return &transientUnitStartError{
+		Code:        classifyTransientUnitStartFailure(diagnostics, cause.Error()),
+		Unit:        unit,
+		Diagnostics: diagnostics,
+		Err:         cause,
+	}
 }
 
 func (l systemdRunLauncher) StopTransientUnit(ctx context.Context, unit string) error {
@@ -1001,6 +1086,92 @@ func (l systemdRunLauncher) showUnitProperty(ctx context.Context, unit string, p
 		return "", fmt.Errorf("read capsule transient unit property %s: %w: %s", property, err, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func (l systemdRunLauncher) unitDiagnostics(ctx context.Context, unit string) (transientUnitDiagnostics, error) {
+	args := []string{
+		"show",
+		"--property=ActiveState",
+		"--property=SubState",
+		"--property=Result",
+		"--property=ExecMainCode",
+		"--property=ExecMainStatus",
+		unit,
+	}
+	output, err := exec.CommandContext(ctx, l.systemctl, args...).CombinedOutput()
+	if err != nil {
+		return transientUnitDiagnostics{}, fmt.Errorf("read capsule transient unit diagnostics: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	values := parseSystemctlShowProperties(output)
+	return transientUnitDiagnostics{
+		ActiveState:    values["ActiveState"],
+		SubState:       values["SubState"],
+		Result:         values["Result"],
+		ExecMainCode:   values["ExecMainCode"],
+		ExecMainStatus: values["ExecMainStatus"],
+	}, nil
+}
+
+func parseSystemctlShowProperties(output []byte) map[string]string {
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || name == "" {
+			continue
+		}
+		values[name] = value
+	}
+	return values
+}
+
+func classifyTransientUnitStartFailure(diagnostics transientUnitDiagnostics, detail string) string {
+	lowerDetail := strings.ToLower(detail)
+	switch {
+	case strings.Contains(lowerDetail, "permission denied") || strings.Contains(lowerDetail, "access denied"):
+		return "permission_denied"
+	case strings.Contains(lowerDetail, "failed at step namespace") ||
+		strings.Contains(lowerDetail, "mount namespacing") ||
+		strings.Contains(lowerDetail, "namespace"):
+		return "namespace_setup_failed"
+	case strings.Contains(lowerDetail, "rootdirectory") ||
+		strings.Contains(lowerDetail, "root directory") ||
+		strings.Contains(lowerDetail, "chroot"):
+		return "rootfs_inaccessible"
+	}
+
+	switch strings.TrimSpace(diagnostics.ExecMainStatus) {
+	case "203":
+		return "exec_failed"
+	case "210":
+		return "rootfs_inaccessible"
+	case "226":
+		return "namespace_setup_failed"
+	case "228":
+		return "seccomp_setup_failed"
+	}
+
+	if strings.TrimSpace(diagnostics.Result) == "signal" && strings.TrimSpace(diagnostics.ExecMainStatus) == "31" {
+		return "seccomp_blocked"
+	}
+
+	switch strings.TrimSpace(diagnostics.Result) {
+	case "exit-code":
+		return "process_exited"
+	case "timeout":
+		return "start_timeout"
+	case "resources":
+		return "resource_limit_failed"
+	case "signal", "core-dump":
+		return "process_signaled"
+	}
+	if diagnostics.ActiveState == "failed" || diagnostics.SubState == "failed" {
+		return "unit_failed"
+	}
+	return "unit_start_failed"
 }
 
 var (

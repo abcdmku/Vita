@@ -865,7 +865,7 @@ async function emitOCICapsuleMarkers(agentTransport: AgentTransport): Promise<vo
     const result = await client.apply(OCI_CAPSULE_EXECUTE_PLAN);
 
     if (result.outcome !== "committed") {
-      emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: reason=${agentApplyResultReason(result)} status=FAILSAFE`);
+      emit(`${CAPSULE_OCI_EXECUTE_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
       await emitForcedOCICapsuleExecuteRejectMarker(client);
       return;
     }
