@@ -231,8 +231,13 @@ if (MODE === "smoke") {
          "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
   // Verity root is read-only + PERSISTENT (P1-029): the repart-verity vita-data partition is mounted writable at
-  // /var (smoke-overlay var.mount, by FileSystemLabel). So NO systemd.volatile=overlay (that tmpfs-overlays / and
+  // /var (verity-overlay var.mount, by FileSystemLabel). So NO systemd.volatile=overlay (that tmpfs-overlays / and
   // would shadow the persistent /var). Host-verified: boots ro, /var on the ext4 data partition, state persists.
+  // var.mount + its local-fs drop-in live in a VERITY-ONLY overlay: on a plain (non-verity) image the vita-data
+  // device never exists, and a present-but-failed var.mount cascades through RequiresMountsFor=/var/... to cancel
+  // vita-agentd (StateDirectory=vita-agent) — breaking the agentd socket. So ship those units ONLY when VITA_VERITY=1.
+  const verityOverlay = useNative ? join(HERE, "verity-overlay") : "/work/os/x86_64/verity-overlay";
+  const verityTree = verityMode ? [`--extra-tree=${verityOverlay}`] : [];
   const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
@@ -277,7 +282,7 @@ if (MODE === "smoke") {
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, ...verity, ...bootloaderPin, ...sb,
-     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
+     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
