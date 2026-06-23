@@ -16,6 +16,12 @@
 #   FIX 3 (real post-P1-029 verity layout):
 #     - GROUP G:  ESP+root+verity+vita-data image -> vita-data GROWS; root + hash UNTOUCHED.
 #     - GROUP G2: legacy ESP+root+verity (NO vita-data) image -> growth SKIPPED; nothing grown.
+# Round-5 additions (the 2 BLOCKING fail-closed gaps from the round-4 re-review):
+#   FIX 1 (loop-backed critical mount must FAIL CLOSED unless its REAL backing disk resolves):
+#     - GROUP L6: loop-backed '/' whose backing disk is UNRESOLVABLE -> fail-closed abort (no write).
+#     - GROUP L7: loop-backed '/' whose backing disk IS the target -> still refused (not over-strict).
+#   FIX 2 (unknown target size is FATAL before any write):
+#     - GROUP M:  blockdev --getsize64 returns empty/0 -> exit 3 before dd; control: good size installs.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -522,6 +528,159 @@ OUT="$(PATH="$SHIM8" bash "$INSTALLER" "$TGT_L5" --yes --image "$FULL_IMG" 2>&1)
 assert_eq 1 "$RC" "L5a [NEW] '/etc' on target -> exit 1 refusal"
 assert_contains "$OUT" "RUNNING system" "L5b [NEW] explicit RUNNING-system refusal (no fail-closed mask)"
 assert_eq 0 "$(zero64 "$TGT_L5")" "L5c [NEW] refusal wrote nothing"
+
+############################################################################################
+note "GROUP L6 [ROUND-5 FIX 1] - loop-backed '/' whose BACKING disk is UNRESOLVABLE -> FAIL-CLOSED"
+# Live media often run '/' off a squashfs on a /dev/loopN. The round-5 BLOCKING gap: the old
+# resolve_source_disks() loop case emitted the loop device ITSELF as a resolved disk, so even when the
+# loop's backing file could NOT be mapped back to a real physical disk, RESOLVE_FAILED never tripped
+# and the installer could be pointed at the real backing disk. The FIX: a loop-backed critical mount
+# counts as resolved ONLY if loop_backing_disks maps it to a REAL physical disk; otherwise abort.
+#
+# Setup: '/' -> a REAL (separate) "root" loop device (so loop_backing_disks' `[ -b ]` passes). Its
+# backing file is real, but the shimmed findmnt returns NOTHING for that backing file's path, so the
+# backing disk is UNRESOLVABLE. The target is a DIFFERENT loop. Expect: exit 1, fail-closed message,
+# target untouched. (Pre-fix this would have "resolved" to the root loop node, skipped the abort, and
+# - since the root loop != target - proceeded to WRITE the target. This test would have FAILED then.)
+TGT_L6="$(mkloop 80M)"
+ROOTLOOP_L6="$(mkloop 24M)"   # the loop that backs '/'; its backing file is UNRESOLVABLE below
+SHIM_L6="$(make_shim_dir)"
+cat > "$SHIM_L6/findmnt" <<EF
+#!/bin/bash
+# '/' -> the root loop (SOURCE). For ANY OTHER path (incl. the loop's backing file): not a mount
+# (exit 1) -> loop_backing_disks yields nothing -> backing disk UNRESOLVABLE -> fail-closed.
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /) [ "\$col" = SOURCE ] && echo "$ROOTLOOP_L6"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+esac
+exit 1
+EF
+chmod +x "$SHIM_L6/findmnt"
+OUT="$(PATH="$SHIM_L6" bash "$INSTALLER" "$TGT_L6" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L6a [FIX1] loop-backed '/' with unresolvable backing -> exit 1 (fail-closed)"
+assert_contains "$OUT" "could not resolve the physical disk" "L6b [FIX1] fail-closed message"
+assert_eq 0 "$(zero64 "$TGT_L6")" "L6c [FIX1] fail-closed wrote nothing (target untouched)"
+
+############################################################################################
+note "GROUP L7 [ROUND-5 FIX 1] - loop-backed '/' whose backing disk IS the target -> STILL protected"
+# Positive control: the fix must NOT over-restrict. A loop-backed '/' whose backing file DOES map to a
+# real physical disk must still protect that disk. Here the root loop's backing file lives on a
+# PARTITION of the TARGET (the realistic squashfs-on-loop-on-the-install-medium case): findmnt resolves
+# the backing file to '${TGT}p1', which lsblk -s walks back to the target disk. So the target IS the
+# disk backing '/' and must be refused (NOT written). (Modelling the backing file as a partition of the
+# target - rather than the bare target loop - mirrors reality AND avoids a self-referential loop->loop
+# cycle, which no real system can produce.)
+TGT_L7="$(mkloop 80M)"
+# Give the target a partition so physical_disks_of_node('${TGT}p1') -> the target disk via lsblk -s.
+sgdisk -o "$TGT_L7" >/dev/null
+sgdisk -n 1:2048:+16M -t 1:8300 -c 1:medium "$TGT_L7" >/dev/null
+partprobe "$TGT_L7" 2>/dev/null || true; sleep 0.3
+ROOTLOOP_L7="$(mkloop 24M)"   # backs '/'; its backing file lives on '${TGT}p1' (resolved below)
+SHIM_L7="$(make_shim_dir)"
+cat > "$SHIM_L7/findmnt" <<EF
+#!/bin/bash
+# '/' -> the root loop. For any OTHER path (the loop's backing file on the install medium):
+# SOURCE = '${TGT_L7}p1' (a partition of the TARGET). physical_disks_of_node maps that to the target.
+col=SOURCE; path=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -no) col="\$2"; shift ;; -no*) col="\${1#-no}" ;;
+    --target) path="\$2"; shift ;; -o) col="\$2"; shift ;;
+  esac; shift
+done
+case "\$path" in
+  /) [ "\$col" = SOURCE ] && echo "$ROOTLOOP_L7"; [ "\$col" = TARGET ] && echo "/"; exit 0 ;;
+  *) [ "\$col" = SOURCE ] && echo "${TGT_L7}p1"; [ "\$col" = TARGET ] && echo "\$path"; exit 0 ;;
+esac
+EF
+chmod +x "$SHIM_L7/findmnt"
+OUT="$(PATH="$SHIM_L7" bash "$INSTALLER" "$TGT_L7" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 1 "$RC" "L7a [FIX1] loop-backed '/' whose backing IS target -> exit 1 refusal"
+assert_contains "$OUT" "RUNNING system" "L7b [FIX1] explicit RUNNING-system refusal (backing disk protected)"
+# 'Wrote nothing' proof: the original 'medium' partition we created must still be present (had the
+# installer dd'd FULL_IMG over it, the GPT/labels would be the image's, not our 'medium').
+NM_L7="$(sgdisk -i 1 "$TGT_L7" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'.*/\1/p")"
+assert_eq "medium" "$NM_L7" "L7c [FIX1] refusal wrote nothing (target's 'medium' partition intact)"
+
+############################################################################################
+note "GROUP M [ROUND-5 FIX 2] - UNKNOWN target size is FATAL before any write"
+# Round-5 BLOCKING gap: TGT_SIZE_BYTES fell back to 0 on a failed probe and the image-fits-target
+# refusal was gated by `[ TGT_SIZE_BYTES -gt 0 ]`, so a failed size probe SILENTLY SKIPPED the fit
+# check and could still dd. FIX: an undeterminable size ABORTS (exit 3) BEFORE any write.
+#
+# The installer now probes size from THREE sources (blockdev --getsize64 -> lsblk -bndo SIZE -> sysfs
+# /sys/class/block/<dev>/size) and only aborts if ALL fail. To exercise the fatal path on a REAL block
+# device (which always has a sysfs size) we must blind ALL THREE: shim `blockdev` (getsize64 empty/0),
+# `lsblk` (return empty ONLY for the `-bndo SIZE` query, forward every other lsblk call - the safety
+# path and partition listing still need real lsblk), and `cat` (return empty ONLY for a
+# `/sys/class/block/*/size` read, forward everything else). With all three blinded the size is
+# genuinely undeterminable -> exit 3 before any dd. The target is a real loop (NOT a system disk).
+make_size_blind_shim() { # $1 = shim dir, $2 = what blockdev --getsize64 emits ("" or "0")
+  local sd="$1" emit="$2" rbd rls rcat
+  rbd="$(command -v blockdev)"; rls="$(command -v lsblk)"; rcat="$(command -v cat)"
+  # make_shim_dir does NOT symlink findmnt (the GROUP L tests override it with their own script). The M
+  # tests use a REAL findmnt (the target loop is not a system disk, so real findmnt correctly reports it
+  # unmounted and the safety gate passes), so symlink it in here - otherwise the installer's required-
+  # tool check exits 2 before ever reaching the size probe we want to exercise.
+  local rfm; rfm="$(command -v findmnt)"; [ -n "$rfm" ] && ln -sf "$rfm" "$sd/findmnt"
+  # IMPORTANT: make_shim_dir left blockdev/lsblk/cat as SYMLINKS to the real tools. Remove them first
+  # so the `cat >` redirects create NEW scripts instead of writing THROUGH the symlink and clobbering
+  # the real binaries.
+  rm -f "$sd/blockdev" "$sd/lsblk" "$sd/cat"
+  cat > "$sd/blockdev" <<BD
+#!/bin/bash
+if [ "\$1" = "--getsize64" ]; then printf '%s' "$emit"; [ -n "$emit" ] && echo; exit 0; fi
+exec "$rbd" "\$@"
+BD
+  cat > "$sd/lsblk" <<LS
+#!/bin/bash
+# Blind ONLY the byte-size probe ('-bndo SIZE'); forward all other lsblk queries to the real tool.
+# (The safety path uses 'lsblk -s -no NAME,TYPE' / 'lsblk -ndo LABEL|MODEL|...' and the partition
+# listing uses 'lsblk -o NAME,SIZE,...'; none of those carry BOTH '-bndo' AND 'SIZE', so only the
+# size-bytes probe is intercepted.)
+has_bndo=0; has_size=0
+for a in "\$@"; do
+  [ "\$a" = "-bndo" ] && has_bndo=1
+  [ "\$a" = "SIZE" ] && has_size=1
+done
+[ "\$has_bndo" = 1 ] && [ "\$has_size" = 1 ] && exit 0
+exec "$rls" "\$@"
+LS
+  cat > "$sd/cat" <<CT
+#!/bin/bash
+# Blind ONLY a sysfs block 'size' read; forward everything else (incl. real /sys reads) untouched.
+for a in "\$@"; do case "\$a" in /sys/class/block/*/size|/sys/block/*/size) exit 0 ;; esac; done
+exec "$rcat" "\$@"
+CT
+  chmod +x "$sd/blockdev" "$sd/lsblk" "$sd/cat"
+}
+# M1: ALL size sources blinded, blockdev emits EMPTY -> exit 3, no write.
+TGT_M1="$(mkloop 200M)"
+SHIM_M1="$(make_shim_dir)"; make_size_blind_shim "$SHIM_M1" ""
+OUT="$(PATH="$SHIM_M1" bash "$INSTALLER" "$TGT_M1" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 3 "$RC" "M1a [FIX2] all size sources blind (empty) -> exit 3 (fatal)"
+assert_contains "$OUT" "could not determine a usable size" "M1b [FIX2] names the undeterminable-size abort"
+assert_eq 0 "$(zero64 "$TGT_M1")" "M1c [FIX2] fatal-size wrote nothing (no dd)"
+# M2: ALL size sources blinded, blockdev emits 0 -> exit 3, no write (the explicit 0 case).
+TGT_M2="$(mkloop 200M)"
+SHIM_M2="$(make_shim_dir)"; make_size_blind_shim "$SHIM_M2" "0"
+OUT="$(PATH="$SHIM_M2" bash "$INSTALLER" "$TGT_M2" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 3 "$RC" "M2a [FIX2] all size sources blind (0) -> exit 3 (fatal)"
+assert_contains "$OUT" "could not determine a usable size" "M2b [FIX2] names the undeterminable-size abort"
+assert_eq 0 "$(zero64 "$TGT_M2")" "M2c [FIX2] zero-size wrote nothing (no dd)"
+# M3 (control): with the NORMAL probe chain a fits-fine target still installs (exit 0) - proves the
+# new guard does not block legitimate installs and that the lsblk/sysfs fallback works when
+# blockdev --getsize64 itself returns 0 (as it does for loop devices on some kernels).
+TGT_M3="$(mkloop 200M)"
+OUT="$(bash "$INSTALLER" "$TGT_M3" --yes --image "$FULL_IMG" 2>&1)"; RC=$?
+assert_eq 0 "$RC" "M3a [FIX2] control: known good size still installs -> exit 0"
+assert_contains "$OUT" "RESULT: PASS" "M3b [FIX2] control: RESULT: PASS"
 
 ############################################################################################
 printf '\n===== ASSERT %d pass / %d fail (total %d) =====\n' "$PASS" "$FAIL" "$((PASS+FAIL))"

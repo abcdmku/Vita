@@ -184,7 +184,7 @@ What it does, in order:
 | `0` | Success (or `--dry-run` plan printed). |
 | `1` | Usage error or a safety refusal (bad args, system-disk target, image too big, no confirmation). |
 | `2` | A required tool is missing. |
-| `3` | Write/verify failure (unmount failed, GPT integrity check failed, or the final layout is wrong). |
+| `3` | Write/verify/probe failure (unmount failed, **target size could not be determined**, GPT integrity check failed, or the final layout is wrong). |
 
 ### 3.5 Grow now, or grow on first boot?
 
@@ -214,7 +214,11 @@ images ship this partition):
 - **Fail-closed when a system mount can't be resolved.** If `/`, `/boot`, `/boot/efi`, `/etc`, or an
   active swap is mounted but the installer cannot resolve it to a physical disk, it **aborts** rather
   than proceed with an incomplete protected-disk set (which could let it overwrite the running
-  system's disk). It never "skips" an unresolvable critical mount.
+  system's disk). It never "skips" an unresolvable critical mount. This includes **loop-backed**
+  critical mounts: a `/dev/loopN` root/swap counts as resolved **only if its backing file maps back to
+  a real physical disk** - the loop device itself is *not* accepted as the answer, so a loop whose
+  backing disk cannot be determined **fails closed** instead of letting the installer target the real
+  backing disk.
 - **Fail-closed on a busy target.** If a node on the target cannot be unmounted, it aborts before
   writing rather than `dd`-ing over a mounted filesystem. It uses a **plain `umount` (never a lazy
   `umount -l`)** so it cannot detach a still-active filesystem and write over it, and it re-verifies
@@ -223,7 +227,10 @@ images ship this partition):
   a serious `e2fsck` failure aborts the run **before** `resize2fs` (it never resizes a corrupt FS).
 - **Whole-disk only.** It rejects partition nodes (`/dev/sdb1`) and non-disk nodes.
 - **Explicit intent required.** Either `--yes` or typing the exact device path.
-- **Won't overflow.** Aborts if the image is larger than the target.
+- **Won't overflow.** Aborts if the image is larger than the target. **If the target's size cannot
+  even be determined** (`blockdev --getsize64` fails / returns 0 / empty), it **aborts (exit 3) before
+  any write** rather than skip the fit check - an unknown capacity is never allowed to bypass the
+  overflow refusal.
 - **Fatal GPT verification.** A failed `sgdisk -v` post-write check fails closed (exit 3, no PASS).
 - **`--dry-run` writes nothing** and needs no root.
 
@@ -302,6 +309,7 @@ A/B + recovery on top of the same data partition.
 | `RESULT: FAIL (expected >=2 partitions incl. an ESP)` | Wrong/corrupt `--image`, or the write was interrupted. Re-run; check `sfdisk -l /dev/sdX`. |
 | `RESULT: FAIL` after "could not unmount" | A partition on the target is busy/mounted. Unmount it (`umount`), close any LVM/dm mapping, and re-run. The installer refuses to write a busy disk. |
 | `sgdisk -v reported GPT integrity problems` (exit 3) | The post-write GPT check failed (fail-closed). Re-run the installer; if it persists the image or disk is bad. |
+| `could not determine a usable size for target` (exit 3) | None of `blockdev --getsize64`, `lsblk -bndo SIZE`, or the sysfs `size` attribute returned a positive capacity (fail-closed before any write). The device may be detached, mid-hotplug, or not a real block device. Re-attach/re-probe it (`blockdev --getsize64 /dev/sdX`; `lsblk -bndo SIZE /dev/sdX`) and re-run. |
 | Installer refuses with "physical disk backing the RUNNING system" | You pointed it at a disk the live environment is using (root/boot/swap, possibly through LVM/dm-crypt/overlay/squashfs). Use the *other* disk. |
 | Installer aborts: "could not resolve the physical disk(s) backing the running system" | Fail-closed safety: a system mount (`/`, `/boot`, `/etc`, swap...) is mounted but couldn't be traced to a disk. Run on a live environment that isn't using the target, or inspect `findmnt` / `lsblk -s` for that mount. |
 | `vita-data` skipped: "no partition labeled 'vita-data'" | Only happens on a legacy image with no data partition. Current verity *and* full images ship `vita-data`; rebuild a current image (`VITA_VERITY=1 ...` or `--mode=full`). |

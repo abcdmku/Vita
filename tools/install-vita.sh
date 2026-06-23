@@ -107,6 +107,32 @@ runcmd_io() {
   "$@" || die_io "command failed (exit $?): $* - failing closed (write/verify failure)."
 }
 need() { command -v "$1" >/dev/null 2>&1 || die_tool "missing required tool: $1 (install it; exit 2)"; }
+# Best-effort partition-table re-read for $1 (a whole-disk node we just rewrote). This re-reads the
+# kernel's view of the on-disk partition table and lets udev re-create the partition device nodes.
+#
+# We PREFER `partprobe`: `blockdev --rereadpt` issues the BLKRRPART ioctl, which on some kernels
+# (notably loop devices under WSL2) can wedge a process in an UNINTERRUPTIBLE (D-state) sleep that no
+# signal - not even SIGKILL - can clear, so even a `timeout` wrapper cannot reliably abort it.
+# `partprobe` performs the equivalent re-read without that failure mode. Every Linux live/installer
+# environment that ships `parted` has `partprobe`, so this is the normal path. ONLY when `partprobe`
+# is unavailable do we fall back to `blockdev --rereadpt`, guarded by a `timeout` (with --kill-after
+# escalation to SIGKILL) so on a well-behaved kernel a stalled ioctl still degrades to a warning
+# rather than hanging the installer. `udevadm settle` (when present) waits for the new nodes.
+# Returns 0 if at least one re-read method ran without erroring; non-zero lets callers `|| warn`.
+reread_pt() {
+  local dev="$1" ok=1
+  if command -v partprobe >/dev/null 2>&1; then
+    runcmd partprobe "$dev" && ok=0 || ok=1
+  else
+    if command -v timeout >/dev/null 2>&1; then
+      runcmd timeout -k 5 20 blockdev --rereadpt "$dev" && ok=0 || ok=1
+    else
+      runcmd blockdev --rereadpt "$dev" && ok=0 || ok=1
+    fi
+  fi
+  command -v udevadm >/dev/null 2>&1 && runcmd udevadm settle 2>/dev/null || true
+  return "$ok"
+}
 
 # -- preconditions -----------------------------------------------------------------------------------
 [ -n "$TARGET" ] || { echo "ERROR: no target device given" >&2; usage 1; }
@@ -219,14 +245,33 @@ overlay_lower_disks() {
 }
 resolve_source_disks() {
   # $1 = a findmnt SOURCE value (may be /dev/..., /dev/...[subvol], overlay, a loop, tmpfs, ...).
+  # $2 = mode: "strict" => for a /dev/loop* source, count ONLY the REAL physical disk(s) the loop's
+  #            backing file lives on (loop_backing_disks); do NOT emit the loop device itself. Any
+  #            other mode (default) ALSO emits the loop node (so target==loop is still detectable).
   # Prints every physical disk backing it (zero or more lines). Recursion-safe (loop/overlay call
   # back into this).
-  local src node
-  src="$1"
+  #
+  # WHY the "strict" distinction (BLOCKING FIX, round 5): for a loop-backed CRITICAL mount
+  # (/ /boot /boot/efi /etc /swap) the safety question is "can we map this loop back to the REAL
+  # physical disk it ultimately sits on?". If we cannot (backing file un-mappable - e.g. detached,
+  # on tmpfs, or losetup/findmnt give us nothing), the loop device ITSELF is NOT a satisfactory
+  # answer: the installer could still be pointed at the real backing disk and wipe the running
+  # system. So in strict mode the loop node is NOT treated as a resolved physical disk - resolution
+  # counts only if loop_backing_disks succeeds - which lets the caller FAIL CLOSED. (The loop node
+  # is still protected separately by the caller as a node-level guard so target==loop is refused.)
+  local src node mode
+  src="$1"; mode="${2:-}"
   [ -n "$src" ] || return 0
   node="$(strip_subvol "$src")"
   case "$node" in
-    /dev/loop*) loop_backing_disks "$node"; physical_disks_of_node "$node" ;;
+    /dev/loop*)
+      if [ "$mode" = strict ]; then
+        # Strict: ONLY the real backing physical disk(s). The loop node itself does NOT count.
+        loop_backing_disks "$node"
+      else
+        loop_backing_disks "$node"; physical_disks_of_node "$node"
+      fi
+      ;;
     /dev/*)     physical_disks_of_node "$node" ;;
     overlay|overlayfs) : ;;  # handled by caller via the mountpoint (overlay_lower_disks) - SOURCE alone is opaque
     *)          : ;;          # tmpfs/ramfs/etc carry no physical disk
@@ -234,8 +279,10 @@ resolve_source_disks() {
 }
 disks_for_path() {
   # $1 = a filesystem path (e.g. /, /boot) -> every physical disk backing it (zero or more lines).
+  # $2 = mode forwarded to resolve_source_disks ("strict" => a loop source counts only via its REAL
+  #      backing disk, not the loop node itself - see resolve_source_disks).
   # Handles /dev nodes, Btrfs-subvol suffixes, overlay roots (live media), and squashfs-on-loop.
-  local path="$1" src mp
+  local path="$1" mode="${2:-}" src mp
   src="$(findmnt -no SOURCE --target "$path" 2>/dev/null | head -1 || true)"
   [ -n "$src" ] || return 0
   case "$(strip_subvol "$src")" in
@@ -244,7 +291,7 @@ disks_for_path() {
       mp="$(findmnt -no TARGET --target "$path" 2>/dev/null | head -1 || true)"
       [ -n "$mp" ] && overlay_lower_disks "$mp"
       ;;
-    *) resolve_source_disks "$src" ;;
+    *) resolve_source_disks "$src" "$mode" ;;
   esac
 }
 # Is a path actually a mountpoint that backs the running system (i.e. resolvable & present)? We use
@@ -267,13 +314,28 @@ add_protected() {
 }
 # Resolve a CRITICAL running-system path and FAIL CLOSED if it is mounted but yields no disk.
 # (A path that is not a mountpoint at all - e.g. no separate /boot - is fine to skip.)
+#
+# BLOCKING FIX (round 5): a LOOP-backed critical mount counts as RESOLVED only if we can map it to a
+# REAL physical disk. Previously `disks_for_path` emitted the loop device ITSELF for a loop source, so
+# even when the loop's backing file could NOT be mapped back to a physical disk, RESOLVE_FAILED never
+# tripped and the installer could be pointed at the actual backing disk. We now resolve in two passes:
+#   1) STRICT pass (`disks_for_path "$path" strict`) - for a loop source this yields ONLY the real
+#      physical backing disk(s); the loop node itself is NOT counted. This pass drives the
+#      fail-closed decision: if it is empty yet the path is mounted, we ABORT.
+#   2) NODE pass (default `disks_for_path "$path"`) - this MAY additionally include the loop node
+#      itself. We still add whatever it finds to PROTECTED_DISKS so that if the target IS that loop
+#      device we refuse it - but its presence must NOT suppress the fail-closed flag (it does not,
+#      because the flag is decided solely by the strict pass).
 protect_critical() {
-  local path="$1" disks
-  disks="$(disks_for_path "$path")"
-  if [ -n "$disks" ]; then
-    add_protected "$disks"
-  elif path_is_mounted "$path"; then
-    # Mounted, but we could not resolve a backing physical disk. Do NOT proceed unprotected.
+  local path="$1" strict_disks node_disks
+  strict_disks="$(disks_for_path "$path" strict)"
+  node_disks="$(disks_for_path "$path")"
+  # Protect every disk we found in EITHER pass (the loop node from the node pass guards target==loop).
+  [ -n "$strict_disks" ] && add_protected "$strict_disks"
+  [ -n "$node_disks" ]   && add_protected "$node_disks"
+  # Fail-closed decision is the STRICT pass only: a mounted critical path that does not resolve to a
+  # REAL physical disk is an ABORT, even if a loop node was emitted by the node pass.
+  if [ -z "$strict_disks" ] && path_is_mounted "$path"; then
     RESOLVE_FAILED="$RESOLVE_FAILED $path"
   fi
   return 0
@@ -287,9 +349,20 @@ protect_critical /boot/efi
 protect_critical /etc           # catches systems where / is overlay but /etc is real
 # Active swap devices, too (overwriting them corrupts the running system). Resolve the full stack;
 # a swap entry we cannot resolve to a disk is also an ABORT (it could be on the target).
+# BLOCKING FIX (round 5): a LOOP-backed swap device gets the SAME strict treatment as loop-backed
+# critical mounts - it counts as resolved only if loop_backing_disks maps it to a REAL physical disk.
+# (physical_disks_of_node on a loop would otherwise emit the loop node itself and mask the gap.) We
+# still protect the loop node so target==loop-swap is refused, but the fail-closed flag is driven by
+# the real backing disk only.
 if [ -r /proc/swaps ]; then
   while read -r dev _rest; do
     case "$dev" in
+      /dev/loop*)
+        sd="$(loop_backing_disks "$dev")"      # STRICT: real backing disk(s) only
+        node="$(physical_disks_of_node "$dev")" # the loop node itself (node-level guard)
+        [ -n "$node" ] && add_protected "$node"
+        if [ -n "$sd" ]; then add_protected "$sd"; else RESOLVE_FAILED="$RESOLVE_FAILED swap:$dev"; fi
+        ;;
       /dev/*)
         sd="$(physical_disks_of_node "$dev")"
         if [ -n "$sd" ]; then add_protected "$sd"; else RESOLVE_FAILED="$RESOLVE_FAILED swap:$dev"; fi
@@ -300,6 +373,24 @@ if [ -r /proc/swaps ]; then
   done < <(tail -n +2 /proc/swaps 2>/dev/null || true)
 fi
 
+# Refusal order matters for the MESSAGE (both refuse, exit 1, write nothing - either is safe):
+#   1) If we POSITIVELY identified the target as a disk backing the running system, say so explicitly
+#      ("RUNNING system"). This is the most precise, actionable message.
+#   2) Otherwise, if ANY critical mount could not be resolved to a physical disk, FAIL CLOSED - we
+#      have an incomplete protected set and cannot prove the target is safe.
+# Doing (1) before (2) is strictly safe: a target that matches a protected disk is unambiguously the
+# running system's disk; only when it does NOT match do we fall back to the conservative fail-closed
+# abort. (Reordered in round 5: a loop-backed critical mount that IS the target now reports the precise
+# "RUNNING system" refusal rather than the generic fail-closed one, while a loop-backed mount whose
+# UNRESOLVABLE backing disk is some OTHER device still fails closed below.)
+for pd in $PROTECTED_DISKS; do
+  if [ "$(readlink -f "$pd" 2>/dev/null || echo "$pd")" = "$TARGET" ]; then
+    die "REFUSING: $TARGET is a physical disk backing the RUNNING system (root/boot/swap, possibly
+       through an LVM/dm-crypt/md/overlay/squashfs stack). Installing onto it would destroy this machine.
+       Boot a live USB and target the OTHER disk, or pass an external disk."
+  fi
+done
+
 # FAIL CLOSED: if any critical running-system mount could not be resolved to a physical disk, we have
 # an incomplete protected set and could wipe the running system's disk. Abort rather than risk it.
 if [ -n "${RESOLVE_FAILED# }" ]; then
@@ -309,16 +400,33 @@ if [ -n "${RESOLVE_FAILED# }" ]; then
        the installer from a live environment that is NOT using the target disk."
 fi
 
-for pd in $PROTECTED_DISKS; do
-  if [ "$(readlink -f "$pd" 2>/dev/null || echo "$pd")" = "$TARGET" ]; then
-    die "REFUSING: $TARGET is a physical disk backing the RUNNING system (root/boot/swap, possibly
-       through an LVM/dm-crypt/md/overlay/squashfs stack). Installing onto it would destroy this machine.
-       Boot a live USB and target the OTHER disk, or pass an external disk."
-  fi
-done
-
 # -- gather target facts for the confirmation prompt ------------------------------------------------
-TGT_SIZE_BYTES="$(blockdev --getsize64 "$TARGET" 2>/dev/null || echo 0)"
+# Probe the target size from the most authoritative source available, falling back if one yields a
+# bogus 0/empty. `blockdev --getsize64` is preferred, but on some kernels/device classes it can
+# transiently report 0 for a perfectly valid device (notably loop devices) - so we also consult
+# `lsblk -bndo SIZE` and the sysfs `size` attribute (in 512-byte sectors). We take the FIRST source
+# that returns a positive integer. If ALL of them fail (empty / 0 / non-numeric), the size is
+# genuinely undeterminable and that is FATAL before any write (checked after the banner) - we never
+# fall back to 0 and silently skip the image-fit refusal.
+target_size_bytes() {
+  local dev="$1" v
+  # 1) blockdev --getsize64 (bytes).
+  v="$(blockdev --getsize64 "$dev" 2>/dev/null || true)"
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  if [ "$v" -gt 0 ] 2>/dev/null; then echo "$v"; return 0; fi
+  # 2) lsblk -bndo SIZE (bytes).
+  v="$(lsblk -bndo SIZE "$dev" 2>/dev/null | head -1 || true)"
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  if [ "$v" -gt 0 ] 2>/dev/null; then echo "$v"; return 0; fi
+  # 3) sysfs size attribute (in 512-byte sectors) -> bytes. /sys/class/block/<name>/size.
+  local nm sect; nm="$(basename "$dev")"
+  sect="$(cat "/sys/class/block/$nm/size" 2>/dev/null || true)"
+  case "$sect" in ''|*[!0-9]*) sect=0 ;; esac
+  if [ "$sect" -gt 0 ] 2>/dev/null; then echo $((sect * 512)); return 0; fi
+  # Nothing worked: emit empty -> the caller treats this as undeterminable (fatal).
+  echo ""
+}
+TGT_SIZE_BYTES="$(target_size_bytes "$TARGET")"
 TGT_MODEL="$(lsblk -ndo MODEL "$TARGET" 2>/dev/null | sed 's/[[:space:]]*$//' || true)"
 TGT_VENDOR="$(lsblk -ndo VENDOR "$TARGET" 2>/dev/null | sed 's/[[:space:]]*$//' || true)"
 [ -n "$TGT_MODEL" ] || TGT_MODEL="(unknown model)"
@@ -333,14 +441,28 @@ echo "===== Vita installer ====="
 echo "  image    : $IMAGE"
 echo "             size $(human_size "$IMG_SIZE_BYTES") ($IMG_SIZE_BYTES bytes)"
 echo "  target   : $TARGET"
-echo "             $TGT_VENDOR $TGT_MODEL - $(human_size "$TGT_SIZE_BYTES") ($TGT_SIZE_BYTES bytes)"
+echo "             $TGT_VENDOR $TGT_MODEL - $([ -n "$TGT_SIZE_BYTES" ] && [ "$TGT_SIZE_BYTES" != 0 ] && echo "$(human_size "$TGT_SIZE_BYTES") ($TGT_SIZE_BYTES bytes)" || echo '(size UNKNOWN - will abort)')"
 echo "  mode     : $([ "$DRY_RUN" = 1 ] && echo 'DRY-RUN (no writes)' || echo WRITE) | grow=$([ "$DO_GROW" = 1 ] && echo vita-data || echo no) | grow-fs=$([ "$DO_GROW_FS" = 1 ] && echo yes || echo no) | relocate-backup-gpt=$([ "$RELOCATE_BACKUP" = 1 ] && echo yes || echo no)"
 echo "  --- current partitions on target (these WILL be destroyed) ---"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL "$TARGET" 2>/dev/null | sed 's/^/  /' || true
 echo
 
-# Image must fit on the target.
-if [ "$IMG_SIZE_BYTES" -gt "$TGT_SIZE_BYTES" ] 2>/dev/null && [ "$TGT_SIZE_BYTES" -gt 0 ]; then
+# BLOCKING FIX (round 5): an UNKNOWN target size is FATAL before any write. Previously the size probe
+# fell back to 0 and the fit check below was gated by `[ "$TGT_SIZE_BYTES" -gt 0 ]`, so a failed probe
+# SILENTLY SKIPPED the image-fits-target refusal and could still dd onto a target whose capacity we
+# never confirmed. The contract requires SHOWING the target size and REFUSING image overflow; an
+# undeterminable size must never bypass that. target_size_bytes() above already tried blockdev, lsblk,
+# and sysfs and returns a positive integer or "" - so anything that is empty, 0, or non-numeric here
+# means the capacity is genuinely undeterminable (a real device with no readable capacity, or a probe
+# that only ever answered 0). ABORT now (fail-closed) BEFORE the confirmation/write. Exit 3 (a
+# device-probe failure on the target, mapping to the write/verify-failure class).
+case "$TGT_SIZE_BYTES" in
+  ''|0|*[!0-9]*)
+    die_io "could not determine a usable size for target $TARGET (blockdev/lsblk/sysfs all returned no positive size; got '${TGT_SIZE_BYTES:-}', i.e. empty / 0 / non-numeric). REFUSING to continue - without a known capacity the installer cannot guarantee the image fits and could overflow/clobber the device. ABORTING (fail-closed) before any write." ;;
+esac
+# Image must fit on the target. (TGT_SIZE_BYTES is now guaranteed a positive integer, so the fit
+# refusal can no longer be skipped by an unknown size.)
+if [ "$IMG_SIZE_BYTES" -gt "$TGT_SIZE_BYTES" ]; then
   die "image ($(human_size "$IMG_SIZE_BYTES")) is LARGER than target ($(human_size "$TGT_SIZE_BYTES")) - it would not fit. Wrong target?"
 fi
 
@@ -394,9 +516,8 @@ $(printf '%s\n' "$still" | sed 's/^/         /')
 fi
 # dd: 4 MiB blocks, conv=fsync so the data is durable before we touch the GPT. status=progress for feedback.
 runcmd_io dd if="$IMAGE" of="$TARGET" bs=4M conv=fsync oflag=direct status=progress
-# Re-read the partition table the image carries.
-runcmd blockdev --rereadpt "$TARGET" || warn "blockdev --rereadpt failed (kernel may already have it); continuing"
-command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
+# Re-read the partition table the image carries (partprobe-first; see reread_pt).
+reread_pt "$TARGET" || warn "partition-table re-read did not fully succeed (kernel may already have it); continuing"
 
 # -- 2 . repair the GPT backup header (it sits mid-disk because the .raw was content-sized) ----------
 echo "===== 2 . repair GPT backup header ====="
@@ -481,11 +602,11 @@ if [ "$DO_GROW" = 1 ]; then
         ${P_GUID:+--partition-guid="$DATA_PARTNUM:$P_GUID"} \
         ${P_NAME:+--change-name="$DATA_PARTNUM:$P_NAME"} \
         "$TARGET"
-      runcmd blockdev --rereadpt "$TARGET" || true
-      command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
-      # Let udev (re)populate the recreated partition node before we probe it. Without this, lsblk's
-      # cached FSTYPE can read empty immediately after a delete/recreate (especially on hosts without
-      # partprobe), which would falsely trip the ext4 guard below.
+      # Re-read the recreated table (partprobe-first; reread_pt also runs `udevadm settle`). The extra
+      # settle below is belt-and-suspenders: without udev (re)populating the recreated partition node,
+      # lsblk's cached FSTYPE can read empty right after a delete/recreate, which would falsely trip the
+      # ext4 guard below.
+      reread_pt "$TARGET" || true
       command -v udevadm >/dev/null 2>&1 && runcmd udevadm settle || true
       if [ "$DO_GROW_FS" = 1 ]; then
         # Partition device naming: /dev/sda3, but /dev/nvme0n1p3 and /dev/loop0p3 use a 'p' separator.
