@@ -20,6 +20,11 @@ import { buildCapsuleRegistryConfig } from "./vita/capsule-registry-model.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
 import { formatPdsSyncStateReadMarker, readPdsSyncStateSummary } from "./vita/pds-read.ts";
 import {
+  applyPdsSyncStateWrite,
+  formatPdsSyncStateWriteMarker,
+  rejectInvalidPdsSyncStateWrite,
+} from "./vita/pds-write.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
 } from "./vita/unix-socket-transport.ts";
@@ -298,16 +303,17 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
+  const agentTransport = createDenoUnixSocketApplyAgentTransport({
+    socketPath: AGENTD_SOCKET_PATH,
+  });
   const state = await readAgentStateSummary(client);
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
-    const agentTransport = createDenoUnixSocketApplyAgentTransport({
-      socketPath: AGENTD_SOCKET_PATH,
-    });
     await emitApplyMarkers(state.state.hostname, agentTransport);
     await emitCapsuleMarkers(agentTransport);
   } else {
@@ -317,6 +323,9 @@ async function emitAgentdConnectMarker(): Promise<void> {
   }
 
   await emitPdsReadMarker(client);
+  if (await emitPdsWriteMarkers(agentTransport)) {
+    await emitPdsReadMarker(client);
+  }
 }
 
 async function emitApplyMarkers(
@@ -464,6 +473,27 @@ async function emitForcedRejectMarker(agentTransport: AgentTransport): Promise<v
 
 async function emitPdsReadMarker(client: Pick<AgentClient, "getState">): Promise<void> {
   emit(formatPdsSyncStateReadMarker(await readPdsSyncStateSummary(client)));
+}
+
+async function emitPdsWriteMarkers(agentTransport: AgentTransport): Promise<boolean> {
+  const result = await applyPdsSyncStateWrite(
+    CAPABILITY_REGISTRY,
+    createApplyNodeTransport(agentTransport),
+  );
+
+  emit(formatPdsSyncStateWriteMarker(result));
+
+  if (!result.ok || result.outcome !== "committed") {
+    return false;
+  }
+
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+  const rejected = await rejectInvalidPdsSyncStateWrite(client);
+  emit(formatPdsSyncStateWriteMarker(rejected));
+  return true;
 }
 
 async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {
