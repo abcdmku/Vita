@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"github.com/vita/agent/capabilities"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
+	capsulestorage "github.com/vita/agent/storage/capsules"
 	"github.com/vita/agent/transaction"
 )
 
@@ -141,11 +143,21 @@ type ExecuteReadResponse struct {
 func (ExecuteReadResponse) CapabilityResponse() {}
 
 type ExecuteStatus struct {
-	ID         string `json:"id"`
-	Unit       string `json:"unit"`
-	DynamicUID string `json:"dynamicUid"`
-	Health     string `json:"health"`
-	Status     string `json:"status"`
+	ID         string                `json:"id"`
+	Unit       string                `json:"unit"`
+	DynamicUID string                `json:"dynamicUid"`
+	Health     string                `json:"health"`
+	Status     string                `json:"status"`
+	Volumes    []ExecuteVolumeStatus `json:"volumes,omitempty"`
+}
+
+type ExecuteVolumeStatus struct {
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	StateDirectory string `json:"stateDirectory"`
+	Access         string `json:"access"`
+	Mounted        string `json:"mounted"`
+	Status         string `json:"status"`
 }
 
 type ExecuteCapability struct {
@@ -164,6 +176,35 @@ type ExecuteInvalidRequestError struct {
 
 func (e *ExecuteInvalidRequestError) Error() string {
 	return fmt.Sprintf("invalid capsule execute request: %s", e.Reason)
+}
+
+type ExecuteStartError struct {
+	Code string
+	Err  error
+}
+
+func (e *ExecuteStartError) Error() string {
+	if e == nil {
+		return "capsule start failed"
+	}
+	if e.Err == nil {
+		return e.ApplyErrorCode()
+	}
+	return fmt.Sprintf("%s: %v", e.ApplyErrorCode(), e.Err)
+}
+
+func (e *ExecuteStartError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *ExecuteStartError) ApplyErrorCode() string {
+	if e == nil || e.Code == "" {
+		return "capsule_start_failed"
+	}
+	return e.Code
 }
 
 func NewExecuteCapability() *ExecuteCapability {
@@ -218,6 +259,7 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 		return ExecuteReadResponse{}, nil
 	}
 	last := *c.last
+	last.Volumes = cloneExecuteVolumeStatuses(c.last.Volumes)
 	if c.supervisor != nil {
 		for _, workload := range c.supervisor.Snapshot() {
 			if workload.Unit == last.Unit {
@@ -271,7 +313,12 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
-		return nil, err
+		code := "capsule_start_failed"
+		if len(unit.Volumes) > 0 {
+			code = "capsule_volume_start_failed"
+			log.Printf("VITA-CAPSULE-VOLUME-ERROR: reason=%s status=FAILSAFE", code)
+		}
+		return nil, &ExecuteStartError{Code: code, Err: err}
 	}
 
 	executeStatus := ExecuteStatus{
@@ -280,9 +327,13 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		DynamicUID: status.DynamicUID,
 		Health:     "OK",
 		Status:     "OK",
+		Volumes:    volumeStatuses(unit.Volumes),
 	}
 	c.setLast(executeStatus)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
+	for _, volume := range unit.Volumes {
+		log.Printf("VITA-CAPSULE-VOLUME: id=%s vol=%s path=%s mounted=OK status=OK", manifest.ID, volume.Name, volume.Path)
+	}
 
 	return executeUndo{
 		capability: c,
@@ -334,6 +385,7 @@ func (c *ExecuteCapability) setLast(status ExecuteStatus) {
 		DynamicUID: status.DynamicUID,
 		Health:     status.Health,
 		Status:     status.Status,
+		Volumes:    cloneExecuteVolumeStatuses(status.Volumes),
 	}
 }
 
@@ -370,6 +422,34 @@ func (c *ExecuteCapability) Workloads() []capsuleruntime.WorkloadStatus {
 	return c.supervisor.Snapshot()
 }
 
+func volumeStatuses(volumes []capsulestorage.VolumeMount) []ExecuteVolumeStatus {
+	if len(volumes) == 0 {
+		return nil
+	}
+
+	out := make([]ExecuteVolumeStatus, 0, len(volumes))
+	for _, volume := range volumes {
+		out = append(out, ExecuteVolumeStatus{
+			Name:           volume.Name,
+			Path:           volume.Path,
+			StateDirectory: volume.StateDirectory,
+			Access:         string(volume.Access),
+			Mounted:        "OK",
+			Status:         "OK",
+		})
+	}
+	return out
+}
+
+func cloneExecuteVolumeStatuses(volumes []ExecuteVolumeStatus) []ExecuteVolumeStatus {
+	if len(volumes) == 0 {
+		return nil
+	}
+	out := make([]ExecuteVolumeStatus, len(volumes))
+	copy(out, volumes)
+	return out
+}
+
 type executeUndo struct {
 	capability *ExecuteCapability
 	launcher   transientUnitLauncher
@@ -397,6 +477,7 @@ type ExecutionManifest struct {
 	PackageClass   string                  `json:"packageClass"`
 	Runtime        ExecutionRuntime        `json:"runtime"`
 	ResourceLimits ExecutionResourceLimits `json:"resourceLimits"`
+	Data           ExecutionData           `json:"data,omitempty"`
 	HealthChecks   []capsuleruntime.Check  `json:"healthChecks,omitempty"`
 
 	baseDir string
@@ -444,6 +525,10 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	data, err := optionalExecutionDataField(fields, "data")
+	if err != nil {
+		return err
+	}
 
 	manifest := ExecutionManifest{
 		ID:             id,
@@ -452,6 +537,7 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 		PackageClass:   packageClass,
 		Runtime:        runtime,
 		ResourceLimits: limits,
+		Data:           data,
 		HealthChecks:   healthChecks,
 	}
 	if err := manifest.Validate(); err != nil {
@@ -479,6 +565,9 @@ func (m ExecutionManifest) Validate() error {
 		return err
 	}
 	if err := m.ResourceLimits.Validate(); err != nil {
+		return err
+	}
+	if err := m.Data.Validate(); err != nil {
 		return err
 	}
 	for i, check := range m.HealthChecks {
@@ -517,6 +606,79 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 
 func (r ExecutionRuntime) Validate() error {
 	return r.TypeScript.Validate()
+}
+
+type ExecutionData struct {
+	Classes []capsulestorage.DataClass  `json:"classes,omitempty"`
+	Volumes []capsulestorage.VolumeSpec `json:"volumes,omitempty"`
+}
+
+func (d *ExecutionData) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, executionDataFields); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	classes, err := requiredDataClassesField(fields, "classes")
+	if err != nil {
+		return err
+	}
+	volumes, err := requiredVolumesField(fields, "volumes")
+	if err != nil {
+		return err
+	}
+
+	out := ExecutionData{
+		Classes: classes,
+		Volumes: volumes,
+	}
+	if err := out.Validate(); err != nil {
+		return err
+	}
+
+	*d = out
+	return nil
+}
+
+func (d ExecutionData) Validate() error {
+	for i, class := range d.Classes {
+		if !validExecutionDataClass(class) {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.classes[%d] must be a supported data class", i)}
+		}
+	}
+	seenClasses := make(map[capsulestorage.DataClass]int, len(d.Classes))
+	for i, class := range d.Classes {
+		if previous, ok := seenClasses[class]; ok {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.classes[%d] duplicates data.classes[%d]", i, previous)}
+		}
+		seenClasses[class] = i
+	}
+	if len(d.Volumes) > 0 && len(seenClasses) == 0 {
+		return &ExecuteInvalidRequestError{Reason: "data.classes must declare volume classes"}
+	}
+	seenVolumes := make(map[string]int, len(d.Volumes))
+	for i, volume := range d.Volumes {
+		if err := volume.Validate(); err != nil {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.volumes[%d]: %v", i, err)}
+		}
+		if previous, ok := seenVolumes[volume.Name]; ok {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.volumes[%d].name duplicates data.volumes[%d].name", i, previous)}
+		}
+		seenVolumes[volume.Name] = i
+		if len(d.Classes) > 0 {
+			if _, ok := seenClasses[volume.Class]; !ok {
+				return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.volumes[%d].class must be declared in data.classes", i)}
+			}
+		}
+	}
+	return nil
 }
 
 type TypeScriptExecution struct {
@@ -682,6 +844,7 @@ type transientUnit struct {
 	Name       string
 	Argv       []string
 	Properties []systemdProperty
+	Volumes    []capsulestorage.VolumeMount
 }
 
 type transientUnitStatus struct {
@@ -800,6 +963,7 @@ var (
 		"version":   {},
 	}
 	executionManifestFields = map[string]struct{}{
+		"data":           {},
 		"healthChecks":   {},
 		"id":             {},
 		"integrity":      {},
@@ -810,6 +974,10 @@ var (
 	}
 	executionRuntimeFields = map[string]struct{}{
 		"typescript": {},
+	}
+	executionDataFields = map[string]struct{}{
+		"classes": {},
+		"volumes": {},
 	}
 	typeScriptExecutionFields = map[string]struct{}{
 		"entrypoint": {},
@@ -867,54 +1035,100 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	unitName := capsuleUnitName(manifest.ID)
 	runtimeDir := capsuleRuntimeDirectory(manifest.ID)
 	limits := manifest.ResourceLimits
+	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
+	if err != nil {
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	argv := denoArgv(entrypoint, volumes)
+	properties := []systemdProperty{
+		{Name: "Description", Value: "Vita capsule " + manifest.ID},
+		{Name: "Type", Value: "simple"},
+		{Name: "DynamicUser", Value: "yes"},
+		{Name: "NoNewPrivileges", Value: "yes"},
+		{Name: "CapabilityBoundingSet", Value: ""},
+		{Name: "AmbientCapabilities", Value: ""},
+		{Name: "ProtectSystem", Value: "strict"},
+		{Name: "ProtectHome", Value: "yes"},
+		{Name: "PrivateTmp", Value: "yes"},
+		{Name: "PrivateDevices", Value: "yes"},
+		{Name: "ProtectControlGroups", Value: "yes"},
+		{Name: "ProtectKernelTunables", Value: "yes"},
+		{Name: "ProtectKernelModules", Value: "yes"},
+		{Name: "ProtectKernelLogs", Value: "yes"},
+		{Name: "ProtectClock", Value: "yes"},
+		{Name: "ProtectHostname", Value: "yes"},
+		{Name: "ProtectProc", Value: "invisible"},
+		{Name: "RestrictSUIDSGID", Value: "yes"},
+		{Name: "RestrictNamespaces", Value: "yes"},
+		{Name: "RestrictRealtime", Value: "yes"},
+		{Name: "RestrictAddressFamilies", Value: "AF_UNIX"},
+		{Name: "LockPersonality", Value: "yes"},
+		{Name: "MemoryDenyWriteExecute", Value: "no"},
+		{Name: "SystemCallArchitectures", Value: "native"},
+		{Name: "SystemCallFilter", Value: "@system-service"},
+		{Name: "SystemCallFilter", Value: "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete"},
+		{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"},
+		{Name: "UMask", Value: "0077"},
+		{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
+		{Name: "RuntimeDirectory", Value: runtimeDir},
+		{Name: "RuntimeDirectoryMode", Value: "0700"},
+		{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
+		{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
+		{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
+	}
+	if len(volumes) > 0 {
+		properties = append(properties,
+			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
+			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
+		)
+	}
+
 	return transientUnit{
-		Name: unitName,
-		Argv: []string{
-			defaultDenoPath,
-			"run",
-			"--no-remote",
-			"--cached-only",
-			"--no-config",
-			"--quiet",
-			entrypoint,
-		},
-		Properties: []systemdProperty{
-			{Name: "Description", Value: "Vita capsule " + manifest.ID},
-			{Name: "Type", Value: "simple"},
-			{Name: "DynamicUser", Value: "yes"},
-			{Name: "NoNewPrivileges", Value: "yes"},
-			{Name: "CapabilityBoundingSet", Value: ""},
-			{Name: "AmbientCapabilities", Value: ""},
-			{Name: "ProtectSystem", Value: "strict"},
-			{Name: "ProtectHome", Value: "yes"},
-			{Name: "PrivateTmp", Value: "yes"},
-			{Name: "PrivateDevices", Value: "yes"},
-			{Name: "ProtectControlGroups", Value: "yes"},
-			{Name: "ProtectKernelTunables", Value: "yes"},
-			{Name: "ProtectKernelModules", Value: "yes"},
-			{Name: "ProtectKernelLogs", Value: "yes"},
-			{Name: "ProtectClock", Value: "yes"},
-			{Name: "ProtectHostname", Value: "yes"},
-			{Name: "ProtectProc", Value: "invisible"},
-			{Name: "RestrictSUIDSGID", Value: "yes"},
-			{Name: "RestrictNamespaces", Value: "yes"},
-			{Name: "RestrictRealtime", Value: "yes"},
-			{Name: "RestrictAddressFamilies", Value: "AF_UNIX"},
-			{Name: "LockPersonality", Value: "yes"},
-			{Name: "MemoryDenyWriteExecute", Value: "no"},
-			{Name: "SystemCallArchitectures", Value: "native"},
-			{Name: "SystemCallFilter", Value: "@system-service"},
-			{Name: "SystemCallFilter", Value: "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete"},
-			{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"},
-			{Name: "UMask", Value: "0077"},
-			{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
-			{Name: "RuntimeDirectory", Value: runtimeDir},
-			{Name: "RuntimeDirectoryMode", Value: "0700"},
-			{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
-			{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
-			{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
-		},
+		Name:       unitName,
+		Argv:       argv,
+		Properties: properties,
+		Volumes:    volumes,
 	}, nil
+}
+
+func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount) []string {
+	argv := []string{
+		defaultDenoPath,
+		"run",
+		"--no-remote",
+		"--cached-only",
+		"--no-config",
+		"--quiet",
+	}
+	readPaths, writePaths := volumePermissionPaths(volumes)
+	if len(readPaths) > 0 {
+		argv = append(argv, "--allow-read="+strings.Join(readPaths, ","))
+	}
+	if len(writePaths) > 0 {
+		argv = append(argv, "--allow-write="+strings.Join(writePaths, ","))
+	}
+	argv = append(argv, entrypoint)
+	return argv
+}
+
+func volumePermissionPaths(volumes []capsulestorage.VolumeMount) ([]string, []string) {
+	readPaths := make([]string, 0, len(volumes))
+	writePaths := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		readPaths = append(readPaths, volume.Path)
+		if volume.Access == capsulestorage.VolumeAccessReadWrite {
+			writePaths = append(writePaths, volume.Path)
+		}
+	}
+	return readPaths, writePaths
+}
+
+func stateDirectories(volumes []capsulestorage.VolumeMount) string {
+	dirs := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		dirs = append(dirs, volume.StateDirectory)
+	}
+	return strings.Join(dirs, " ")
 }
 
 func healthChecksForUnit(checks []capsuleruntime.Check, unit string) ([]capsuleruntime.Check, error) {
@@ -994,6 +1208,61 @@ func optionalHealthChecksField(fields map[string]json.RawMessage, key string) ([
 	return checks, nil
 }
 
+func optionalExecutionDataField(fields map[string]json.RawMessage, key string) (ExecutionData, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ExecutionData{}, nil
+	}
+
+	var data ExecutionData
+	if err := decodeSingleJSONValue(raw, &data); err != nil {
+		return ExecutionData{}, err
+	}
+	return data, nil
+}
+
+func requiredDataClassesField(fields map[string]json.RawMessage, key string) ([]capsulestorage.DataClass, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, &ExecuteInvalidRequestError{Reason: "data." + key + " is required"}
+	}
+
+	var classes []capsulestorage.DataClass
+	if err := decodeSingleJSONValue(raw, &classes); err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "data." + key + " must be a list"}
+	}
+	if classes == nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "data." + key + " must be a list"}
+	}
+	for i, class := range classes {
+		if !validExecutionDataClass(class) {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.%s[%d] must be a supported data class", key, i)}
+		}
+	}
+	return classes, nil
+}
+
+func requiredVolumesField(fields map[string]json.RawMessage, key string) ([]capsulestorage.VolumeSpec, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, &ExecuteInvalidRequestError{Reason: "data." + key + " is required"}
+	}
+
+	var volumes []capsulestorage.VolumeSpec
+	if err := decodeSingleJSONValue(raw, &volumes); err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.%s must be a list of volume specs: %v", key, err)}
+	}
+	if volumes == nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "data." + key + " must be a list"}
+	}
+	for i, volume := range volumes {
+		if err := volume.Validate(); err != nil {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.%s[%d]: %v", key, i, err)}
+		}
+	}
+	return volumes, nil
+}
+
 func requiredPositiveFloatField(fields map[string]json.RawMessage, key string) (float64, error) {
 	raw, ok := fields[key]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
@@ -1028,6 +1297,20 @@ func requiredPositiveInt64Field(fields map[string]json.RawMessage, key string) (
 
 func positiveFinite(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value > 0
+}
+
+func validExecutionDataClass(value capsulestorage.DataClass) bool {
+	switch value {
+	case capsulestorage.DataClassUserContent,
+		capsulestorage.DataClassAppState,
+		capsulestorage.DataClassCache,
+		capsulestorage.DataClassLogs,
+		capsulestorage.DataClassTelemetry,
+		capsulestorage.DataClassConfiguration:
+		return true
+	default:
+		return false
+	}
 }
 
 func parseProcStatusUID(raw []byte) (string, bool) {

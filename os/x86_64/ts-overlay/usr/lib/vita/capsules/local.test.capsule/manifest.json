@@ -14,6 +14,22 @@
     "storageMiB": 16,
     "tasksMax": 32
   },
+  "data": {
+    "classes": [
+      "app-state"
+    ],
+    "volumes": [
+      {
+        "name": "state",
+        "mountPath": "/var/lib/vita/runtime/volumes/local.test.capsule/state",
+        "class": "app-state",
+        "access": "read-write",
+        "persistence": "persistent",
+        "backup": false,
+        "sizeMiB": 8
+      }
+    ]
+  },
   "healthChecks": [
     {
       "name": "lifecycle",
