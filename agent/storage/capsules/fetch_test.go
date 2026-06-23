@@ -7,12 +7,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
+
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
 func TestFetchCapsuleVerifiesSRIStagesAndReturnsCachePath(t *testing.T) {
 	cacheRoot := filepath.Join(t.TempDir(), "cache")
@@ -22,6 +28,9 @@ func TestFetchCapsuleVerifiesSRIStagesAndReturnsCachePath(t *testing.T) {
 		{name: "manifest.json", body: `{"id":"local.test.capsule","version":"1.0.0"}`},
 		{name: "main.ts", body: `console.log("ok");`},
 	})
+	if !bytes.HasPrefix(archive, zstdMagic) {
+		t.Fatalf("capsuleArchive produced % x, want zstd magic", archive[:4])
+	}
 	source := writeArtifact(t, archive)
 	integrity := sriFor(archive)
 	logs := captureLogs(t)
@@ -99,57 +108,198 @@ func TestFetchCapsuleRemovesTempOnCompletenessFailure(t *testing.T) {
 }
 
 func TestFetchCapsuleRejectsTraversalWithoutPartialExtract(t *testing.T) {
-	root := t.TempDir()
-	cacheRoot := filepath.Join(root, "cache")
-	t.Setenv(cacheRootEnv, cacheRoot)
+	tests := []struct {
+		name    string
+		entry   tarEntry
+		wantErr string
+	}{
+		{
+			name:    "relative parent escape",
+			entry:   tarEntry{name: "../evil", body: "owned"},
+			wantErr: "escapes capsule root",
+		},
+		{
+			name:    "absolute path escape",
+			entry:   tarEntry{name: "/evil", body: "owned"},
+			wantErr: "escapes capsule root",
+		},
+		{
+			name:    "symlink escaping linkname rejected",
+			entry:   tarEntry{name: "link", typeflag: tar.TypeSymlink, linkname: "../evil"},
+			wantErr: "unsupported type",
+		},
+		{
+			name:    "hardlink escaping linkname rejected",
+			entry:   tarEntry{name: "link", typeflag: tar.TypeLink, linkname: "../evil"},
+			wantErr: "unsupported type",
+		},
+	}
 
-	archive := capsuleArchive(t, []tarEntry{
-		{name: "../evil", body: "owned"},
-		{name: "manifest.json", body: `{"id":"local.test.capsule","version":"1.0.0"}`},
-		{name: "main.ts", body: `console.log("ok");`},
-	})
-	source := writeArtifact(t, archive)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			cacheRoot := filepath.Join(root, "cache")
+			t.Setenv(cacheRootEnv, cacheRoot)
 
-	localPath, err := FetchCapsule(context.Background(), source, sriFor(archive))
-	if localPath != "" {
-		t.Fatalf("localPath = %q, want empty on traversal archive", localPath)
+			archive := capsuleArchive(t, []tarEntry{
+				tt.entry,
+				{name: "manifest.json", body: `{"id":"local.test.capsule","version":"1.0.0"}`},
+				{name: "main.ts", body: `console.log("ok");`},
+			})
+			source := writeArtifact(t, archive)
+
+			localPath, err := FetchCapsule(context.Background(), source, sriFor(archive))
+			if localPath != "" {
+				t.Fatalf("localPath = %q, want empty on traversal archive", localPath)
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("FetchCapsule error = %v, want %q rejection", err, tt.wantErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(root, "evil")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("outside file stat error = %v, want not exist", statErr)
+			}
+			assertCacheRootEmpty(t, cacheRoot)
+		})
 	}
-	if err == nil || !strings.Contains(err.Error(), "escapes capsule root") {
-		t.Fatalf("FetchCapsule error = %v, want traversal rejection", err)
+}
+
+func TestFetchCapsuleRejectsExtractionResourceCapsWithoutStaging(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive func(t *testing.T) []byte
+		wantErr string
+	}{
+		{
+			name: "per entry size cap",
+			archive: func(t *testing.T) []byte {
+				return capsuleArchive(t, []tarEntry{
+					{name: "manifest.json", body: `{"id":"local.test.capsule","version":"1.0.0"}`},
+					{name: "main.ts", size: maxCapsuleTarEntryBytes + 1, fill: 'a'},
+				})
+			},
+			wantErr: "per-entry size limit",
+		},
+		{
+			name: "total payload cap",
+			archive: func(t *testing.T) []byte {
+				entries := []tarEntry{
+					{name: "manifest.json", body: `{"id":"local.test.capsule","version":"1.0.0"}`},
+					{name: "main.ts", body: `console.log("ok");`},
+				}
+				for i := 0; i < int(maxCapsuleTarPayloadBytes/maxCapsuleTarEntryBytes)+1; i++ {
+					entries = append(entries, tarEntry{
+						name: fmt.Sprintf("assets/blob-%02d.bin", i),
+						size: maxCapsuleTarEntryBytes,
+						fill: byte('a' + i%26),
+					})
+				}
+				return capsuleArchive(t, entries)
+			},
+			wantErr: "total payload size limit",
+		},
+		{
+			name: "entry count cap",
+			archive: func(t *testing.T) []byte {
+				entries := make([]tarEntry, 0, maxCapsuleTarEntries+1)
+				for i := 0; i < maxCapsuleTarEntries+1; i++ {
+					entries = append(entries, tarEntry{name: fmt.Sprintf("empty-%04d", i)})
+				}
+				return capsuleArchive(t, entries)
+			},
+			wantErr: "entry limit",
+		},
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "evil")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("outside file stat error = %v, want not exist", statErr)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cacheRoot := filepath.Join(t.TempDir(), "cache")
+			t.Setenv(cacheRootEnv, cacheRoot)
+
+			archive := tt.archive(t)
+			source := writeArtifact(t, archive)
+
+			localPath, err := FetchCapsule(context.Background(), source, sriFor(archive))
+			if localPath != "" {
+				t.Fatalf("localPath = %q, want empty on capped archive", localPath)
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("FetchCapsule error = %v, want %q rejection", err, tt.wantErr)
+			}
+			assertCacheRootEmpty(t, cacheRoot)
+		})
 	}
-	assertCacheRootEmpty(t, cacheRoot)
 }
 
 type tarEntry struct {
-	name string
-	body string
+	name     string
+	body     string
+	size     int64
+	fill     byte
+	typeflag byte
+	linkname string
 }
 
 func capsuleArchive(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
 
 	var buffer bytes.Buffer
-	writer := tar.NewWriter(&buffer)
+	encoder, err := zstd.NewWriter(&buffer, zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatalf("zstd NewWriter returned error: %v", err)
+	}
+	writer := tar.NewWriter(encoder)
 	for _, entry := range entries {
+		typeflag := entry.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		mode := int64(0o600)
+		if typeflag == tar.TypeDir {
+			mode = 0o700
+		}
 		header := &tar.Header{
-			Name: entry.name,
-			Mode: 0o600,
-			Size: int64(len(entry.body)),
+			Name:     entry.name,
+			Mode:     mode,
+			Typeflag: typeflag,
+			Linkname: entry.linkname,
+		}
+		if typeflag == tar.TypeReg {
+			header.Size = int64(len(entry.body))
+			if entry.size > 0 {
+				header.Size = entry.size
+			}
 		}
 		if err := writer.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader returned error: %v", err)
 		}
-		if _, err := writer.Write([]byte(entry.body)); err != nil {
-			t.Fatalf("Write returned error: %v", err)
+		if typeflag == tar.TypeReg && header.Size > 0 {
+			var body io.Reader = strings.NewReader(entry.body)
+			if entry.size > 0 {
+				body = io.LimitReader(repeatingByteReader{b: entry.fill}, entry.size)
+			}
+			if _, err := io.Copy(writer, body); err != nil {
+				t.Fatalf("tar body write returned error: %v", err)
+			}
 		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("tar writer Close returned error: %v", err)
 	}
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("zstd encoder Close returned error: %v", err)
+	}
 	return buffer.Bytes()
+}
+
+type repeatingByteReader struct {
+	b byte
+}
+
+func (r repeatingByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.b
+	}
+	return len(p), nil
 }
 
 func writeArtifact(t *testing.T, content []byte) string {
