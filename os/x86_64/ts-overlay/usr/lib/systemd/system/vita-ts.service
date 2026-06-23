@@ -75,6 +75,11 @@ MemoryDenyWriteExecute=no
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+# Deno's V8 uses memory-protection-keys (PKU) hardening at startup: pkey_alloc (x86-64 syscall 330) is NOT in
+# @system-service, so the allow-list above otherwise SIGSYS-kills Deno before it prints anything (host-verified:
+# status=31/SYS, audit syscall=330). Allow back exactly the pkey family — pkey_mprotect is itself a hardening
+# primitive — and nothing else; any other forbidden syscall still kills. This is the minimal add to run Deno.
+SystemCallFilter=pkey_alloc pkey_free pkey_mprotect
 UMask=0077
 
 # A read-only verity root has no writable HOME/cache; point Deno's dirs at /run (tmpfs) so it never
