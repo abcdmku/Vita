@@ -1,0 +1,13 @@
+# Vita smoke VERITY /var mount. This is explicit because systemd-gpt-auto-generator only
+# auto-mounts a DPS /var partition when its UUID is keyed to the running machine-id.
+[Unit]
+Description=Vita persistent data partition (/var)
+DefaultDependencies=no
+Before=local-fs.target umount.target
+Conflicts=umount.target
+
+[Mount]
+What=/dev/disk/by-label/vita-data
+Where=/var
+Type=ext4
+Options=x-systemd.growfs

@@ -40,9 +40,16 @@ type PartitionPlan = {
   readonly id: PartitionId;
   readonly name: string;
   readonly label: string;
+  readonly partitionLabel: string;
+  readonly filesystemLabel: string;
   readonly role: "esp" | "rootfs" | "recovery" | "data";
   readonly filesystem: "vfat" | "ext4";
   readonly sizeBytes: number;
+  readonly sizeMinBytes: number;
+  readonly growable: boolean;
+  readonly growToFill: boolean;
+  readonly mountPoint: string | null;
+  readonly factoryReset: boolean;
   readonly typeGuid: string;
   readonly partitionGuid: string;
   readonly startByte: number;
@@ -51,6 +58,7 @@ type PartitionPlan = {
   readonly endLBA: number;
   readonly device: string;
   readonly byPartLabel: string;
+  readonly byLabel: string;
 };
 
 type RootDirectoryInput = {
@@ -151,6 +159,23 @@ type ImageStep = {
   readonly output: string;
 };
 
+type SystemdMountPlan = {
+  readonly unit: "var.mount";
+  readonly unitPath: string;
+  readonly sourcePartition: "data";
+  readonly what: string;
+  readonly where: "/var";
+  readonly type: "ext4";
+  readonly options: readonly string[];
+  readonly defaultDependencies: false;
+  readonly before: readonly string[];
+  readonly conflicts: readonly string[];
+  readonly enabled: true;
+  readonly enableKind: "target-drop-in";
+  readonly enablePath: string;
+  readonly requiredBy: "local-fs.target";
+};
+
 type ImageLayoutPlan = {
   readonly schemaVersion: 1;
   readonly target: "x86_64";
@@ -167,6 +192,9 @@ type ImageLayoutPlan = {
     readonly containerPath: string;
     readonly readOnly: boolean;
   }[];
+  readonly systemd: {
+    readonly mounts: readonly SystemdMountPlan[];
+  };
   readonly environment: {
     readonly SOURCE_DATE_EPOCH: string;
     readonly TZ: "UTC";
@@ -234,6 +262,12 @@ type ImageLayoutModule = {
 
 const imageLayoutModuleUrl = new URL("../image-layout.mjs", import.meta.url);
 const imageConfigUrl = new URL("../image.conf", import.meta.url);
+const repartDataUrl = new URL("../repart-verity/40-data.conf", import.meta.url);
+const varMountUnitUrl = new URL("../smoke-overlay/usr/lib/systemd/system/var.mount", import.meta.url);
+const varMountDropInUrl = new URL(
+  "../smoke-overlay/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf",
+  import.meta.url,
+);
 
 const defaultMountRoots = {
   workspaceHostPath: "/repo",
@@ -246,50 +280,75 @@ const expectedPartitions = [
   {
     id: "esp",
     number: 1,
+    name: "vita-esp",
     label: "VITA-ESP",
     role: "esp",
     filesystem: "vfat",
     sizeBytes: 536870912,
+    sizeMinBytes: 536870912,
+    growable: false,
+    growToFill: false,
+    mountPoint: null,
     typeGuid: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
     partitionGuid: "5f7b7fb2-3228-43a3-8f52-6ac0d5d28c01",
   },
   {
     id: "root-a",
     number: 2,
+    name: "vita-root-a",
     label: "vita-root-a",
     role: "rootfs",
     filesystem: "ext4",
     sizeBytes: 4294967296,
+    sizeMinBytes: 4294967296,
+    growable: false,
+    growToFill: false,
+    mountPoint: null,
     typeGuid: "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
     partitionGuid: "d3d7f6e6-1b23-4cf4-955f-4a87a2c04a11",
   },
   {
     id: "root-b",
     number: 3,
+    name: "vita-root-b",
     label: "vita-root-b",
     role: "rootfs",
     filesystem: "ext4",
     sizeBytes: 4294967296,
+    sizeMinBytes: 4294967296,
+    growable: false,
+    growToFill: false,
+    mountPoint: null,
     typeGuid: "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
     partitionGuid: "abd2a3d5-6956-491b-9c48-14ac3280f7b2",
   },
   {
     id: "recovery",
     number: 4,
+    name: "vita-recovery",
     label: "vita-recovery",
     role: "recovery",
     filesystem: "ext4",
     sizeBytes: 2147483648,
+    sizeMinBytes: 2147483648,
+    growable: false,
+    growToFill: false,
+    mountPoint: null,
     typeGuid: "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
     partitionGuid: "76dc6fc4-f5a7-48a0-9122-874064f38044",
   },
   {
     id: "data",
     number: 5,
+    name: "vita-data",
     label: "vita-data",
     role: "data",
     filesystem: "ext4",
-    sizeBytes: 8589934592,
+    sizeBytes: 536870912,
+    sizeMinBytes: 536870912,
+    growable: true,
+    growToFill: true,
+    mountPoint: "/var",
     typeGuid: "0fc63daf-8483-4772-8e79-3d69d8477de4",
     partitionGuid: "ee154f01-bbe5-4b8a-a763-acef82710d55",
   },
@@ -334,12 +393,22 @@ test("GPT partitions have pinned sizes, GUIDs, labels, and non-overlapping byte 
   for (const expected of expectedPartitions) {
     const partition = findPartition(plan, expected.id);
     assert.equal(partition.number, expected.number);
+    assert.equal(partition.name, expected.name);
     assert.equal(partition.label, expected.label);
+    assert.equal(partition.partitionLabel, expected.name);
+    assert.equal(partition.filesystemLabel, expected.label);
     assert.equal(partition.role, expected.role);
     assert.equal(partition.filesystem, expected.filesystem);
     assert.equal(partition.sizeBytes, expected.sizeBytes);
+    assert.equal(partition.sizeMinBytes, expected.sizeMinBytes);
+    assert.equal(partition.growable, expected.growable);
+    assert.equal(partition.growToFill, expected.growToFill);
+    assert.equal(partition.mountPoint, expected.mountPoint);
+    assert.equal(partition.factoryReset, false);
     assert.equal(partition.typeGuid, expected.typeGuid);
     assert.equal(partition.partitionGuid, expected.partitionGuid);
+    assert.equal(partition.byPartLabel, `/dev/disk/by-partlabel/${expected.name}`);
+    assert.equal(partition.byLabel, `/dev/disk/by-label/${expected.label}`);
     assert.equal(partition.startByte % plan.image.alignmentBytes, 0);
     assert.equal(partition.sizeBytes % plan.image.alignmentBytes, 0);
     assert.equal(partition.startLBA * plan.image.sectorSize, partition.startByte);
@@ -368,6 +437,69 @@ test("GPT partitions have pinned sizes, GUIDs, labels, and non-overlapping byte 
     assert.fail("last partition must exist");
   }
   assert.equal(plan.image.imageSizeBytes, lastPartition.endExclusiveByte + plan.image.alignmentBytes);
+});
+
+test("persistent data partition is explicitly mounted as /var by label", async () => {
+  const imageLayout = await loadImageLayoutModule();
+  const plan = imageLayout.planImageLayout(await readPlanInput());
+  const data = findPartition(plan, "data");
+  const varMount = plan.systemd.mounts[0];
+  if (varMount === undefined) {
+    assert.fail("var.mount plan must exist");
+  }
+
+  assert.equal(data.name, "vita-data");
+  assert.equal(data.partitionLabel, "vita-data");
+  assert.equal(data.filesystemLabel, "vita-data");
+  assert.equal(data.byLabel, "/dev/disk/by-label/vita-data");
+  assert.equal(data.mountPoint, "/var");
+  assert.equal(data.filesystem, "ext4");
+  assert.equal(data.growable, true);
+  assert.equal(data.growToFill, true);
+  assert.equal(data.factoryReset, false);
+
+  assert.deepEqual(varMount, {
+    unit: "var.mount",
+    unitPath: "/usr/lib/systemd/system/var.mount",
+    sourcePartition: "data",
+    what: "/dev/disk/by-label/vita-data",
+    where: "/var",
+    type: "ext4",
+    options: ["x-systemd.growfs"],
+    defaultDependencies: false,
+    before: ["local-fs.target", "umount.target"],
+    conflicts: ["umount.target"],
+    enabled: true,
+    enableKind: "target-drop-in",
+    enablePath: "/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf",
+    requiredBy: "local-fs.target",
+  });
+  assert.equal(varMount.what, data.byLabel);
+  assert.equal(varMount.where, data.mountPoint);
+  assert.equal(varMount.type, data.filesystem);
+
+  const repartText = await readFile(repartDataUrl, "utf8");
+  assert.match(repartText, /^Type=linux-generic$/mu);
+  assert.match(repartText, /^Label=vita-data$/mu);
+  assert.match(repartText, /^Format=ext4$/mu);
+  assert.match(repartText, /^SizeMinBytes=512M$/mu);
+  assert.match(repartText, /^Weight=1000$/mu);
+  assert.match(repartText, /^FactoryReset=no$/mu);
+  assert.doesNotMatch(repartText, /^SizeMaxBytes=/mu);
+
+  const unitText = await readFile(varMountUnitUrl, "utf8");
+  assert.match(unitText, /^DefaultDependencies=no$/mu);
+  assert.match(unitText, /^Before=local-fs\.target umount\.target$/mu);
+  assert.match(unitText, /^Conflicts=umount\.target$/mu);
+  assert.match(unitText, /^What=\/dev\/disk\/by-label\/vita-data$/mu);
+  assert.match(unitText, /^Where=\/var$/mu);
+  assert.match(unitText, /^Type=ext4$/mu);
+  assert.match(unitText, /^Options=x-systemd\.growfs$/mu);
+  assert.doesNotMatch(unitText, /systemd\.volatile/u);
+
+  const dropInText = await readFile(varMountDropInUrl, "utf8");
+  assert.match(dropInText, /^\[Unit\]$/mu);
+  assert.match(dropInText, /^Requires=var\.mount$/mu);
 });
 
 test("RAUC A/B plus recovery slot mapping is coherent with partitions and bundle manifest", async () => {
@@ -580,6 +712,12 @@ test("canonical path validation covers container paths, host mount roots, and tr
   }
   for (const input of plan.inputs.external) {
     assertCanonicalPath(input.path);
+  }
+  for (const mount of plan.systemd.mounts) {
+    assertCanonicalPath(mount.unitPath);
+    assertCanonicalPath(mount.enablePath);
+    assertCanonicalPath(mount.what);
+    assertCanonicalPath(mount.where);
   }
 });
 
