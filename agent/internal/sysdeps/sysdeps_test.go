@@ -17,4 +17,6 @@ func TestPackageContract(t *testing.T) {
 	var _ func(int64, int64) error = SetRealtimeClock
 	var _ func() (int64, int64, error) = RealtimeClock
 	var _ func(string) error = SetHostname
+	var _ func(string, int, int) error = Chown
+	var _ func(string) error = Unmount
 }

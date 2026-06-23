@@ -8,6 +8,20 @@
       "entrypoint": "main.ts"
     }
   },
+  "data": {
+    "classes": ["app-state"],
+    "volumes": [
+      {
+        "name": "state",
+        "mountPath": "/var/lib/vita/runtime/volumes/state",
+        "class": "app-state",
+        "access": "read-write",
+        "persistence": "persistent",
+        "backup": true,
+        "sizeMiB": 16
+      }
+    ]
+  },
   "resourceLimits": {
     "cpuCores": 0.25,
     "ramMiB": 64,

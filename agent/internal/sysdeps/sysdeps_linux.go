@@ -2,7 +2,11 @@
 
 package sysdeps
 
-import "golang.org/x/sys/unix"
+import (
+	"errors"
+
+	"golang.org/x/sys/unix"
+)
 
 // SetRealtimeClock sets CLOCK_REALTIME to the given Unix time (seconds + nanoseconds).
 // Privileged: requires CAP_SYS_TIME.
@@ -22,4 +26,21 @@ func RealtimeClock() (sec, nsec int64, err error) {
 // SetHostname sets the kernel hostname. Privileged: requires CAP_SYS_ADMIN.
 func SetHostname(name string) error {
 	return unix.Sethostname([]byte(name))
+}
+
+// Chown changes a path owner. Privileged callers use this narrow wrapper instead
+// of importing the syscall package directly.
+func Chown(path string, uid, gid int) error {
+	return unix.Chown(path, uid, gid)
+}
+
+// Unmount detaches a mount target from the current mount namespace.
+func Unmount(target string) error {
+	if err := unix.Unmount(target, unix.MNT_DETACH); err != nil {
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
+			return ErrNotMounted
+		}
+		return err
+	}
+	return nil
 }

@@ -61,6 +61,8 @@ const CAPSULE_PREVIEW_ERROR_MARKER = "VITA-CAPSULE-PREVIEW-ERROR";
 const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
 const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
 const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
+const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
+const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
@@ -341,6 +343,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -356,6 +359,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     } else {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
@@ -363,6 +367,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
   }
 
   await emitPdsReadMarker(client);
@@ -396,6 +401,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -408,6 +414,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   if (!result.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -590,6 +597,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     if (result.outcome !== "committed") {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
@@ -598,13 +606,16 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     if (!state.ok) {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
 
     emit(formatCapsuleExecutedMarker(state.status));
+    emit(formatCapsuleVolumeMarker(state.status));
   } catch {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -652,6 +663,14 @@ interface CapsuleExecuteStatus {
   readonly dynamicUid: string;
   readonly health: "OK";
   readonly status: "OK";
+  readonly volumes: readonly CapsuleVolumeStatus[];
+}
+
+interface CapsuleVolumeStatus {
+  readonly name: string;
+  readonly path: string;
+  readonly mounted: "OK";
+  readonly status: "OK";
 }
 
 function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
@@ -670,13 +689,15 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
   const dynamicUid = readStringField(last, "dynamicUid");
   const health = readStringField(last, "health");
   const status = readStringField(last, "status");
+  const volumes = readCapsuleVolumeStatuses(last["volumes"]);
 
   if (
     id === undefined ||
     unit === undefined ||
     dynamicUid === undefined ||
     health !== "OK" ||
-    status !== "OK"
+    status !== "OK" ||
+    volumes === undefined
   ) {
     return { ok: false };
   }
@@ -689,6 +710,7 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
       id,
       status,
       unit,
+      volumes,
     },
   };
 }
@@ -702,6 +724,61 @@ function formatCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `health=${status.health} ` +
     "status=OK"
   );
+}
+
+function formatCapsuleVolumeMarker(status: CapsuleExecuteStatus): string {
+  const volume = status.volumes[0];
+
+  if (volume === undefined) {
+    return `${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`;
+  }
+
+  return (
+    `${CAPSULE_VOLUME_MARKER}: ` +
+    `id=${status.id} ` +
+    `vol=${volume.name} ` +
+    `path=${volume.path} ` +
+    `mounted=${volume.mounted} ` +
+    "status=OK"
+  );
+}
+
+function readCapsuleVolumeStatuses(value: unknown): readonly CapsuleVolumeStatus[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+
+  const volumes: CapsuleVolumeStatus[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+
+    if (!isJsonObject(item)) {
+      return undefined;
+    }
+
+    const name = readStringField(item, "name");
+    const path = readStringField(item, "path");
+    const mounted = readStringField(item, "mounted");
+    const status = readStringField(item, "status");
+
+    if (
+      name === undefined ||
+      path === undefined ||
+      mounted !== "OK" ||
+      status !== "OK"
+    ) {
+      return undefined;
+    }
+
+    volumes[volumes.length] = {
+      mounted,
+      name,
+      path,
+      status,
+    };
+  }
+
+  return Object.freeze(volumes);
 }
 
 function readStringField(
