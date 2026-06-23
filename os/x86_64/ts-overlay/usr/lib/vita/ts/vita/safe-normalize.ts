@@ -1,4 +1,5 @@
-// Vendored from sdk/typescript/src/safe-normalize.ts for P1-033.
+// Vendored from sdk/typescript/src/safe-normalize.ts
+import { types as nodeTypes } from "node:util";
 
 export type PlainJsonPrimitive = string | number | boolean | null;
 export type PlainJson = PlainJsonPrimitive | PlainJsonObject | readonly PlainJson[];
@@ -53,16 +54,6 @@ const DEFAULT_OPTIONS: NormalizedOptions = Object.freeze({
   maxDepth: DEFAULT_MAX_DEPTH,
   maxNodes: DEFAULT_MAX_NODES,
 });
-
-type NodeIsProxy = (value: object) => boolean;
-
-interface GlobalWithNodeProcess {
-  readonly process?: {
-    readonly getBuiltinModule?: (name: string) => unknown;
-  };
-}
-
-const nodeIsProxy = resolveNodeIsProxy();
 
 export function safeNormalize(
   value: unknown,
@@ -121,7 +112,7 @@ function normalizeOptions(opts: SafeNormalizeOptions | undefined):
     return reject("Options must be a plain object.");
   }
 
-  if (isProxyObject(opts) || Array.isArray(opts)) {
+  if (nodeTypes.isProxy(opts) || Array.isArray(opts)) {
     return reject("Options must be a plain object.");
   }
 
@@ -217,7 +208,7 @@ function normalizeValue(
     return reject("Only JSON data values are accepted.");
   }
 
-  if (isProxyObject(value)) {
+  if (nodeTypes.isProxy(value)) {
     return reject("Proxy objects are not accepted.");
   }
 
@@ -394,37 +385,6 @@ function isAllowedInteger(value: unknown, min: number, max: number): value is nu
     value >= min &&
     value <= max
   );
-}
-
-function isProxyObject(value: object): boolean {
-  return nodeIsProxy?.(value) ?? false;
-}
-
-function resolveNodeIsProxy(): NodeIsProxy | undefined {
-  const processLike = (globalThis as typeof globalThis & GlobalWithNodeProcess).process;
-  const builtin = processLike?.getBuiltinModule?.("util");
-
-  if (!isObjectRecord(builtin)) {
-    return undefined;
-  }
-
-  const types = builtin["types"];
-
-  if (!isObjectRecord(types)) {
-    return undefined;
-  }
-
-  const isProxy = types["isProxy"];
-
-  return isNodeIsProxy(isProxy) ? isProxy : undefined;
-}
-
-function isNodeIsProxy(value: unknown): value is NodeIsProxy {
-  return typeof value === "function";
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object";
 }
 
 function isPlainJsonObject(value: object): value is PlainJsonObject {
