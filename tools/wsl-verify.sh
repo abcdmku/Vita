@@ -116,7 +116,7 @@ boot_ts() {
   done
   sleep 1  # grace for any trailing marker flush
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn st ac ar cpv cc cr pds pw cx cxr fe hl
+  local ts ev pv ex cn st ac ar cpv cc cr pds pw cx cxr fe hl vo
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
@@ -126,12 +126,13 @@ boot_ts() {
   pds=$(grep -aE 'VITA-PDS: ' "$log" | tail -1); pw=$(grep -a 'VITA-PDS-WRITE: outcome=committed' "$log" | tail -1)
   cx=$(grep -a 'VITA-CAPSULE-EXECUTED:' "$log" | tail -1); cxr=$(grep -a 'VITA-CAPSULE-EXECUTE-REJECT:' "$log" | tail -1)
   fe=$(grep -aE 'VITA-CAPSULE-FETCH:.*verified=OK' "$log" | tail -1); hl=$(grep -aE 'VITA-CAPSULE-HEALTH:' "$log" | tail -1)
-  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl"; do echo "  $m"; done
+  vo=$(grep -aE 'VITA-CAPSULE-VOLUME:.*mounted=OK' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl" "$vo"; do echo "  $m"; done
   # PASS = the FULL on-device control plane THROUGH RUNNING A CAPSULE: ...+ PDS read/write + capsule.execute (the node
   # spawns a hardened transient-unit workload, W4-S1) + its fail-closed reject + FETCH (SRI-verified, P1-045) + capsule
-  # HEALTH supervised via /state (P1-047). Node proposes; agent validates+spawns. (P1-046 volume reverted pending fix.)
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ]; then
-    echo "RESULT: PASS (full control-plane on-device: fetch(SRI)+capsule.execute(hardened)+health-supervised — P1-046 volume pending fix)"
+  # HEALTH supervised via /state (P1-047) + a per-capsule persistent VOLUME via StateDirectory (P1-046). Node proposes; agent validates+spawns.
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ] && [ -n "$vo" ]; then
+    echo "RESULT: PASS (full control-plane on-device: fetch(SRI)+capsule.execute(hardened)+health-supervised+persistent-volume — the node fetched, ran, supervised, and gave durable state to a capsule)"
   else
     echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
     sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -28
