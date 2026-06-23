@@ -226,7 +226,10 @@ if (MODE === "smoke") {
     fail("VITA_VERITY=1 requires the native mkosi engine — --repart-directory is a host path not mounted into " +
          "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
-  const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
+  // Verity root is read-only + PERSISTENT (P1-029): the repart-verity vita-data partition is mounted writable at
+  // /var (smoke-overlay var.mount, by FileSystemLabel). So NO systemd.volatile=overlay (that tmpfs-overlays / and
+  // would shadow the persistent /var). Host-verified: boots ro, /var on the ext4 data partition, state persists.
+  const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
   // Enrollment is OFFLINE via virt-fw-vars (PK=KEK=db from db.crt into the OVMF varstore) — NOT mkosi
