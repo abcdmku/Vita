@@ -36,8 +36,17 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     codex↔opus rounds hardened the diff fail-closed via a `safeNormalize` whole-envelope gate that rejects throwing
     AND lying-Proxy inputs). Serial: `VITA-PREVIEW: added=1 removed=1 changed=1` + `VITA-PREVIEW-NOOP`. Follow-up
     noted: make safe-normalize's proxy guardian structurally fail-CLOSED via the direct `node:util` import
-    (proven-working as shipped on the pinned Deno). **NEXT FRONTIER (R3): on-device APPLY (TS runtime → the agentd
-    privileged executor), a persistent PDS on /var, then capsules — mapping that surface now to author the contracts.**
+    (proven-working as shipped on the pinned Deno). **APPLY-CHAIN FRONTIER (mapped via a workflow): agentd ALREADY
+    has transactional capsule + pdssync handlers — the wave is wire-up over a transport-gated chain S0→S1→S2→S3.**
+    **ADR-0008 (TS↔agentd transport = unix socket, spike-confirmed) ACCEPTED.** **S1 (P1-035) DONE + HOST-VERIFIED on
+    BOTH plain smoke AND verity:** agentd serves its API over `/run/vita-agent/agentd.sock` (root:vita-agent 0660,
+    stale-replace, unlink-on-shutdown); the unprivileged TS DynamicUser connects via `SupplementaryGroups=vita-agent`
+    + socket-path-scoped Deno `--allow-read/write` (AF_UNIX-only sandbox KEPT) → `VITA-CONNECT: transport=unix
+    healthz=OK`. Two parallel Codex candidates; Opus judge picked A + ported B's `.catch`. **Host-verify exposed a
+    real bug: var.mount in smoke-overlay cascaded (RequiresMountsFor) to cancel vita-agentd on plain smoke → moved
+    var.mount to a VERITY-ONLY overlay (conditional --extra-tree).** Also merged P1-036 (guardian fail-closed) +
+    P1-037 (on-device EXPLAIN) — boot shows VITA-TS/EVAL/PREVIEW/EXPLAIN/CONNECT. **NEXT: S2 (read /state →
+    VITA-STATE, R1) → S3 (apply keystone → VITA-APPLY, R3, parallel-candidates); then S4-S7 (PDS/capsule wire-up).**
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
