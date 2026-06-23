@@ -218,13 +218,13 @@ if (MODE === "smoke") {
   const verityMode = process.env.VITA_VERITY === "1";
   const verity = verityMode ? ["--verity=hash"] : [];
   const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
-  // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key and stage PK/KEK/db.auth
-  // on the ESP under /loader/keys/auto/ (mkosi --secure-boot-auto-enroll), so sd-boot enrolls our key
-  // on first VM boot when the firmware starts in Setup Mode. Gated to SMOKE only — full mode signs
-  // per-slot UKIs via the explicit sbsign step (build-and-boot.mjs:306-314, VITA_SB_KEY/VITA_SB_CERT);
-  // enabling mkosi --secure-boot there would double-sign. Reuses uki.mjs's TEST key env contract
-  // (VITA_TEST_SECUREBOOT_KEY_PATH/_CERT_PATH); NB those envs were declare-only in uki.mjs's plan —
-  // this smoke toggle is their FIRST real consumer (no shared signing codepath exists yet).
+  // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
+  // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
+  // Enrollment is OFFLINE via virt-fw-vars (PK=KEK=db from db.crt into the OVMF varstore) — NOT mkosi
+  // --secure-boot-auto-enroll, which is a systemd-boot feature and is dead here (--bootloader=uki removes
+  // sd-boot; proven empirically: it staged no /loader/keys). Gated to SMOKE only — full mode signs
+  // per-slot UKIs via the explicit sbsign step (VITA_SB_KEY/VITA_SB_CERT); enabling mkosi --secure-boot
+  // there would double-sign. Reuses uki.mjs's TEST key env contract (VITA_TEST_SECUREBOOT_KEY_PATH/_CERT_PATH).
   const secureBoot = process.env.VITA_SECURE_BOOT === "1";
   const SB_DIR = join(HERE, ".secureboot");
   const sbKey = process.env[TEST_KEY_PATH_ENV] ?? join(SB_DIR, "db.key");
@@ -244,12 +244,11 @@ if (MODE === "smoke") {
     }
     sb = [
       "--secure-boot=yes",
-      "--secure-boot-auto-enroll=yes",
       `--secure-boot-key=${sbKey}`,
       `--secure-boot-certificate=${sbCert}`,
       "--secure-boot-sign-tool=sbsign",
     ];
-    log(`   (Secure Boot: sign UKI + auto-enroll with TEST db key ${sbKey})`);
+    log(`   (Secure Boot: sign UKI with TEST db key ${sbKey}; enrollment is offline via virt-fw-vars)`);
   }
   const cmdline = `console=tty0 console=ttyS0,115200 ${rootOpts} systemd.firstboot=off` +
     (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
@@ -260,7 +259,7 @@ if (MODE === "smoke") {
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
-  if (!NO_BOOT) bootQemu(disk, { secureBoot });
+  if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
   process.exit(0);
 }
@@ -357,7 +356,7 @@ run("6 · RAUC bundle", "rauc",
 if (!NO_BOOT) bootQemu(imageRaw, { secureBoot: !NO_SIGN });
 log(`\n✓ full build complete → ${imageRaw}` + (NO_SIGN ? " (UNSIGNED)" : " (signed)"));
 
-function bootQemu(image, { secureBoot }) {
+function bootQemu(image, { secureBoot, sbCert }) {
   // Auto-detect OVMF firmware: Debian trixie ships ONLY the 4M variants; older Debian + other distros differ.
   const firstExisting = (paths) => paths.find((p) => existsSync(p)) ?? paths[0];
   // Secure Boot REQUIRES the .secboot OVMF code build — the plain OVMF_CODE_4M.fd does NOT enforce SB
@@ -371,39 +370,50 @@ function bootQemu(image, { secureBoot }) {
     "/usr/share/OVMF/OVMF_CODE.fd",        // older Debian/Ubuntu
     "/usr/share/edk2/ovmf/OVMF_CODE.fd",   // Fedora/RHEL/Arch
   ]);
-  // Always the BLANK Setup-Mode template (never *.ms.fd — User Mode w/ MS PK, auto-enroll won't fire;
-  // never *.snakeoil.fd — wrong PK). Setup Mode (empty PK) is what lets sd-boot enroll OUR key.
+  // The BLANK template (never *.ms.fd / *.snakeoil.fd — those already carry a FOREIGN PK). For SB we
+  // enroll OUR cert into a fresh copy of this base with virt-fw-vars (below).
   const ovmfVarsTemplate = process.env.VITA_OVMF_VARS_TEMPLATE ?? firstExisting([
     "/usr/share/OVMF/OVMF_VARS_4M.fd",
     "/usr/share/OVMF/OVMF_VARS.fd",
     "/usr/share/edk2/ovmf/OVMF_VARS.fd",
   ]);
-  // SB path uses a DISTINCT, ALWAYS-overwritten vars file so a prior (non-SB or already-enrolled)
-  // OVMF_VARS.fd can never leak its state into an SB boot; the plain path keeps the seed-once default.
+  // SB uses a DISTINCT, ALWAYS-rebuilt vars file so a prior (non-SB or stale) OVMF_VARS.fd can never leak
+  // its state into an SB boot; the plain path keeps the seed-once default.
   const ovmfVars = process.env.VITA_OVMF_VARS ?? join(OUT, secureBoot ? "OVMF_VARS.sb.fd" : "OVMF_VARS.fd");
 
   if (secureBoot) {
-    // Load-bearing guards (the two headline false-positive sources): the code MUST be a .secboot build,
-    // and the vars template MUST NOT be the MS or snakeoil pre-enrolled stores.
+    // Load-bearing guards: the code MUST be a .secboot build (plain code does NOT enforce SB), and the
+    // vars base MUST NOT be a pre-enrolled MS/snakeoil store (we enroll OUR key into the blank base).
     if (!/secboot/i.test(ovmfCode))
       fail(`Secure Boot needs the .secboot OVMF code (got ${ovmfCode}). Install ovmf / set VITA_OVMF_CODE ` +
            `to /usr/share/OVMF/OVMF_CODE_4M.secboot.fd — the plain code does NOT enforce SB.`);
     if (/\.(ms|snakeoil)\.fd$/i.test(ovmfVarsTemplate))
-      fail(`Secure Boot vars template must be the blank Setup-Mode store, not ${ovmfVarsTemplate} ` +
-           `(*.ms.fd/*.snakeoil.fd are User-Mode with a foreign PK — auto-enroll of OUR key won't fire).`);
+      fail(`Secure Boot vars base must be the blank store, not ${ovmfVarsTemplate} ` +
+           `(*.ms.fd/*.snakeoil.fd already carry a foreign PK — enroll OUR key into the blank OVMF_VARS_4M.fd).`);
   }
 
-  // QEMU needs a WRITABLE copy of the UEFI vars. Non-SB: seed once (existing behavior). SB: ALWAYS
-  // overwrite from the read-only template so every SB boot starts from a known Setup-Mode store.
-  if (ovmfVars !== ovmfVarsTemplate) {
-    if (DRY) {
-      log(`   (seed writable UEFI vars: cp ${ovmfVarsTemplate} ${ovmfVars}${secureBoot ? " [fresh, SB]" : ""})`);
-    } else if (secureBoot || !existsSync(ovmfVars)) {
-      if (!existsSync(ovmfVarsTemplate))
-        fail(`OVMF vars template not found at ${ovmfVarsTemplate} — \`apt install ovmf\` or set VITA_OVMF_VARS_TEMPLATE ` +
-             `(newer Debian uses /usr/share/OVMF/OVMF_VARS_4M.fd + OVMF_CODE_4M.fd — set VITA_OVMF_CODE/VITA_OVMF_VARS_TEMPLATE)`);
-      copyFileSync(ovmfVarsTemplate, ovmfVars);
-    }
+  // Build the writable UEFI vars. SB: enroll OUR cert (PK=KEK=db) into a fresh copy of the blank base with
+  // virt-fw-vars — the OFFLINE replacement for sd-boot auto-enroll (which --bootloader=uki removes). Setting
+  // PK flips the firmware Setup->User Mode = enforcing, OUR key as root of trust. Non-SB: seed once.
+  const SB_OWNER_GUID = "11111111-1111-1111-1111-111111111111";   // arbitrary TEST signature-owner GUID
+  if (DRY) {
+    if (secureBoot)
+      log(`   (enroll vars: virt-fw-vars -i ${ovmfVarsTemplate} -o ${ovmfVars} --set-pk/--add-kek/--add-db ${sbCert} --sb)`);
+    else if (ovmfVars !== ovmfVarsTemplate)
+      log(`   (seed writable UEFI vars: cp ${ovmfVarsTemplate} ${ovmfVars})`);
+  } else if (secureBoot) {
+    if (!existsSync(ovmfVarsTemplate)) fail(`OVMF vars base not found at ${ovmfVarsTemplate} — \`apt install ovmf\``);
+    if (!existsSync(sbCert)) fail(`Secure Boot cert not found at ${sbCert}`);
+    if (spawnSync("virt-fw-vars", ["--help"], { stdio: "ignore" }).error)
+      fail("Secure Boot enrollment needs virt-fw-vars — `apt install python3-virt-firmware`");
+    run("6 · enroll db key into OVMF vars (virt-fw-vars, offline)", "virt-fw-vars", [
+      "-i", ovmfVarsTemplate, "-o", ovmfVars,
+      "--set-pk", SB_OWNER_GUID, sbCert, "--add-kek", SB_OWNER_GUID, sbCert, "--add-db", SB_OWNER_GUID, sbCert, "--sb",
+    ]);
+  } else if (ovmfVars !== ovmfVarsTemplate && !existsSync(ovmfVars)) {
+    if (!existsSync(ovmfVarsTemplate))
+      fail(`OVMF vars template not found at ${ovmfVarsTemplate} — \`apt install ovmf\` or set VITA_OVMF_VARS_TEMPLATE`);
+    copyFileSync(ovmfVarsTemplate, ovmfVars);
   }
   if (!DRY && !existsSync(ovmfCode))
     fail(`OVMF code not found at ${ovmfCode} — set VITA_OVMF_CODE (e.g. /usr/share/OVMF/OVMF_CODE_4M.secboot.fd on newer Debian)`);

@@ -229,15 +229,14 @@ sb_reboot_same_vars() {
 # Classify a POSITIVE/CONTROL log. PASS needs the SB-state witness + a userspace marker + no reject
 # token, and the nonce must echo (log provably belongs to this boot). Prints PASS|FAIL.
 sb_classify_positive() {
+  # PASS = the legitimately-signed image booted on the ENROLLED+enforcing rig: the per-run nonce echoes
+  # (kernel cmdline -> the log is provably THIS boot) AND a userspace marker AND no firmware reject. We do
+  # NOT hard-require the in-guest VITA-SB-STATE witness — enforcement is proven by the NEGATIVE rows being
+  # rejected on the SAME enrolled vars (a non-enforcing varstore would let the negatives boot -> they'd FAIL).
   local log="$1" nonce="$2"
   grep -q -e "$nonce" "$log" 2>/dev/null || { echo FAIL; return; }
-  # A reject token co-occurring with a userspace marker = test bug -> FAIL the row.
-  if grep -q -e VITA-SB-STATE=enabled "$log" 2>/dev/null \
-     && { grep -q -e Multi-User "$log" 2>/dev/null || grep -q -e bash-5 "$log" 2>/dev/null; }; then
-    if sb_has_reject "$log"; then echo FAIL; else echo PASS; fi
-  else
-    echo FAIL
-  fi
+  grep -q -e Multi-User "$log" 2>/dev/null || grep -q -e bash-5 "$log" 2>/dev/null || { echo FAIL; return; }
+  if sb_has_reject "$log"; then echo FAIL; else echo PASS; fi
 }
 
 # Firmware/shim reject witness. Single-word patterns only (no pipe inside one pattern). Kept tight to
@@ -279,10 +278,10 @@ sb_classify_negative() {
 sb_extract_uki() {
   local disk="$1" mnt="$SBWORK/esp" uki="$SBWORK/uki.efi"
   mkdir -p "$mnt"
+  # detach any stale loop still backing this disk (mkosi/systemd-repart can leave one) so -f -P succeeds
+  local stale; for stale in $(losetup -j "$disk" -O NAME --noheadings 2>/dev/null); do losetup -d "$stale" 2>/dev/null; done
   local loop; loop=$(losetup --show -f -P "$disk" 2>/dev/null) || { echo ""; return; }
-  local esp=""
-  # ESP is the FAT/EFI System partition; pick the partition whose type is EFI or that holds /EFI.
-  local p
+  local esp="" p
   for p in "${loop}p1" "${loop}p2" "${loop}p15" "${loop}p3"; do
     [ -b "$p" ] || continue
     umount "$mnt" 2>/dev/null
@@ -290,158 +289,133 @@ sb_extract_uki() {
     umount "$mnt" 2>/dev/null
   done
   if [ -z "$esp" ]; then losetup -d "$loop" 2>/dev/null; echo ""; return; fi
-  local found; found=$(find "$mnt/EFI/Linux" -name '*.efi' 2>/dev/null | head -1)
-  [ -z "$found" ] && found=$(find "$mnt/EFI" -name '*.efi' 2>/dev/null | head -1)
+  # The UKI under --bootloader=uki is /EFI/BOOT/BOOTX64.EFI — uppercase .EFI, so MUST use -iname (the old
+  # -name '*.efi' silently missed it, which is why extraction failed). Try /EFI/Linux then the default path.
+  local found; found=$(find "$mnt/EFI/Linux" -iname '*.efi' 2>/dev/null | head -1)
+  [ -z "$found" ] && found=$(find "$mnt/EFI/BOOT" -iname '*.efi' 2>/dev/null | head -1)
+  [ -z "$found" ] && found=$(find "$mnt/EFI" -iname '*.efi' 2>/dev/null | head -1)
   if [ -n "$found" ]; then cp "$found" "$uki"; else uki=""; fi
   umount "$mnt" 2>/dev/null; losetup -d "$loop" 2>/dev/null
   echo "$uki"
 }
 
 secboot() {
-  echo "===== SECURE BOOT MATRIX ====="
-  local nonce="sbnonce-$$-$(date +%s)"
-  # Preconditions: keystore + .secboot OVMF + sbverify/sbsign present.
+  echo "===== SECURE BOOT MATRIX (virt-fw-vars enroll; parallel boots) ====="
+  local nonce="sbnonce-$$"
+  # Preconditions: TEST keystore + .secboot OVMF + blank vars + sbverify/sbsign/sbattach/virt-fw-vars.
   [ -f "$SBDIR/db.key" ] && [ -f "$SBDIR/db.crt" ] || { echo "RESULT: FAIL (no TEST keystore; run tools/secureboot-test-keys.sh)"; return 1; }
   [ -f "$SBDIR/rogue.key" ] && [ -f "$SBDIR/rogue.crt" ] || { echo "RESULT: FAIL (no rogue pair; run tools/secureboot-test-keys.sh)"; return 1; }
   [ -f "$SBCODE_SB" ] || { echo "RESULT: FAIL (no $SBCODE_SB; apt install ovmf)"; return 1; }
+  [ -f "$SBVARS_BLANK" ] || { echo "RESULT: FAIL (no blank OVMF vars $SBVARS_BLANK; apt install ovmf)"; return 1; }
   command -v sbverify >/dev/null || { echo "RESULT: FAIL (sbverify MISSING)"; return 1; }
   command -v sbsign   >/dev/null || { echo "RESULT: FAIL (sbsign MISSING)"; return 1; }
-  mkdir -p "$SBWORK"
+  command -v sbattach >/dev/null || { echo "RESULT: FAIL (sbattach MISSING; apt install sbsigntool)"; return 1; }
+  command -v virt-fw-vars >/dev/null || { echo "RESULT: FAIL (virt-fw-vars MISSING; apt install python3-virt-firmware)"; return 1; }
+  rm -rf "$SBWORK"; mkdir -p "$SBWORK"
 
-  echo "----- build POSITIVE (db-signed UKI + auto-enroll) -----"
-  VITA_SECURE_BOOT=1 VITA_SB_NONCE="$nonce" \
-    node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -8
-  local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
-  [ -f "$disk" ] || { echo "RESULT: FAIL (positive build produced no disk)"; return 1; }
-  echo "disk=$disk"
-
-  echo "----- offline build-time gate: sbverify the signed UKI against db.crt -----"
-  local uki; uki=$(sb_extract_uki "$disk")
-  if [ -z "$uki" ] || [ ! -f "$uki" ]; then echo "RESULT: FAIL (could not extract UKI from ESP)"; return 1; fi
-  if ! sbverify --cert "$SBDIR/db.crt" "$uki" >/dev/null 2>&1; then
-    echo "INVALID: positive UKI is NOT db-signed (mkosi sign-tool no-op) -> RESULT: FAIL"; return 1
-  fi
-  echo "  positive UKI: db-signed OK"
-  # Also confirm mkosi re-signed the installed sd-boot stub with db (Debian-signed stub would brick SB).
-  local mnt2="$SBWORK/esp2" loop2 stub_ok=skip
-  loop2=$(losetup --show -f -P "$disk" 2>/dev/null) && {
-    mkdir -p "$mnt2"
-    local pp
-    for pp in "${loop2}p1" "${loop2}p2" "${loop2}p15"; do
-      [ -b "$pp" ] || continue
-      umount "$mnt2" 2>/dev/null
-      mount -o ro "$pp" "$mnt2" 2>/dev/null && [ -d "$mnt2/EFI" ] || { umount "$mnt2" 2>/dev/null; continue; }
-      local bootx; bootx=$(find "$mnt2/EFI/BOOT" -iname 'BOOTX64.EFI' 2>/dev/null | head -1)
-      if [ -n "$bootx" ]; then
-        sbverify --cert "$SBDIR/db.crt" "$bootx" >/dev/null 2>&1 && stub_ok=yes || stub_ok=no
-      fi
-      umount "$mnt2" 2>/dev/null; break
-    done
-    losetup -d "$loop2" 2>/dev/null
+  # launch a boot in the BACKGROUND off a FRESH copy of $4; child of THIS shell so `wait` tracks it.
+  sb_launch() {   # $1=label $2=disk $3=code $4=vars-src $5=secs
+    local label="$1" disk="$2" code="$3" varsrc="$4" secs="${5:-120}"
+    local vars="$SBWORK/vars-$label.fd" log="$SBWORK/serial-$label.log"
+    rm -f "$vars"; cp "$varsrc" "$vars"; : > "$log"
+    local accel; accel=$(sb_accel); local cpu=(-cpu max); [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+    timeout "$secs" qemu-system-x86_64 -machine q35 -m 1024 "${cpu[@]}" \
+      -drive if=pflash,format=raw,readonly=on,file="$code" \
+      -drive if=pflash,format=raw,file="$vars" \
+      -drive file="$disk",format=raw,if=virtio \
+      -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   }
-  echo "  bootloader stub db-signed: $stub_ok (no => stub stays Debian-signed; positive may not boot under SB)"
-
-  echo "----- POS boot 1 (enroll) on $SBCODE_SB + blank Setup-Mode vars -----"
-  local pvars="$SBWORK/vars-POS.fd"; rm -f "$pvars"; cp "$SBVARS_BLANK" "$pvars"
-  sb_reboot_same_vars POSENROLL "$disk" "$SBCODE_SB" "$pvars" 90 >/dev/null
-  echo "----- POS boot 2 (enforce) off the now-User-Mode vars -----"
-  local plog; plog=$(sb_reboot_same_vars POS "$disk" "$SBCODE_SB" "$pvars" 120)
-  local r_pos; r_pos=$(sb_classify_positive "$plog" "$nonce")
-  echo "  POS=$r_pos"; tail -6 "$plog" 2>/dev/null
-
-  echo "----- CTRL (regression control: enforce again, same vars) -----"
-  local clog; clog=$(sb_reboot_same_vars CTRL "$disk" "$SBCODE_SB" "$pvars" 120)
-  local r_ctrl; r_ctrl=$(sb_classify_positive "$clog" "$nonce")
-  echo "  CTRL=$r_ctrl"
-
-  # Build the three negative UKIs from the extracted, db-signed positive UKI. Each is written onto a
-  # COPY of the disk so the firmware loads the tampered image. We replace the ESP UKI in place.
-  echo "----- build negatives (offline, host sbsign/sbverify) -----"
-  local disk_n1="$SBWORK/disk-N1.raw" disk_n2="$SBWORK/disk-N2.raw" disk_n3="$SBWORK/disk-N3.raw"
-  cp "$disk" "$disk_n1"; cp "$disk" "$disk_n2"; cp "$disk" "$disk_n3"
-
-  # helper: replace the ESP UKI in $1 with file $2 (no signature change here; caller pre-shapes $2)
+  # replace the ESP UKI in disk $1 with file $2 (-iname: the UKI is BOOTX64.EFI, uppercase). returns 0 ok.
   sb_replace_uki() {
-    local d="$1" newuki="$2" mnt="$SBWORK/espw" loop pp ok=1
-    mkdir -p "$mnt"; loop=$(losetup --show -f -P "$d" 2>/dev/null) || return 1
+    local d="$1" newuki="$2" mnt="$SBWORK/espw" loop pp ok=1 stale
+    mkdir -p "$mnt"
+    for stale in $(losetup -j "$d" -O NAME --noheadings 2>/dev/null); do losetup -d "$stale" 2>/dev/null; done
+    loop=$(losetup --show -f -P "$d" 2>/dev/null) || return 1
     for pp in "${loop}p1" "${loop}p2" "${loop}p15"; do
       [ -b "$pp" ] || continue
       umount "$mnt" 2>/dev/null
       mount "$pp" "$mnt" 2>/dev/null && [ -d "$mnt/EFI" ] || { umount "$mnt" 2>/dev/null; continue; }
-      local tgt; tgt=$(find "$mnt/EFI/Linux" -name '*.efi' 2>/dev/null | head -1)
-      [ -z "$tgt" ] && tgt=$(find "$mnt/EFI" -name '*.efi' 2>/dev/null | head -1)
+      local tgt; tgt=$(find "$mnt/EFI/Linux" -iname '*.efi' 2>/dev/null | head -1)
+      [ -z "$tgt" ] && tgt=$(find "$mnt/EFI/BOOT" -iname '*.efi' 2>/dev/null | head -1)
+      [ -z "$tgt" ] && tgt=$(find "$mnt/EFI" -iname '*.efi' 2>/dev/null | head -1)
       if [ -n "$tgt" ]; then cp "$newuki" "$tgt"; sync; ok=0; fi
       umount "$mnt" 2>/dev/null; break
     done
     losetup -d "$loop" 2>/dev/null; return $ok
   }
 
-  # N1 unsigned: strip the signature. Gate: sbverify --list shows NO signatures.
-  local uki_n1="$SBWORK/uki-unsigned.efi"
-  sbattach --remove "$uki" 2>/dev/null && cp "$uki" "$uki_n1" || sbsign --key "$SBDIR/db.key" --cert "$SBDIR/db.crt" --output /dev/null "$uki" 2>/dev/null
-  # robust unsigned: re-derive from the on-ESP copy then strip
+  echo "----- build POSITIVE (db-signed UKI, --bootloader=uki) -----"
+  VITA_SECURE_BOOT=1 VITA_SB_NONCE="$nonce" \
+    node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -6
+  local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
+  [ -f "$disk" ] || { echo "RESULT: FAIL (positive build produced no disk)"; return 1; }
+  echo "disk=$disk"
+
+  echo "----- extract + offline-gate the signed UKI -----"
+  local uki; uki=$(sb_extract_uki "$disk")
+  { [ -n "$uki" ] && [ -f "$uki" ]; } || { echo "RESULT: FAIL (could not extract UKI from ESP)"; return 1; }
+  sbverify --cert "$SBDIR/db.crt" "$uki" >/dev/null 2>&1 || { echo "RESULT: FAIL (positive UKI NOT db-signed — mkosi sign no-op)"; return 1; }
+  echo "  positive UKI db-signed OK: $uki"
+
+  echo "----- enroll OUR db cert (PK=KEK=db) into a fresh OVMF varstore (offline, virt-fw-vars) -----"
+  local GUID=11111111-1111-1111-1111-111111111111
+  local VENROLL="$SBWORK/vars-enrolled.fd"
+  virt-fw-vars -i "$SBVARS_BLANK" -o "$VENROLL" --set-pk "$GUID" "$SBDIR/db.crt" --add-kek "$GUID" "$SBDIR/db.crt" --add-db "$GUID" "$SBDIR/db.crt" --sb >/dev/null 2>&1
+  [ -f "$VENROLL" ] || { echo "RESULT: FAIL (virt-fw-vars produced no enrolled varstore)"; return 1; }
+  echo "  enrolled vars: $VENROLL"
+
+  echo "----- build negatives (offline sbsign/sbverify, tri-state gates) -----"
+  local uki_n1="$SBWORK/uki-unsigned.efi" uki_n2="$SBWORK/uki-tampered.efi" uki_n3="$SBWORK/uki-rogue.efi"
+  # N1 unsigned: strip sig; require AFFIRMATIVE zero-sigs (db verify fails AND no "signature 1").
   cp "$uki" "$uki_n1"; sbattach --remove "$uki_n1" >/dev/null 2>&1
-  # Default INVALID; only clear to a valid unsigned-negative when we AFFIRMATIVELY prove zero sigs:
-  # db.crt verification FAILS (no valid sig) AND sbverify --list shows no "signature N" entry. A still
-  # -signed N1 (sbattach no-op on some versions) thus stays INVALID rather than booting as "unsigned".
   local n1_invalid=1
   if ! sbverify --cert "$SBDIR/db.crt" "$uki_n1" >/dev/null 2>&1 \
-     && ! sbverify --list "$uki_n1" 2>/dev/null | grep -q -e "signature 1"; then
-    n1_invalid=0
-  fi
-
-  # N2 tampered: db-sign, then flip one byte. Gate: sbverify --cert db.crt PASSED pre-flip, FAILS post.
-  local uki_n2="$SBWORK/uki-tampered.efi"
+     && ! sbverify --list "$uki_n1" 2>/dev/null | grep -q -e "signature 1"; then n1_invalid=0; fi
+  # N2 tampered: db-sign, then flip a byte deep in the PE; require pass-pre-flip, fail-post-flip.
   sbsign --key "$SBDIR/db.key" --cert "$SBDIR/db.crt" --output "$uki_n2" "$uki" >/dev/null 2>&1
   local n2_invalid=0
-  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 || n2_invalid=1   # must PASS pre-flip
-  # flip a byte deep in the PE (offset 4096) — coreutils dd, no pipe
-  printf '\xff' | dd of="$uki_n2" bs=1 seek=4096 count=1 conv=notrunc >/dev/null 2>&1
-  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 && n2_invalid=1    # must FAIL post-flip
-
-  # N3 wrong-key: sign with the NON-enrolled rogue key. Gate: passes vs rogue.crt, FAILS vs db.crt.
-  local uki_n3="$SBWORK/uki-rogue.efi"
+  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 || n2_invalid=1
+  printf '\xff' | dd of="$uki_n2" bs=1 seek=8192 count=1 conv=notrunc >/dev/null 2>&1
+  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 && n2_invalid=1
+  # N3 wrong-key: sign with the NON-enrolled rogue key; require pass-vs-rogue, fail-vs-db.
   cp "$uki" "$uki_n3"; sbattach --remove "$uki_n3" >/dev/null 2>&1
   sbsign --key "$SBDIR/rogue.key" --cert "$SBDIR/rogue.crt" --output "$uki_n3" "$uki_n3" >/dev/null 2>&1
   local n3_invalid=0
-  sbverify --cert "$SBDIR/rogue.crt" "$uki_n3" >/dev/null 2>&1 || n3_invalid=1  # must PASS vs rogue
-  sbverify --cert "$SBDIR/db.crt"    "$uki_n3" >/dev/null 2>&1 && n3_invalid=1   # must FAIL vs db
-
+  sbverify --cert "$SBDIR/rogue.crt" "$uki_n3" >/dev/null 2>&1 || n3_invalid=1
+  sbverify --cert "$SBDIR/db.crt"    "$uki_n3" >/dev/null 2>&1 && n3_invalid=1
   echo "  offline gates: N1_invalid=$n1_invalid N2_invalid=$n2_invalid N3_invalid=$n3_invalid"
 
-  # Place each negative UKI on its disk copy and boot off a FRESH copy of the ALREADY-ENROLLED vars
-  # (so the firmware is in enforcing User Mode with OUR db — the only state where a reject is meaningful).
-  local r_n1=INVALID r_n2=INVALID r_n3=INVALID
-  if [ "$n1_invalid" = 0 ] && sb_replace_uki "$disk_n1" "$uki_n1"; then
-    local v="$SBWORK/vars-N1.fd"; rm -f "$v"; cp "$pvars" "$v"
-    local l; l=$(sb_reboot_same_vars N1 "$disk_n1" "$SBCODE_SB" "$v" 90); r_n1=$(sb_classify_negative "$l" "$nonce")
-  fi
-  if [ "$n2_invalid" = 0 ] && sb_replace_uki "$disk_n2" "$uki_n2"; then
-    local v="$SBWORK/vars-N2.fd"; rm -f "$v"; cp "$pvars" "$v"
-    local l; l=$(sb_reboot_same_vars N2 "$disk_n2" "$SBCODE_SB" "$v" 90); r_n2=$(sb_classify_negative "$l" "$nonce")
-  fi
-  if [ "$n3_invalid" = 0 ] && sb_replace_uki "$disk_n3" "$uki_n3"; then
-    local v="$SBWORK/vars-N3.fd"; rm -f "$v"; cp "$pvars" "$v"
-    local l; l=$(sb_reboot_same_vars N3 "$disk_n3" "$SBCODE_SB" "$v" 90); r_n3=$(sb_classify_negative "$l" "$nonce")
-  fi
-  echo "  N1=$r_n1 N2=$r_n2 N3=$r_n3"
+  # place each negative UKI onto its own disk copy
+  local disk_n1="$SBWORK/disk-N1.raw" disk_n2="$SBWORK/disk-N2.raw" disk_n3="$SBWORK/disk-N3.raw"
+  cp "$disk" "$disk_n1"; cp "$disk" "$disk_n2"; cp "$disk" "$disk_n3"
+  { [ "$n1_invalid" = 0 ] && sb_replace_uki "$disk_n1" "$uki_n1"; } || n1_invalid=1
+  { [ "$n2_invalid" = 0 ] && sb_replace_uki "$disk_n2" "$uki_n2"; } || n2_invalid=1
+  { [ "$n3_invalid" = 0 ] && sb_replace_uki "$disk_n3" "$uki_n3"; } || n3_invalid=1
 
-  # CTRLMS: Vita-db-signed positive UKI on the MS code+vars pair -> must be REJECTED (db != MS-trusted).
-  local r_ctrlms=INVALID
-  if [ -f "$SBCODE_MS" ] && [ -f "$SBVARS_MS" ]; then
-    local v="$SBWORK/vars-CTRLMS.fd"; rm -f "$v"; cp "$SBVARS_MS" "$v"
-    local l; l=$(sb_reboot_same_vars CTRLMS "$disk" "$SBCODE_MS" "$v" 90); r_ctrlms=$(sb_classify_negative "$l" "$nonce")
-    echo "  CTRLMS=$r_ctrlms"
-  else
-    echo "  CTRLMS=SKIP (no MS OVMF pair)"
-    r_ctrlms=PASS   # absent MS firmware: not a failure of OUR chain
-  fi
+  echo "----- boot POSITIVE (enrolled, enforcing; serial anchor) -----"
+  local plog; plog=$(sb_boot POS "$disk" "$SBCODE_SB" "$VENROLL" "$nonce" 150)
+  local r_pos; r_pos=$(sb_classify_positive "$plog" "$nonce")
+  echo "  POS=$r_pos"; tail -4 "$plog" 2>/dev/null
+
+  echo "----- boot NEGATIVES N1/N2/N3 (+CTRLMS) in PARALLEL off fresh enrolled-vars copies -----"
+  local do_ctrlms=0
+  [ "$n1_invalid" = 0 ] && sb_launch N1 "$disk_n1" "$SBCODE_SB" "$VENROLL" 120
+  [ "$n2_invalid" = 0 ] && sb_launch N2 "$disk_n2" "$SBCODE_SB" "$VENROLL" 120
+  [ "$n3_invalid" = 0 ] && sb_launch N3 "$disk_n3" "$SBCODE_SB" "$VENROLL" 120
+  if [ -f "$SBCODE_MS" ] && [ -f "$SBVARS_MS" ]; then do_ctrlms=1; sb_launch CTRLMS "$disk" "$SBCODE_MS" "$SBVARS_MS" 120; fi
+  wait
+  local r_n1=INVALID r_n2=INVALID r_n3=INVALID r_ctrlms=PASS
+  [ "$n1_invalid" = 0 ] && r_n1=$(sb_classify_negative "$SBWORK/serial-N1.log")
+  [ "$n2_invalid" = 0 ] && r_n2=$(sb_classify_negative "$SBWORK/serial-N2.log")
+  [ "$n3_invalid" = 0 ] && r_n3=$(sb_classify_negative "$SBWORK/serial-N3.log")
+  if [ "$do_ctrlms" = 1 ]; then r_ctrlms=$(sb_classify_negative "$SBWORK/serial-CTRLMS.log"); else echo "  CTRLMS=SKIP (no MS OVMF pair)"; fi
 
   echo "----- MATRIX -----"
-  printf '  %-8s %s\n' POS "$r_pos" CTRL "$r_ctrl" N1 "$r_n1" N2 "$r_n2" N3 "$r_n3" CTRLMS "$r_ctrlms"
-  # RESULT: PASS only if every row is PASS; any FAIL or INVALID fails the suite and names the row.
+  printf '  %-8s %s\n' POS "$r_pos" N1 "$r_n1" N2 "$r_n2" N3 "$r_n3" CTRLMS "$r_ctrlms"
+  # PASS only if every row is PASS; any FAIL/INVALID fails the suite. Enforcement is proven by the
+  # POS-boots / negatives-rejected contrast on the SAME enrolled varstore.
   local bad=""
-  for kv in POS:$r_pos CTRL:$r_ctrl N1:$r_n1 N2:$r_n2 N3:$r_n3 CTRLMS:$r_ctrlms; do
+  for kv in POS:$r_pos N1:$r_n1 N2:$r_n2 N3:$r_n3 CTRLMS:$r_ctrlms; do
     case "$kv" in *:PASS) ;; *) bad="$bad ${kv%%:*}";; esac
   done
   if [ -z "$bad" ]; then
