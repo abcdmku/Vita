@@ -1,26 +1,26 @@
 // Minimal ambient declaration of the Deno global surface used by the on-device entrypoint (P1-030).
 //
-// WHY THIS EXISTS — it keeps the diff os-only while restoring typecheck coverage of main.ts:
+// WHY THIS EXISTS - it keeps the diff os-only while restoring typecheck coverage of main.ts in the
+// repo-wide Node `tsc` lane, WITHOUT ever being visible to Deno's own checker:
 //   - On-device, main.ts runs under the REAL pinned Deno runtime (/usr/lib/vita/deno). `deno check`
-//     (see os/x86_64/ts-overlay/deno.json) is the AUTHORITATIVE typecheck, validated against Deno's
-//     real lib — that is the check that matters and it is wired as this overlay's acceptance command.
-//   - The repo-wide Node `tsc` lane (root tsconfig.json: include "os/**/*.ts") ALSO compiles this
-//     file. Node has no `Deno` global, so without this declaration the Node lane fails on the three
-//     `Deno.*` references in main.ts. Round 1 fixed that by EXCLUDING the overlay from the Node lane
-//     via a root tsconfig edit — but that (a) edited a root file (scope) and (b) dropped the
-//     entrypoint from the Node lane entirely (coverage). This file fixes both with an os-local change:
-//     it supplies just enough of the `Deno` namespace for Node tsc to keep the entrypoint IN its lane,
-//     while `deno check` remains the real, lib-accurate gate.
+//     (config at os/x86_64/deno.json, outside this overlay) is the AUTHORITATIVE typecheck, vs Deno's
+//     real lib - that is the check that matters and it is wired as this overlay's acceptance command.
+//     This file is NOT referenced from main.ts (no triple-slash) and is `exclude`d in deno.json, so
+//     `deno check` NEVER loads it. Deno therefore sees only its own `Deno` global - there is no
+//     second `Deno.version` / duplicate-ambient-const declaration for Deno to reject (the round-2
+//     blocking risk). The shim lives in the Deno lane's source tree but is inert to Deno.
+//   - The repo-wide Node `tsc` lane (root tsconfig.json: include "os/**/*.ts") ALSO compiles main.ts.
+//     Node has no `Deno` global, so without this declaration the Node lane fails on the three `Deno.*`
+//     references in main.ts. Round 1 fixed that by EXCLUDING the overlay from the Node lane via a root
+//     tsconfig edit - but that (a) edited a root file (scope) and (b) dropped the entrypoint from the
+//     Node lane entirely (coverage). This file fixes both with an os-local change: the include glob
+//     "os/**/*.ts" matches this sibling `.d.ts` automatically, so the Node lane picks up the ambient
+//     `Deno` namespace and keeps the entrypoint IN its coverage - no triple-slash, no root edit.
 //
-// SAFETY OF DECLARATION MERGING — the signatures below are a strict SUBSET of Deno's own, with
-// IDENTICAL shapes for the members main.ts touches. TypeScript merges this ambient `namespace Deno`
-// with Deno's built-in one; because the overlapping members are structurally identical, `deno check`
-// accepts the merge (verified on Deno 2.8.3). It is deliberately MINIMAL: it declares only the three
-// members main.ts uses, so it cannot mask a typo on some other Deno API — any such use would surface
-// as a Node-lane error here AND be caught authoritatively by `deno check`.
-//
-// Keep in sync: if main.ts starts using another Deno API, add its (subset, exact) signature here so
-// the Node lane keeps compiling; `deno check` is what guarantees the signature is correct.
+// MINIMAL ON PURPOSE - it declares only the three members main.ts uses, so it cannot mask a typo on
+// some other Deno API in the Node lane; and any such use is caught authoritatively by `deno check`
+// against Deno's real lib. Keep in sync: if main.ts starts using another Deno API, add its (subset,
+// exact) signature here so the Node lane keeps compiling.
 
 declare namespace Deno {
   /** Process/runtime version triplet. Only `deno` is read here. */

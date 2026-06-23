@@ -1,0 +1,31 @@
+{
+  "//": "Deno config for the ON-DEVICE TypeScript overlay (P1-030). This file makes `deno check` the",
+  "//2": "authoritative typechecker for the production entrypoint that runs on-device under the pinned",
+  "//3": "Deno runtime. The Node `tsc` lane (root tsconfig.json) cannot validate this code — it uses the",
+  "//4": "Deno.* global namespace, not Node types — so coverage of the entrypoint lives HERE, checked",
+  "//5": "against Deno's real lib, exactly as it will run on the device. See the acceptance command in",
+  "//6": "os/x86_64/ts-image.conf [Typecheck].",
+  "//7": "LOCATION: this config lives at os/x86_64/ (alongside ts-image.conf), NOT inside ts-overlay/.",
+  "//7b": "mkosi copies ts-overlay into the rootfs via --extra-tree, so a deno.json inside that tree",
+  "//7c": "would ship into the image as /deno.json. Keeping it one level up keeps dev/build-only config",
+  "//7d": "out of the image. Run `deno check` from os/x86_64/: `deno check ts-overlay/usr/lib/vita/ts/main.ts`.",
+  "//8": "Pure on-device control-plane code: no permissions, no remote imports (only vendored relative",
+  "//8b": "imports under ts-overlay/usr/lib/vita/ts/). lint/fmt kept on Deno defaults; strict typecheck is the point.",
+  "//9": "EXCLUDE the Node-only ambient shim from EVERY Deno lane: it redeclares a subset of `Deno.*`",
+  "//10": "for the Node `tsc` lane, and Deno already provides the real `Deno` global. main.ts no longer",
+  "//11": "references it (no triple-slash), so `deno check` never loads it; this exclude is belt-and-",
+  "//12": "suspenders so `deno check`/lint/fmt can never pick it up and hit a duplicate-decl error.",
+  "exclude": ["ts-overlay/usr/lib/vita/ts/vendor/deno.shim.d.ts"],
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true
+  }
+}

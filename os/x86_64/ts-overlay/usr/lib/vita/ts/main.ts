@@ -20,11 +20,18 @@
 // Run model: `deno run` with NO --allow-* flags. The control-plane logic here is pure, so it
 // needs zero permissions; Deno's default-deny sandbox is the on-device least-privilege posture.
 
-// Ambient `Deno` namespace declaration (minimal, exact subset of Deno's own) so the repo-wide Node
-// `tsc` lane can keep this production entrypoint IN its include set without a root tsconfig edit. The
-// AUTHORITATIVE typecheck is `deno check` against Deno's real lib (see ../vendor/deno.shim.d.ts and
-// os/x86_64/ts-overlay/deno.json). On-device this directive is inert — Deno provides the real Deno.*.
-/// <reference path="./vendor/deno.shim.d.ts" />
+// Deno runtime globals (`Deno.*`) used below resolve differently in the two typecheck lanes, by
+// DESIGN — and the Node-only shim is deliberately NOT referenced from here so it stays invisible to
+// Deno's own checker:
+//   - `deno check` (AUTHORITATIVE, run against Deno's real lib; config at os/x86_64/deno.json, which
+//     lives OUTSIDE this overlay so it is not copied into the image rootfs by --extra-tree):
+//     Deno provides the real `Deno` global. The Node shim (vendor/deno.shim.d.ts) is EXCLUDED in
+//     deno.json and is not pulled in by any triple-slash here, so Deno never sees a second
+//     declaration of `Deno.version` (the round-2 duplicate/incompatible-ambient-const risk is gone).
+//   - The repo-wide Node `tsc` lane (root tsconfig.json include "os/**/*.ts") has no `Deno` global.
+//     It picks up the ambient shim automatically because the include glob also matches the sibling
+//     vendor/deno.shim.d.ts — no triple-slash reference and no root tsconfig edit are needed. That
+//     keeps this production entrypoint IN the Node lane's coverage while the shim never reaches Deno.
 
 import {
   compareSemver,

@@ -11,6 +11,11 @@
 # serial even under the autologin getty (same reliable wiring used by vita-sb-state.service).
 #
 # Determinism / least privilege (spec §9.3, §8.2):
+#   - The runtime runs UNPRIVILEGED. Per the spec/ADR split, privileged host mutation belongs ONLY
+#     to the narrow Go agent (agentd); the TypeScript runtime must NOT be root and must hold NO
+#     capabilities. The [Service] block below enforces that with DynamicUser + an empty capability
+#     bounding/ambient set + NoNewPrivileges, plus the standard systemd sandbox knobs. A oneshot
+#     that only reads /usr/lib/vita/ts and prints a marker needs nothing more.
 #   - `deno run` is invoked with NO --allow-* flags: Deno's default-deny sandbox is the on-device
 #     least-privilege posture. main.ts is pure (parse + compare a vendored semver), needs nothing.
 #   - --no-remote forbids any network module fetch; --cached-only forbids touching the module
@@ -34,11 +39,51 @@ RemainAfterExit=yes
 ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet /usr/lib/vita/ts/main.ts
 StandardOutput=journal+console
 StandardError=journal+console
+
+# ── Run UNPRIVILEGED + sandboxed (spec/ADR: only the Go agent is privileged) ─────────────────────
+# DynamicUser allocates a transient, unprivileged UID/GID for this unit only (no static account in
+# the image). The runtime never runs as root and cannot mutate the host; that authority is reserved
+# to agentd. RuntimeDirectory= is created owned by the dynamic user (so DENO_DIR below is writable).
+DynamicUser=yes
+# Belt-and-suspenders: even a misbehaving runtime can gain no privileges and holds zero capabilities.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Reduce kernel/host attack surface for a pure compute oneshot: read-only filesystem view (the rootfs
+# is verity-RO anyway), no access to home dirs, a private /tmp and /dev, no real-time scheduling, no
+# privileged syscalls, no setuid/setgid bits honoured, kernel tunables/logs/modules off-limits.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+# ProtectProc=invisible hides OTHER processes' /proc entries from this unit. We deliberately do NOT
+# set ProcSubset=pid: Deno reads non-pid /proc files (e.g. /proc/cpuinfo, /proc/meminfo) at startup,
+# and hiding them risks breaking the runtime on-device where this can't be re-tested cheaply.
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+UMask=0077
+
 # A read-only verity root has no writable HOME/cache; point Deno's dirs at /run (tmpfs) so it never
 # tries to create a cache under a read-only path. We pass --cached-only so nothing is actually
 # written, but DENO_DIR keeps Deno from erroring on a missing/RO default cache location.
+# RuntimeDirectory=vita-deno -> /run/vita-deno, created 0700 owned by the DynamicUser each start.
 Environment=DENO_DIR=/run/vita-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
 RuntimeDirectory=vita-deno
+RuntimeDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
