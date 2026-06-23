@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/vita/agent/capabilities"
+	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -151,6 +152,7 @@ type ExecuteCapability struct {
 	registryFS registryFileSystem
 	manifests  executionManifestStore
 	launcher   transientUnitLauncher
+	supervisor *capsuleruntime.Supervisor
 
 	mu   sync.Mutex
 	last *ExecuteStatus
@@ -165,21 +167,31 @@ func (e *ExecuteInvalidRequestError) Error() string {
 }
 
 func NewExecuteCapability() *ExecuteCapability {
-	return newExecuteCapability(
+	return NewExecuteCapabilityWithSupervisor(capsuleruntime.NewSupervisor(capsuleruntime.Options{}))
+}
+
+func NewExecuteCapabilityWithSupervisor(supervisor *capsuleruntime.Supervisor) *ExecuteCapability {
+	return newExecuteCapabilityWithSupervisor(
 		newDefaultFileSystem(),
 		fileExecutionManifestStore{root: defaultCapsuleRoot},
 		systemdRunLauncher{
 			systemdRun: systemdRunPath,
 			systemctl:  systemctlPath,
 		},
+		supervisor,
 	)
 }
 
 func newExecuteCapability(registryFS registryFileSystem, manifests executionManifestStore, launcher transientUnitLauncher) *ExecuteCapability {
+	return newExecuteCapabilityWithSupervisor(registryFS, manifests, launcher, nil)
+}
+
+func newExecuteCapabilityWithSupervisor(registryFS registryFileSystem, manifests executionManifestStore, launcher transientUnitLauncher, supervisor *capsuleruntime.Supervisor) *ExecuteCapability {
 	return &ExecuteCapability{
 		registryFS: registryFS,
 		manifests:  manifests,
 		launcher:   launcher,
+		supervisor: supervisor,
 	}
 }
 
@@ -206,6 +218,15 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 		return ExecuteReadResponse{}, nil
 	}
 	last := *c.last
+	if c.supervisor != nil {
+		for _, workload := range c.supervisor.Snapshot() {
+			if workload.Unit == last.Unit {
+				last.Health = string(workload.Health)
+				last.Status = string(workload.Status)
+				break
+			}
+		}
+	}
 	return ExecuteReadResponse{Last: &last}, nil
 }
 
@@ -257,6 +278,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Status:     "OK",
 	}
 	c.setLast(executeStatus)
+	c.startWorkload(manifest, unit.Name)
 
 	return executeUndo{
 		capability: c,
@@ -320,6 +342,30 @@ func (c *ExecuteCapability) clearLast(unit string) {
 	}
 }
 
+func (c *ExecuteCapability) startWorkload(manifest ExecutionManifest, unit string) {
+	if c.supervisor == nil {
+		return
+	}
+	c.supervisor.StartWorkload(capsuleruntime.WorkloadSpec{
+		ID:     manifest.ID,
+		Unit:   unit,
+		Checks: healthChecksForUnit(manifest.HealthChecks, unit),
+	})
+}
+
+func (c *ExecuteCapability) stopWorkload(unit string) {
+	if c.supervisor != nil {
+		c.supervisor.StopWorkload(unit)
+	}
+}
+
+func (c *ExecuteCapability) Workloads() []capsuleruntime.WorkloadStatus {
+	if c == nil || c.supervisor == nil {
+		return []capsuleruntime.WorkloadStatus{}
+	}
+	return c.supervisor.Snapshot()
+}
+
 type executeUndo struct {
 	capability *ExecuteCapability
 	launcher   transientUnitLauncher
@@ -334,6 +380,7 @@ func (u executeUndo) Undo(ctx context.Context) error {
 		return err
 	}
 	if u.capability != nil {
+		u.capability.stopWorkload(u.unit)
 		u.capability.clearLast(u.unit)
 	}
 	return nil
@@ -346,6 +393,7 @@ type ExecutionManifest struct {
 	PackageClass   string                  `json:"packageClass"`
 	Runtime        ExecutionRuntime        `json:"runtime"`
 	ResourceLimits ExecutionResourceLimits `json:"resourceLimits"`
+	HealthChecks   []capsuleruntime.Check  `json:"healthChecks,omitempty"`
 
 	baseDir string
 }
@@ -388,6 +436,10 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 	if err := requiredObjectField(fields, "resourceLimits", &limits); err != nil {
 		return err
 	}
+	healthChecks, err := optionalHealthChecksField(fields, "healthChecks")
+	if err != nil {
+		return err
+	}
 
 	manifest := ExecutionManifest{
 		ID:             id,
@@ -396,6 +448,7 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 		PackageClass:   packageClass,
 		Runtime:        runtime,
 		ResourceLimits: limits,
+		HealthChecks:   healthChecks,
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -421,7 +474,15 @@ func (m ExecutionManifest) Validate() error {
 	if err := m.Runtime.Validate(); err != nil {
 		return err
 	}
-	return m.ResourceLimits.Validate()
+	if err := m.ResourceLimits.Validate(); err != nil {
+		return err
+	}
+	for i, check := range m.HealthChecks {
+		if err := check.Validate(); err != nil {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("healthChecks[%d]: %v", i, err)}
+		}
+	}
+	return nil
 }
 
 type ExecutionRuntime struct {
@@ -735,6 +796,7 @@ var (
 		"version":   {},
 	}
 	executionManifestFields = map[string]struct{}{
+		"healthChecks":   {},
 		"id":             {},
 		"integrity":      {},
 		"packageClass":   {},
@@ -851,6 +913,17 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	}, nil
 }
 
+func healthChecksForUnit(checks []capsuleruntime.Check, unit string) []capsuleruntime.Check {
+	out := make([]capsuleruntime.Check, len(checks))
+	copy(out, checks)
+	for i := range out {
+		if out[i].Type == capsuleruntime.CheckTypeLifecycle && (out[i].Target == "self" || out[i].Target == "unit") {
+			out[i].Target = unit
+		}
+	}
+	return out
+}
+
 func manifestEntrypointPath(manifest ExecutionManifest) (string, error) {
 	if err := manifest.Runtime.TypeScript.Validate(); err != nil {
 		return "", err
@@ -904,6 +977,24 @@ func requiredObjectField(fields map[string]json.RawMessage, key string, target i
 		return err
 	}
 	return nil
+}
+
+func optionalHealthChecksField(fields map[string]json.RawMessage, key string) ([]capsuleruntime.Check, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+
+	var checks []capsuleruntime.Check
+	if err := decodeSingleJSONValue(raw, &checks); err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("%s must be a list of health checks: %v", key, err)}
+	}
+	for i, check := range checks {
+		if err := check.Validate(); err != nil {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("%s[%d]: %v", key, i, err)}
+		}
+	}
+	return checks, nil
 }
 
 func requiredPositiveFloatField(fields map[string]json.RawMessage, key string) (float64, error) {

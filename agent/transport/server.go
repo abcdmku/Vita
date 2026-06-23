@@ -32,6 +32,7 @@ import (
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/internal/auditlog"
+	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -69,7 +70,8 @@ type Config struct {
 	Now             func() time.Time
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
-	AuditStore AuditStore
+	AuditStore       AuditStore
+	CapsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
 
 type ErrorResponse struct {
@@ -135,18 +137,23 @@ type stateCapabilityError struct {
 	Error string `json:"error"`
 }
 
+type capsuleWorkloadSource interface {
+	Workloads() []capsuleruntime.WorkloadStatus
+}
+
 type handler struct {
-	version         string
-	startedAt       time.Time
-	capabilityNames []string
-	registry        *capabilities.Registry
-	discoverer      hardware.Discoverer
-	requestDecoders map[string]RequestDecoder
-	readRequests    map[string]ReadRequestFactory
-	healthCheck     transaction.HealthCheck
-	maxBodyBytes    int64
-	now             func() time.Time
-	auditStore      AuditStore
+	version          string
+	startedAt        time.Time
+	capabilityNames  []string
+	registry         *capabilities.Registry
+	discoverer       hardware.Discoverer
+	requestDecoders  map[string]RequestDecoder
+	readRequests     map[string]ReadRequestFactory
+	healthCheck      transaction.HealthCheck
+	maxBodyBytes     int64
+	now              func() time.Time
+	auditStore       AuditStore
+	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
 
 type applyRequest struct {
@@ -264,21 +271,27 @@ func NewHandler(config Config) (http.Handler, error) {
 		readRequests[name] = factory
 	}
 
+	capsuleWorkloads := config.CapsuleWorkloads
+	if capsuleWorkloads == nil {
+		capsuleWorkloads = capsuleWorkloadSnapshotFunc(registry)
+	}
+
 	names := registry.Names()
 	sort.Strings(names)
 
 	return &handler{
-		version:         config.Version,
-		startedAt:       startedAt.UTC(),
-		capabilityNames: names,
-		registry:        registry,
-		discoverer:      discoverer,
-		requestDecoders: decoders,
-		readRequests:    readRequests,
-		healthCheck:     config.HealthCheck,
-		maxBodyBytes:    maxBodyBytes,
-		now:             now,
-		auditStore:      config.AuditStore,
+		version:          config.Version,
+		startedAt:        startedAt.UTC(),
+		capabilityNames:  names,
+		registry:         registry,
+		discoverer:       discoverer,
+		requestDecoders:  decoders,
+		readRequests:     readRequests,
+		healthCheck:      config.HealthCheck,
+		maxBodyBytes:     maxBodyBytes,
+		now:              now,
+		auditStore:       config.AuditStore,
+		capsuleWorkloads: capsuleWorkloads,
 	}, nil
 }
 
@@ -489,9 +502,23 @@ func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Write(raw)
 	}
-	body.WriteString("}}\n")
+	body.WriteString("},\"capsuleWorkloads\":")
+	workloads, err := encodeJSONValue(h.capsuleWorkloadSnapshot())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+		return
+	}
+	body.Write(workloads)
+	body.WriteString("}\n")
 
 	writeRawJSON(w, http.StatusOK, body.Bytes())
+}
+
+func (h *handler) capsuleWorkloadSnapshot() []capsuleruntime.WorkloadStatus {
+	if h.capsuleWorkloads == nil {
+		return []capsuleruntime.WorkloadStatus{}
+	}
+	return normalizeCapsuleWorkloads(h.capsuleWorkloads())
 }
 
 func (h *handler) readCapabilityJSON(ctx context.Context, name string) ([]byte, *requestError) {
@@ -518,6 +545,38 @@ func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
 
 	request := factory()
 	return request, request != nil
+}
+
+func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) func() []capsuleruntime.WorkloadStatus {
+	if registry == nil {
+		return nil
+	}
+
+	capability, ok := registry.Lookup(capsule.ExecuteName)
+	if !ok {
+		return nil
+	}
+	source, ok := capability.(capsuleWorkloadSource)
+	if !ok {
+		return nil
+	}
+	return source.Workloads
+}
+
+func normalizeCapsuleWorkloads(workloads []capsuleruntime.WorkloadStatus) []capsuleruntime.WorkloadStatus {
+	if len(workloads) == 0 {
+		return []capsuleruntime.WorkloadStatus{}
+	}
+
+	out := make([]capsuleruntime.WorkloadStatus, len(workloads))
+	copy(out, workloads)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Unit < out[j].Unit
+	})
+	return out
 }
 
 func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {

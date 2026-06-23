@@ -13,5 +13,14 @@
     "ramMiB": 64,
     "storageMiB": 16,
     "tasksMax": 32
-  }
+  },
+  "healthChecks": [
+    {
+      "name": "lifecycle",
+      "type": "lifecycle",
+      "target": "self",
+      "intervalSeconds": 5,
+      "timeoutSeconds": 2
+    }
+  ]
 }
