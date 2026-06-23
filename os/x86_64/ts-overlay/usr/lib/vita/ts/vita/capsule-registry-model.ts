@@ -1,3 +1,4 @@
+// Vendored from sdk/typescript/src/capsule-registry-model.ts
 import {
   CAPSULE_MANIFEST,
   compileCapabilityValidator,
