@@ -39,6 +39,39 @@ export function createDenoUnixSocketAgentTransport(
   };
 }
 
+export function createDenoUnixSocketApplyAgentTransport(
+  options: DenoUnixSocketTransportOptions,
+): AgentTransport {
+  const host = options.host ?? DEFAULT_HOST;
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+
+  // This only widens the TS transport guard to POST /apply. agentd still treats
+  // the plan as untrusted and re-validates it in server.go buildPlan before
+  // transaction execution.
+  return async (url, init) => {
+    if (init.method !== "GET" && !isApplyPost(url, init)) {
+      throw new Error("on-device agent transport only allows GET plus POST /apply");
+    }
+
+    return requestOverUnixSocket(
+      options.socketPath,
+      host,
+      maxResponseBytes,
+      url,
+      init,
+    );
+  };
+}
+
+function isApplyPost(urlText: string, init: AgentTransportInit): boolean {
+  if (init.method !== "POST") {
+    return false;
+  }
+
+  const url = new URL(urlText);
+  return url.pathname === "/apply" && url.search === "";
+}
+
 async function requestOverUnixSocket(
   socketPath: string,
   host: string,
