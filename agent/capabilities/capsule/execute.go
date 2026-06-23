@@ -33,7 +33,8 @@ const (
 	systemdRunPath     = "/usr/bin/systemd-run"
 	systemctlPath      = "/usr/bin/systemctl"
 
-	executePackageClassTSService = "ts-service"
+	executePackageClassTSService  = "ts-service"
+	executePackageClassOCIService = "oci-service"
 
 	maxCPUQuotaCores = 64
 	maxMemoryMiB     = 1024 * 1024
@@ -558,10 +559,12 @@ func (m ExecutionManifest) Validate() error {
 	if !isValidSRI(m.Integrity) {
 		return &ExecuteInvalidRequestError{Reason: "manifest.integrity must be a real SRI integrity"}
 	}
-	if m.PackageClass != executePackageClassTSService {
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service"}
+	switch m.PackageClass {
+	case executePackageClassTSService, executePackageClassOCIService:
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
 	}
-	if err := m.Runtime.Validate(); err != nil {
+	if err := m.Runtime.ValidateForPackageClass(m.PackageClass); err != nil {
 		return err
 	}
 	if err := m.ResourceLimits.Validate(); err != nil {
@@ -580,6 +583,7 @@ func (m ExecutionManifest) Validate() error {
 
 type ExecutionRuntime struct {
 	TypeScript TypeScriptExecution `json:"typescript"`
+	OCI        OCIExecution        `json:"oci"`
 }
 
 func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
@@ -595,17 +599,70 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 		return &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 
-	var ts TypeScriptExecution
-	if err := requiredObjectField(fields, "typescript", &ts); err != nil {
-		return err
+	rawTS, hasTS := fields["typescript"]
+	rawOCI, hasOCI := fields["oci"]
+	if hasTS == hasOCI {
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one of typescript or oci"}
 	}
 
-	r.TypeScript = ts
+	var runtime ExecutionRuntime
+	if hasTS {
+		if bytes.Equal(bytes.TrimSpace(rawTS), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript is required"}
+		}
+		var ts TypeScriptExecution
+		if err := decodeSingleJSONValue(rawTS, &ts); err != nil {
+			return err
+		}
+		runtime.TypeScript = ts
+	} else {
+		if bytes.Equal(bytes.TrimSpace(rawOCI), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "runtime.oci is required"}
+		}
+		var oci OCIExecution
+		if err := decodeSingleJSONValue(rawOCI, &oci); err != nil {
+			return err
+		}
+		runtime.OCI = oci
+	}
+
+	*r = runtime
 	return nil
 }
 
 func (r ExecutionRuntime) Validate() error {
-	return r.TypeScript.Validate()
+	tsErr := r.TypeScript.Validate()
+	ociErr := r.OCI.Validate()
+	switch {
+	case tsErr == nil && ociErr == nil:
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
+	case tsErr == nil || ociErr == nil:
+		return nil
+	default:
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
+	}
+}
+
+func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
+	switch packageClass {
+	case executePackageClassTSService:
+		if err := r.TypeScript.Validate(); err != nil {
+			return err
+		}
+		if err := r.OCI.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.oci must not be declared for ts-service"}
+		}
+	case executePackageClassOCIService:
+		if err := r.OCI.Validate(); err != nil {
+			return err
+		}
+		if err := r.TypeScript.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for oci-service"}
+		}
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+	return nil
 }
 
 type ExecutionData struct {
@@ -821,15 +878,8 @@ func (s fileExecutionManifestStore) Load(ctx context.Context, id string) (Execut
 	}
 	manifest.baseDir = baseDir
 
-	entrypointPath, err := manifestEntrypointPath(manifest)
-	if err != nil {
+	if err := statExecutionManifestArtifacts(manifest); err != nil {
 		return ExecutionManifest{}, err
-	}
-	if _, err := os.Stat(entrypointPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ExecutionManifest{}, &ExecuteInvalidRequestError{Reason: "capsule entrypoint is absent"}
-		}
-		return ExecutionManifest{}, fmt.Errorf("stat capsule entrypoint: %w", err)
 	}
 
 	return manifest, nil
@@ -973,6 +1023,7 @@ var (
 		"version":        {},
 	}
 	executionRuntimeFields = map[string]struct{}{
+		"oci":        {},
 		"typescript": {},
 	}
 	executionDataFields = map[string]struct{}{
@@ -1026,7 +1077,39 @@ func validateManifestMatchesRequest(manifest ExecutionManifest, desired ExecuteD
 	return nil
 }
 
+func statExecutionManifestArtifacts(manifest ExecutionManifest) error {
+	switch manifest.PackageClass {
+	case executePackageClassTSService:
+		entrypointPath, err := manifestEntrypointPath(manifest)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(entrypointPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return &ExecuteInvalidRequestError{Reason: "capsule entrypoint is absent"}
+			}
+			return fmt.Errorf("stat capsule entrypoint: %w", err)
+		}
+	case executePackageClassOCIService:
+		return statOCIManifestArtifacts(manifest)
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+	return nil
+}
+
 func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
+	switch manifest.PackageClass {
+	case executePackageClassTSService:
+		return composeTypeScriptTransientUnit(manifest)
+	case executePackageClassOCIService:
+		return composeOCITransientUnit(manifest)
+	default:
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+}
+
+func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	entrypoint, err := manifestEntrypointPath(manifest)
 	if err != nil {
 		return transientUnit{}, err
@@ -1040,6 +1123,31 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 	argv := denoArgv(entrypoint, volumes)
+	properties := hardenedTransientUnitProperties(manifest, true)
+	properties = append(properties,
+		systemdProperty{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
+		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
+		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
+		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
+		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
+		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
+	)
+	if len(volumes) > 0 {
+		properties = append(properties,
+			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
+			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
+		)
+	}
+
+	return transientUnit{
+		Name:       unitName,
+		Argv:       argv,
+		Properties: properties,
+		Volumes:    volumes,
+	}, nil
+}
+
+func hardenedTransientUnitProperties(manifest ExecutionManifest, includeDenoPkey bool) []systemdProperty {
 	properties := []systemdProperty{
 		{Name: "Description", Value: "Vita capsule " + manifest.ID},
 		{Name: "Type", Value: "simple"},
@@ -1067,28 +1175,11 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		{Name: "SystemCallArchitectures", Value: "native"},
 		{Name: "SystemCallFilter", Value: "@system-service"},
 		{Name: "SystemCallFilter", Value: "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete"},
-		{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"},
-		{Name: "UMask", Value: "0077"},
-		{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
-		{Name: "RuntimeDirectory", Value: runtimeDir},
-		{Name: "RuntimeDirectoryMode", Value: "0700"},
-		{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
-		{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
-		{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	}
-	if len(volumes) > 0 {
-		properties = append(properties,
-			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
-			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
-		)
+	if includeDenoPkey {
+		properties = append(properties, systemdProperty{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"})
 	}
-
-	return transientUnit{
-		Name:       unitName,
-		Argv:       argv,
-		Properties: properties,
-		Volumes:    volumes,
-	}, nil
+	return append(properties, systemdProperty{Name: "UMask", Value: "0077"})
 }
 
 func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount) []string {
