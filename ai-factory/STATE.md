@@ -67,8 +67,16 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     agentd handler (zero). Slice plan: **S2 ADR-0009 (execution model: systemd-transient+runc vs direct agentd
     supervision vs nspawn — a real fork, HIGH unknowns, spike first) → S1 fetch/verify-by-SRI (R3) → S3 volumes (R3) →
     S4 health poller (R2) → S5 workload state+audit (R2) → S6 capsule.execute orchestrator (R3, largest).** Each gets
-    a VITA-CAPSULE-FETCH/EXECUTED/HEALTH marker + host-verify. **STARTING with ADR-0009 (architect drafting + host-cap
-    spike).** Filed hardenings: SO_PEERCRED agentd auth (ADR-0008); safe-normalize direct node:util.
+    a VITA-CAPSULE-FETCH/EXECUTED/HEALTH marker + host-verify. **ADR-0009 ACCEPTED (orchestrator, conservative, per
+    standing autonomy — OWNER MAY REDIRECT):** launch capsules as hardened systemd TRANSIENT UNITS driven by agentd,
+    REUSING the host-verified vita-ts.service hardening (systemd is the jailer); `ts-service` FIRST (Deno already
+    staged — no new runtime); OCI/WASM deferred to separate slices. Spike (systemd 259, cgroup v2): transient units
+    accept every isolation knob (DynamicUser→real transient uid, caps, seccomp, ProtectSystem, MemoryMax/CPUQuota);
+    NO OCI runtime installed (confirms OCI=later). Conditions: ts-service-only first; cgroup ENFORCEMENT confirmed on
+    a real verity-node boot before relied on; volume user/group at S3; SO_PEERCRED alongside execute; agentd composes
+    units ONLY from a re-validated manifest. **Slice 1 = `capsule.execute` (R3): agentd runs a baked test ts-service
+    capsule as a hardened transient unit → `VITA-CAPSULE-EXECUTED` + reject.** Filed: SO_PEERCRED; safe-normalize
+    direct node:util.
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
