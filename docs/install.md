@@ -63,8 +63,12 @@ You write the image from *a running Linux that is NOT using the target disk*. Op
 - Any **other Linux host** with the target disk attached externally (USB-SATA dock, etc.).
 
 The installer needs these tools (all standard): `dd`, `sgdisk` (gdisk), `sfdisk`, `lsblk`,
-`blockdev`. For `--grow-fs` it also needs `resize2fs` + `e2fsck` (e2fsprogs). A missing required tool
-makes the installer exit with **code 2**. On Debian/Ubuntu:
+`blockdev`, and **`findmnt`**. `findmnt` is part of the *safety boundary* - it is how the installer
+resolves which physical disks back the running system so it can refuse them - so it is **required**,
+not optional: if it is missing the installer exits **code 2 before writing anything** rather than
+proceeding with a weakened system-disk check. For `--grow-fs` it also needs `resize2fs`, `e2fsck`,
+and `blkid` (e2fsprogs + util-linux). A missing required tool makes the installer exit with **code
+2**. On Debian/Ubuntu:
 
 ```bash
 sudo apt-get install -y gdisk util-linux coreutils e2fsprogs
@@ -113,16 +117,21 @@ sudo tools/install-vita.sh /dev/sdX --image os/x86_64/out/<name>.raw --yes --gro
 
 What it does, in order:
 
-1. **Unmount + write** - unmounts any partition currently mounted from the target, **aborting
-   (RESULT: FAIL) if any of them cannot be unmounted** (it will not `dd` against a busy disk), then
-   `dd if=<image> of=/dev/sdX bs=4M conv=fsync` (byte-for-byte image -> disk).
+1. **Unmount + write** - unmounts any node (the whole disk and every partition) currently mounted
+   from the target with a **plain `umount` (never a lazy `umount -l`)**, **aborting (exit 3) if any
+   of them cannot be unmounted** - it will not `dd` against a busy disk, and it will not lazily
+   detach a still-active filesystem and then write over it. After unmounting it **re-verifies** that
+   no target node is still mounted before writing. Then `dd if=<image> of=/dev/sdX bs=4M conv=fsync`
+   (byte-for-byte image -> disk).
 2. **Repair GPT** - `sgdisk --move-second-header` relocates the backup GPT to the disk end and fixes
    the alternate-LBA pointers (otherwise firmware warns and the trailing space is unusable).
 3. **Grow `vita-data`** - finds the partition whose GPT label (or ext4 filesystem label) is
    `vita-data`, recreates it from its original start to the disk end, preserving its type GUID,
-   unique GUID, and name. With `--grow-fs`, also `resize2fs` the ext4. **If there is no `vita-data`
-   partition (smoke/verity images), this step is SKIPPED** - the root and verity-hash partitions are
-   never grown or resized.
+   unique GUID, and name. With `--grow-fs`, it first runs `e2fsck -fy` and then `resize2fs` the
+   ext4. **A serious `e2fsck` failure (errors left uncorrected, or an operational error) is FATAL**:
+   the installer aborts (exit 3) **before** `resize2fs` rather than resize a corrupt filesystem.
+   **If there is no `vita-data` partition (smoke/verity images), this step is SKIPPED** - the root
+   and verity-hash partitions are never grown or resized.
 4. **Verify** - `sgdisk -v` (GPT integrity; **FATAL** - a failure here makes the run exit 3 and it
    will NOT print PASS) + `sfdisk -l` (final table), and asserts the target now has >=2 partitions
    including an EFI System Partition. Prints `RESULT: PASS` or `RESULT: FAIL`.
@@ -164,10 +173,15 @@ You have two equivalent ways to claim the rest of the disk for `vita-data` (full
 
 - **Refuses any physical disk backing the running system.** It resolves the whole *stack* (partition
   -> dm-crypt -> LVM -> md -> ... -> physical disk) for `/`, `/boot`, `/boot/efi`, `/etc`, and any
-  active swap, and aborts if the target is any of those physical disks.
-- **Fail-closed on a busy target.** If a partition on the target cannot be unmounted, it aborts
-  before writing rather than `dd`-ing over a mounted filesystem.
-- **Grows only `vita-data`.** It never grows or `resize2fs`-es the root or verity-hash partition.
+  active swap, and aborts if the target is any of those physical disks. `findmnt` (which resolves
+  those disks) is a **required** tool: if it is absent the installer exits **before writing** rather
+  than fall back to a weakened check.
+- **Fail-closed on a busy target.** If a node on the target cannot be unmounted, it aborts before
+  writing rather than `dd`-ing over a mounted filesystem. It uses a **plain `umount` (never a lazy
+  `umount -l`)** so it cannot detach a still-active filesystem and write over it, and it re-verifies
+  nothing is mounted before writing.
+- **Grows only `vita-data`.** It never grows or `resize2fs`-es the root or verity-hash partition, and
+  a serious `e2fsck` failure aborts the run **before** `resize2fs` (it never resizes a corrupt FS).
 - **Whole-disk only.** It rejects partition nodes (`/dev/sdb1`) and non-disk nodes.
 - **Explicit intent required.** Either `--yes` or typing the exact device path.
 - **Won't overflow.** Aborts if the image is larger than the target.

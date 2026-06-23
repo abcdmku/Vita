@@ -94,11 +94,13 @@ need() { command -v "$1" >/dev/null 2>&1 || die_tool "missing required tool: $1 
 # -- preconditions -----------------------------------------------------------------------------------
 [ -n "$TARGET" ] || { echo "ERROR: no target device given" >&2; usage 1; }
 
-# Required tools. (resize2fs/e2fsck only needed for --grow-fs.)
-for t in dd sgdisk sfdisk lsblk blockdev; do
+# Required tools. findmnt is part of the SAFETY boundary (it resolves the running system's disks so
+# we can refuse them) - it MUST be present or we cannot fail-closed, so it is required, not optional.
+# (resize2fs/e2fsck only needed for --grow-fs.)
+for t in dd sgdisk sfdisk lsblk blockdev findmnt; do
   command -v "$t" >/dev/null 2>&1 || die_tool "missing required tool: $t - install gdisk/util-linux (exit 2)"
 done
-if [ "$DO_GROW_FS" = 1 ]; then need resize2fs; need e2fsck; fi
+if [ "$DO_GROW_FS" = 1 ]; then need resize2fs; need e2fsck; need blkid; fi
 
 # Must be root to write a block device (skip the hard check in dry-run so the plan is inspectable as a user).
 if [ "$DRY_RUN" != 1 ] && [ "$(id -u)" != 0 ]; then
@@ -172,14 +174,13 @@ add_protected() {
   done
   return 0
 }
-if command -v findmnt >/dev/null 2>&1; then
-  add_protected "$(disks_for_path /)"
-  add_protected "$(disks_for_path /boot)"
-  add_protected "$(disks_for_path /boot/efi)"
-  add_protected "$(disks_for_path /etc)"      # catches systems where / is overlay but /etc is real
-else
-  warn "findmnt not found - cannot resolve the running system's disks; the system-disk refusal is WEAKENED."
-fi
+# findmnt is a REQUIRED tool (asserted above): if it were absent we would already have exited 2
+# BEFORE any disk write. We therefore never fail open here - the running-system-disk set is always
+# resolved before we touch the target.
+add_protected "$(disks_for_path /)"
+add_protected "$(disks_for_path /boot)"
+add_protected "$(disks_for_path /boot/efi)"
+add_protected "$(disks_for_path /etc)"      # catches systems where / is overlay but /etc is real
 # Active swap devices, too (overwriting them corrupts the running system). Resolve the full stack.
 if [ -r /proc/swaps ]; then
   while read -r dev _rest; do
@@ -237,21 +238,38 @@ fi
 
 # -- 1 . write the image -----------------------------------------------------------------------------
 echo "===== 1 . write image -> target ====="
-# FAIL-CLOSED: unmount anything currently mounted from the target. If ANY target partition cannot be
+# FAIL-CLOSED: unmount anything currently mounted from the target. If ANY target node cannot be
 # unmounted, we ABORT rather than dd against a still-mounted/busy filesystem (which would corrupt it).
+#
+# We use a PLAIN `umount` (NEVER `umount -l`/lazy): a lazy unmount detaches the mountpoint from the
+# namespace while processes may still hold the filesystem open and keep writing to it. The follow-up
+# lsblk check would then see no mountpoint and FALSELY pass, letting dd run against a target that is
+# still actively in use. So: plain umount; if it FAILS (busy/in-use), ABORT (exit 3).
+#
+# A whole-disk node can itself carry a mountpoint (e.g. a filesystem written directly to the disk
+# with no partition table), so we iterate EVERY node lsblk reports for the target - the disk and all
+# its partitions - not just the partitions.
+target_mounted_nodes() {
+  # Print every "name<TAB>mountpoint" pair under $TARGET that currently has a non-empty mountpoint.
+  lsblk -nro NAME,MOUNTPOINT "$TARGET" 2>/dev/null | awk 'NF>=2 && $2!="" {print $1"\t"$2}'
+}
 if [ "$DRY_RUN" != 1 ]; then
-  for part in $(lsblk -nlo NAME "$TARGET" 2>/dev/null | tail -n +2); do
-    mp="$(lsblk -nlo MOUNTPOINT "/dev/$part" 2>/dev/null | head -1 || true)"
-    if [ -n "$mp" ]; then
-      info "unmounting /dev/$part ($mp)"
-      umount "/dev/$part" 2>/dev/null || umount -l "/dev/$part" 2>/dev/null || true
-      # Re-check: if it is STILL mounted, fail closed.
-      mp2="$(lsblk -nlo MOUNTPOINT "/dev/$part" 2>/dev/null | head -1 || true)"
-      if [ -n "$mp2" ]; then
-        die_io "could not unmount /dev/$part (still mounted at $mp2). ABORTING before write - refusing to dd against a mounted/busy target. Unmount it manually and re-run."
-      fi
+  # 1) Unmount each mounted node with a PLAIN umount. Abort (exit 3) the moment one fails.
+  while IFS="$(printf '\t')" read -r name mp; do
+    [ -n "$name" ] || continue
+    info "unmounting /dev/$name ($mp)"
+    if ! umount "/dev/$name"; then
+      die_io "could not unmount /dev/$name (mounted at $mp; target busy/in-use). ABORTING before write - refusing to dd against a mounted/busy target, and refusing a LAZY unmount that would detach it while still active. Close anything using it (lsof/fuser) and re-run."
     fi
-  done
+  done < <(target_mounted_nodes)
+  # 2) RE-VERIFY: after unmounting, confirm the whole disk AND every partition are GENUINELY not
+  #    mounted (not merely lazy-detached). If anything still shows a mountpoint, fail closed.
+  still="$(target_mounted_nodes || true)"
+  if [ -n "$still" ]; then
+    die_io "target still has mounted node(s) after unmount - refusing to write:
+$(printf '%s\n' "$still" | sed 's/^/         /')
+       ABORTING before write (fail-closed). Unmount/close them manually and re-run."
+  fi
 fi
 # dd: 4 MiB blocks, conv=fsync so the data is durable before we touch the GPT. status=progress for feedback.
 runcmd dd if="$IMAGE" of="$TARGET" bs=4M conv=fsync oflag=direct status=progress
@@ -339,6 +357,10 @@ if [ "$DO_GROW" = 1 ]; then
         "$TARGET"
       runcmd blockdev --rereadpt "$TARGET" || true
       command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
+      # Let udev (re)populate the recreated partition node before we probe it. Without this, lsblk's
+      # cached FSTYPE can read empty immediately after a delete/recreate (especially on hosts without
+      # partprobe), which would falsely trip the ext4 guard below.
+      command -v udevadm >/dev/null 2>&1 && runcmd udevadm settle || true
       if [ "$DO_GROW_FS" = 1 ]; then
         # Partition device naming: /dev/sda3, but /dev/nvme0n1p3 and /dev/loop0p3 use a 'p' separator.
         case "$TGT_NAME" in
@@ -346,9 +368,26 @@ if [ "$DO_GROW" = 1 ]; then
           *)      PART_DEV="${TARGET}${DATA_PARTNUM}" ;;
         esac
         # Defense in depth: only resize2fs an ext4 vita-data partition. Refuse anything else.
+        # Probe the on-disk FS type directly with blkid (authoritative; reads the superblock) and fall
+        # back to lsblk. Retry briefly: right after a partition recreate the node/cache can lag, and a
+        # transient empty reading must NOT be mistaken for "not ext4". We only ever PROCEED on a
+        # positive ext4 reading - a genuinely non-ext4 (or unreadable) partition still fails closed.
+        probe_fstype() {
+          # $1 = partition device. Echo the detected FSTYPE ("" if unknown), retrying a few times.
+          local d="$1" fs="" i
+          for i in 1 2 3 4 5; do
+            fs="$(blkid -o value -s TYPE "$d" 2>/dev/null || true)"
+            [ -n "$fs" ] || fs="$(lsblk -ndo FSTYPE "$d" 2>/dev/null | head -1 || true)"
+            [ -n "$fs" ] && { echo "$fs"; return 0; }
+            command -v udevadm >/dev/null 2>&1 && udevadm settle 2>/dev/null || true
+            sleep 1
+          done
+          echo "$fs"
+        }
         if [ "$DRY_RUN" != 1 ]; then
-          PFS="$(lsblk -ndo FSTYPE "$PART_DEV" 2>/dev/null | head -1 || true)"
-          PLB="$(lsblk -ndo LABEL  "$PART_DEV" 2>/dev/null | head -1 || true)"
+          PFS="$(probe_fstype "$PART_DEV")"
+          PLB="$(blkid -o value -s LABEL "$PART_DEV" 2>/dev/null || true)"
+          [ -n "$PLB" ] || PLB="$(lsblk -ndo LABEL "$PART_DEV" 2>/dev/null | head -1 || true)"
           if [ "$PFS" != "ext4" ]; then
             die_io "refusing to resize2fs $PART_DEV: FSTYPE='$PFS' is not ext4 (partition grown, FS left untouched)."
           fi
@@ -356,7 +395,23 @@ if [ "$DO_GROW" = 1 ]; then
         else
           info "growing filesystem on $PART_DEV (ext4)"
         fi
-        runcmd e2fsck -fy "$PART_DEV" || warn "e2fsck reported issues (continuing to resize2fs)"
+        # e2fsck BEFORE resize2fs: never resize a corrupt filesystem. e2fsck's exit status is a
+        # bitmask: 0 = clean; 1 = errors were CORRECTED; 2 = corrected + reboot advised; these are
+        # benign (we may safely resize). But bit 2+ (rc >= 4) means errors were left UNCORRECTED, or
+        # an operational/usage error / cancellation occurred - the filesystem is NOT known-good, so
+        # treat it as FATAL and abort BEFORE resize2fs rather than resizing a corrupt FS.
+        if [ "$DRY_RUN" = 1 ]; then
+          runcmd e2fsck -fy "$PART_DEV"
+        else
+          echo "    \$ e2fsck -fy $PART_DEV"
+          # `|| fsck_rc=$?` keeps set -e from aborting on a non-zero (expected: 1/2 mean "fixed").
+          fsck_rc=0
+          e2fsck -fy "$PART_DEV" || fsck_rc=$?
+          if [ "$fsck_rc" -ge 4 ]; then
+            die_io "e2fsck on $PART_DEV exited $fsck_rc (errors left UNCORRECTED or operational failure). ABORTING before resize2fs - refusing to resize a corrupt filesystem. Repair it manually and re-run (the partition is grown; the FS was left untouched)."
+          fi
+          [ "$fsck_rc" -eq 0 ] || warn "e2fsck corrected errors on $PART_DEV (rc=$fsck_rc); filesystem is now consistent - proceeding to resize2fs."
+        fi
         runcmd resize2fs "$PART_DEV"
       else
         info "(filesystem NOT grown; pass --grow-fs to resize2fs now, or let systemd-repart grow it on first boot)"
