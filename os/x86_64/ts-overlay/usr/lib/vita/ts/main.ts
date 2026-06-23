@@ -17,11 +17,12 @@ import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manife
 import { createAgentClient, isAgentClientError } from "./vita/agent-client.ts";
 import { applyNodeConfig } from "./vita/apply-node-config.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
+import { formatPdsSyncStateReadMarker, readPdsSyncStateSummary } from "./vita/pds-read.ts";
 import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
 } from "./vita/unix-socket-transport.ts";
-import type { AgentApplyPlan, AgentApplyResult, AgentTransport } from "./vita/agent-client.ts";
+import type { AgentApplyPlan, AgentApplyResult, AgentClient, AgentTransport } from "./vita/agent-client.ts";
 import type {
   ApplyNodeApplyResult,
   ApplyNodeConfigResult,
@@ -265,6 +266,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     return;
   }
 
@@ -276,6 +278,8 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
   }
+
+  await emitPdsReadMarker(client);
 }
 
 async function emitApplyMarkers(currentHostname: string): Promise<void> {
@@ -382,6 +386,10 @@ async function emitForcedRejectMarker(agentTransport: AgentTransport): Promise<v
   }
 
   emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitPdsReadMarker(client: Pick<AgentClient, "getState">): Promise<void> {
+  emit(formatPdsSyncStateReadMarker(await readPdsSyncStateSummary(client)));
 }
 
 function applyResultReason(result: ApplyNodeApplyResult, fallback: string): string {
