@@ -317,7 +317,8 @@ added `os/x86_64/repart-verity/` (esp + root Verity=data + root-verity Verity=ha
 ONLY when VITA_VERITY=1 (default smoke/SB layout untouched). mkosi builds the hash tree + bakes `roothash=` onto
 the UKI. `wsl-verify verity` matrix GREEN: POS = boots with root on /dev/mapper/root (`device-mapper: verity`
 active) → multi-user; VNEG = one flipped byte in the root DATA partition → `device-mapper: verity: ... data block
-0 is corrupted` → root rejected. R3 reviewer + merge pending (this tick). **NEXT:** step 3 (A/B + RAUC bundle),
+0 is corrupted` → root rejected. R3 Codex reviewer APPROVED (both non-blocking notes folded in: POS asserts
+/dev/mapper/root; native-mkosi verity guard); **MERGED to main (merge 90cafe0).** **NEXT:** step 3 (A/B + RAUC bundle),
 then step 4(b) real-key SB signing + RAUC bundle signing + N-of-M recovery (4b–d). RAUC + recovery need owner keys (§16).
 `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
