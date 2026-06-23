@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vita/agent/capabilities"
@@ -33,7 +36,12 @@ import (
 	"github.com/vita/agent/transaction"
 )
 
-const defaultMaxBodyBytes int64 = 1 << 20
+const (
+	defaultMaxBodyBytes int64 = 1 << 20
+
+	DefaultUnixSocketPath             = "/run/vita-agent/agentd.sock"
+	DefaultUnixSocketMode fs.FileMode = 0o660
+)
 
 type RequestDecoder func(json.RawMessage) (capabilities.TypedRequest, error)
 
@@ -159,6 +167,55 @@ type requestError struct {
 type validatableRequest interface {
 	capabilities.TypedRequest
 	Validate() error
+}
+
+type unixSocketListener struct {
+	net.Listener
+	path string
+	once sync.Once
+}
+
+func ListenUnixSocket(path string) (net.Listener, error) {
+	return ListenUnixSocketMode(path, DefaultUnixSocketMode)
+}
+
+func ListenUnixSocketMode(path string, mode fs.FileMode) (net.Listener, error) {
+	if path == "" {
+		return nil, errors.New("unix socket path is required")
+	}
+	if mode == 0 {
+		mode = DefaultUnixSocketMode
+	}
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale unix socket %q: %w", path, err)
+	}
+
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("listen unix socket %q: %w", path, err)
+	}
+
+	if err := os.Chmod(path, mode); err != nil {
+		closeErr := listener.Close()
+		removeErr := os.Remove(path)
+		return nil, errors.Join(fmt.Errorf("chmod unix socket %q: %w", path, err), closeErr, removeErr)
+	}
+
+	return &unixSocketListener{Listener: listener, path: path}, nil
+}
+
+func (l *unixSocketListener) Close() error {
+	var closeErr error
+	var removeErr error
+	l.once.Do(func() {
+		closeErr = l.Listener.Close()
+		removeErr = os.Remove(l.path)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+	})
+	return errors.Join(closeErr, removeErr)
 }
 
 func NewHandler(config Config) (http.Handler, error) {

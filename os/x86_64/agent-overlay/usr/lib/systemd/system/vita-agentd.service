@@ -13,8 +13,16 @@ Type=simple
 ExecStart=/usr/lib/vita/agentd
 Restart=on-failure
 RestartSec=5s
+# agentd still runs as UID 0, but its primary group owns /run/vita-agent and
+# agentd.sock so the DynamicUser TS runtime can connect via SupplementaryGroups
+# without making the privileged socket world-accessible.
+Group=vita-agent
+UMask=0007
 AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME
 StateDirectory=vita-agent
+StateDirectoryMode=0700
+RuntimeDirectory=vita-agent
+RuntimeDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target
