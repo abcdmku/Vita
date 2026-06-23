@@ -29,6 +29,7 @@ func composeMicroVMTransientUnit(manifest ExecutionManifest) (transientUnit, err
 		"-U",
 		"--as-pid2",
 		"--ephemeral",
+		"--console=pipe",
 		"--private-network",
 		"--drop-capability=all",
 		"--",
@@ -48,6 +49,8 @@ func hardenedMicroVMTransientUnitProperties(manifest ExecutionManifest) []system
 	return []systemdProperty{
 		{Name: "Description", Value: "Vita capsule " + manifest.ID + " microvm-service"},
 		{Name: "Type", Value: "simple"},
+		{Name: "StandardOutput", Value: "journal"},
+		{Name: "StandardError", Value: "journal"},
 		{Name: "AmbientCapabilities", Value: ""},
 		{Name: "ProtectHome", Value: "yes"},
 		{Name: "PrivateTmp", Value: "yes"},

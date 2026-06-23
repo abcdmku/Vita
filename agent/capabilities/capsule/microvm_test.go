@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) {
@@ -55,6 +56,7 @@ func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) 
 		"-U",
 		"--as-pid2",
 		"--ephemeral",
+		"--console=pipe",
 		"--private-network",
 		"--drop-capability=all",
 		"--",
@@ -73,6 +75,8 @@ func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) 
 
 	props := propertyValues(started.Properties)
 	assertProperty(t, props, "Type", "simple")
+	assertProperty(t, props, "StandardOutput", "journal")
+	assertProperty(t, props, "StandardError", "journal")
 	assertProperty(t, props, "AmbientCapabilities", "")
 	assertProperty(t, props, "ProtectHome", "yes")
 	assertProperty(t, props, "PrivateTmp", "yes")
@@ -224,8 +228,8 @@ func TestExecuteRejectsMicroVMWithoutReadinessProofAfterStart(t *testing.T) {
 	if !errors.As(err, &startErr) {
 		t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
 	}
-	if startErr.ApplyErrorCode() != "microvm_readiness_failed" {
-		t.Fatalf("ApplyErrorCode = %q, want microvm_readiness_failed", startErr.ApplyErrorCode())
+	if startErr.ApplyErrorCode() != "workload_line_absent" {
+		t.Fatalf("ApplyErrorCode = %q, want workload_line_absent", startErr.ApplyErrorCode())
 	}
 	if len(launcher.starts) != 1 {
 		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
@@ -274,6 +278,53 @@ VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=2 pid1=own status=OK
 		t.Run(name, func(t *testing.T) {
 			if parsed, ok := parseMicroVMReadiness([]byte(line), probe); ok {
 				t.Fatalf("parseMicroVMReadiness accepted %#v, want reject", parsed)
+			}
+		})
+	}
+}
+
+func TestInspectMicroVMReadinessClassifiesJournalEvidence(t *testing.T) {
+	probe := microVMReadinessProbe{ID: "local.microvm.capsule"}
+
+	tests := []struct {
+		name string
+		raw  string
+		code string
+		seen bool
+	}{
+		{
+			name: "line absent",
+			raw:  "noise\n",
+			code: "workload_line_absent",
+		},
+		{
+			name: "workload line wrong id",
+			raw:  "VITA-CAPSULE-MICROVM-WORKLOAD: id=other.capsule pid=2 pid1=own status=OK\n",
+			code: "workload_id_mismatch",
+			seen: true,
+		},
+		{
+			name: "workload line not own pid namespace",
+			raw:  "VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=412 pid1=own status=OK\n",
+			code: "workload_pid1_not_own",
+			seen: true,
+		},
+		{
+			name: "workload line failed status",
+			raw:  "VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=2 pid1=own status=FAIL\n",
+			code: "workload_status_not_ok",
+			seen: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, result := inspectMicroVMReadiness([]byte(tc.raw), probe)
+			if status != nil {
+				t.Fatalf("status = %#v, want nil", status)
+			}
+			if result.Code != tc.code || result.WorkloadLineSeen != tc.seen {
+				t.Fatalf("result = %#v, want code=%q seen=%v", result, tc.code, tc.seen)
 			}
 		})
 	}
@@ -337,6 +388,77 @@ exit 0
 	}
 	if status.MicroVM == nil || status.MicroVM.Isolation != "nspawn" || status.MicroVM.PID1 != "own" {
 		t.Fatalf("MicroVM = %#v, want measured nspawn/own readiness", status.MicroVM)
+	}
+}
+
+func TestSystemdRunLauncherReportsSpecificMicroVMReadinessFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake journalctl script requires a POSIX shell")
+	}
+
+	dir := t.TempDir()
+	journalctl := filepath.Join(dir, "journalctl")
+	if err := os.WriteFile(journalctl, []byte(`#!/bin/sh
+printf '%s\n' 'VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=412 pid1=own status=OK'
+exit 0
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile journalctl returned error: %v", err)
+	}
+
+	launcher := systemdRunLauncher{journalctl: journalctl}
+	_, err := launcher.readMicroVMReadiness(
+		context.Background(),
+		"vita-capsule-local-microvm.service",
+		microVMReadinessProbe{ID: "local.microvm.capsule"},
+		time.Now(),
+	)
+
+	var readinessErr *microVMReadinessError
+	if !errors.As(err, &readinessErr) {
+		t.Fatalf("readMicroVMReadiness error = %T %v, want microVMReadinessError", err, err)
+	}
+	if readinessErr.Code != "workload_pid1_not_own" {
+		t.Fatalf("readiness code = %q, want workload_pid1_not_own", readinessErr.Code)
+	}
+}
+
+func TestClassifyNspawnStartFailureIsSpecific(t *testing.T) {
+	absent := transientUnitDiagnostics{
+		Result:         "exit-code",
+		ExecMainStatus: "203",
+	}
+	if got := classifyTransientUnitStartFailure(absent, "systemd-nspawn: No such file or directory", true); got != "nspawn_absent" {
+		t.Fatalf("absent nspawn code = %q, want nspawn_absent", got)
+	}
+
+	exited := transientUnitDiagnostics{
+		ActiveState:    "failed",
+		SubState:       "failed",
+		Result:         "exit-code",
+		ExecMainStatus: "1",
+	}
+	if got := classifyTransientUnitStartFailure(exited, "systemd-nspawn exited", true); got != "nspawn_exec_failed" {
+		t.Fatalf("failed nspawn code = %q, want nspawn_exec_failed", got)
+	}
+}
+
+func TestClassifyMicroVMReadinessFailurePrefersFailedNspawnDiagnostics(t *testing.T) {
+	unit := transientUnit{
+		Argv: []string{defaultNspawnPath, "--directory=/rootfs", "--", "/init"},
+	}
+	diagnostics := transientUnitDiagnostics{
+		ActiveState:    "failed",
+		SubState:       "failed",
+		Result:         "exit-code",
+		ExecMainStatus: "1",
+	}
+	err := &microVMReadinessError{
+		Code: "workload_line_absent",
+		Err:  errors.New("readiness marker absent"),
+	}
+
+	if got := classifyMicroVMReadinessFailure(unit, diagnostics, err); got != "nspawn_exec_failed" {
+		t.Fatalf("readiness failure code = %q, want nspawn_exec_failed", got)
 	}
 }
 

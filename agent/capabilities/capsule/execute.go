@@ -360,7 +360,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	microVMStatus, err := verifiedMicroVMStatus(manifest, status)
 	if err != nil {
 		cleanupErr := stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name)
-		return nil, &ExecuteStartError{Code: "microvm_readiness_failed", Err: errors.Join(err, cleanupErr)}
+		return nil, &ExecuteStartError{Code: microVMReadinessFailureCode(err, "workload_line_absent"), Err: errors.Join(err, cleanupErr)}
 	}
 
 	executeStatus := ExecuteStatus{
@@ -494,18 +494,18 @@ func verifiedMicroVMStatus(manifest ExecutionManifest, status transientUnitStatu
 		return nil, nil
 	}
 	if status.MicroVM == nil {
-		return nil, errors.New("microvm workload readiness marker was not observed")
+		return nil, &microVMReadinessError{Code: "workload_line_absent", Err: errors.New("microvm workload readiness marker was not observed")}
 	}
 	if status.MicroVM.Isolation != "nspawn" ||
 		status.MicroVM.PID1 != "own" ||
 		status.MicroVM.Health != "OK" ||
 		status.MicroVM.Status != "OK" {
-		return nil, fmt.Errorf("microvm workload readiness marker was invalid: isolation=%s pid1=%s health=%s status=%s",
+		return nil, &microVMReadinessError{Code: "workload_pid1_not_own", Err: fmt.Errorf("microvm workload readiness marker was invalid: isolation=%s pid1=%s health=%s status=%s",
 			status.MicroVM.Isolation,
 			status.MicroVM.PID1,
 			status.MicroVM.Health,
 			status.MicroVM.Status,
-		)
+		)}
 	}
 	return status.MicroVM, nil
 }
@@ -989,6 +989,39 @@ type microVMReadinessStatus struct {
 	Status    string
 }
 
+type microVMReadinessResult struct {
+	Code             string
+	WorkloadLineSeen bool
+}
+
+type microVMReadinessError struct {
+	Code string
+	Err  error
+}
+
+func (e *microVMReadinessError) Error() string {
+	if e == nil {
+		return "microvm readiness failed"
+	}
+	if e.Code == "" {
+		if e.Err == nil {
+			return "microvm readiness failed"
+		}
+		return e.Err.Error()
+	}
+	if e.Err == nil {
+		return e.Code
+	}
+	return e.Code + ": " + e.Err.Error()
+}
+
+func (e *microVMReadinessError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type transientUnitDiagnostics struct {
 	ActiveState    string
 	SubState       string
@@ -1060,11 +1093,11 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	args = append(args, unit.Argv...)
 
 	if output, err := exec.CommandContext(ctx, l.systemdRun, args...).CombinedOutput(); err != nil {
-		return transientUnitStatus{}, l.startError(ctx, unit.Name, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output))))
+		return transientUnitStatus{}, l.startError(ctx, unit, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output))))
 	}
 
 	if output, err := exec.CommandContext(ctx, l.systemctl, "is-active", "--quiet", unit.Name).CombinedOutput(); err != nil {
-		startErr := l.startError(ctx, unit.Name, fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))))
+		startErr := l.startError(ctx, unit, fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))))
 		cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
 		if cleanupErr != nil {
 			startErr.Err = errors.Join(startErr.Err, cleanupErr)
@@ -1079,11 +1112,20 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	}
 	microVMStatus, err := l.waitForMicroVMReadiness(ctx, unit, startedAt)
 	if err != nil {
+		diagnostics, diagErr := l.unitDiagnostics(ctx, unit.Name)
+		cause := err
+		if diagErr != nil {
+			cause = errors.Join(cause, diagErr)
+		}
 		cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
+		if cleanupErr != nil {
+			cause = errors.Join(cause, cleanupErr)
+		}
 		startErr := &transientUnitStartError{
-			Code: "microvm_readiness_failed",
-			Unit: unit.Name,
-			Err:  errors.Join(err, cleanupErr),
+			Code:        classifyMicroVMReadinessFailure(unit, diagnostics, err),
+			Unit:        unit.Name,
+			Diagnostics: diagnostics,
+			Err:         cause,
 		}
 		return transientUnitStatus{}, startErr
 	}
@@ -1091,14 +1133,14 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	return transientUnitStatus{DynamicUID: uid, MicroVM: microVMStatus}, nil
 }
 
-func (l systemdRunLauncher) startError(ctx context.Context, unit string, cause error) *transientUnitStartError {
-	diagnostics, err := l.unitDiagnostics(ctx, unit)
+func (l systemdRunLauncher) startError(ctx context.Context, unit transientUnit, cause error) *transientUnitStartError {
+	diagnostics, err := l.unitDiagnostics(ctx, unit.Name)
 	if err != nil {
 		cause = errors.Join(cause, err)
 	}
 	return &transientUnitStartError{
-		Code:        classifyTransientUnitStartFailure(diagnostics, cause.Error()),
-		Unit:        unit,
+		Code:        classifyTransientUnitStartFailure(diagnostics, cause.Error(), isNspawnTransientUnit(unit)),
+		Unit:        unit.Name,
 		Diagnostics: diagnostics,
 		Err:         cause,
 	}
@@ -1124,7 +1166,7 @@ func (l systemdRunLauncher) waitForMicroVMReadiness(ctx context.Context, unit tr
 		return nil, nil
 	}
 	if probe.ID == "" {
-		return nil, &ExecuteInvalidRequestError{Code: "microvm_readiness_failed", Reason: "microvm readiness id is required"}
+		return nil, &microVMReadinessError{Code: "workload_probe_invalid", Err: errors.New("microvm readiness id is required")}
 	}
 
 	deadline := time.Now().Add(microVMReadinessTimeout)
@@ -1157,7 +1199,7 @@ func (l systemdRunLauncher) waitForMicroVMReadiness(ctx context.Context, unit tr
 	}
 
 	if lastErr == nil {
-		lastErr = errors.New("microvm workload readiness marker was not observed")
+		lastErr = &microVMReadinessError{Code: "workload_line_absent", Err: errors.New("microvm workload readiness marker was not observed")}
 	}
 	return nil, lastErr
 }
@@ -1176,12 +1218,18 @@ func (l systemdRunLauncher) readMicroVMReadiness(ctx context.Context, unit strin
 	}
 	output, err := exec.CommandContext(ctx, journalctl, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("read microvm workload journal: %w: %s", err, strings.TrimSpace(string(output)))
+		return nil, &microVMReadinessError{
+			Code: "journal_read_failed",
+			Err:  fmt.Errorf("read microvm workload journal: %w: %s", err, strings.TrimSpace(string(output))),
+		}
 	}
 
-	status, ok := parseMicroVMReadiness(output, probe)
-	if !ok {
-		return nil, fmt.Errorf("microvm workload readiness marker was not observed for %s", probe.ID)
+	status, result := inspectMicroVMReadiness(output, probe)
+	if status == nil {
+		return nil, &microVMReadinessError{
+			Code: result.Code,
+			Err:  fmt.Errorf("microvm workload readiness marker was not valid for %s", probe.ID),
+		}
 	}
 	return status, nil
 }
@@ -1274,8 +1322,15 @@ func parseSystemctlShowProperties(output []byte) map[string]string {
 	return values
 }
 
-func classifyTransientUnitStartFailure(diagnostics transientUnitDiagnostics, detail string) string {
+func classifyTransientUnitStartFailure(diagnostics transientUnitDiagnostics, detail string, nspawn bool) string {
 	lowerDetail := strings.ToLower(detail)
+	if nspawn {
+		if strings.TrimSpace(diagnostics.ExecMainStatus) == "203" ||
+			(strings.Contains(lowerDetail, "systemd-nspawn") &&
+				(strings.Contains(lowerDetail, "no such file") || strings.Contains(lowerDetail, "not found"))) {
+			return "nspawn_absent"
+		}
+	}
 	switch {
 	case strings.Contains(lowerDetail, "permission denied") || strings.Contains(lowerDetail, "access denied"):
 		return "permission_denied"
@@ -1306,18 +1361,65 @@ func classifyTransientUnitStartFailure(diagnostics transientUnitDiagnostics, det
 
 	switch strings.TrimSpace(diagnostics.Result) {
 	case "exit-code":
+		if nspawn {
+			return "nspawn_exec_failed"
+		}
 		return "process_exited"
 	case "timeout":
 		return "start_timeout"
 	case "resources":
 		return "resource_limit_failed"
 	case "signal", "core-dump":
+		if nspawn {
+			return "nspawn_exec_failed"
+		}
 		return "process_signaled"
 	}
 	if diagnostics.ActiveState == "failed" || diagnostics.SubState == "failed" {
+		if nspawn {
+			return "nspawn_exec_failed"
+		}
 		return "unit_failed"
 	}
 	return "unit_start_failed"
+}
+
+func classifyMicroVMReadinessFailure(unit transientUnit, diagnostics transientUnitDiagnostics, err error) string {
+	if diagnostics.ActiveState == "failed" ||
+		diagnostics.SubState == "failed" ||
+		(strings.TrimSpace(diagnostics.Result) != "" && strings.TrimSpace(diagnostics.Result) != "success") {
+		code := classifyTransientUnitStartFailure(diagnostics, errorString(err), isNspawnTransientUnit(unit))
+		if code != "unit_start_failed" {
+			return code
+		}
+	}
+	return microVMReadinessFailureCode(err, "workload_line_absent")
+}
+
+func microVMReadinessFailureCode(err error, fallback string) string {
+	var readinessErr *microVMReadinessError
+	if errors.As(err, &readinessErr) && readinessErr.Code != "" {
+		return readinessErr.Code
+	}
+	var invalid *ExecuteInvalidRequestError
+	if errors.As(err, &invalid) && invalid.ApplyErrorCode() != "capsule_execute_rejected" {
+		return invalid.ApplyErrorCode()
+	}
+	return fallback
+}
+
+func isNspawnTransientUnit(unit transientUnit) bool {
+	if len(unit.Argv) == 0 {
+		return false
+	}
+	return path.Base(unit.Argv[0]) == "systemd-nspawn"
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 var (
@@ -1747,17 +1849,35 @@ func parseProcStatusUID(raw []byte) (string, bool) {
 }
 
 func parseMicroVMReadiness(raw []byte, probe microVMReadinessProbe) (*microVMReadinessStatus, bool) {
+	status, result := inspectMicroVMReadiness(raw, probe)
+	return status, result.Code == ""
+}
+
+func inspectMicroVMReadiness(raw []byte, probe microVMReadinessProbe) (*microVMReadinessStatus, microVMReadinessResult) {
+	workloadLineSeen := false
+	matchingIDSeen := false
+	failureCode := "workload_line_absent"
 	for _, rawLine := range bytes.Split(raw, []byte{'\n'}) {
 		line := strings.TrimSpace(string(rawLine))
 		if !strings.HasPrefix(line, microVMWorkloadMarker) {
 			continue
 		}
+		workloadLineSeen = true
 		fields := markerFields(strings.TrimSpace(strings.TrimPrefix(line, microVMWorkloadMarker)))
-		if fields["id"] != probe.ID || fields["pid1"] != "own" || fields["status"] != "OK" {
+		if fields["id"] != probe.ID {
+			if !matchingIDSeen {
+				failureCode = "workload_id_mismatch"
+			}
+			continue
+		}
+		matchingIDSeen = true
+		if fields["status"] != "OK" {
+			failureCode = "workload_status_not_ok"
 			continue
 		}
 		pid, err := strconv.ParseUint(fields["pid"], 10, 32)
-		if err != nil || (pid != 1 && pid != 2) {
+		if fields["pid1"] != "own" || err != nil || (pid != 1 && pid != 2) {
+			failureCode = "workload_pid1_not_own"
 			continue
 		}
 		return &microVMReadinessStatus{
@@ -1765,9 +1885,12 @@ func parseMicroVMReadiness(raw []byte, probe microVMReadinessProbe) (*microVMRea
 			PID1:      "own",
 			Health:    "OK",
 			Status:    "OK",
-		}, true
+		}, microVMReadinessResult{}
 	}
-	return nil, false
+	return nil, microVMReadinessResult{
+		Code:             failureCode,
+		WorkloadLineSeen: workloadLineSeen,
+	}
 }
 
 func markerFields(value string) map[string]string {

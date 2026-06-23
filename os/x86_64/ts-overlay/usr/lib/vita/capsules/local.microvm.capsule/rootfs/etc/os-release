@@ -1,0 +1,4 @@
+ID=vita-capsule
+NAME="Vita microvm capsule rootfs"
+VERSION_ID=1.0.0
+PRETTY_NAME="Vita microvm capsule rootfs"
