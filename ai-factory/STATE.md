@@ -82,7 +82,8 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     cond.2 (cgroup-limit enforcement) — the DynamicUser uid proves real-kernel application; an explicit MemoryMax
     readback is deferred until a slice RELIES on resource caps (per the condition's wording; the test capsule doesn't).
     **NEXT W4 slices: artifact fetch/verify-by-SRI, persistent volumes (resolve the per-capsule user/group), then
-    OCI/WASM runtimes (new staging+sandbox each).** Filed: SO_PEERCRED agentd auth; safe-normalize direct node:util.
+    OCI/WASM runtimes (new staging+sandbox each).** Filed hardening: SO_PEERCRED agentd socket auth (now higher-impact
+    since execute landed). [safe-normalize direct node:util — DONE in P1-036, not pending.]
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
