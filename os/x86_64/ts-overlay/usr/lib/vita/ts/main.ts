@@ -64,6 +64,8 @@ const CAPSULE_FETCH_ERROR_MARKER = "VITA-CAPSULE-FETCH-ERROR";
 const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
 const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
 const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
+const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
+const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
@@ -71,6 +73,9 @@ const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
 const CAPSULE_BUNDLE_INTEGRITY = "sha256-2CR0HBzqwe6jE+rSVO6VZNx99AXq+fqZ/6dwa9itQ9w=";
 const BAD_CAPSULE_BUNDLE_INTEGRITY = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const STATE_JSON_HEADERS = Object.freeze({
+  Accept: "application/json",
+});
 const APPLY_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
   "Content-Type": "application/json",
@@ -381,6 +386,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -397,6 +403,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
@@ -405,6 +412,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
 
   await emitPdsReadMarker(client);
@@ -439,6 +447,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -452,6 +461,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -689,6 +699,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     if (result.outcome !== "committed") {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
@@ -697,13 +708,22 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     if (!state.ok) {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
 
     emit(formatCapsuleExecutedMarker(state.status));
+
+    const health = await readCapsuleHealthState(agentTransport, state.status.id);
+    if (health.ok && health.workload.status === "OK" && health.workload.health === "OK") {
+      emit(formatCapsuleHealthMarker(health.workload));
+    } else {
+      emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    }
   } catch {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -751,6 +771,23 @@ interface CapsuleExecuteStatus {
   readonly dynamicUid: string;
   readonly health: "OK";
   readonly status: "OK";
+}
+
+type CapsuleHealthReadResult =
+  | {
+      readonly ok: true;
+      readonly workload: CapsuleWorkloadStatus;
+    }
+  | {
+      readonly ok: false;
+    };
+
+interface CapsuleWorkloadStatus {
+  readonly id: string;
+  readonly unit: string;
+  readonly status: string;
+  readonly health: string;
+  readonly restarts: number;
 }
 
 function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
@@ -823,6 +860,96 @@ function capsuleFetchRejectReason(result: AgentApplyResult): string {
   return agentApplyResultReason(result);
 }
 
+async function readCapsuleHealthState(
+  agentTransport: AgentTransport,
+  id: string,
+): Promise<CapsuleHealthReadResult> {
+  try {
+    const response = await agentTransport(new URL("/state", AGENTD_BASE_URL).toString(), {
+      headers: STATE_JSON_HEADERS,
+      method: "GET",
+    });
+
+    if (!response.ok) {
+      return { ok: false };
+    }
+
+    return parseCapsuleHealthState(parseJsonOrText(await response.text()), id);
+  } catch {
+    return { ok: false };
+  }
+}
+
+function parseCapsuleHealthState(value: unknown, id: string): CapsuleHealthReadResult {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const workloads = value["capsuleWorkloads"];
+
+  if (!Array.isArray(workloads)) {
+    return { ok: false };
+  }
+
+  for (let index = 0; index < workloads.length; index += 1) {
+    const workload = workloads[index];
+
+    if (!isJsonObject(workload)) {
+      continue;
+    }
+
+    const parsed = parseCapsuleWorkloadStatus(workload);
+
+    if (parsed !== undefined && parsed.id === id) {
+      return {
+        ok: true,
+        workload: parsed,
+      };
+    }
+  }
+
+  return { ok: false };
+}
+
+function parseCapsuleWorkloadStatus(
+  value: Readonly<Record<string, unknown>>,
+): CapsuleWorkloadStatus | undefined {
+  const id = readStringField(value, "id");
+  const unit = readStringField(value, "unit");
+  const status = readStringField(value, "status");
+  const health = readStringField(value, "health");
+  const restarts = readNonNegativeIntegerField(value, "restarts");
+
+  if (
+    id === undefined ||
+    unit === undefined ||
+    status === undefined ||
+    health === undefined ||
+    restarts === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    health,
+    id,
+    restarts,
+    status,
+    unit,
+  };
+}
+
+function formatCapsuleHealthMarker(workload: CapsuleWorkloadStatus): string {
+  return (
+    `${CAPSULE_HEALTH_MARKER}: ` +
+    `id=${workload.id} ` +
+    "check=lifecycle " +
+    `status=${markerToken(workload.status)} ` +
+    `health=${markerToken(workload.health)} ` +
+    `restarts=${workload.restarts}`
+  );
+}
+
 function readStringField(
   value: Readonly<Record<string, unknown>>,
   key: string,
@@ -830,6 +957,19 @@ function readStringField(
   const child = value[key];
 
   if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
+}
+
+function readNonNegativeIntegerField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): number | undefined {
+  const child = value[key];
+
+  if (typeof child !== "number" || !Number.isSafeInteger(child) || child < 0) {
     return undefined;
   }
 

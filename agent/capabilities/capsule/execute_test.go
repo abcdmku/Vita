@@ -2,11 +2,16 @@ package capsule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/vita/agent/capabilities"
+	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 )
 
 func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T) {
@@ -96,6 +101,225 @@ func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T)
 	readResponse = response.(ExecuteReadResponse)
 	if readResponse.Last != nil {
 		t.Fatalf("Last after undo = %#v, want nil", readResponse.Last)
+	}
+}
+
+func TestExecuteWiresHealthSupervisorAndMergesWorkloadStatus(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		status: transientUnitStatus{DynamicUID: "61408"},
+	}
+	manifest := executeManifest(entry)
+	manifest.HealthChecks = []capsuleruntime.Check{
+		{
+			Name:            "lifecycle",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          "self",
+			IntervalSeconds: 60,
+			TimeoutSeconds:  1,
+		},
+	}
+	prober := &recordingHealthProber{
+		status:   capsuleruntime.StatusDown,
+		restarts: 3,
+	}
+	supervisor := capsuleruntime.NewSupervisor(capsuleruntime.Options{
+		Prober: prober,
+		Jitter: func(capsuleruntime.WorkloadSpec, capsuleruntime.Check) time.Duration {
+			return 0
+		},
+	})
+	capability := newExecuteCapabilityWithSupervisor(
+		fs,
+		memoryExecutionManifestStore{entry.ID: manifest},
+		launcher,
+		supervisor,
+	)
+	t.Cleanup(func() {
+		supervisor.StopWorkload(capsuleUnitName(entry.ID))
+	})
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+	unit := launcher.starts[0].Name
+
+	polled := prober.polledChecks()
+	if len(polled) == 0 {
+		t.Fatal("health supervisor did not poll the capsule workload")
+	}
+	if polled[0].Target != unit {
+		t.Fatalf("health check target = %q, want rewritten unit %q", polled[0].Target, unit)
+	}
+
+	workloads := capability.Workloads()
+	wantWorkloads := []capsuleruntime.WorkloadStatus{
+		{
+			ID:       entry.ID,
+			Unit:     unit,
+			Status:   capsuleruntime.StatusDown,
+			Health:   capsuleruntime.StatusDown,
+			Restarts: 3,
+		},
+	}
+	if !reflect.DeepEqual(workloads, wantWorkloads) {
+		t.Fatalf("Workloads = %#v, want %#v", workloads, wantWorkloads)
+	}
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse := response.(ExecuteReadResponse)
+	if readResponse.Last == nil {
+		t.Fatal("Handle Last = nil, want execution status")
+	}
+	if readResponse.Last.Health != string(capsuleruntime.StatusDown) || readResponse.Last.Status != string(capsuleruntime.StatusDown) {
+		t.Fatalf("Handle Last health/status = %q/%q, want down/down", readResponse.Last.Health, readResponse.Last.Status)
+	}
+
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
+	}
+	if got := capability.Workloads(); len(got) != 0 {
+		t.Fatalf("Workloads after Undo = %#v, want empty", got)
+	}
+}
+
+func TestExecutionManifestDecodesAndValidatesHealthChecks(t *testing.T) {
+	if _, ok := executionManifestFields["healthChecks"]; !ok {
+		t.Fatal("executionManifestFields is missing healthChecks")
+	}
+
+	raw := []byte(`{
+		"id":"local.test.capsule",
+		"version":"1.0.0",
+		"integrity":"` + validSHA256SRI + `",
+		"packageClass":"ts-service",
+		"runtime":{"typescript":{"entrypoint":"main.ts"}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32},
+		"healthChecks":[
+			{"name":"ready","type":"http","target":"http://127.0.0.1:8787/health","intervalSeconds":5,"timeoutSeconds":1}
+		]
+	}`)
+	var manifest ExecutionManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("Unmarshal valid manifest returned error: %v", err)
+	}
+	if len(manifest.HealthChecks) != 1 {
+		t.Fatalf("HealthChecks length = %d, want 1", len(manifest.HealthChecks))
+	}
+	if manifest.HealthChecks[0].Name != "ready" || manifest.HealthChecks[0].Type != capsuleruntime.CheckTypeHTTP {
+		t.Fatalf("decoded health check = %#v, want ready http", manifest.HealthChecks[0])
+	}
+
+	invalid := strings.Replace(string(raw), `"intervalSeconds":5`, `"intervalSeconds":0`, 1)
+	if err := json.Unmarshal([]byte(invalid), &manifest); err == nil {
+		t.Fatal("Unmarshal accepted an invalid health check")
+	}
+}
+
+func TestHealthChecksForUnitRewritesAliasesAndRejectsOtherLifecycleUnits(t *testing.T) {
+	unit := capsuleUnitName("local.test.capsule")
+	checks := []capsuleruntime.Check{
+		{
+			Name:            "self",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          "self",
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+		{
+			Name:            "unit",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          "unit",
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+		{
+			Name:            "explicit-own",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          unit,
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+		{
+			Name:            "http",
+			Type:            capsuleruntime.CheckTypeHTTP,
+			Target:          "http://127.0.0.1:8787/health",
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+	}
+
+	rewritten, err := healthChecksForUnit(checks, unit)
+	if err != nil {
+		t.Fatalf("healthChecksForUnit returned error: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if rewritten[i].Target != unit {
+			t.Fatalf("rewritten[%d].Target = %q, want %q", i, rewritten[i].Target, unit)
+		}
+	}
+	if rewritten[3].Target != checks[3].Target {
+		t.Fatalf("http target = %q, want unchanged %q", rewritten[3].Target, checks[3].Target)
+	}
+
+	bad := []capsuleruntime.Check{
+		{
+			Name:            "host",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          "ssh.service",
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+	}
+	if _, err := healthChecksForUnit(bad, unit); err == nil {
+		t.Fatal("healthChecksForUnit accepted a lifecycle target outside the capsule unit")
+	}
+}
+
+func TestExecuteRejectsLifecycleHealthCheckOutsideOwnUnitBeforeStarting(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	manifest := executeManifest(entry)
+	manifest.HealthChecks = []capsuleruntime.Check{
+		{
+			Name:            "host",
+			Type:            capsuleruntime.CheckTypeLifecycle,
+			Target:          "ssh.service",
+			IntervalSeconds: 5,
+			TimeoutSeconds:  1,
+		},
+	}
+	launcher := &recordingTransientLauncher{}
+	capability := newExecuteCapabilityWithSupervisor(
+		fs,
+		memoryExecutionManifestStore{entry.ID: manifest},
+		launcher,
+		capsuleruntime.NewSupervisor(capsuleruntime.Options{}),
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *ExecuteInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+	}
+	if len(launcher.starts) != 0 {
+		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
 	}
 }
 
@@ -288,6 +512,37 @@ func assertContainsProperty(t *testing.T, props map[string][]string, name string
 		}
 	}
 	t.Fatalf("%s = %v, want value %q", name, props[name], want)
+}
+
+type recordingHealthProber struct {
+	mu       sync.Mutex
+	status   capsuleruntime.Status
+	restarts int
+	checks   []capsuleruntime.Check
+}
+
+func (p *recordingHealthProber) PollHealth(_ context.Context, check capsuleruntime.Check) (capsuleruntime.Status, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.checks = append(p.checks, check)
+	return p.status, nil
+}
+
+func (p *recordingHealthProber) Restarts(context.Context, string) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.restarts, nil
+}
+
+func (p *recordingHealthProber) polledChecks() []capsuleruntime.Check {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	out := make([]capsuleruntime.Check, len(p.checks))
+	copy(out, p.checks)
+	return out
 }
 
 var _ capabilities.TypedRequest = ExecuteApplyRequest{}

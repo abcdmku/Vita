@@ -33,6 +33,7 @@ import (
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/internal/auditlog"
+	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -318,6 +319,160 @@ func TestStateIsolatesReadErrorWithoutLeakingInternals(t *testing.T) {
 	wantEvents := []string{"handle:test.bad", "handle:test.good", "handle:test.good"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestStateIncludesCapsuleWorkloads(t *testing.T) {
+	workloads := []capsuleruntime.WorkloadStatus{
+		{
+			ID:       "local.zed.capsule",
+			Unit:     "vita-capsule-zed.service",
+			Status:   capsuleruntime.StatusDown,
+			Health:   capsuleruntime.StatusDown,
+			Restarts: 4,
+		},
+		{
+			ID:       "local.test.capsule",
+			Unit:     "vita-capsule-test.service",
+			Status:   capsuleruntime.StatusOK,
+			Health:   capsuleruntime.StatusOK,
+			Restarts: 2,
+		},
+	}
+	registry := mustRegistry(t, &stateReadCapability{
+		name:     "test.good",
+		response: stateReadResponse{Name: "test.good", Ordinal: 1},
+	})
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.good": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+		capsuleWorkloads: func() []capsuleruntime.WorkloadStatus {
+			return workloads
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got stateResponse
+	decodeResponse(t, response, &got)
+	if _, ok := got.Capabilities["test.good"]; !ok {
+		t.Fatalf("state missing capability test.good; body=%s", response.Body.String())
+	}
+	want := []capsuleruntime.WorkloadStatus{
+		{
+			ID:       "local.test.capsule",
+			Unit:     "vita-capsule-test.service",
+			Status:   capsuleruntime.StatusOK,
+			Health:   capsuleruntime.StatusOK,
+			Restarts: 2,
+		},
+		{
+			ID:       "local.zed.capsule",
+			Unit:     "vita-capsule-zed.service",
+			Status:   capsuleruntime.StatusDown,
+			Health:   capsuleruntime.StatusDown,
+			Restarts: 4,
+		},
+	}
+	if !reflect.DeepEqual(got.CapsuleWorkloads, want) {
+		t.Fatalf("capsuleWorkloads = %#v, want %#v; body=%s", got.CapsuleWorkloads, want, response.Body.String())
+	}
+}
+
+func TestStateIncludesCapsuleWorkloadsFromRegistryDefaultPath(t *testing.T) {
+	unit := "vita-capsule-test.service"
+	supervisor := capsuleruntime.NewSupervisor(capsuleruntime.Options{
+		Prober: capsuleruntime.ProbeFunc(func(context.Context, capsuleruntime.Check) (capsuleruntime.Status, error) {
+			return capsuleruntime.StatusOK, nil
+		}),
+		Jitter: func(capsuleruntime.WorkloadSpec, capsuleruntime.Check) time.Duration {
+			return 0
+		},
+	})
+	supervisor.StartWorkload(capsuleruntime.WorkloadSpec{
+		ID:   "local.test.capsule",
+		Unit: unit,
+		Checks: []capsuleruntime.Check{
+			{
+				Name:            "lifecycle",
+				Type:            capsuleruntime.CheckTypeLifecycle,
+				Target:          "self",
+				IntervalSeconds: 60,
+				TimeoutSeconds:  1,
+			},
+		},
+	})
+	t.Cleanup(func() {
+		supervisor.StopWorkload(unit)
+	})
+
+	registry := mustRegistry(t, capsule.NewExecuteCapabilityWithSupervisor(supervisor))
+	handler := mustHandler(t, handlerConfig{registry: registry})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got stateResponse
+	decodeResponse(t, response, &got)
+	want := []capsuleruntime.WorkloadStatus{
+		{
+			ID:       "local.test.capsule",
+			Unit:     unit,
+			Status:   capsuleruntime.StatusOK,
+			Health:   capsuleruntime.StatusOK,
+			Restarts: 0,
+		},
+	}
+	if !reflect.DeepEqual(got.CapsuleWorkloads, want) {
+		t.Fatalf("capsuleWorkloads = %#v, want registry-fed %#v; body=%s", got.CapsuleWorkloads, want, response.Body.String())
+	}
+	if _, ok := got.Capabilities[capsule.ExecuteName]; !ok {
+		t.Fatalf("state missing %q capability entry; body=%s", capsule.ExecuteName, response.Body.String())
+	}
+}
+
+func TestStateCapsuleWorkloadsEmptyWhenNoSource(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t)})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got stateResponse
+	decodeResponse(t, response, &got)
+	if got.CapsuleWorkloads == nil {
+		t.Fatalf("capsuleWorkloads = nil, want empty array; body=%s", response.Body.String())
+	}
+	if len(got.CapsuleWorkloads) != 0 {
+		t.Fatalf("capsuleWorkloads = %#v, want empty", got.CapsuleWorkloads)
+	}
+}
+
+func TestNewHandlerRejectsCapsuleExecuteWithoutWorkloadSource(t *testing.T) {
+	registry := mustRegistry(t, brokenCapsuleExecuteCapability{})
+
+	_, err := NewHandler(Config{
+		Version:   "test-version",
+		StartedAt: transportStartedAt,
+		Registry:  registry,
+		Now: func() time.Time {
+			return transportStartedAt.Add(90 * time.Second)
+		},
+	})
+
+	if err == nil {
+		t.Fatal("NewHandler accepted capsule.execute without a workload source")
+	}
+	if !strings.Contains(err.Error(), capsule.ExecuteName) {
+		t.Fatalf("NewHandler error = %q, want capsule.execute detail", err.Error())
 	}
 }
 
@@ -1219,11 +1374,12 @@ func TestParseProcStatusGroups(t *testing.T) {
 }
 
 type handlerConfig struct {
-	registry     *capabilities.Registry
-	discoverer   hardware.Discoverer
-	readRequests map[string]ReadRequestFactory
-	maxBodyBytes int64
-	auditStore   AuditStore
+	registry         *capabilities.Registry
+	discoverer       hardware.Discoverer
+	readRequests     map[string]ReadRequestFactory
+	maxBodyBytes     int64
+	auditStore       AuditStore
+	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
 
 func mustHandler(t *testing.T, config handlerConfig) http.Handler {
@@ -1240,14 +1396,15 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 	}
 
 	handler, err := NewHandler(Config{
-		Version:         "test-version",
-		StartedAt:       transportStartedAt,
-		Registry:        config.registry,
-		Discoverer:      discoverer,
-		RequestDecoders: map[string]RequestDecoder{"test.apply": decodeMockRequest, "test.first": decodeMockRequest, "test.second": decodeMockRequest},
-		ReadRequests:    config.readRequests,
-		MaxBodyBytes:    config.maxBodyBytes,
-		AuditStore:      config.auditStore,
+		Version:          "test-version",
+		StartedAt:        transportStartedAt,
+		Registry:         config.registry,
+		Discoverer:       discoverer,
+		RequestDecoders:  map[string]RequestDecoder{"test.apply": decodeMockRequest, "test.first": decodeMockRequest, "test.second": decodeMockRequest},
+		ReadRequests:     config.readRequests,
+		MaxBodyBytes:     config.maxBodyBytes,
+		AuditStore:       config.auditStore,
+		CapsuleWorkloads: config.capsuleWorkloads,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
 		},
@@ -1314,7 +1471,8 @@ type mockReadRequest struct{}
 func (mockReadRequest) CapabilityRequest() {}
 
 type stateResponse struct {
-	Capabilities map[string]json.RawMessage `json:"capabilities"`
+	Capabilities     map[string]json.RawMessage      `json:"capabilities"`
+	CapsuleWorkloads []capsuleruntime.WorkloadStatus `json:"capsuleWorkloads"`
 }
 
 type stateReadResponse struct {
@@ -1343,6 +1501,10 @@ func (c *stateReadCapability) Handle(context.Context, capabilities.TypedRequest)
 		return nil, c.err
 	}
 	return c.response, nil
+}
+
+func (c *stateReadCapability) Workloads() []capsuleruntime.WorkloadStatus {
+	return []capsuleruntime.WorkloadStatus{}
 }
 
 type mockReadResponse struct {
@@ -1394,6 +1556,10 @@ func (c *mockTxCapability) Handle(context.Context, capabilities.TypedRequest) (c
 	return mockResponse{}, nil
 }
 
+func (c *mockTxCapability) Workloads() []capsuleruntime.WorkloadStatus {
+	return []capsuleruntime.WorkloadStatus{}
+}
+
 func (c *mockTxCapability) Apply(_ context.Context, request capabilities.TypedRequest) (transaction.Undo, error) {
 	typedRequest, ok := request.(mockRequest)
 	if !ok {
@@ -1409,10 +1575,11 @@ func (c *mockTxCapability) Apply(_ context.Context, request capabilities.TypedRe
 }
 
 type routedTxCapability struct {
-	name   string
-	handle func(capabilities.TypedRequest) (capabilities.TypedResponse, error)
-	apply  func(capabilities.TypedRequest) error
-	events *[]string
+	name      string
+	handle    func(capabilities.TypedRequest) (capabilities.TypedResponse, error)
+	apply     func(capabilities.TypedRequest) error
+	workloads func() []capsuleruntime.WorkloadStatus
+	events    *[]string
 }
 
 func (c *routedTxCapability) Name() string {
@@ -1426,6 +1593,13 @@ func (c *routedTxCapability) Handle(_ context.Context, request capabilities.Type
 	return mockResponse{}, nil
 }
 
+func (c *routedTxCapability) Workloads() []capsuleruntime.WorkloadStatus {
+	if c.workloads == nil {
+		return []capsuleruntime.WorkloadStatus{}
+	}
+	return c.workloads()
+}
+
 func (c *routedTxCapability) Apply(_ context.Context, request capabilities.TypedRequest) (transaction.Undo, error) {
 	if c.apply != nil {
 		if err := c.apply(request); err != nil {
@@ -1436,6 +1610,16 @@ func (c *routedTxCapability) Apply(_ context.Context, request capabilities.Typed
 		*c.events = append(*c.events, c.name)
 	}
 	return noopUndo{}, nil
+}
+
+type brokenCapsuleExecuteCapability struct{}
+
+func (brokenCapsuleExecuteCapability) Name() string {
+	return capsule.ExecuteName
+}
+
+func (brokenCapsuleExecuteCapability) Handle(context.Context, capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+	return mockResponse{}, nil
 }
 
 type noopUndo struct{}
