@@ -312,8 +312,13 @@ rejected). R3 reviewer (Codex gpt-5.5 xhigh): round-1 REVISE → fixed 4 blocker
 build-exit/PIPESTATUS guard vs stale-disk masquerade; probe via /bin/bash; governance moved off the code branch
 to main) → round-2 APPROVE. The owner provided their REAL SB cert (staged on the host at /home/borg/vita-keys/,
 option (b) autonomous signing — see [[vita-owner-secureboot-cert]]); it swaps in for the TEST key at 4(b).
-**NEXT:** step 2 (mkosi.repart verity defs → verity'd root), step 3 (A/B + RAUC bundle), then step 4(b) real-key
-SB signing + RAUC bundle signing + N-of-M recovery (4b–d). RAUC + recovery still need owner keys (§16).
+**STEP 2 — dm-verity ROOT DONE (P1-028, branch task/P1-028).** `--verity` was a no-op without partition defs →
+added `os/x86_64/repart-verity/` (esp + root Verity=data + root-verity Verity=hash) passed via `--repart-directory`
+ONLY when VITA_VERITY=1 (default smoke/SB layout untouched). mkosi builds the hash tree + bakes `roothash=` onto
+the UKI. `wsl-verify verity` matrix GREEN: POS = boots with root on /dev/mapper/root (`device-mapper: verity`
+active) → multi-user; VNEG = one flipped byte in the root DATA partition → `device-mapper: verity: ... data block
+0 is corrupted` → root rejected. R3 reviewer + merge pending (this tick). **NEXT:** step 3 (A/B + RAUC bundle),
+then step 4(b) real-key SB signing + RAUC bundle signing + N-of-M recovery (4b–d). RAUC + recovery need owner keys (§16).
 `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
