@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -355,6 +356,74 @@ func TestApplyAcceptsExplicitEmptyRegistry(t *testing.T) {
 	}
 }
 
+func TestFetchCapabilityStagesAndUndoRemovesNewCacheEntry(t *testing.T) {
+	ctx := context.Background()
+	target := filepath.Join(t.TempDir(), "local.test.capsule", "1.0.0")
+	store := &recordingFetchStore{target: target}
+	capability := newFetchCapability(store)
+	req := fetchApply("local.test.capsule", "1.0.0", "file:///staging/local.test.capsule.tar.zst", validSHA256SRI)
+
+	undo, err := capability.Apply(ctx, req)
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if store.fetches != 1 {
+		t.Fatalf("FetchCapsuleFor calls = %d, want 1", store.fetches)
+	}
+	if store.ref != req.Desired.Ref || store.integrity != req.Desired.Integrity || store.id != req.Desired.ID || store.version != req.Desired.Version {
+		t.Fatalf("fetch call = ref=%q integrity=%q id=%q version=%q, want request fields", store.ref, store.integrity, store.id, store.version)
+	}
+
+	response, err := capability.Handle(ctx, FetchReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse, ok := response.(FetchReadResponse)
+	if !ok {
+		t.Fatalf("Handle returned %T, want FetchReadResponse", response)
+	}
+	if readResponse.Last == nil || readResponse.Last.LocalPath != target || readResponse.Last.Status != "OK" {
+		t.Fatalf("FetchReadResponse.Last = %#v, want staged OK status", readResponse.Last)
+	}
+
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
+	}
+	if !reflect.DeepEqual(store.removed, []string{target}) {
+		t.Fatalf("removed = %v, want [%s]", store.removed, target)
+	}
+	response, err = capability.Handle(ctx, FetchReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle after undo returned error: %v", err)
+	}
+	readResponse = response.(FetchReadResponse)
+	if readResponse.Last != nil {
+		t.Fatalf("Last after undo = %#v, want nil", readResponse.Last)
+	}
+}
+
+func TestFetchCapabilityRejectsInvalidRequestWithoutFetching(t *testing.T) {
+	ctx := context.Background()
+	store := &recordingFetchStore{target: filepath.Join(t.TempDir(), "target")}
+	capability := newFetchCapability(store)
+
+	undo, err := capability.Apply(ctx, fetchApply("local.test.capsule", "1.0.0", "https://registry.example.invalid/capsule.tar.zst", validSHA256SRI))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *FetchInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want FetchInvalidRequestError", err, err)
+	}
+	if store.fetches != 0 {
+		t.Fatalf("FetchCapsuleFor calls = %d, want 0", store.fetches)
+	}
+}
+
 func TestAbsentRequiredFieldsRejectFailClosed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -561,6 +630,44 @@ type pathSmugglingRequest struct {
 
 func (pathSmugglingRequest) CapabilityRequest() {}
 
+type recordingFetchStore struct {
+	target    string
+	fetches   int
+	ref       string
+	integrity string
+	id        string
+	version   string
+	removed   []string
+	err       error
+}
+
+func (s *recordingFetchStore) FetchCapsuleFor(ctx context.Context, ref string, integrity string, id string, version string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.fetches++
+	s.ref = ref
+	s.integrity = integrity
+	s.id = id
+	s.version = version
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.target, nil
+}
+
+func (s *recordingFetchStore) CachePath(string, string) (string, error) {
+	return s.target, nil
+}
+
+func (s *recordingFetchStore) RemoveStagedCapsule(ctx context.Context, localPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.removed = append(s.removed, localPath)
+	return nil
+}
+
 func validEntry() CapsuleEntry {
 	return CapsuleEntry{
 		ID:        "dev.vita.notes",
@@ -595,6 +702,16 @@ func registryWithCapsules(capsules []CapsuleEntry) Registry {
 func applyRegistry(registry Registry) ApplyRequest {
 	cloned := cloneRegistry(registry)
 	return ApplyRequest{Desired: &cloned}
+}
+
+func fetchApply(id string, version string, ref string, integrity string) FetchApplyRequest {
+	desired := FetchDesired{
+		ID:        id,
+		Version:   version,
+		Ref:       ref,
+		Integrity: integrity,
+	}
+	return FetchApplyRequest{Desired: &desired}
 }
 
 func withID(entry CapsuleEntry, id string) CapsuleEntry {
