@@ -1,47 +1,50 @@
 #!/bin/bash
-# Vita installer — write the built Vita GPT disk image onto a REAL target block device (P1-032).
+# Vita installer - write the built Vita GPT disk image onto a REAL target block device (P1-032).
 #
 # Vita's bootable artifact (os/x86_64/build-and-boot.mjs) is a self-contained GPT raw disk:
 #   smoke/verity:  ESP (vfat) + root (ext4, dm-verity data) + root-verity (hash)
 #   full:          ESP + root-a + root-b + recovery + data        (the data partition grows to fill)
 # This script writes that whole .raw byte-for-byte onto a target disk (/dev/sdX), repairs the GPT
-# backup header (the .raw is sized to its content, so the backup header lands mid-disk), and — for
-# images that carry a growable data partition — grows the LAST partition to fill the rest of the
-# disk. The result boots on real hardware (after the one-time Secure Boot firmware enrollment that
-# can only be done in the target's UEFI setup — see docs/install.md).
+# backup header (the .raw is sized to its content, so the backup header lands mid-disk), and - for
+# images that carry a growable data partition - grows the vita-data partition to fill the rest of
+# the disk. The result boots on real hardware (after the one-time Secure Boot firmware enrollment
+# that can only be done in the target's UEFI setup - see docs/install.md).
 #
 # THIS IS A DESTRUCTIVE OPERATION. It overwrites the entire target disk. Safety is the whole point:
-#   • refuses to write to the disk the running system booted from (root/boot/swap backing device),
-#   • requires the EXACT target path AND an explicit --yes,
-#   • shows the target's model/size/partitions and (without --yes) makes you type the device to confirm,
-#   • --dry-run prints every action and writes NOTHING,
-#   • verifies the written partition table afterwards (sfdisk -l).
+#   - refuses to write to ANY physical disk backing the running system (root/boot/swap, through
+#     dm-crypt/LVM/md stacks - the FULL parent chain is resolved, not just one hop),
+#   - requires the EXACT target path AND an explicit --yes,
+#   - shows the target's model/size/partitions and (without --yes) makes you type the device to confirm,
+#   - --dry-run prints every action and writes NOTHING,
+#   - ABORTS (fail-closed) if a target partition cannot be unmounted before the write,
+#   - grows ONLY the partition labeled vita-data (never root / verity / a non-ext4 partition),
+#   - verifies the written GPT afterwards (sgdisk -v is FATAL on failure; sfdisk -l for the report).
 #
 # USAGE:
 #   tools/install-vita.sh /dev/sdX [--image PATH] [--yes] [--dry-run]
 #                                  [--no-grow] [--grow-fs] [--keep-backup-gap]
 #
-#   /dev/sdX            target WHOLE disk (not a partition — /dev/sdb, NOT /dev/sdb1)
+#   /dev/sdX            target WHOLE disk (not a partition - /dev/sdb, NOT /dev/sdb1)
 #   --image PATH        path to the .raw image (default: newest os/x86_64/out/*.raw)
 #   --yes               actually write (skip the interactive type-the-device confirmation)
 #   --dry-run           print every action, write nothing (implies a full plan walkthrough)
-#   --no-grow           do NOT grow the last partition to fill the disk (leave repart to do it on first boot)
+#   --no-grow           do NOT grow the vita-data partition (leave repart to do it on first boot)
 #   --grow-fs           after growing the partition, also grow its ext4 filesystem (resize2fs)
-#   --keep-backup-gap   skip `sgdisk -e` (relocate GPT backup header) — almost never what you want
+#   --keep-backup-gap   skip GPT backup-header relocation - almost never what you want
 #
-# EXIT CODES: 0 ok · 1 usage/safety refusal · 2 missing tool · 3 write/verify failure
+# EXIT CODES: 0 ok | 1 usage/safety refusal | 2 missing tool | 3 write/verify failure
 #
 # House style mirrors tools/wsl-verify.sh: set -euo pipefail, defensive quoting, =====/RESULT banners,
-# no destructive default. Run as root (block-device writes need it). Tested via bash -n + a loopback
-# image (truncate+losetup) so the write/repair/grow path is exercised without real hardware.
+# no destructive default, ASCII-only. Run as root (block-device writes need it). Tested via bash -n +
+# loopback images (truncate+losetup) so the write/repair/grow path is exercised without real hardware.
 set -euo pipefail
 
-# ── repo discovery (so --image default + relative paths resolve from anywhere) ──────────────────────
+# -- repo discovery (so --image default + relative paths resolve from anywhere) ----------------------
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/.." && pwd)"
 OUT_DIR="$REPO/os/x86_64/out"
 
-# ── argument parsing ────────────────────────────────────────────────────────────────────────────────
+# -- argument parsing --------------------------------------------------------------------------------
 TARGET=""
 IMAGE=""
 ASSUME_YES=0
@@ -51,7 +54,7 @@ DO_GROW_FS=0
 RELOCATE_BACKUP=1
 
 usage() {
-  sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-1}"
 }
 
@@ -65,35 +68,37 @@ while [ $# -gt 0 ]; do
     --keep-backup-gap)  RELOCATE_BACKUP=0 ;;
     --image)            shift; IMAGE="${1:-}" ;;
     --image=*)          IMAGE="${1#--image=}" ;;
-    --*)                echo "✖ unknown option: $1" >&2; usage 1 ;;
+    --*)                echo "ERROR: unknown option: $1" >&2; usage 1 ;;
     *)
       if [ -z "$TARGET" ]; then TARGET="$1"
-      else echo "✖ unexpected extra argument: $1 (one target only)" >&2; usage 1; fi
+      else echo "ERROR: unexpected extra argument: $1 (one target only)" >&2; usage 1; fi
       ;;
   esac
   shift
 done
 
-# ── tiny helpers ─────────────────────────────────────────────────────────────────────────────────────
-die()  { echo "✖ $*" >&2; exit 1; }
-warn() { echo "⚠ $*" >&2; }
-info() { echo "  $*"; }
+# -- tiny helpers ------------------------------------------------------------------------------------
+die()      { echo "ERROR: $*" >&2; exit 1; }       # exit 1: usage / safety refusal
+die_tool() { echo "ERROR: $*" >&2; exit 2; }       # exit 2: missing required tool
+die_io()   { echo "ERROR: $*" >&2; exit 3; }       # exit 3: write / verify failure
+warn()     { echo "WARN: $*" >&2; }
+info()     { echo "  $*"; }
 # Print a command and, unless --dry-run, run it. EVERY mutation of the target goes through this.
 runcmd() {
   echo "    \$ $*"
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
   "$@"
 }
-need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1 (install it; exit 2)"; }
+need() { command -v "$1" >/dev/null 2>&1 || die_tool "missing required tool: $1 (install it; exit 2)"; }
 
-# ── preconditions ────────────────────────────────────────────────────────────────────────────────────
-[ -n "$TARGET" ] || { echo "✖ no target device given" >&2; usage 1; }
+# -- preconditions -----------------------------------------------------------------------------------
+[ -n "$TARGET" ] || { echo "ERROR: no target device given" >&2; usage 1; }
 
-# Required tools. (resize2fs only needed for --grow-fs.)
+# Required tools. (resize2fs/e2fsck only needed for --grow-fs.)
 for t in dd sgdisk sfdisk lsblk blockdev; do
-  command -v "$t" >/dev/null 2>&1 || die "missing required tool: $t — install gdisk/util-linux (exit 2)"
+  command -v "$t" >/dev/null 2>&1 || die_tool "missing required tool: $t - install gdisk/util-linux (exit 2)"
 done
-[ "$DO_GROW_FS" = 1 ] && need resize2fs
+if [ "$DO_GROW_FS" = 1 ]; then need resize2fs; need e2fsck; fi
 
 # Must be root to write a block device (skip the hard check in dry-run so the plan is inspectable as a user).
 if [ "$DRY_RUN" != 1 ] && [ "$(id -u)" != 0 ]; then
@@ -103,12 +108,12 @@ fi
 # Resolve the default image: newest *.raw in os/x86_64/out (excludes OVMF_VARS*.fd etc).
 if [ -z "$IMAGE" ]; then
   IMAGE="$(ls -t "$OUT_DIR"/*.raw 2>/dev/null | head -1 || true)"
-  [ -n "$IMAGE" ] || die "no image given and none found in $OUT_DIR/*.raw — build first (node os/x86_64/build-and-boot.mjs ...) or pass --image PATH"
+  [ -n "$IMAGE" ] || die "no image given and none found in $OUT_DIR/*.raw - build first (node os/x86_64/build-and-boot.mjs ...) or pass --image PATH"
 fi
 [ -f "$IMAGE" ] || die "image not found: $IMAGE"
 IMAGE="$(cd "$(dirname "$IMAGE")" && pwd)/$(basename "$IMAGE")"   # absolutize
 
-# ── target validation: must be a WHOLE block device, not a partition ──────────────────────────────────
+# -- target validation: must be a WHOLE block device, not a partition --------------------------------
 [ -b "$TARGET" ] || die "target is not a block device: $TARGET (pass a whole disk like /dev/sdb)"
 # Canonicalize (resolve symlinks like /dev/disk/by-id/...). readlink -f is in coreutils.
 TARGET="$(readlink -f "$TARGET")"
@@ -117,61 +122,86 @@ TGT_NAME="$(basename "$TARGET")"
 # Reject partitions: a partition has a 'partition' devtype / a parent 'disk'. lsblk TYPE tells us.
 TGT_TYPE="$(lsblk -ndo TYPE "$TARGET" 2>/dev/null | head -1 || true)"
 if [ "$TGT_TYPE" != "disk" ] && [ "$TGT_TYPE" != "loop" ]; then
-  die "target $TARGET is TYPE=$TGT_TYPE — pass the whole disk (e.g. /dev/sdb), not a partition or other node"
+  die "target $TARGET is TYPE=$TGT_TYPE - pass the whole disk (e.g. /dev/sdb), not a partition or other node"
 fi
 
-# ── SAFETY: refuse to overwrite the running system's disk ─────────────────────────────────────────────
-# Resolve the whole-disk device backing a given mount/path. lsblk PKNAME gives the parent disk of a
-# partition; for a path we stat its source first. Returns "" if it cannot be resolved.
-parent_disk_of_source() {
-  # $1 = a /dev/... node (partition or disk)
-  local node="$1" pk
+# -- SAFETY: refuse to overwrite the running system's disk(s) ----------------------------------------
+# A root/boot/swap device may sit on a STACK (partition -> dm-crypt -> LVM -> md -> ... -> physical
+# disk). Resolving a single PKNAME hop is NOT enough: it would leave the real backing disk
+# unprotected. Instead we walk the FULL dependency chain down to every physical (TYPE=disk/loop)
+# ancestor.
+#
+# `lsblk -s` prints the inverse (parents) tree: starting at a leaf node, it lists the node and all
+# of its ancestors. With `-no NAME,TYPE` we get every ancestor's name+type; we keep the terminal
+# physical ones (TYPE=disk, and TYPE=loop since the installer also accepts loop devices as whole-disk
+# targets). This catches dm-crypt/LVM/md/multipath stacks and plain partitions alike.
+physical_disks_of_node() {
+  # $1 = a /dev/... node (partition, dm-*, md*, disk, loop, ...). Prints zero or more "/dev/<disk>".
+  local node="$1" name type
   [ -b "$node" ] || return 0
-  pk="$(lsblk -ndo PKNAME "$node" 2>/dev/null | head -1 || true)"
-  if [ -n "$pk" ]; then echo "/dev/$pk"; else echo "$(readlink -f "$node")"; fi
+  # lsblk -s walks toward the parents (physical devices) from the given node.
+  while read -r name type; do
+    [ -n "$name" ] || continue
+    if [ "$type" = "disk" ] || [ "$type" = "loop" ]; then
+      # NAME may carry tree-drawing prefixes on some lsblk versions; -s -no should be clean, but
+      # strip any leading non-name chars defensively.
+      name="${name##*[!A-Za-z0-9_-]}"
+      echo "/dev/$name"
+    fi
+  done < <(lsblk -s -no NAME,TYPE "$node" 2>/dev/null || true)
 }
-disk_for_path() {
-  # $1 = a filesystem path (e.g. /, /boot) → the whole disk that backs it, or "".
+disks_for_path() {
+  # $1 = a filesystem path (e.g. /, /boot) -> every physical disk backing it (zero or more lines).
   local path="$1" src
   src="$(findmnt -no SOURCE --target "$path" 2>/dev/null | head -1 || true)"
   [ -n "$src" ] || return 0
-  # SOURCE may be a /dev node, or a non-block source (overlay, tmpfs) → skip those.
+  # SOURCE may be a /dev node, or a non-block source (overlay, tmpfs) -> skip those.
   case "$src" in
-    /dev/*) parent_disk_of_source "$src" ;;
+    /dev/*) physical_disks_of_node "$src" ;;
     *) : ;;  # not a block-backed mount; nothing to protect here
   esac
 }
 
 PROTECTED_DISKS=""
-# NB: must end with `return 0` — under `set -e`, a trailing `[ -n "" ] && …` would return 1 and abort.
-add_protected() { if [ -n "$1" ]; then PROTECTED_DISKS="$PROTECTED_DISKS $1"; fi; return 0; }
+# NB: each helper may print multiple lines; collect them all. Must end with `return 0` so the
+# function never returns non-zero under `set -e`.
+add_protected() {
+  local d
+  for d in $1; do
+    [ -n "$d" ] && PROTECTED_DISKS="$PROTECTED_DISKS $d"
+  done
+  return 0
+}
 if command -v findmnt >/dev/null 2>&1; then
-  add_protected "$(disk_for_path /)"
-  add_protected "$(disk_for_path /boot)"
-  add_protected "$(disk_for_path /boot/efi)"
-  add_protected "$(disk_for_path /etc)"      # catches systems where / is overlay but /etc is real
+  add_protected "$(disks_for_path /)"
+  add_protected "$(disks_for_path /boot)"
+  add_protected "$(disks_for_path /boot/efi)"
+  add_protected "$(disks_for_path /etc)"      # catches systems where / is overlay but /etc is real
+else
+  warn "findmnt not found - cannot resolve the running system's disks; the system-disk refusal is WEAKENED."
 fi
-# Active swap devices, too (overwriting them corrupts the running system).
+# Active swap devices, too (overwriting them corrupts the running system). Resolve the full stack.
 if [ -r /proc/swaps ]; then
   while read -r dev _rest; do
-    case "$dev" in /dev/*) add_protected "$(parent_disk_of_source "$dev")" ;; esac
+    case "$dev" in /dev/*) add_protected "$(physical_disks_of_node "$dev")" ;; esac
   done < <(tail -n +2 /proc/swaps 2>/dev/null || true)
 fi
 
 for pd in $PROTECTED_DISKS; do
   if [ "$(readlink -f "$pd" 2>/dev/null || echo "$pd")" = "$TARGET" ]; then
-    die "REFUSING: $TARGET backs the RUNNING system (root/boot/swap). Installing onto it would destroy this machine.
+    die "REFUSING: $TARGET is a physical disk backing the RUNNING system (root/boot/swap, possibly
+       through an LVM/dm-crypt/md stack). Installing onto it would destroy this machine.
        Boot a live USB and target the OTHER disk, or pass an external disk."
   fi
 done
 
-# ── gather target facts for the confirmation prompt ───────────────────────────────────────────────────
+# -- gather target facts for the confirmation prompt ------------------------------------------------
 TGT_SIZE_BYTES="$(blockdev --getsize64 "$TARGET" 2>/dev/null || echo 0)"
 TGT_MODEL="$(lsblk -ndo MODEL "$TARGET" 2>/dev/null | sed 's/[[:space:]]*$//' || true)"
 TGT_VENDOR="$(lsblk -ndo VENDOR "$TARGET" 2>/dev/null | sed 's/[[:space:]]*$//' || true)"
 [ -n "$TGT_MODEL" ] || TGT_MODEL="(unknown model)"
 human_size() {
-  # bytes → human (no external `numfmt` dependency)
+  # bytes -> human (no external `numfmt` dependency)
   local b="${1:-0}"
   awk -v b="$b" 'BEGIN{ split("B KiB MiB GiB TiB PiB",u," "); i=1; while(b>=1024 && i<6){b/=1024;i++} printf((b==int(b))?"%d %s":"%.1f %s", b, u[i]) }'
 }
@@ -181,18 +211,18 @@ echo "===== Vita installer ====="
 echo "  image    : $IMAGE"
 echo "             size $(human_size "$IMG_SIZE_BYTES") ($IMG_SIZE_BYTES bytes)"
 echo "  target   : $TARGET"
-echo "             $TGT_VENDOR $TGT_MODEL — $(human_size "$TGT_SIZE_BYTES") ($TGT_SIZE_BYTES bytes)"
-echo "  mode     : $([ "$DRY_RUN" = 1 ] && echo DRY-RUN' (no writes)' || echo WRITE) · grow=$([ "$DO_GROW" = 1 ] && echo last-partition || echo no) · grow-fs=$([ "$DO_GROW_FS" = 1 ] && echo yes || echo no) · relocate-backup-gpt=$([ "$RELOCATE_BACKUP" = 1 ] && echo yes || echo no)"
+echo "             $TGT_VENDOR $TGT_MODEL - $(human_size "$TGT_SIZE_BYTES") ($TGT_SIZE_BYTES bytes)"
+echo "  mode     : $([ "$DRY_RUN" = 1 ] && echo 'DRY-RUN (no writes)' || echo WRITE) | grow=$([ "$DO_GROW" = 1 ] && echo vita-data || echo no) | grow-fs=$([ "$DO_GROW_FS" = 1 ] && echo yes || echo no) | relocate-backup-gpt=$([ "$RELOCATE_BACKUP" = 1 ] && echo yes || echo no)"
 echo "  --- current partitions on target (these WILL be destroyed) ---"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL "$TARGET" 2>/dev/null | sed 's/^/  /' || true
 echo
 
 # Image must fit on the target.
 if [ "$IMG_SIZE_BYTES" -gt "$TGT_SIZE_BYTES" ] 2>/dev/null && [ "$TGT_SIZE_BYTES" -gt 0 ]; then
-  die "image ($(human_size "$IMG_SIZE_BYTES")) is LARGER than target ($(human_size "$TGT_SIZE_BYTES")) — it would not fit. Wrong target?"
+  die "image ($(human_size "$IMG_SIZE_BYTES")) is LARGER than target ($(human_size "$TGT_SIZE_BYTES")) - it would not fit. Wrong target?"
 fi
 
-# ── confirmation ──────────────────────────────────────────────────────────────────────────────────────
+# -- confirmation ------------------------------------------------------------------------------------
 if [ "$DRY_RUN" = 1 ]; then
   echo "[dry-run] no confirmation needed; printing the plan only."
 elif [ "$ASSUME_YES" = 1 ]; then
@@ -201,17 +231,26 @@ else
   echo "This will ERASE ALL DATA on $TARGET ($TGT_MODEL, $(human_size "$TGT_SIZE_BYTES"))."
   echo "To proceed, type the target device path EXACTLY (or anything else to abort):"
   printf '  target> '
-  read -r CONFIRM </dev/tty || die "no tty for confirmation — re-run with --yes if you are certain"
-  [ "$CONFIRM" = "$TARGET" ] || die "confirmation '$CONFIRM' != '$TARGET' — aborted (nothing written)."
+  read -r CONFIRM </dev/tty || die "no tty for confirmation - re-run with --yes if you are certain"
+  [ "$CONFIRM" = "$TARGET" ] || die "confirmation '$CONFIRM' != '$TARGET' - aborted (nothing written)."
 fi
 
-# ── 1 · write the image ───────────────────────────────────────────────────────────────────────────────
-echo "===== 1 · write image → target ====="
-# Best-effort: unmount anything currently mounted from the target so the write isn't fighting the kernel.
+# -- 1 . write the image -----------------------------------------------------------------------------
+echo "===== 1 . write image -> target ====="
+# FAIL-CLOSED: unmount anything currently mounted from the target. If ANY target partition cannot be
+# unmounted, we ABORT rather than dd against a still-mounted/busy filesystem (which would corrupt it).
 if [ "$DRY_RUN" != 1 ]; then
   for part in $(lsblk -nlo NAME "$TARGET" 2>/dev/null | tail -n +2); do
     mp="$(lsblk -nlo MOUNTPOINT "/dev/$part" 2>/dev/null | head -1 || true)"
-    if [ -n "$mp" ]; then info "unmounting /dev/$part ($mp)"; umount "/dev/$part" 2>/dev/null || warn "could not unmount /dev/$part"; fi
+    if [ -n "$mp" ]; then
+      info "unmounting /dev/$part ($mp)"
+      umount "/dev/$part" 2>/dev/null || umount -l "/dev/$part" 2>/dev/null || true
+      # Re-check: if it is STILL mounted, fail closed.
+      mp2="$(lsblk -nlo MOUNTPOINT "/dev/$part" 2>/dev/null | head -1 || true)"
+      if [ -n "$mp2" ]; then
+        die_io "could not unmount /dev/$part (still mounted at $mp2). ABORTING before write - refusing to dd against a mounted/busy target. Unmount it manually and re-run."
+      fi
+    fi
   done
 fi
 # dd: 4 MiB blocks, conv=fsync so the data is durable before we touch the GPT. status=progress for feedback.
@@ -220,98 +259,150 @@ runcmd dd if="$IMAGE" of="$TARGET" bs=4M conv=fsync oflag=direct status=progress
 runcmd blockdev --rereadpt "$TARGET" || warn "blockdev --rereadpt failed (kernel may already have it); continuing"
 command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
 
-# ── 2 · repair the GPT backup header (it sits mid-disk because the .raw was content-sized) ─────────────
-echo "===== 2 · repair GPT backup header ====="
+# -- 2 . repair the GPT backup header (it sits mid-disk because the .raw was content-sized) ----------
+echo "===== 2 . repair GPT backup header ====="
 if [ "$RELOCATE_BACKUP" = 1 ]; then
-  # sgdisk -e moves the backup GPT to the very end of the (larger) target and fixes the header's
-  # alternate-LBA pointers. Without this, firmware/tools see a 'GPT backup at wrong location' warning
-  # and the trailing space is unusable.
+  # sgdisk --move-second-header moves the backup GPT to the very end of the (larger) target and fixes
+  # the header's alternate-LBA pointers. Without this, firmware/tools see a 'GPT backup at wrong
+  # location' warning and the trailing space is unusable.
   runcmd sgdisk --move-second-header "$TARGET"
 else
   warn "--keep-backup-gap: leaving the backup GPT mid-disk (firmware may warn; trailing space unusable)."
 fi
 
-# ── 3 · grow the last partition to fill the disk (optional) ────────────────────────────────────────────
-echo "===== 3 · grow last partition ====="
+# -- 3 . grow ONLY the vita-data partition to fill the disk (optional) -------------------------------
+echo "===== 3 . grow vita-data partition ====="
+# The growable persistent partition is vita-data (full-mode layout). On smoke/verity images the LAST
+# partition is root-verity (the dm-verity HASH tree) - growing or resize2fs-ing THAT corrupts it, and
+# the root partition must never be resized either. So we identify the data partition explicitly by its
+# GPT PartitionLabel `vita-data` (preferred) or, failing that, an ext4 filesystem LABEL `vita-data`.
+# If no vita-data partition exists, we SKIP growth entirely (never touch root/verity/any other part).
+#
+# Find the partition NUMBER whose PARTLABEL or LABEL == vita-data on a given device (image or target).
+vita_data_partnum() {
+  # $1 = device to inspect (the freshly-written target, or the image in dry-run). Prints "" if none.
+  local dev="$1" num
+  # 3a) Prefer the GPT partition label. sgdisk -i N reports 'Partition name'.
+  num="$(sgdisk -p "$dev" 2>/dev/null | awk '/^[[:space:]]*[0-9]+/{print $1}' \
+        | while read -r n; do
+            nm="$(sgdisk -i "$n" "$dev" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'.*/\1/p")"
+            if [ "$nm" = "vita-data" ]; then echo "$n"; break; fi
+          done)"
+  if [ -n "$num" ]; then echo "$num"; return 0; fi
+  # 3b) Fall back to the ext4 filesystem LABEL on the actual partition device (target only; needs the
+  #     partition nodes to exist). Map partition number -> device name suffix the same way as below.
+  case "$dev" in
+    *[0-9]) local sep="p" ;;
+    *)      local sep="" ;;
+  esac
+  for n in $(sgdisk -p "$dev" 2>/dev/null | awk '/^[[:space:]]*[0-9]+/{print $1}'); do
+    local pdev="${dev}${sep}${n}"
+    [ -b "$pdev" ] || continue
+    local lbl; lbl="$(lsblk -ndo LABEL "$pdev" 2>/dev/null | head -1 || true)"
+    if [ "$lbl" = "vita-data" ]; then echo "$n"; return 0; fi
+  done
+  echo ""
+}
+
 if [ "$DO_GROW" = 1 ]; then
-  # The Vita layout's LAST partition is the persistent data partition (vita-data). Growing it here is the
-  # simplest portable path; alternatively systemd-repart can grow it on first boot (--no-grow + a repart.d
-  # GrowFileSystem=yes drop-in on the target — see docs/install.md). We grow the PARTITION; the filesystem
-  # is grown only with --grow-fs (repart/first-boot usually handles the FS).
-  # In dry-run nothing was written to the target, so read the partition table from the IMAGE instead (so the
-  # plan still shows which partition WOULD grow); a real run reads it back from the freshly-written target.
+  # In dry-run nothing was written to the target, so inspect the IMAGE instead (so the plan shows what
+  # WOULD grow); a real run reads it back from the freshly-written target. The image has no partition
+  # nodes, so the ext4-LABEL fallback only applies on a real run against the target.
   GROW_SRC="$TARGET"; [ "$DRY_RUN" = 1 ] && GROW_SRC="$IMAGE"
-  LAST_PARTNUM="$(sgdisk -p "$GROW_SRC" 2>/dev/null | awk '/^[[:space:]]*[0-9]+/{n=$1} END{print n}')"
-  if [ -z "${LAST_PARTNUM:-}" ]; then
-    warn "could not determine the last partition number from sgdisk -p $GROW_SRC; skipping grow."
+  DATA_PARTNUM="$(vita_data_partnum "$GROW_SRC")"
+  if [ -z "${DATA_PARTNUM:-}" ]; then
+    warn "no partition labeled 'vita-data' found on $GROW_SRC - SKIPPING growth."
+    warn "  (This is expected for smoke/verity images whose last partition is root-verity; the verity"
+    warn "   HASH partition and the root partition are NEVER grown. Use a full-mode image, or rely on"
+    warn "   systemd-repart first-boot growth.)"
   else
-    info "last partition = #$LAST_PARTNUM (expected: vita-data)"
+    info "vita-data partition = #$DATA_PARTNUM"
     # delete+create does NOT preserve type/GUID/name, so capture them first and restore them on the new
-    # (larger) partition. Parse a SINGLE `sgdisk -i` dump (its field labels are stable across sgdisk versions).
+    # (larger) partition. Parse a SINGLE `sgdisk -i` dump (its field labels are stable across versions).
     # End at 0 = the largest possible last sector (sgdisk leaves room for the relocated backup GPT).
-    P_INFO="$(sgdisk -i "$LAST_PARTNUM" "$GROW_SRC" 2>/dev/null || true)"
+    P_INFO="$(sgdisk -i "$DATA_PARTNUM" "$GROW_SRC" 2>/dev/null || true)"
     P_TYPE="$(printf '%s\n' "$P_INFO" | sed -n 's/^Partition GUID code: \([0-9A-Fa-f-]*\).*/\1/p')"
     P_GUID="$(printf '%s\n' "$P_INFO" | sed -n 's/^Partition unique GUID: \([0-9A-Fa-f-]*\).*/\1/p')"
     P_START="$(printf '%s\n' "$P_INFO" | sed -n 's/^First sector: \([0-9]*\).*/\1/p')"
     P_NAME="$(printf '%s\n' "$P_INFO" | sed -n "s/^Partition name: '\(.*\)'.*/\1/p")"
     info "preserving type=${P_TYPE:-?} guid=${P_GUID:-?} name='${P_NAME:-}' start=${P_START:-?}"
-    [ -n "$P_START" ] || { warn "could not read the last partition's start sector; skipping grow."; P_START=""; }
-    if [ -n "$P_START" ]; then
+    if [ -z "$P_START" ]; then
+      warn "could not read the vita-data partition's start sector; skipping grow (nothing touched)."
+    else
       # Delete and recreate from the SAME start sector to the disk end (0 = max), restoring type/name/GUID.
       runcmd sgdisk \
-        --delete="$LAST_PARTNUM" \
-        --new="$LAST_PARTNUM:$P_START:0" \
-        ${P_TYPE:+--typecode="$LAST_PARTNUM:$P_TYPE"} \
-        ${P_GUID:+--partition-guid="$LAST_PARTNUM:$P_GUID"} \
-        ${P_NAME:+--change-name="$LAST_PARTNUM:$P_NAME"} \
+        --delete="$DATA_PARTNUM" \
+        --new="$DATA_PARTNUM:$P_START:0" \
+        ${P_TYPE:+--typecode="$DATA_PARTNUM:$P_TYPE"} \
+        ${P_GUID:+--partition-guid="$DATA_PARTNUM:$P_GUID"} \
+        ${P_NAME:+--change-name="$DATA_PARTNUM:$P_NAME"} \
         "$TARGET"
-    fi
-    runcmd blockdev --rereadpt "$TARGET" || true
-    command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
-    if [ "$DO_GROW_FS" = 1 ]; then
-      # Partition device naming: /dev/sda3, but /dev/nvme0n1p3 and /dev/loop0p3 use a 'p' separator.
-      case "$TGT_NAME" in
-        *[0-9]) PART_DEV="${TARGET}p${LAST_PARTNUM}" ;;
-        *)      PART_DEV="${TARGET}${LAST_PARTNUM}" ;;
-      esac
-      info "growing filesystem on $PART_DEV (ext4)"
-      runcmd e2fsck -fy "$PART_DEV" || warn "e2fsck reported issues (continuing)"
-      runcmd resize2fs "$PART_DEV"
-    else
-      info "(filesystem NOT grown; pass --grow-fs to resize2fs now, or let systemd-repart grow it on first boot)"
+      runcmd blockdev --rereadpt "$TARGET" || true
+      command -v partprobe >/dev/null 2>&1 && runcmd partprobe "$TARGET" || true
+      if [ "$DO_GROW_FS" = 1 ]; then
+        # Partition device naming: /dev/sda3, but /dev/nvme0n1p3 and /dev/loop0p3 use a 'p' separator.
+        case "$TGT_NAME" in
+          *[0-9]) PART_DEV="${TARGET}p${DATA_PARTNUM}" ;;
+          *)      PART_DEV="${TARGET}${DATA_PARTNUM}" ;;
+        esac
+        # Defense in depth: only resize2fs an ext4 vita-data partition. Refuse anything else.
+        if [ "$DRY_RUN" != 1 ]; then
+          PFS="$(lsblk -ndo FSTYPE "$PART_DEV" 2>/dev/null | head -1 || true)"
+          PLB="$(lsblk -ndo LABEL  "$PART_DEV" 2>/dev/null | head -1 || true)"
+          if [ "$PFS" != "ext4" ]; then
+            die_io "refusing to resize2fs $PART_DEV: FSTYPE='$PFS' is not ext4 (partition grown, FS left untouched)."
+          fi
+          info "growing filesystem on $PART_DEV (ext4, label='${PLB:-}')"
+        else
+          info "growing filesystem on $PART_DEV (ext4)"
+        fi
+        runcmd e2fsck -fy "$PART_DEV" || warn "e2fsck reported issues (continuing to resize2fs)"
+        runcmd resize2fs "$PART_DEV"
+      else
+        info "(filesystem NOT grown; pass --grow-fs to resize2fs now, or let systemd-repart grow it on first boot)"
+      fi
     fi
   fi
 else
-  info "--no-grow: leaving the last partition at its image size (systemd-repart can grow it on first boot)."
+  info "--no-grow: leaving vita-data at its image size (systemd-repart can grow it on first boot)."
 fi
 
-# ── 4 · verify ────────────────────────────────────────────────────────────────────────────────────────
-echo "===== 4 · verify ====="
+# -- 4 . verify --------------------------------------------------------------------------------------
+echo "===== 4 . verify ====="
 if [ "$DRY_RUN" = 1 ]; then
-  echo "    \$ sgdisk -v $TARGET   (would run; dry-run)"
+  echo "    \$ sgdisk -v $TARGET   (would run; dry-run; FATAL on failure)"
   echo "    \$ sfdisk -l $TARGET   (would run; dry-run)"
   echo
   echo "RESULT: DRY-RUN OK (no writes performed; plan above is what a real run would do)"
   exit 0
 fi
-echo "  --- sgdisk -v (GPT integrity) ---"
-sgdisk -v "$TARGET" | sed 's/^/  /' || warn "sgdisk -v reported problems"
+# GPT integrity check is FATAL: if sgdisk -v reports problems we fail closed (do NOT print PASS).
+echo "  --- sgdisk -v (GPT integrity; FATAL on failure) ---"
+if ! sgdisk -v "$TARGET" 2>&1 | sed 's/^/  /'; then
+  die_io "sgdisk -v reported GPT integrity problems on $TARGET - failing closed."
+fi
+# `sgdisk -v` prints findings but its exit status is the real signal; the pipe above masks it, so run
+# it once more capturing the status explicitly to be certain.
+if ! sgdisk -v "$TARGET" >/dev/null 2>&1; then
+  die_io "sgdisk -v exited non-zero (GPT integrity problems) on $TARGET - failing closed."
+fi
 echo "  --- sfdisk -l (final partition table) ---"
 sfdisk -l "$TARGET" | sed 's/^/  /'
 echo "  --- lsblk ---"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL "$TARGET" 2>/dev/null | sed 's/^/  /' || true
 
-# Acceptance: target must now have an ESP + at least one root partition (the Vita layout).
+# Acceptance: target must now have an ESP + at least one root partition (the Vita layout) AND a clean
+# GPT (verified fatally above).
 PARTS="$(sfdisk -l "$TARGET" 2>/dev/null | grep -cE "^$TARGET" || true)"
 HAS_ESP="$(sfdisk -d "$TARGET" 2>/dev/null | grep -c 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B' || true)"
 if [ "${PARTS:-0}" -ge 2 ] && [ "${HAS_ESP:-0}" -ge 1 ]; then
   echo
-  echo "RESULT: PASS ($PARTS partitions written incl. an EFI System Partition)"
+  echo "RESULT: PASS ($PARTS partitions written incl. an EFI System Partition; GPT integrity verified)"
   echo "  NEXT: move the disk to the target machine, then enroll the Vita Secure Boot key in its UEFI"
   echo "        firmware setup (manual, one-time). See docs/install.md."
   exit 0
 else
   echo
-  echo "RESULT: FAIL (expected ≥2 partitions incl. an ESP; got parts=$PARTS esp=$HAS_ESP) — image may be wrong"
+  echo "RESULT: FAIL (expected >=2 partitions incl. an ESP; got parts=$PARTS esp=$HAS_ESP) - image may be wrong"
   exit 3
 fi
