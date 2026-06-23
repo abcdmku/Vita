@@ -96,24 +96,25 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for VITA-PREVIEW (the LAST marker main.ts prints — after VITA-TS + VITA-EVAL) — its presence implies the
-  # whole on-device chain ran: Deno runtime (P1-030) -> evaluator (P1-033) -> preview diff (P1-034).
+  # Wait for VITA-EXPLAIN (the LAST marker main.ts prints — after TS/EVAL/PREVIEW) — its presence implies the whole
+  # on-device chain ran: Deno runtime (P1-030) -> evaluator (P1-033) -> preview diff (P1-034) -> explain (P1-037).
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-PREVIEW:' "$log" 2>/dev/null; then ok=1; echo "VITA-PREVIEW marker found at ~${i}s"; break; fi
+    if grep -qa 'VITA-EXPLAIN:' "$log" 2>/dev/null; then ok=1; echo "VITA-EXPLAIN marker found at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv noop
+  local ts ev pv ex
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
-  pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); noop=$(grep -a 'VITA-PREVIEW-NOOP:' "$log" | tail -1)
-  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $noop"
-  # PASS requires the runtime (VITA-TS, P1-030) + evaluator (VITA-EVAL, P1-033) + preview diff (VITA-PREVIEW, P1-034).
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ]; then
-    echo "RESULT: PASS (Deno runtime + config→plan evaluator + config-change preview all executed on-device)"
+  pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
+  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $ex"
+  # PASS requires runtime (VITA-TS) + evaluator (VITA-EVAL) + preview (VITA-PREVIEW) + explain (VITA-EXPLAIN);
+  # implicitly confirms the fail-closed safe-normalize guardian (P1-036) doesn't break the runtime.
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ]; then
+    echo "RESULT: PASS (Deno runtime + evaluator + preview + explain all executed on-device)"
   else
-    echo "RESULT: FAIL (missing VITA-TS / VITA-EVAL / VITA-PREVIEW — service likely failed)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|deno' | tail -12
+    echo "RESULT: FAIL (missing VITA-TS / VITA-EVAL / VITA-PREVIEW / VITA-EXPLAIN — service likely failed)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|vita-explain|deno' | tail -12
     return 1
   fi
 }
