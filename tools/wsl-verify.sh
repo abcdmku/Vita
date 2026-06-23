@@ -96,28 +96,30 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for a COMMITTED apply (the LAST marker — order ...->CONNECT->STATE->APPLY). Its presence proves the full
-  # on-device control-plane chain incl. the unprivileged runtime driving a real agentd APPLY (P1-035 S1 + P1-038 S2 +
-  # P1-039 S3). 'outcome=committed' (not just VITA-APPLY:) so a failed/rejected-only apply correctly times out -> FAIL.
+  # Wait for VITA-PDS (the LAST marker — main() order ...APPLY -> CAPSULE -> PDS). Its presence implies the WHOLE
+  # on-device control-plane ran: eval/preview/explain (P1-033/34/37) + connect/state read (P1-035/38) + APPLY
+  # commit&reject (P1-039) + capsule.registry apply (P1-041) + PDS read (P1-040). A failed tail shows *-ERROR -> FAIL.
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-APPLY: outcome=committed' "$log" 2>/dev/null; then ok=1; echo "VITA-APPLY committed at ~${i}s"; break; fi
+    if grep -qa 'VITA-PDS:' "$log" 2>/dev/null; then ok=1; echo "VITA-PDS (last marker) at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn st ac ar
+  local ts ev pv ex cn st ac ar cc cr pds
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
   ac=$(grep -a 'VITA-APPLY: outcome=committed' "$log" | tail -1); ar=$(grep -a 'VITA-APPLY: outcome=rejected' "$log" | tail -1)
-  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar"; do echo "  $m"; done
-  # PASS = the whole chain + a COMMITTED apply AND a REJECTED apply (proves agentd applies a benign plan AND fails
-  # closed on an invalid one — the unprivileged->privileged mutation boundary works correctly).
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ar" ]; then
-    echo "RESULT: PASS (full control-plane on-device: evaluate->preview->explain->connect->read->APPLY commit + reject)"
+  cc=$(grep -a 'VITA-CAPSULE: outcome=committed' "$log" | tail -1); cr=$(grep -a 'VITA-CAPSULE: outcome=rejected' "$log" | tail -1)
+  pds=$(grep -a 'VITA-PDS:' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cc" "$cr" "$pds"; do echo "  $m"; done
+  # PASS = full chain: runtime+evaluator+preview+explain+connect+state read + APPLY commit&reject + CAPSULE
+  # commit&reject (P1-041) + PDS read (P1-040) — the node proposes, the privileged agent validates+applies, fail-closed.
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ]; then
+    echo "RESULT: PASS (full control-plane on-device: eval->preview->explain->connect->read->APPLY+CAPSULE commit&reject->PDS)"
   else
-    echo "RESULT: FAIL (missing a marker above; failures show *-ERROR or a missing committed/rejected apply)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply)|agentd|deno' | tail -18
+    echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -20
     return 1
   fi
 }

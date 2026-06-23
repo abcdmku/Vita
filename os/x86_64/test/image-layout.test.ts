@@ -263,9 +263,11 @@ type ImageLayoutModule = {
 const imageLayoutModuleUrl = new URL("../image-layout.mjs", import.meta.url);
 const imageConfigUrl = new URL("../image.conf", import.meta.url);
 const repartDataUrl = new URL("../repart-verity/40-data.conf", import.meta.url);
-const varMountUnitUrl = new URL("../smoke-overlay/usr/lib/systemd/system/var.mount", import.meta.url);
+// var.mount moved to the VERITY-ONLY overlay (it must not exist on plain-smoke images — a failed mount there
+// cascades through RequiresMountsFor=/var/... to cancel vita-agentd). It ships via --extra-tree only when VITA_VERITY=1.
+const varMountUnitUrl = new URL("../verity-overlay/usr/lib/systemd/system/var.mount", import.meta.url);
 const varMountDropInUrl = new URL(
-  "../smoke-overlay/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf",
+  "../verity-overlay/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf",
   import.meta.url,
 );
 
