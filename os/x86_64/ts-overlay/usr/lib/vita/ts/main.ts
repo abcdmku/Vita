@@ -14,9 +14,19 @@ import { evaluateNodeConfig } from "./vita/evaluate.ts";
 import { diffTransactionPlans, TransactionPlanDiffError } from "./vita/transaction-plan-diff.ts";
 import { explainTransactionPlanChange } from "./vita/transaction-plan-explain.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
-import { createAgentClient } from "./vita/agent-client.ts";
+import { createAgentClient, isAgentClientError } from "./vita/agent-client.ts";
+import { applyNodeConfig } from "./vita/apply-node-config.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
-import { createDenoUnixSocketAgentTransport } from "./vita/unix-socket-transport.ts";
+import {
+  createDenoUnixSocketAgentTransport,
+  createDenoUnixSocketApplyAgentTransport,
+} from "./vita/unix-socket-transport.ts";
+import type { AgentApplyPlan, AgentApplyResult, AgentTransport } from "./vita/agent-client.ts";
+import type {
+  ApplyNodeApplyResult,
+  ApplyNodeConfigResult,
+  ApplyNodeTransport,
+} from "./vita/apply-node-config.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
 const TS_MARKER = "VITA-TS";
@@ -29,7 +39,14 @@ const EXPLAIN_MARKER = "VITA-EXPLAIN";
 const CONNECT_MARKER = "VITA-CONNECT";
 const CONNECT_ERROR_MARKER = "VITA-CONNECT-ERROR";
 const STATE_ERROR_MARKER = "VITA-STATE-ERROR";
+const APPLY_MARKER = "VITA-APPLY";
+const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
+const AGENTD_BASE_URL = "http://agentd";
+const APPLY_JSON_HEADERS = Object.freeze({
+  Accept: "application/json",
+  "Content-Type": "application/json",
+});
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -61,6 +78,17 @@ const INVALID_CONFIG = Object.freeze({
     }),
   }),
 });
+
+const FORCED_REJECT_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: "vita.invalid.capability",
+      request: Object.freeze({
+        desired: true,
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
 
 // Config-change PREVIEW (P1-034): evaluate a CURRENT and a DESIRED config via the
 // real evaluator, then diff the two TransactionPlans by capability. The CURRENT
@@ -221,7 +249,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     socketPath: AGENTD_SOCKET_PATH,
   });
   const client = createAgentClient({
-    baseUrl: "http://agentd",
+    baseUrl: AGENTD_BASE_URL,
     transport,
   });
 
@@ -236,15 +264,137 @@ async function emitAgentdConnectMarker(): Promise<void> {
   } catch {
     emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   const state = await readAgentStateSummary(client);
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
+    await emitApplyMarkers(state.state.hostname);
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
   }
+}
+
+async function emitApplyMarkers(currentHostname: string): Promise<void> {
+  const agentTransport = createDenoUnixSocketApplyAgentTransport({
+    socketPath: AGENTD_SOCKET_PATH,
+  });
+  const result = await applyNodeConfig(
+    hostnameConfig(currentHostname),
+    CAPABILITY_REGISTRY,
+    createApplyNodeTransport(agentTransport),
+  );
+
+  emit(formatApplyConfigMarker(result));
+
+  if (!result.ok && result.stage === "transport") {
+    return;
+  }
+
+  await emitForcedRejectMarker(agentTransport);
+}
+
+function hostnameConfig(currentHostname: string): unknown {
+  return {
+    "hostname.set": {
+      desired: currentHostname,
+    },
+  };
+}
+
+function createApplyNodeTransport(agentTransport: AgentTransport): ApplyNodeTransport {
+  return async (method, path, body) => {
+    const response = await agentTransport(new URL(path, AGENTD_BASE_URL).toString(), {
+      body: JSON.stringify(body),
+      headers: APPLY_JSON_HEADERS,
+      method,
+    });
+
+    return {
+      body: parseJsonOrText(await response.text()),
+      status: response.status,
+    };
+  };
+}
+
+function parseJsonOrText(text: string): unknown {
+  if (text.length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function formatApplyConfigMarker(result: ApplyNodeConfigResult): string {
+  if (result.ok) {
+    return formatCommittedApplyMarker(result.applyResult);
+  }
+
+  if (result.stage === "apply" && result.applyResult?.outcome === "rejected") {
+    return `${APPLY_MARKER}: outcome=rejected reason=${applyResultReason(result.applyResult, result.reason)} status=OK`;
+  }
+
+  return `${APPLY_ERROR_MARKER}: status=FAILSAFE`;
+}
+
+function formatCommittedApplyMarker(result: ApplyNodeApplyResult): string {
+  return (
+    `${APPLY_MARKER}: ` +
+    `outcome=${result.outcome} ` +
+    `applied=${result.applied.length} ` +
+    `rolledBack=${result.rolledBack.length} ` +
+    `audit=${result.auditUnrecorded === true ? "unrecorded" : "recorded"} ` +
+    "status=OK"
+  );
+}
+
+async function emitForcedRejectMarker(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const result = await client.apply(FORCED_REJECT_PLAN);
+
+    if (result.outcome === "rejected") {
+      emit(`${APPLY_MARKER}: outcome=rejected reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${APPLY_MARKER}: outcome=rejected reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+function applyResultReason(result: ApplyNodeApplyResult, fallback: string): string {
+  return markerToken(result.error?.code ?? fallback);
+}
+
+function agentApplyResultReason(result: AgentApplyResult): string {
+  return markerToken(result.error?.code ?? "transaction_rejected");
+}
+
+function markerToken(value: string): string {
+  const token = value.replace(/[^A-Za-z0-9_.-]+/gu, "_");
+  return token.length === 0 ? "unknown" : token;
 }
 
 function stableStringify(value: unknown): string {
