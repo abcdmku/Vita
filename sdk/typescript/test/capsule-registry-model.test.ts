@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { validateCapsuleRegistry } from "../src/capsule-registry-model.ts";
+import {
+  buildCapsuleRegistryApplyRequest,
+  buildCapsuleRegistryConfig,
+  validateCapsuleRegistry,
+  validateCapsuleRegistryApplyRequest,
+} from "../src/capsule-registry-model.ts";
 import type {
   CapsuleEntry,
   CapsuleRegistry,
@@ -25,6 +30,29 @@ test("a valid installed-capsule registry validates", () => {
   assert.equal(result.value, result.registry);
 });
 
+test("the builder emits the agent capsule.registry apply request shape", () => {
+  const registry = validRegistry();
+  const request = buildCapsuleRegistryApplyRequest(registry);
+  const config = buildCapsuleRegistryConfig(registry);
+
+  if (!request.ok) {
+    assert.fail(`expected capsule apply request to build: ${JSON.stringify(request.errors)}`);
+  }
+  if (!config.ok) {
+    assert.fail(`expected capsule config to build: ${JSON.stringify(config.errors)}`);
+  }
+
+  assert.deepEqual(request.request, {
+    desired: {
+      capsules: registry,
+    },
+  });
+  assert.deepEqual(config.config, {
+    "capsule.registry": request.request,
+  });
+  assert.equal(config.value, config.config);
+});
+
 test("malformed id, version, SRI, and state are rejected with precise paths", () => {
   const registry = mutableRegistry();
   const entry = registry[0];
@@ -33,7 +61,7 @@ test("malformed id, version, SRI, and state are rejected with precise paths", ()
     assert.fail("expected capsule registry fixture");
   }
 
-  entry.id = "com..vita";
+  entry.id = "com.vita/app";
   entry.version = "";
   entry.integrity = "sha256-AAAA";
   entry.state = "enabled";
@@ -59,10 +87,57 @@ test("duplicate capsule ids are rejected", () => {
     version: "1.2.4",
   });
 
-  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(registry)), ["2/id"]);
+  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(registry)), ["2"]);
 });
 
-test("embedded capsule bytes are rejected", () => {
+test("embedded secrets and embedded capsule bytes are rejected", () => {
+  const secretRegistry = mutableRegistry();
+  const secretEntry = secretRegistry[0];
+
+  if (secretEntry === undefined) {
+    assert.fail("expected capsule registry fixture");
+  }
+
+  secretEntry.version = "private_key";
+  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(secretRegistry)), ["0/version"]);
+
+  const embeddedRegistry = mutableRegistry();
+  const embeddedEntry = embeddedRegistry[0];
+
+  if (embeddedEntry === undefined) {
+    assert.fail("expected capsule registry fixture");
+  }
+
+  embeddedEntry.capsuleBytes = "data:application/vnd.vita.capsule;base64,AAAA";
+
+  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(embeddedRegistry)), ["0/capsuleBytes"]);
+});
+
+test("unknown fields are rejected at every request level", () => {
+  assert.deepEqual(
+    rejectedPaths(
+      validateCapsuleRegistryApplyRequest({
+        desired: {
+          capsules: validRegistry(),
+        },
+        extra: true,
+      }),
+    ),
+    ["extra"],
+  );
+
+  assert.deepEqual(
+    rejectedPaths(
+      validateCapsuleRegistryApplyRequest({
+        desired: {
+          capsules: validRegistry(),
+          extra: true,
+        },
+      }),
+    ),
+    ["desired/extra"],
+  );
+
   const registry = mutableRegistry();
   const entry = registry[0];
 
@@ -70,9 +145,9 @@ test("embedded capsule bytes are rejected", () => {
     assert.fail("expected capsule registry fixture");
   }
 
-  entry.capsuleBytes = "data:application/vnd.vita.capsule;base64,AAAA";
+  entry.reload = true;
 
-  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(registry)), ["0/capsuleBytes"]);
+  assert.deepEqual(rejectedPaths(validateCapsuleRegistry(registry)), ["0/reload"]);
 });
 
 test("missing required fields are rejected fail-closed", () => {
@@ -150,18 +225,8 @@ test("hostile and partial input fails closed through safeNormalize without throw
 
 function validRegistry(): CapsuleRegistry {
   return [
-    {
-      id: "com.vita.notes",
-      integrity: SHA256_EMPTY,
-      state: "installed",
-      version: "1.2.3",
-    },
-    {
-      id: "capsule:local-search",
-      integrity: SHA384_ZERO,
-      state: "disabled",
-      version: "2026.06.20",
-    },
+    capsule("com.vita.notes", "1.2.3", SHA256_EMPTY, "installed"),
+    capsule("capsule:local-search", "2026.06.20", SHA384_ZERO, "disabled"),
   ];
 }
 
@@ -174,12 +239,31 @@ function mutableRegistry(): MutableCapsuleEntryInput[] {
   }));
 }
 
-function rejectedPaths(result: CapsuleRegistryValidationResult): readonly string[] {
+function capsule(
+  id: string,
+  version: string,
+  integrity: CapsuleEntry["integrity"],
+  state: CapsuleEntry["state"],
+): CapsuleEntry {
+  return {
+    id,
+    integrity,
+    state,
+    version,
+  };
+}
+
+function rejectedPaths(
+  result:
+    | CapsuleRegistryValidationResult
+    | ReturnType<typeof validateCapsuleRegistryApplyRequest>
+    | ReturnType<typeof buildCapsuleRegistryConfig>,
+): readonly string[] {
   if (result.ok) {
     assert.fail(`expected validation to fail: ${JSON.stringify(result.value)}`);
   }
 
-  return result.errors.map((error) => error.path).sort();
+  return [...new Set(result.errors.map((error) => error.path))].sort();
 }
 
 function assertRejected(value: unknown): void {

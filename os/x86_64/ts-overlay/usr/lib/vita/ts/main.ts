@@ -16,6 +16,7 @@ import { explainTransactionPlanChange } from "./vita/transaction-plan-explain.ts
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import { createAgentClient, isAgentClientError } from "./vita/agent-client.ts";
 import { applyNodeConfig } from "./vita/apply-node-config.ts";
+import { buildCapsuleRegistryConfig } from "./vita/capsule-registry-model.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
 import {
   createDenoUnixSocketAgentTransport,
@@ -27,6 +28,7 @@ import type {
   ApplyNodeConfigResult,
   ApplyNodeTransport,
 } from "./vita/apply-node-config.ts";
+import type { CapsuleEntry } from "./vita/capsule-registry-model.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
 const TS_MARKER = "VITA-TS";
@@ -41,6 +43,8 @@ const CONNECT_ERROR_MARKER = "VITA-CONNECT-ERROR";
 const STATE_ERROR_MARKER = "VITA-STATE-ERROR";
 const APPLY_MARKER = "VITA-APPLY";
 const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
+const CAPSULE_MARKER = "VITA-CAPSULE";
+const CAPSULE_ERROR_MARKER = "VITA-CAPSULE-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const APPLY_JSON_HEADERS = Object.freeze({
@@ -79,12 +83,39 @@ const INVALID_CONFIG = Object.freeze({
   }),
 });
 
+const TEST_CAPSULE_ENTRY = Object.freeze({
+  id: "local.test.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
+
 const FORCED_REJECT_PLAN = Object.freeze({
   operations: Object.freeze([
     Object.freeze({
       capability: "vita.invalid.capability",
       request: Object.freeze({
         desired: true,
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_INVALID_CAPSULE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: "capsule.registry",
+      request: Object.freeze({
+        desired: Object.freeze({
+          capsules: Object.freeze([
+            Object.freeze({
+              id: TEST_CAPSULE_ENTRY.id,
+              integrity: "sha256-AAAA",
+              state: TEST_CAPSULE_ENTRY.state,
+              version: TEST_CAPSULE_ENTRY.version,
+            }),
+          ]),
+        }),
       }),
     }),
   ]),
@@ -265,23 +296,29 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   const state = await readAgentStateSummary(client);
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
-    await emitApplyMarkers(state.state.hostname);
+    const agentTransport = createDenoUnixSocketApplyAgentTransport({
+      socketPath: AGENTD_SOCKET_PATH,
+    });
+    await emitApplyMarkers(state.state.hostname, agentTransport);
+    await emitCapsuleMarkers(agentTransport);
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
   }
 }
 
-async function emitApplyMarkers(currentHostname: string): Promise<void> {
-  const agentTransport = createDenoUnixSocketApplyAgentTransport({
-    socketPath: AGENTD_SOCKET_PATH,
-  });
+async function emitApplyMarkers(
+  currentHostname: string,
+  agentTransport: AgentTransport,
+): Promise<void> {
   const result = await applyNodeConfig(
     hostnameConfig(currentHostname),
     CAPABILITY_REGISTRY,
@@ -295,6 +332,29 @@ async function emitApplyMarkers(currentHostname: string): Promise<void> {
   }
 
   await emitForcedRejectMarker(agentTransport);
+}
+
+async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
+  const config = buildCapsuleRegistryConfig(Object.freeze([TEST_CAPSULE_ENTRY]));
+
+  if (!config.ok) {
+    emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  const result = await applyNodeConfig(
+    config.config,
+    CAPABILITY_REGISTRY,
+    createApplyNodeTransport(agentTransport),
+  );
+
+  if (!result.ok) {
+    emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  emit(formatCommittedCapsuleMarker(TEST_CAPSULE_ENTRY, result.applyResult));
+  await emitForcedCapsuleRejectMarker(agentTransport);
 }
 
 function hostnameConfig(currentHostname: string): unknown {
@@ -355,6 +415,20 @@ function formatCommittedApplyMarker(result: ApplyNodeApplyResult): string {
   );
 }
 
+function formatCommittedCapsuleMarker(
+  entry: CapsuleEntry,
+  result: ApplyNodeApplyResult,
+): string {
+  return (
+    `${CAPSULE_MARKER}: ` +
+    `id=${entry.id} ` +
+    `ver=${entry.version} ` +
+    `state=${entry.state} ` +
+    `outcome=${result.outcome} ` +
+    "status=OK"
+  );
+}
+
 async function emitForcedRejectMarker(agentTransport: AgentTransport): Promise<void> {
   const client = createAgentClient({
     baseUrl: AGENTD_BASE_URL,
@@ -382,6 +456,35 @@ async function emitForcedRejectMarker(agentTransport: AgentTransport): Promise<v
   }
 
   emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const result = await client.apply(FORCED_INVALID_CAPSULE_PLAN);
+
+    if (result.outcome === "rejected") {
+      emit(`${CAPSULE_MARKER}: outcome=rejected reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_MARKER}: outcome=rejected reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 function applyResultReason(result: ApplyNodeApplyResult, fallback: string): string {
