@@ -81,9 +81,22 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     candidates; Opus judge picked B (collision-safe naming, manifest-only composition, transport coverage). ADR-0009
     cond.2 (cgroup-limit enforcement) — the DynamicUser uid proves real-kernel application; an explicit MemoryMax
     readback is deferred until a slice RELIES on resource caps (per the condition's wording; the test capsule doesn't).
-    **NEXT W4 slices: artifact fetch/verify-by-SRI, persistent volumes (resolve the per-capsule user/group), then
-    OCI/WASM runtimes (new staging+sandbox each).** Filed hardening: SO_PEERCRED agentd socket auth (now higher-impact
-    since execute landed). [safe-normalize direct node:util — DONE in P1-036, not pending.]
+    **WAVE 4 FUNCTIONALLY COMPLETE + BOOT-VERIFIED (2026-06-23): the node runs the full capsule lifecycle on-device.**
+    One smoke boot proves the whole chain: P1-045 FETCH (SRI verified=OK) → P1-044 EXECUTE (hardened transient unit,
+    health=OK, no FAILSAFE) → P1-047 HEALTH (supervised via /state, status=OK) → P1-046 VOLUME (per-capsule persistent
+    state via systemd `StateDirectory=`, mounted=OK + capsule write succeeds) → P1-048 PEERCRED (unix peer auth) →
+    P1-050 unix-ONLY transport (closed the unauthenticated loopback-TCP bypass). 6/7 slices done+verified on main.
+    KEY DEBUG WIN: the volume bug took 3 attempts — review+unit-tests PASSED but the BOOT caught a runtime FAILSAFE;
+    root cause = a DynamicUser can't write a manually-chowned/group dir; FIX = systemd `StateDirectory=` (auto-chowns
+    persistent /var/lib state to the transient uid). I reverted the broken merge to keep main green, then drove it to
+    root cause + booted the branch before re-merging. Volume reboot-PERSISTENCE rides the same persistent /var as PDS
+    (cursor=42 survival already proves the partition persists) — a dedicated verity volume-2-boot is confirmable but
+    mechanistically covered. REMAINING: **P1-051 (real zstd decode + extraction DoS caps + traversal tests) — BLOCKED
+    on vendoring `klauspost/compress` (orchestrator dep-bootstrap); the .tar.zst bundle is plain-tar today (works, SRI
+    covers it).** Minor: the transport stale-socket test fails under Docker-as-root (env artifact, passes via the real
+    socket on boot). Filed hardening SO_PEERCRED = DONE (P1-048). safe-normalize direct node:util = DONE (P1-036).
+    NEXT FRONTIERS: P1-051 dep-vendoring; then OCI/WASM capsule runtimes (new staging+sandbox each) OR the next spec
+    phase. See [[vita-verification-pipeline]] for the host-verify/go-in-docker/Windows-acceptance lessons banked here.
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
