@@ -303,11 +303,17 @@ flipped, SAME enrolled vars) → NO kernel + firmware `BdsDxe: ... Access Denied
 (already in sb_has_reject). (3) UKI lives at /EFI/BOOT/BOOTX64.EFI; harness extraction bug was case-sensitive
 `-name '*.efi'` vs `BOOTX64.EFI` → use `-iname`. **Committed so far:** VITA_SECURE_BOOT=1 toggle, .secboot/blank-vars
 guards, KVM→TCG fallback, the SB-state-probe witness + committed 120000 enablement symlink, gitignored test
-keystore (-days, no openssl>=3.2 dep), the 4 adversarial must-fixes. **NEXT (step 4a finish):** rewrite secboot()
-+ bootQemu around the PROVEN virt-fw-vars flow (drop auto-enroll + boot1/boot2; single enforcing boot off enrolled
-vars; -iname/BOOTX64 extraction; positive = boots + the negatives-rejected-on-identical-vars contrast is the proof,
-not the flaky in-guest witness), re-run the matrix to GREEN, then R3 reviewer + merge. Secure Boot SIGNING with the
-owner's REAL keys (vs this TEST pair) + RAUC bundle signing + N-of-M recovery (step 4b–d) still need owner keys (§16).
+keystore (-days, no openssl>=3.2 dep), the 4 adversarial must-fixes.
+
+**STEP 4(a) — DONE + MERGED to main (merge 5451562, P1-027).** Harness rewritten to the proven virt-fw-vars flow
+(offline PK=KEK=db enroll; single enforcing POS boot; N1/N2/N3+CTRLMS boot in PARALLEL; -iname/BOOTX64 extraction).
+Independent verification: `wsl-verify secboot` GREEN twice (POS boots; unsigned/tampered/wrong-key/CTRLMS all
+rejected). R3 reviewer (Codex gpt-5.5 xhigh): round-1 REVISE → fixed 4 blockers (CTRLMS-required not skip-pass;
+build-exit/PIPESTATUS guard vs stale-disk masquerade; probe via /bin/bash; governance moved off the code branch
+to main) → round-2 APPROVE. The owner provided their REAL SB cert (staged on the host at /home/borg/vita-keys/,
+option (b) autonomous signing — see [[vita-owner-secureboot-cert]]); it swaps in for the TEST key at 4(b).
+**NEXT:** step 2 (mkosi.repart verity defs → verity'd root), step 3 (A/B + RAUC bundle), then step 4(b) real-key
+SB signing + RAUC bundle signing + N-of-M recovery (4b–d). RAUC + recovery still need owner keys (§16).
 `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
