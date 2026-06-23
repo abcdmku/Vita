@@ -467,7 +467,7 @@ test("persistent data partition is explicitly mounted as /var by label", async (
     what: "/dev/disk/by-label/vita-data",
     where: "/var",
     type: "ext4",
-    options: ["x-systemd.growfs"],
+    options: ["nofail", "x-systemd.device-timeout=5s", "x-systemd.growfs"],
     defaultDependencies: false,
     before: ["local-fs.target", "umount.target"],
     conflicts: ["umount.target"],
@@ -493,15 +493,19 @@ test("persistent data partition is explicitly mounted as /var by label", async (
   assert.match(unitText, /^DefaultDependencies=no$/mu);
   assert.match(unitText, /^Before=local-fs\.target umount\.target$/mu);
   assert.match(unitText, /^Conflicts=umount\.target$/mu);
+  // var.mount is verity-only + must SKIP (not fail) when the device is absent, else RequiresMountsFor=/var/...
+  // dependents (vita-agentd's StateDirectory) get cancelled — so the device condition is load-bearing.
+  assert.match(unitText, /^ConditionPathExists=\/dev\/disk\/by-label\/vita-data$/mu);
   assert.match(unitText, /^What=\/dev\/disk\/by-label\/vita-data$/mu);
   assert.match(unitText, /^Where=\/var$/mu);
   assert.match(unitText, /^Type=ext4$/mu);
-  assert.match(unitText, /^Options=x-systemd\.growfs$/mu);
+  assert.match(unitText, /^Options=nofail,x-systemd\.device-timeout=5s,x-systemd\.growfs$/mu);
   assert.doesNotMatch(unitText, /systemd\.volatile/u);
 
   const dropInText = await readFile(varMountDropInUrl, "utf8");
   assert.match(dropInText, /^\[Unit\]$/mu);
-  assert.match(dropInText, /^Requires=var\.mount$/mu);
+  // Wants (not Requires) so a nofail-skipped var.mount on a non-verity image doesn't fail local-fs.target.
+  assert.match(dropInText, /^Wants=var\.mount$/mu);
 });
 
 test("RAUC A/B plus recovery slot mapping is coherent with partitions and bundle manifest", async () => {

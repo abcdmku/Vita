@@ -201,7 +201,9 @@ const DATA_MOUNT_POINT = "/var";
 const VAR_MOUNT_UNIT = "var.mount";
 const VAR_MOUNT_UNIT_PATH = "/usr/lib/systemd/system/var.mount";
 const VAR_MOUNT_ENABLE_PATH = "/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf";
-const VAR_MOUNT_OPTIONS = Object.freeze(["x-systemd.growfs"]);
+// nofail + a short device-timeout so a missing vita-data device degrades gracefully; growfs grows /var on first boot.
+// (var.mount also carries ConditionPathExists for the device + ships in the verity-only overlay — see var.mount.)
+const VAR_MOUNT_OPTIONS = Object.freeze(["nofail", "x-systemd.device-timeout=5s", "x-systemd.growfs"]);
 
 class ConfigValidationError extends Error {
   constructor(message) {

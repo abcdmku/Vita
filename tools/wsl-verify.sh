@@ -110,7 +110,7 @@ boot_ts() {
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
   ac=$(grep -a 'VITA-APPLY: outcome=committed' "$log" | tail -1); ar=$(grep -a 'VITA-APPLY: outcome=rejected' "$log" | tail -1)
-  cc=$(grep -a 'VITA-CAPSULE: outcome=committed' "$log" | tail -1); cr=$(grep -a 'VITA-CAPSULE: outcome=rejected' "$log" | tail -1)
+  cc=$(grep -aE 'VITA-CAPSULE:.*outcome=committed' "$log" | tail -1); cr=$(grep -aE 'VITA-CAPSULE:.*outcome=rejected' "$log" | tail -1)
   pds=$(grep -a 'VITA-PDS:' "$log" | tail -1)
   echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cc" "$cr" "$pds"; do echo "  $m"; done
   # PASS = full chain: runtime+evaluator+preview+explain+connect+state read + APPLY commit&reject + CAPSULE
