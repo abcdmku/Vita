@@ -1,0 +1,12 @@
+# os-local ignore for x86_64 build artifacts (P1-030). Kept under os/ (NOT the repo root) so the rule
+# lives next to the thing it governs and the diff stays within os/. It is OUTSIDE the ts-overlay tree
+# on purpose: mkosi copies the overlay into the rootfs via `--extra-tree=os/x86_64/ts-overlay`, so a
+# .gitignore inside that tree would be shipped into the image as /.gitignore. Placing it one level up
+# keeps dev/build-only files out of the image while still ignoring the artifact.
+#
+# The Deno runtime binary is a BUILD ARTIFACT, not source: os/x86_64/ts-image.mjs fetches the
+# version- + sha256-pinned upstream zip, verifies it, and stages the single `deno` executable at
+# ts-overlay/usr/lib/vita/deno before mkosi runs `--extra-tree`. It is large and reproducible from the
+# pin, so it is never committed. The committed TS sources under ts-overlay/usr/lib/vita/ts/ (main.ts +
+# vendor/*) and the systemd unit + wants-symlink stay tracked — the path below anchors to the FILE.
+ts-overlay/usr/lib/vita/deno

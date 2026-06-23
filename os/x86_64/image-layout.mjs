@@ -77,7 +77,10 @@ Name=vita-data
 Label=vita-data
 Role=data
 Filesystem=ext4
-SizeBytes=8589934592
+SizeMinBytes=536870912
+Growable=true
+MountPoint=/var
+FactoryReset=false
 TypeGuid=0fc63daf-8483-4772-8e79-3d69d8477de4
 PartitionGuid=ee154f01-bbe5-4b8a-a763-acef82710d55
 
@@ -193,6 +196,12 @@ const ROOT_IMAGE_SECTIONS = Object.freeze(["RootImageRootA", "RootImageRootB", "
 const BOOT_SECTIONS = Object.freeze(["BootRootA", "BootRootB", "BootRecovery"]);
 const SLOT_SECTIONS = Object.freeze(["SlotRootA", "SlotRootB", "SlotRecovery"]);
 const ROOT_DIRECTORY_OUTPUT_NAME = "vita-debian-trixie-x86_64-root";
+const DATA_PARTITION_ID = "data";
+const DATA_MOUNT_POINT = "/var";
+const VAR_MOUNT_UNIT = "var.mount";
+const VAR_MOUNT_UNIT_PATH = "/usr/lib/systemd/system/var.mount";
+const VAR_MOUNT_ENABLE_PATH = "/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf";
+const VAR_MOUNT_OPTIONS = Object.freeze(["x-systemd.growfs"]);
 
 class ConfigValidationError extends Error {
   constructor(message) {
@@ -211,6 +220,7 @@ export function planImageLayout(input = DEFAULT_IMAGE_LAYOUT_INPUT) {
   const resolvedConfig = resolveImageConfig(config);
   const configDigest = sha256Text(normalizedInput.value.configText);
   const mounts = buildMounts(normalizedInput.value.mountRoots, resolvedConfig.paths);
+  const systemdMounts = buildSystemdMounts(resolvedConfig);
   const raucManifestText = buildRaucManifestText(resolvedConfig);
   const raucManifestDigest = sha256Text(raucManifestText);
 
@@ -232,6 +242,9 @@ export function planImageLayout(input = DEFAULT_IMAGE_LAYOUT_INPUT) {
       digest: configDigest,
     },
     mounts,
+    systemd: {
+      mounts: systemdMounts,
+    },
     environment: {
       SOURCE_DATE_EPOCH: resolvedConfig.image.sourceDateEpoch,
       TZ: "UTC",
@@ -626,7 +639,10 @@ function resolveImageConfig(config) {
       "Label",
       "Role",
       "Filesystem",
-      "SizeBytes",
+      "SizeMinBytes",
+      "Growable",
+      "MountPoint",
+      "FactoryReset",
       "TypeGuid",
       "PartitionGuid",
     ],
@@ -778,7 +794,6 @@ function resolvePartitions(config, image) {
     const label = getSingleValue(config, sectionName, "Label");
     const role = getSingleValue(config, sectionName, "Role");
     const filesystem = getSingleValue(config, sectionName, "Filesystem");
-    const sizeBytes = getInteger(config, sectionName, "SizeBytes");
     const typeGuid = validateGuid(getSingleValue(config, sectionName, "TypeGuid"), `${sectionName}.TypeGuid`);
     const partitionGuid = validateGuid(getSingleValue(config, sectionName, "PartitionGuid"), `${sectionName}.PartitionGuid`);
 
@@ -790,8 +805,14 @@ function resolvePartitions(config, image) {
     validatePartitionLabel(label, `${sectionName}.Label`);
     validateRole(role, `${sectionName}.Role`);
     validateFilesystem(filesystem, `${sectionName}.Filesystem`);
+    const partitionSizing = resolvePartitionSizing(config, sectionName);
+    const sizeBytes = partitionSizing.sizeBytes;
+    const sizeMinBytes = partitionSizing.sizeMinBytes;
+    const sizeLabel = partitionSizing.growable ? `${sectionName}.SizeMinBytes` : `${sectionName}.SizeBytes`;
+    const mountPoint = resolvePartitionMountPoint(config, sectionName, id, role, filesystem, partitionSizing.growable);
+    const factoryReset = resolvePartitionFactoryReset(config, sectionName, id, role);
     if (sizeBytes <= 0 || sizeBytes % image.alignmentBytes !== 0 || sizeBytes % image.sectorSize !== 0) {
-      throw new ConfigValidationError(`${sectionName}.SizeBytes must be positive and aligned`);
+      throw new ConfigValidationError(`${sizeLabel} must be positive and aligned`);
     }
     assertUnique(seenNumbers, number, `${sectionName}.Number`);
     assertUnique(seenIds, id, `${sectionName}.Id`);
@@ -810,9 +831,16 @@ function resolvePartitions(config, image) {
       id,
       name,
       label,
+      partitionLabel: name,
+      filesystemLabel: label,
       role,
       filesystem,
       sizeBytes,
+      sizeMinBytes,
+      growable: partitionSizing.growable,
+      growToFill: partitionSizing.growToFill,
+      mountPoint,
+      factoryReset,
       typeGuid,
       partitionGuid,
       startByte,
@@ -821,12 +849,77 @@ function resolvePartitions(config, image) {
       endLBA,
       device: `/dev/disk/by-partuuid/${partitionGuid}`,
       byPartLabel: `/dev/disk/by-partlabel/${name}`,
+      byLabel: `/dev/disk/by-label/${label}`,
     });
     nextStartByte = endExclusiveByte;
   }
 
   image.imageSizeBytes = nextStartByte + image.alignmentBytes;
   return partitions;
+}
+
+function resolvePartitionSizing(config, sectionName) {
+  if (sectionName === "PartitionData") {
+    const sizeMinBytes = getInteger(config, sectionName, "SizeMinBytes");
+    const growable = getBoolean(config, sectionName, "Growable");
+    if (!growable) {
+      throw new ConfigValidationError("PartitionData.Growable must be true");
+    }
+    return {
+      sizeBytes: sizeMinBytes,
+      sizeMinBytes,
+      growable: true,
+      growToFill: true,
+    };
+  }
+
+  const sizeBytes = getInteger(config, sectionName, "SizeBytes");
+  return {
+    sizeBytes,
+    sizeMinBytes: sizeBytes,
+    growable: false,
+    growToFill: false,
+  };
+}
+
+function resolvePartitionMountPoint(config, sectionName, id, role, filesystem, growable) {
+  if (sectionName !== "PartitionData") {
+    return null;
+  }
+
+  if (id !== DATA_PARTITION_ID || role !== "data") {
+    throw new ConfigValidationError("PartitionData must be the data partition");
+  }
+  if (filesystem !== "ext4") {
+    throw new ConfigValidationError("PartitionData.Filesystem must be ext4");
+  }
+  if (!growable) {
+    throw new ConfigValidationError("PartitionData must be growable");
+  }
+
+  const mountPoint = validateCanonicalPosixPath(getSingleValue(config, sectionName, "MountPoint"), {
+    label: `${sectionName}.MountPoint`,
+    root: "/",
+    allowRoot: false,
+  });
+  if (mountPoint !== DATA_MOUNT_POINT) {
+    throw new ConfigValidationError(`PartitionData.MountPoint expected ${DATA_MOUNT_POINT}, found ${mountPoint}`);
+  }
+  return mountPoint;
+}
+
+function resolvePartitionFactoryReset(config, sectionName, id, role) {
+  if (sectionName !== "PartitionData") {
+    return false;
+  }
+  if (id !== DATA_PARTITION_ID || role !== "data") {
+    throw new ConfigValidationError("PartitionData.FactoryReset belongs only on the data partition");
+  }
+  const factoryReset = getBoolean(config, sectionName, "FactoryReset");
+  if (factoryReset) {
+    throw new ConfigValidationError("PartitionData.FactoryReset must be false");
+  }
+  return factoryReset;
 }
 
 function resolveRootDirectory(config, paths) {
@@ -1072,6 +1165,38 @@ function buildMounts(mountRoots, paths) {
   ];
 }
 
+function buildSystemdMounts(resolvedConfig) {
+  const dataPartition = resolvedConfig.partitions.find((partition) => partition.id === DATA_PARTITION_ID);
+  if (dataPartition === undefined) {
+    throw new ConfigValidationError("data partition must exist before declaring var.mount");
+  }
+  if (dataPartition.mountPoint !== DATA_MOUNT_POINT) {
+    throw new ConfigValidationError(`data partition mount point must be ${DATA_MOUNT_POINT}`);
+  }
+  if (dataPartition.filesystem !== "ext4") {
+    throw new ConfigValidationError("data partition must be ext4 for var.mount");
+  }
+
+  return [
+    {
+      unit: VAR_MOUNT_UNIT,
+      unitPath: VAR_MOUNT_UNIT_PATH,
+      sourcePartition: dataPartition.id,
+      what: dataPartition.byLabel,
+      where: dataPartition.mountPoint,
+      type: dataPartition.filesystem,
+      options: [...VAR_MOUNT_OPTIONS],
+      defaultDependencies: false,
+      before: ["local-fs.target", "umount.target"],
+      conflicts: ["umount.target"],
+      enabled: true,
+      enableKind: "target-drop-in",
+      enablePath: VAR_MOUNT_ENABLE_PATH,
+      requiredBy: "local-fs.target",
+    },
+  ];
+}
+
 function buildRaucManifestText(resolvedConfig) {
   const lines = [
     "[update]",
@@ -1137,6 +1262,17 @@ function getInteger(config, sectionName, key) {
     throw new ConfigValidationError(`${sectionName}.${key} must be a safe integer`);
   }
   return integer;
+}
+
+function getBoolean(config, sectionName, key) {
+  const value = getSingleValue(config, sectionName, key);
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  throw new ConfigValidationError(`${sectionName}.${key} must be true or false`);
 }
 
 function validateCanonicalPosixPath(path, options) {

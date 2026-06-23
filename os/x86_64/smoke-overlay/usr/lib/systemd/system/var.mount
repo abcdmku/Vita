@@ -1,0 +1,15 @@
+# Vita /var mount. Explicit because gpt-auto only mounts a DPS /var when its UUID is machine-id-keyed.
+# nofail + short device-timeout: the vita-data partition exists ONLY in VITA_VERITY builds (repart-verity).
+# On a plain (non-verity) smoke image the device is absent, so nofail makes the mount skip quickly instead of
+# hanging boot ~90s on dev-disk-by-label-vita-data.device (plain smoke's rw root already provides a writable /var).
+[Unit]
+Description=Vita persistent data partition (/var)
+DefaultDependencies=no
+Before=local-fs.target umount.target
+Conflicts=umount.target
+
+[Mount]
+What=/dev/disk/by-label/vita-data
+Where=/var
+Type=ext4
+Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs

@@ -203,6 +203,10 @@ if (MODE === "smoke") {
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
   const smokeOverlay = useNative ? join(HERE, "smoke-overlay") : "/work/os/x86_64/smoke-overlay";
   const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
+  // P1-030: stage the pinned Deno runtime into ts-overlay (ts-image.mjs fetches + sha256-verifies + extracts the
+  // binary to ts-overlay/usr/lib/vita/deno), then ship the on-device TS runtime + entrypoint via --extra-tree.
+  const tsOverlay = useNative ? join(HERE, "ts-overlay") : "/work/os/x86_64/ts-overlay";
+  if (!DRY) run("1b · stage Deno runtime (ts-image.mjs)", "node", [join(HERE, "ts-image.mjs")]);
   // --incremental: mkosi caches the package-installed rootfs, so re-builds only re-apply the overlays/cmdline
   // (seconds) instead of re-installing all of Debian (~5 min). Smoke is iterate-fast; full keeps it off for
   // byte-reproducibility. Override with VITA_INCREMENTAL=0.
@@ -226,7 +230,10 @@ if (MODE === "smoke") {
     fail("VITA_VERITY=1 requires the native mkosi engine — --repart-directory is a host path not mounted into " +
          "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
-  const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
+  // Verity root is read-only + PERSISTENT (P1-029): the repart-verity vita-data partition is mounted writable at
+  // /var (smoke-overlay var.mount, by FileSystemLabel). So NO systemd.volatile=overlay (that tmpfs-overlays / and
+  // would shadow the persistent /var). Host-verified: boots ro, /var on the ext4 data partition, state persists.
+  const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
   // Enrollment is OFFLINE via virt-fw-vars (PK=KEK=db from db.crt into the OVMF varstore) — NOT mkosi
@@ -270,7 +277,7 @@ if (MODE === "smoke") {
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, ...verity, ...bootloaderPin, ...sb,
-     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
+     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);

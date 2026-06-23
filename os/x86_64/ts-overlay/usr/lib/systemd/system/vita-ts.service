@@ -1,0 +1,89 @@
+# Vita on-device TypeScript runtime (P1-030) — run TS on the device via the pinned Deno runtime.
+#
+# This is the heart of "Vita is a TS OS": at boot it runs /usr/lib/vita/ts/main.ts under the
+# version- + sha256-pinned, vendored Deno binary at /usr/lib/vita/deno and prints a grep-able
+# marker ("VITA-TS: hello from Deno <version> ...") to the serial console so a host boot log
+# proves the TypeScript control-plane layer actually executed on-device.
+#
+# Type=oneshot: it runs once, prints, and exits (the first slice is proof-of-life, not a daemon).
+# RemainAfterExit=yes so `systemctl status` shows it as active after it finishes.
+# StandardOutput/Error=journal+console mirrors the smoke sb-state probe so the marker lands on the
+# serial even under the autologin getty (same reliable wiring used by vita-sb-state.service).
+#
+# Determinism / least privilege (spec §9.3, §8.2):
+#   - The runtime runs UNPRIVILEGED. Per the spec/ADR split, privileged host mutation belongs ONLY
+#     to the narrow Go agent (agentd); the TypeScript runtime must NOT be root and must hold NO
+#     capabilities. The [Service] block below enforces that with DynamicUser + an empty capability
+#     bounding/ambient set + NoNewPrivileges, plus the standard systemd sandbox knobs. A oneshot
+#     that only reads /usr/lib/vita/ts and prints a marker needs nothing more.
+#   - `deno run` is invoked with NO --allow-* flags: Deno's default-deny sandbox is the on-device
+#     least-privilege posture. main.ts is pure (parse + compare a vendored semver), needs nothing.
+#   - --no-remote forbids any network module fetch; --cached-only forbids touching the module
+#     cache. Combined with the vendored relative imports this guarantees no remote imports at boot.
+#   - The Deno binary itself is staged from a verified, pinned download at BUILD time, never fetched
+#     here (see os/x86_64/ts-image.conf / ts-image.mjs).
+[Unit]
+Description=Vita on-device TypeScript runtime (Deno)
+Documentation=https://vita.local/ts
+# Run after multi-user basics are up; deliberately NOT ordered after network-online.target (no
+# network is needed and waiting on it hangs headless/no-NIC boots ~120s — same rationale as agentd).
+After=vita-agentd.service
+Wants=vita-agentd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Invoke the pinned, vendored runtime explicitly (not a PATH lookup) so we run exactly the staged
+# binary. No --allow-* flags -> Deno's default sandbox. --no-remote/--cached-only forbid any network
+# or cache module resolution so only the vendored relative imports under /usr/lib/vita/ts can load.
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet /usr/lib/vita/ts/main.ts
+StandardOutput=journal+console
+StandardError=journal+console
+
+# ── Run UNPRIVILEGED + sandboxed (spec/ADR: only the Go agent is privileged) ─────────────────────
+# DynamicUser allocates a transient, unprivileged UID/GID for this unit only (no static account in
+# the image). The runtime never runs as root and cannot mutate the host; that authority is reserved
+# to agentd. RuntimeDirectory= is created owned by the dynamic user (so DENO_DIR below is writable).
+DynamicUser=yes
+# Belt-and-suspenders: even a misbehaving runtime can gain no privileges and holds zero capabilities.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Reduce kernel/host attack surface for a pure compute oneshot: read-only filesystem view (the rootfs
+# is verity-RO anyway), no access to home dirs, a private /tmp and /dev, no real-time scheduling, no
+# privileged syscalls, no setuid/setgid bits honoured, kernel tunables/logs/modules off-limits.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+# ProtectProc=invisible hides OTHER processes' /proc entries from this unit. We deliberately do NOT
+# set ProcSubset=pid: Deno reads non-pid /proc files (e.g. /proc/cpuinfo, /proc/meminfo) at startup,
+# and hiding them risks breaking the runtime on-device where this can't be re-tested cheaply.
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+UMask=0077
+
+# A read-only verity root has no writable HOME/cache; point Deno's dirs at /run (tmpfs) so it never
+# tries to create a cache under a read-only path. We pass --cached-only so nothing is actually
+# written, but DENO_DIR keeps Deno from erroring on a missing/RO default cache location.
+# RuntimeDirectory=vita-deno -> /run/vita-deno, created 0700 owned by the DynamicUser each start.
+Environment=DENO_DIR=/run/vita-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
+RuntimeDirectory=vita-deno
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
