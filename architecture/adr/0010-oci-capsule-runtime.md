@@ -16,6 +16,19 @@ caught it). **`RootDirectory=` (A) is THE OCI path.** The attempt (crun staging 
 origin `task/P1-056` for a future revisit if the namespace/seccomp tension is resolved; it is NOT merged (would bake an
 unused ~3MB crun binary into the immutable image). Date: 2026-06-23.
 
+**MICROVM/NSPAWN OUTCOME (approach C, P1-055, 2026-06-23): DEFERRED.** Three attempts + adversarial review. Progress:
+the gamed-evidence (a hardcoded `pid1=own`) was fixed → honest measured marker, and the jailer-hardening conflict
+(hardening applied to the nspawn unit, blocking it) was fixed. But the workload's `VITA-CAPSULE-MICROVM-WORKLOAD`
+proof line never reaches agentd's `journalctl -u <unit>` read on the node — it fails closed with the SPECIFIC reason
+`VITA-CAPSULE-MICROVM-REJECT: reason=workload_line_absent` (no false success). Root remaining work: route the nspawn
+container's stdout to the host unit's journal agentd reads (`--console=pipe`/output plumbing) and/or the minimal
+rootfs markers nspawn requires (os-release/machine-id) + `--as-pid2` semantics — an output-routing + immutable-image-
+nspawn refinement, not a quick fix. Like crun, it's a heavy container-manager that doesn't fit cleanly under the
+constraints yet. **The strong-isolation `microvm-service` class is DEFERRED;** the three working runtimes (ts-service,
+OCI via RootDirectory, WASM — all hardened + cgroup-gated, hostile workloads contained) cover running apps. The attempt
+(nspawn wiring + systemd-container) is preserved on origin `task/P1-055`; NOT merged (avoids an unused package + capsule).
+Both crun + microVM are REVISITABLE if a strong-isolation need justifies the deeper work. Date: 2026-06-23.
+
 ## Context
 Today (ADR-0009) only `ts-service` capsules run — as hardened systemd transient units whose ONLY workload is the
 PINNED, audited Deno. Wave 5 extends the runtime to OCI container images. This is the first time the node would run
