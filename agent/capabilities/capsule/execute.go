@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path"
@@ -19,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/network"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
 	capsulestorage "github.com/vita/agent/storage/capsules"
@@ -151,6 +153,12 @@ type ExecuteStatus struct {
 	Status     string                `json:"status"`
 	Volumes    []ExecuteVolumeStatus `json:"volumes,omitempty"`
 	OCILimits  *OCILimitsStatus      `json:"ociLimits,omitempty"`
+	Network    *ExecuteNetworkStatus `json:"network,omitempty"`
+}
+
+type ExecuteNetworkStatus struct {
+	Ingress int `json:"ingress"`
+	Egress  int `json:"egress"`
 }
 
 type ExecuteVolumeStatus struct {
@@ -285,6 +293,7 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 	last := *c.last
 	last.Volumes = cloneExecuteVolumeStatuses(c.last.Volumes)
 	last.OCILimits = cloneOCILimitsStatus(c.last.OCILimits)
+	last.Network = cloneExecuteNetworkStatus(c.last.Network)
 	if c.supervisor != nil {
 		for _, workload := range c.supervisor.Snapshot() {
 			if workload.Unit == last.Unit {
@@ -372,6 +381,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Status:     "OK",
 		Volumes:    volumeStatuses(unit.Volumes),
 		OCILimits:  ociLimits,
+		Network:    executeNetworkStatus(manifest.Network),
 	}
 	c.setLast(executeStatus)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
@@ -431,6 +441,7 @@ func (c *ExecuteCapability) setLast(status ExecuteStatus) {
 		Status:     status.Status,
 		Volumes:    cloneExecuteVolumeStatuses(status.Volumes),
 		OCILimits:  cloneOCILimitsStatus(status.OCILimits),
+		Network:    cloneExecuteNetworkStatus(status.Network),
 	}
 }
 
@@ -524,6 +535,7 @@ type ExecutionManifest struct {
 	ResourceLimits ExecutionResourceLimits `json:"resourceLimits"`
 	Data           ExecutionData           `json:"data,omitempty"`
 	HealthChecks   []capsuleruntime.Check  `json:"healthChecks,omitempty"`
+	Network        *ExecutionNetwork       `json:"network,omitempty"`
 
 	baseDir string
 }
@@ -574,6 +586,10 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	networkPolicy, err := optionalExecutionNetworkField(fields, "network")
+	if err != nil {
+		return err
+	}
 
 	manifest := ExecutionManifest{
 		ID:             id,
@@ -584,6 +600,7 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 		ResourceLimits: limits,
 		Data:           data,
 		HealthChecks:   healthChecks,
+		Network:        networkPolicy,
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -616,6 +633,11 @@ func (m ExecutionManifest) Validate() error {
 	}
 	if err := m.Data.Validate(); err != nil {
 		return err
+	}
+	if m.Network != nil {
+		if err := m.Network.Validate(); err != nil {
+			return err
+		}
 	}
 	for i, check := range m.HealthChecks {
 		if err := check.Validate(); err != nil {
@@ -778,6 +800,271 @@ func (d ExecutionData) Validate() error {
 				return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("data.volumes[%d].class must be declared in data.classes", i)}
 			}
 		}
+	}
+	return nil
+}
+
+type ExecutionNetwork struct {
+	Ingress []ExecutionNetworkIngressRule `json:"ingress"`
+	Egress  []ExecutionNetworkEgressRule  `json:"egress"`
+}
+
+func (n *ExecutionNetwork) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, executionNetworkFields); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	ingress, err := requiredNetworkIngressField(fields, "ingress")
+	if err != nil {
+		return err
+	}
+	egress, err := requiredNetworkEgressField(fields, "egress")
+	if err != nil {
+		return err
+	}
+
+	out := ExecutionNetwork{
+		Ingress: ingress,
+		Egress:  egress,
+	}
+	if err := out.Validate(); err != nil {
+		return err
+	}
+
+	*n = out
+	return nil
+}
+
+func (n ExecutionNetwork) Validate() error {
+	for i, rule := range n.Ingress {
+		if err := rule.Validate(i); err != nil {
+			return err
+		}
+	}
+	for i, rule := range n.Egress {
+		if err := rule.Validate(i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type ExecutionNetworkIngressRule struct {
+	Direction      string           `json:"direction,omitempty"`
+	Name           string           `json:"name,omitempty"`
+	Protocol       network.Protocol `json:"protocol"`
+	Port           int              `json:"port"`
+	SourceCIDR     string           `json:"sourceCidr"`
+	Interface      string           `json:"interface"`
+	Public         bool             `json:"public"`
+	UnsafeWideOpen bool             `json:"unsafeWideOpen,omitempty"`
+}
+
+func (r *ExecutionNetworkIngressRule) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, executionNetworkIngressFields); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	name, err := optionalNetworkNameField(fields, "name")
+	if err != nil {
+		return err
+	}
+	direction, err := optionalNetworkDirectionField(fields, "direction", "ingress")
+	if err != nil {
+		return err
+	}
+	protocol, err := requiredNetworkProtocolField(fields, "protocol")
+	if err != nil {
+		return err
+	}
+	portValue, err := requiredNetworkPortField(fields, "port")
+	if err != nil {
+		return err
+	}
+	sourceCIDR, prefix, err := requiredNetworkCIDRField(fields, "sourceCidr")
+	if err != nil {
+		return err
+	}
+	iface, err := requiredNetworkInterfaceField(fields, "interface")
+	if err != nil {
+		return err
+	}
+	public, err := requiredBoolField(fields, "public")
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: "network.ingress[].public " + err.Error()}
+	}
+	unsafeWideOpen, err := optionalBoolField(fields, "unsafeWideOpen")
+	if err != nil {
+		return err
+	}
+	if network.SourceCoversAll(prefix) && !unsafeWideOpen {
+		return &ExecuteInvalidRequestError{Reason: "network.ingress[].sourceCidr opens all sources without unsafeWideOpen"}
+	}
+
+	out := ExecutionNetworkIngressRule{
+		Direction:      direction,
+		Name:           name,
+		Protocol:       protocol,
+		Port:           portValue,
+		SourceCIDR:     sourceCIDR,
+		Interface:      iface,
+		Public:         public,
+		UnsafeWideOpen: unsafeWideOpen,
+	}
+	if err := out.Validate(0); err != nil {
+		return err
+	}
+
+	*r = out
+	return nil
+}
+
+func (r ExecutionNetworkIngressRule) Validate(index int) error {
+	if r.Direction != "" && r.Direction != "ingress" {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].direction must be ingress", index)}
+	}
+	if r.Name != "" && !validExecutionNetworkName(r.Name) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].name must be a safe network grant name", index)}
+	}
+	if !validNetworkProtocol(r.Protocol) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].protocol must be tcp or udp", index)}
+	}
+	if !validNetworkPort(r.Port) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].port must be 1-65535 or PortAll", index)}
+	}
+	prefix, err := network.NormalizeCIDR(r.SourceCIDR)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].sourceCidr %s", index, err)}
+	}
+	if network.SourceCoversAll(prefix) && !r.UnsafeWideOpen {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].sourceCidr opens all sources without unsafeWideOpen", index)}
+	}
+	if !network.ValidInterfaceName(r.Interface) || !safeExecutionNetworkString(r.Interface) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.ingress[%d].interface must be a concrete interface name", index)}
+	}
+	return nil
+}
+
+type ExecutionNetworkEgressRule struct {
+	Direction      string           `json:"direction,omitempty"`
+	Name           string           `json:"name,omitempty"`
+	Protocol       network.Protocol `json:"protocol"`
+	Destinations   []string         `json:"destinations"`
+	Ports          []int            `json:"ports"`
+	Interface      string           `json:"interface"`
+	UnsafeWideOpen bool             `json:"unsafeWideOpen,omitempty"`
+}
+
+func (r *ExecutionNetworkEgressRule) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, executionNetworkEgressFields); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	name, err := optionalNetworkNameField(fields, "name")
+	if err != nil {
+		return err
+	}
+	direction, err := optionalNetworkDirectionField(fields, "direction", "egress")
+	if err != nil {
+		return err
+	}
+	protocol, err := requiredNetworkProtocolField(fields, "protocol")
+	if err != nil {
+		return err
+	}
+	destinations, prefixes, err := requiredNetworkDestinationsField(fields, "destinations")
+	if err != nil {
+		return err
+	}
+	ports, err := requiredNetworkPortsField(fields, "ports")
+	if err != nil {
+		return err
+	}
+	iface, err := requiredNetworkInterfaceField(fields, "interface")
+	if err != nil {
+		return err
+	}
+	unsafeWideOpen, err := optionalBoolField(fields, "unsafeWideOpen")
+	if err != nil {
+		return err
+	}
+	if coversAnyAll(prefixes) && !unsafeWideOpen {
+		return &ExecuteInvalidRequestError{Reason: "network.egress[].destinations opens all destinations without unsafeWideOpen"}
+	}
+
+	out := ExecutionNetworkEgressRule{
+		Direction:      direction,
+		Name:           name,
+		Protocol:       protocol,
+		Destinations:   destinations,
+		Ports:          ports,
+		Interface:      iface,
+		UnsafeWideOpen: unsafeWideOpen,
+	}
+	if err := out.Validate(0); err != nil {
+		return err
+	}
+
+	*r = out
+	return nil
+}
+
+func (r ExecutionNetworkEgressRule) Validate(index int) error {
+	if r.Direction != "" && r.Direction != "egress" {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].direction must be egress", index)}
+	}
+	if r.Name != "" && !validExecutionNetworkName(r.Name) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].name must be a safe network grant name", index)}
+	}
+	if !validNetworkProtocol(r.Protocol) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].protocol must be tcp or udp", index)}
+	}
+	if len(r.Destinations) == 0 {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].destinations must not be empty", index)}
+	}
+	for i, destination := range r.Destinations {
+		prefix, err := normalizeNetworkDestination(destination)
+		if err != nil {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].destinations[%d] %s", index, i, err)}
+		}
+		if network.SourceCoversAll(prefix) && !r.UnsafeWideOpen {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].destinations[%d] opens all destinations without unsafeWideOpen", index, i)}
+		}
+	}
+	if len(r.Ports) == 0 {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].ports must not be empty", index)}
+	}
+	for i, portValue := range r.Ports {
+		if !validNetworkPort(portValue) {
+			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].ports[%d] must be 1-65535 or PortAll", index, i)}
+		}
+	}
+	if !network.ValidInterfaceName(r.Interface) || !safeExecutionNetworkString(r.Interface) {
+		return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.egress[%d].interface must be a concrete interface name", index)}
 	}
 	return nil
 }
@@ -1211,6 +1498,7 @@ var (
 		"healthChecks":   {},
 		"id":             {},
 		"integrity":      {},
+		"network":        {},
 		"packageClass":   {},
 		"resourceLimits": {},
 		"runtime":        {},
@@ -1224,6 +1512,29 @@ var (
 		"classes": {},
 		"volumes": {},
 	}
+	executionNetworkFields = map[string]struct{}{
+		"egress":  {},
+		"ingress": {},
+	}
+	executionNetworkIngressFields = map[string]struct{}{
+		"direction":      {},
+		"interface":      {},
+		"name":           {},
+		"port":           {},
+		"protocol":       {},
+		"public":         {},
+		"sourceCidr":     {},
+		"unsafeWideOpen": {},
+	}
+	executionNetworkEgressFields = map[string]struct{}{
+		"destinations":   {},
+		"direction":      {},
+		"interface":      {},
+		"name":           {},
+		"ports":          {},
+		"protocol":       {},
+		"unsafeWideOpen": {},
+	}
 	typeScriptExecutionFields = map[string]struct{}{
 		"entrypoint": {},
 	}
@@ -1234,6 +1545,8 @@ var (
 		"tasksMax":   {},
 	}
 	unsafeRuntimeDirRune = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
+	networkNamePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+	networkMetaCharacter = regexp.MustCompile("[\\\\'\"`$;&|<>()\\[\\]{}!*?%]")
 )
 
 func validateExecuteDesired(desired ExecuteDesired, field string) error {
@@ -1506,6 +1819,252 @@ func optionalExecutionDataField(fields map[string]json.RawMessage, key string) (
 	return data, nil
 }
 
+func optionalExecutionNetworkField(fields map[string]json.RawMessage, key string) (*ExecutionNetwork, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+
+	var networkPolicy ExecutionNetwork
+	if err := decodeSingleJSONValue(raw, &networkPolicy); err != nil {
+		return nil, err
+	}
+	return &networkPolicy, nil
+}
+
+func requiredNetworkIngressField(fields map[string]json.RawMessage, key string) ([]ExecutionNetworkIngressRule, error) {
+	rawItems, err := requiredRawListField(fields, key)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]ExecutionNetworkIngressRule, len(rawItems))
+	for i, rawItem := range rawItems {
+		if bytes.Equal(bytes.TrimSpace(rawItem), []byte("null")) {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.%s[%d] must be an object", key, i)}
+		}
+		var rule ExecutionNetworkIngressRule
+		if err := decodeSingleJSONValue(rawItem, &rule); err != nil {
+			return nil, err
+		}
+		if err := rule.Validate(i); err != nil {
+			return nil, err
+		}
+		items[i] = rule
+	}
+	return items, nil
+}
+
+func requiredNetworkEgressField(fields map[string]json.RawMessage, key string) ([]ExecutionNetworkEgressRule, error) {
+	rawItems, err := requiredRawListField(fields, key)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]ExecutionNetworkEgressRule, len(rawItems))
+	for i, rawItem := range rawItems {
+		if bytes.Equal(bytes.TrimSpace(rawItem), []byte("null")) {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network.%s[%d] must be an object", key, i)}
+		}
+		var rule ExecutionNetworkEgressRule
+		if err := decodeSingleJSONValue(rawItem, &rule); err != nil {
+			return nil, err
+		}
+		if err := rule.Validate(i); err != nil {
+			return nil, err
+		}
+		items[i] = rule
+	}
+	return items, nil
+}
+
+func requiredRawListField(fields map[string]json.RawMessage, key string) ([]json.RawMessage, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, &ExecuteInvalidRequestError{Reason: "network." + key + " is required"}
+	}
+
+	var rawItems []json.RawMessage
+	if err := decodeSingleJSONValue(raw, &rawItems); err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "network." + key + " must be a list"}
+	}
+	if rawItems == nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "network." + key + " must be a list"}
+	}
+	return rawItems, nil
+}
+
+func optionalNetworkNameField(fields map[string]json.RawMessage, key string) (string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant name must be a string"}
+	}
+
+	var value string
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant name must be a string"}
+	}
+	if !validExecutionNetworkName(value) {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant name must be a safe network grant name"}
+	}
+	return value, nil
+}
+
+func optionalNetworkDirectionField(fields map[string]json.RawMessage, key string, want string) (string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant direction must be ingress or egress"}
+	}
+
+	var value string
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant direction must be a string"}
+	}
+	if !safeExecutionNetworkString(value) || (value != "ingress" && value != "egress") {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant direction must be ingress or egress"}
+	}
+	if value != want {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant direction must match its list"}
+	}
+	return value, nil
+}
+
+func requiredNetworkProtocolField(fields map[string]json.RawMessage, key string) (network.Protocol, error) {
+	value, err := requiredStringField(fields, key)
+	if err != nil {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant " + err.Error()}
+	}
+	if !safeExecutionNetworkString(value) || !validNetworkProtocol(network.Protocol(value)) {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant protocol must be tcp or udp"}
+	}
+	return network.Protocol(value), nil
+}
+
+func requiredNetworkPortField(fields map[string]json.RawMessage, key string) (int, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, &ExecuteInvalidRequestError{Reason: "network grant " + key + " is required"}
+	}
+
+	var value int
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return 0, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be an integer"}
+	}
+	if !validNetworkPort(value) {
+		return 0, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be 1-65535 or PortAll"}
+	}
+	return value, nil
+}
+
+func requiredNetworkPortsField(fields map[string]json.RawMessage, key string) ([]int, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " is required"}
+	}
+
+	var ports []int
+	if err := decodeSingleJSONValue(raw, &ports); err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be an integer list"}
+	}
+	if len(ports) == 0 {
+		return nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must not be empty"}
+	}
+	for i, portValue := range ports {
+		if !validNetworkPort(portValue) {
+			return nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network grant %s[%d] must be 1-65535 or PortAll", key, i)}
+		}
+	}
+	return ports, nil
+}
+
+func requiredNetworkCIDRField(fields map[string]json.RawMessage, key string) (string, netip.Prefix, error) {
+	value, err := requiredStringField(fields, key)
+	if err != nil {
+		return "", netip.Prefix{}, &ExecuteInvalidRequestError{Reason: "network grant " + err.Error()}
+	}
+	if !safeExecutionNetworkString(value) {
+		return "", netip.Prefix{}, &ExecuteInvalidRequestError{Reason: "network grant " + key + " contains unsafe characters"}
+	}
+	prefix, err := network.NormalizeCIDR(value)
+	if err != nil {
+		return "", netip.Prefix{}, &ExecuteInvalidRequestError{Reason: "network grant " + key + " " + err.Error()}
+	}
+	return prefix.String(), prefix, nil
+}
+
+func requiredNetworkDestinationsField(fields map[string]json.RawMessage, key string) ([]string, []netip.Prefix, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " is required"}
+	}
+
+	var destinations []string
+	if err := decodeSingleJSONValue(raw, &destinations); err != nil {
+		return nil, nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be a string list"}
+	}
+	if len(destinations) == 0 {
+		return nil, nil, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must not be empty"}
+	}
+
+	normalized := make([]string, len(destinations))
+	prefixes := make([]netip.Prefix, len(destinations))
+	for i, destination := range destinations {
+		prefix, err := normalizeNetworkDestination(destination)
+		if err != nil {
+			return nil, nil, &ExecuteInvalidRequestError{Reason: fmt.Sprintf("network grant %s[%d] %s", key, i, err)}
+		}
+		normalized[i] = prefix.String()
+		prefixes[i] = prefix
+	}
+	return normalized, prefixes, nil
+}
+
+func requiredNetworkInterfaceField(fields map[string]json.RawMessage, key string) (string, error) {
+	value, err := requiredStringField(fields, key)
+	if err != nil {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant " + err.Error()}
+	}
+	if !safeExecutionNetworkString(value) || !network.ValidInterfaceName(value) {
+		return "", &ExecuteInvalidRequestError{Reason: "network grant interface must be a concrete interface name"}
+	}
+	return value, nil
+}
+
+func requiredBoolField(fields map[string]json.RawMessage, key string) (bool, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, fmt.Errorf("%s is required", key)
+	}
+
+	var value bool
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return value, nil
+}
+
+func optionalBoolField(fields map[string]json.RawMessage, key string) (bool, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be a boolean"}
+	}
+
+	var value bool
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return false, &ExecuteInvalidRequestError{Reason: "network grant " + key + " must be a boolean"}
+	}
+	return value, nil
+}
+
 func requiredDataClassesField(fields map[string]json.RawMessage, key string) ([]capsulestorage.DataClass, error) {
 	raw, ok := fields[key]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
@@ -1578,6 +2137,82 @@ func requiredPositiveInt64Field(fields map[string]json.RawMessage, key string) (
 		return 0, &ExecuteInvalidRequestError{Reason: key + " must be positive"}
 	}
 	return value, nil
+}
+
+func normalizeNetworkDestination(value string) (netip.Prefix, error) {
+	if !safeExecutionNetworkString(value) {
+		return netip.Prefix{}, errors.New("contains unsafe characters")
+	}
+	if strings.Contains(value, "/") {
+		prefix, err := network.NormalizeCIDR(value)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return prefix, nil
+	}
+
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Prefix{}, errors.New("must be a CIDR prefix or IP address")
+	}
+	bits := 32
+	if addr.Is6() {
+		bits = 128
+	}
+	return netip.PrefixFrom(addr, bits), nil
+}
+
+func coversAnyAll(prefixes []netip.Prefix) bool {
+	for _, prefix := range prefixes {
+		if network.SourceCoversAll(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validNetworkProtocol(value network.Protocol) bool {
+	switch value {
+	case network.ProtoTCP, network.ProtoUDP:
+		return true
+	default:
+		return false
+	}
+}
+
+func validNetworkPort(value int) bool {
+	return value == network.PortAll || (value > 0 && value <= 65535)
+}
+
+func validExecutionNetworkName(value string) bool {
+	return safeExecutionNetworkString(value) && networkNamePattern.MatchString(value)
+}
+
+func safeExecutionNetworkString(value string) bool {
+	return value != "" &&
+		value == strings.TrimSpace(value) &&
+		!controlCharacter.MatchString(value) &&
+		!networkMetaCharacter.MatchString(value) &&
+		!containsInlineCapsuleMaterial(value) &&
+		!hasInlineReferenceScheme(value)
+}
+
+func executeNetworkStatus(networkPolicy *ExecutionNetwork) *ExecuteNetworkStatus {
+	if networkPolicy == nil {
+		return nil
+	}
+	return &ExecuteNetworkStatus{
+		Ingress: len(networkPolicy.Ingress),
+		Egress:  len(networkPolicy.Egress),
+	}
+}
+
+func cloneExecuteNetworkStatus(status *ExecuteNetworkStatus) *ExecuteNetworkStatus {
+	if status == nil {
+		return nil
+	}
+	out := *status
+	return &out
 }
 
 func positiveFinite(value float64) bool {

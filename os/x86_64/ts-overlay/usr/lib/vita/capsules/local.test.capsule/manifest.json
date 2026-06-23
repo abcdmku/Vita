@@ -14,6 +14,32 @@
     "storageMiB": 16,
     "tasksMax": 32
   },
+  "network": {
+    "ingress": [
+      {
+        "name": "health",
+        "protocol": "tcp",
+        "port": 8787,
+        "sourceCidr": "127.0.0.1/32",
+        "interface": "lo",
+        "public": false
+      }
+    ],
+    "egress": [
+      {
+        "name": "api",
+        "protocol": "tcp",
+        "destinations": [
+          "203.0.113.10",
+          "2001:db8::/32"
+        ],
+        "ports": [
+          443
+        ],
+        "interface": "eth0"
+      }
+    ]
+  },
   "data": {
     "classes": [
       "app-state"

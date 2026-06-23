@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"reflect"
 	"testing"
 
@@ -283,6 +284,10 @@ func TestApplyRejectsInvalidPolicyWithoutWriting(t *testing.T) {
 			req:  applyPolicy(policyWith(Rule{Proto: ProtoTCP, Port: 443, SourceCIDR: "0.0.0.0", Interface: "eth0"})),
 		},
 		{
+			name: "host-bit smuggled cidr",
+			req:  applyPolicy(policyWith(Rule{Proto: ProtoTCP, Port: 443, SourceCIDR: "10.0.0.5/24", Interface: "eth0"})),
+		},
+		{
 			name: "missing interface",
 			req:  applyPolicy(policyWith(Rule{Proto: ProtoTCP, Port: 443, SourceCIDR: "10.0.0.0/8"})),
 		},
@@ -312,6 +317,31 @@ func TestApplyRejectsInvalidPolicyWithoutWriting(t *testing.T) {
 				t.Fatalf("live policy = %q, want unchanged %q", got, prior)
 			}
 		})
+	}
+}
+
+func TestExportedValidatorsReuseNetworkPolicySemantics(t *testing.T) {
+	prefix, err := NormalizeCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("NormalizeCIDR returned error: %v", err)
+	}
+	if prefix.String() != "10.0.0.0/24" {
+		t.Fatalf("NormalizeCIDR = %q, want canonical 10.0.0.0/24", prefix.String())
+	}
+	if _, err := NormalizeCIDR("10.0.0.5/24"); err == nil {
+		t.Fatal("NormalizeCIDR accepted host-bit-smuggled CIDR")
+	}
+	if !SourceCoversAll(mustCIDR(t, "0.0.0.0/0")) {
+		t.Fatal("SourceCoversAll rejected IPv4 all-prefix")
+	}
+	if !SourceCoversAll(mustCIDR(t, "::/0")) {
+		t.Fatal("SourceCoversAll rejected IPv6 all-prefix")
+	}
+	if !ValidInterfaceName("eth0") {
+		t.Fatal("ValidInterfaceName rejected eth0")
+	}
+	if ValidInterfaceName("bad iface") {
+		t.Fatal("ValidInterfaceName accepted an interface with whitespace")
 	}
 }
 
@@ -494,6 +524,15 @@ func policyWith(rules ...Rule) Policy {
 func applyPolicy(policy Policy) ApplyRequest {
 	desired := clonePolicy(policy)
 	return ApplyRequest{Desired: &desired}
+}
+
+func mustCIDR(t *testing.T, value string) netip.Prefix {
+	t.Helper()
+	prefix, err := NormalizeCIDR(value)
+	if err != nil {
+		t.Fatalf("NormalizeCIDR(%q) returned error: %v", value, err)
+	}
+	return prefix
 }
 
 func mustRegistry(t *testing.T, registered ...capabilities.Capability) *capabilities.Registry {

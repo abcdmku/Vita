@@ -1,0 +1,33 @@
+{
+  "id": "local.invalid-net.capsule",
+  "version": "1.0.0",
+  "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  "packageClass": "ts-service",
+  "runtime": {
+    "typescript": {
+      "entrypoint": "main.ts"
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  },
+  "network": {
+    "ingress": [],
+    "egress": [
+      {
+        "name": "bad-hostname",
+        "protocol": "tcp",
+        "destinations": [
+          "example.com"
+        ],
+        "ports": [
+          443
+        ],
+        "interface": "eth0"
+      }
+    ]
+  }
+}
