@@ -18,8 +18,9 @@
 //   node os/x86_64/ts-image.mjs --print    # print the resolved pin (no network), for auditing
 //   node os/x86_64/ts-image.mjs --check    # verify an already-staged binary's sha256 (no fetch)
 //
-// Offline / air-gapped: set VITA_DENO_ZIP=/path/to/deno-x86_64-unknown-linux-gnu.zip to stage from
-// a local copy instead of downloading (still sha256-verified against the pin).
+// Offline / air-gapped: set VITA_DENO_ZIP=/path/to/deno-x86_64-unknown-linux-gnu.zip and/or
+// VITA_WASMTIME_TARBALL=/path/to/wasmtime-v36.0.11-x86_64-linux.tar.xz to stage from local copies
+// instead of downloading (still sha256-verified against the pins).
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -35,6 +36,15 @@ const OVERLAY_ROOT = join(HERE, "ts-overlay");
 const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs"),
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.hostile-oci.capsule", "rootfs"),
+]);
+const BAKED_WASM_CAPSULES = Object.freeze([
+  Object.freeze({
+    id: "local.wasm.capsule",
+    module: "component.wasm",
+    // Deterministic wasm32-wasip1 binary matching local.wasm.capsule/component.wat.
+    wasmBase64:
+      "AGFzbQEAAAABEANgBH9/f38Bf2AAAX9gAAACSAIWd2FzaV9zbmFwc2hvdF9wcmV2aWV3MQhmZF93cml0ZQAAFndhc2lfc25hcHNob3RfcHJldmlldzELc2NoZWRfeWllbGQAAQMCAQIFAwEAAQcTAgZtZW1vcnkCAAZfc3RhcnQAAgolASMAQQBBEDYCAEEEQR82AgBBAUEAQQFBCBAAGgNAEAEaDAALCwslAQBBEAsfVklUQS1XQVNNLUNBUFNVTEU6IHNlbnRpbmVsPU9LCg==",
+  }),
 ]);
 
 function fail(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
@@ -57,19 +67,35 @@ function parseConf(text) {
   return out;
 }
 
-function loadPin() {
+function overlayHostPath(installPath) {
+  return join(OVERLAY_ROOT, installPath.replace(/^\//, ""));
+}
+
+function requireKeys(block, section, keys) {
+  for (const key of keys) {
+    if (!block[key]) fail(`ts-image.conf missing required key ${section}.${key}`);
+  }
+}
+
+function assertSha256(value, section) {
+  if (!/^[0-9a-f]{64}$/.test(value)) fail(`ts-image.conf ${section}.Sha256 must be 64 lowercase hex chars, got: ${value}`);
+}
+
+function loadPins() {
   if (!existsSync(CONFIG_PATH)) fail(`missing ${CONFIG_PATH}`);
   const conf = parseConf(readFileSync(CONFIG_PATH, "utf8"));
   const r = conf.Runtime ?? {};
   const i = conf.Install ?? {};
-  for (const [k, v] of Object.entries({ Version: r.Version, Asset: r.Asset, Url: r.Url, Sha256: r.Sha256, ArchiveMember: r.ArchiveMember, Binary: i.Binary, BinaryMode: i.BinaryMode })) {
-    if (!v) fail(`ts-image.conf missing required key ${k}`);
-  }
-  if (!/^[0-9a-f]{64}$/.test(r.Sha256)) fail(`ts-image.conf Sha256 must be 64 lowercase hex chars, got: ${r.Sha256}`);
-  // Map the container install path (/usr/...) onto the committed overlay tree on the host.
-  const binaryRel = i.Binary.replace(/^\//, "");          // usr/lib/vita/deno
-  const binaryHostPath = join(OVERLAY_ROOT, binaryRel);
-  return { ...r, binary: i.Binary, binaryMode: i.BinaryMode, binaryHostPath };
+  const w = conf.Wasmtime ?? {};
+  requireKeys(r, "Runtime", ["Version", "Asset", "Url", "Sha256", "ArchiveMember"]);
+  requireKeys(i, "Install", ["Binary", "BinaryMode"]);
+  requireKeys(w, "Wasmtime", ["Version", "Asset", "Url", "Sha256", "ArchiveMember", "Binary", "BinaryMode"]);
+  assertSha256(r.Sha256, "Runtime");
+  assertSha256(w.Sha256, "Wasmtime");
+  return {
+    deno: { ...r, binary: i.Binary, binaryMode: i.BinaryMode, binaryHostPath: overlayHostPath(i.Binary) },
+    wasmtime: { ...w, binary: w.Binary, binaryMode: w.BinaryMode, binaryHostPath: overlayHostPath(w.Binary) },
+  };
 }
 
 function sha256File(path) {
@@ -89,6 +115,16 @@ function extractMember(zipPath, member, destDir) {
   fail(`could not extract '${member}' from ${zipPath} — install 'unzip' (apt install unzip) or bsdtar`);
 }
 
+function extractTarMember(tarPath, member, destDir) {
+  const tryRun = (exe, args) => {
+    const r = spawnSync(exe, args, { stdio: ["ignore", "inherit", "inherit"] });
+    return r.error === undefined && r.status === 0;
+  };
+  if (tryRun("bsdtar", ["-x", "-f", tarPath, "-C", destDir, member])) return join(destDir, member);
+  if (tryRun("tar", ["-x", "-f", tarPath, "-C", destDir, member])) return join(destDir, member);
+  fail(`could not extract '${member}' from ${tarPath} - install bsdtar or GNU tar with xz support`);
+}
+
 async function downloadTo(url, destPath) {
   log(`   fetching ${url}`);
   const res = await fetch(url, { redirect: "follow" });
@@ -98,7 +134,7 @@ async function downloadTo(url, destPath) {
   return destPath;
 }
 
-async function stage(pin) {
+async function stageDeno(pin) {
   mkdirSync(dirname(pin.binaryHostPath), { recursive: true });
   const work = mkdtempSync(join(tmpdir(), "vita-deno-"));
   try {
@@ -118,11 +154,43 @@ async function stage(pin) {
     if (!existsSync(extracted)) fail(`extraction did not produce ${extracted}`);
     copyFileSync(extracted, pin.binaryHostPath);
     chmodSync(pin.binaryHostPath, parseInt(pin.binaryMode, 8));
-    stageBakedOCIRootfs();
     log(`   staged deno ${pin.Version} → ${pin.binaryHostPath} (mode ${pin.binaryMode})`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+async function stageWasmtime(pin) {
+  mkdirSync(dirname(pin.binaryHostPath), { recursive: true });
+  const work = mkdtempSync(join(tmpdir(), "vita-wasmtime-"));
+  try {
+    let tarballPath = process.env.VITA_WASMTIME_TARBALL;
+    if (tarballPath) {
+      if (!existsSync(tarballPath)) fail(`VITA_WASMTIME_TARBALL set but not found: ${tarballPath}`);
+      log(`   using local wasmtime tarball (offline): ${tarballPath}`);
+    } else {
+      tarballPath = await downloadTo(pin.Url, join(work, pin.Asset));
+    }
+    const got = sha256File(tarballPath);
+    if (got !== pin.Sha256) {
+      fail(`sha256 MISMATCH for ${pin.Asset}\n   expected ${pin.Sha256}\n   got      ${got}\n   (refusing to stage an unverified runtime)`);
+    }
+    log(`   sha256 OK: ${got}`);
+    const extracted = extractTarMember(tarballPath, pin.ArchiveMember, work);
+    if (!existsSync(extracted)) fail(`extraction did not produce ${extracted}`);
+    copyFileSync(extracted, pin.binaryHostPath);
+    chmodSync(pin.binaryHostPath, parseInt(pin.binaryMode, 8));
+    log(`   staged wasmtime ${pin.Version} -> ${pin.binaryHostPath} (mode ${pin.binaryMode})`);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function stage(pins) {
+  await stageDeno(pins.deno);
+  await stageWasmtime(pins.wasmtime);
+  stageBakedOCIRootfs();
+  stageBakedWasmCapsules();
 }
 
 function stageBakedOCIRootfs() {
@@ -136,6 +204,21 @@ function stageBakedOCIRootfs() {
   }
 }
 
+function stageBakedWasmCapsules() {
+  for (const capsule of BAKED_WASM_CAPSULES) {
+    const capsuleDir = join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", capsule.id);
+    const modulePath = join(capsuleDir, capsule.module);
+    const sourcePath = join(capsuleDir, "component.wat");
+    if (!existsSync(capsuleDir)) fail(`baked WASM capsule missing: ${capsuleDir}`);
+    if (!existsSync(sourcePath)) fail(`baked WASM source missing: ${sourcePath}`);
+    const bytes = Buffer.from(capsule.wasmBase64, "base64");
+    if (!WebAssembly.validate(bytes)) fail(`baked WASM module bytes are invalid for ${capsule.id}`);
+    writeFileSync(modulePath, bytes);
+    chmodSync(modulePath, 0o644);
+    log(`   staged baked WASM capsule ${capsule.id}/${capsule.module} (${bytes.length} bytes, mode 0644)`);
+  }
+}
+
 function chmodDirectories(root) {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.isDirectory()) chmodDirectories(join(root, entry.name));
@@ -145,22 +228,31 @@ function chmodDirectories(root) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  const pin = loadPin();
+  const pins = loadPins();
   if (argv.includes("--print")) {
-    log(JSON.stringify({ name: pin.Name, version: pin.Version, asset: pin.Asset, url: pin.Url, sha256: pin.Sha256, binary: pin.binary, binaryHostPath: pin.binaryHostPath }, null, 2));
+    log(JSON.stringify({
+      deno: { name: pins.deno.Name, version: pins.deno.Version, asset: pins.deno.Asset, url: pins.deno.Url, sha256: pins.deno.Sha256, binary: pins.deno.binary, binaryHostPath: pins.deno.binaryHostPath },
+      wasmtime: { name: pins.wasmtime.Name, version: pins.wasmtime.Version, asset: pins.wasmtime.Asset, url: pins.wasmtime.Url, sha256: pins.wasmtime.Sha256, binary: pins.wasmtime.binary, binaryHostPath: pins.wasmtime.binaryHostPath },
+    }, null, 2));
     return;
   }
   if (argv.includes("--check")) {
-    if (!existsSync(pin.binaryHostPath)) fail(`no staged binary at ${pin.binaryHostPath} — run without --check to stage it`);
-    log("   (note: --check verifies the staged binary is non-empty; the pinned sha256 is over the zip, not the unpacked binary)");
-    const size = readFileSync(pin.binaryHostPath).length;
-    if (size === 0) fail(`staged binary is empty: ${pin.binaryHostPath}`);
-    log(`   staged binary present: ${pin.binaryHostPath} (${size} bytes)`);
+    checkStagedBinary(pins.deno);
+    checkStagedBinary(pins.wasmtime);
+    stageBakedWasmCapsules();
     return;
   }
-  log(`Vita ts-image — stage pinned Deno ${pin.Version} into ${REPO ? "ts-overlay" : ""}`);
-  await stage(pin);
-  log("\n✓ deno staged. Now build with mkosi --extra-tree=os/x86_64/ts-overlay (see build-and-boot wiring).");
+  log(`Vita ts-image — stage pinned Deno ${pins.deno.Version} + Wasmtime ${pins.wasmtime.Version} into ${REPO ? "ts-overlay" : ""}`);
+  await stage(pins);
+  log("\n✓ runtimes staged. Now build with mkosi --extra-tree=os/x86_64/ts-overlay (see build-and-boot wiring).");
+}
+
+function checkStagedBinary(pin) {
+  if (!existsSync(pin.binaryHostPath)) fail(`no staged binary at ${pin.binaryHostPath} — run without --check to stage it`);
+  log("   (note: --check verifies the staged binary is non-empty; the pinned sha256 is over the archive, not the unpacked binary)");
+  const size = readFileSync(pin.binaryHostPath).length;
+  if (size === 0) fail(`staged binary is empty: ${pin.binaryHostPath}`);
+  log(`   staged binary present: ${pin.binaryHostPath} (${size} bytes)`);
 }
 
 main().catch((e) => fail(e?.stack ?? String(e)));

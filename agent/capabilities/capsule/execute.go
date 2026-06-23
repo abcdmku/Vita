@@ -28,13 +28,15 @@ import (
 const (
 	ExecuteName = "capsule.execute"
 
-	defaultCapsuleRoot = "/usr/lib/vita/capsules"
-	defaultDenoPath    = "/usr/lib/vita/deno"
-	systemdRunPath     = "/usr/bin/systemd-run"
-	systemctlPath      = "/usr/bin/systemctl"
+	defaultCapsuleRoot  = "/usr/lib/vita/capsules"
+	defaultDenoPath     = "/usr/lib/vita/deno"
+	defaultWasmtimePath = "/usr/lib/vita/bin/wasmtime"
+	systemdRunPath      = "/usr/bin/systemd-run"
+	systemctlPath       = "/usr/bin/systemctl"
 
-	executePackageClassTSService  = "ts-service"
-	executePackageClassOCIService = "oci-service"
+	executePackageClassTSService   = "ts-service"
+	executePackageClassOCIService  = "oci-service"
+	executePackageClassWasmService = "wasm-service"
 
 	maxCPUQuotaCores = 64
 	maxMemoryMiB     = 1024 * 1024
@@ -604,9 +606,9 @@ func (m ExecutionManifest) Validate() error {
 		return &ExecuteInvalidRequestError{Reason: "manifest.integrity must be a real SRI integrity"}
 	}
 	switch m.PackageClass {
-	case executePackageClassTSService, executePackageClassOCIService:
+	case executePackageClassTSService, executePackageClassOCIService, executePackageClassWasmService:
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service, oci-service, or wasm-service"}
 	}
 	if err := m.Runtime.ValidateForPackageClass(m.PackageClass); err != nil {
 		return err
@@ -628,6 +630,7 @@ func (m ExecutionManifest) Validate() error {
 type ExecutionRuntime struct {
 	TypeScript TypeScriptExecution `json:"typescript"`
 	OCI        OCIExecution        `json:"oci"`
+	Wasm       WasmExecution       `json:"wasm"`
 }
 
 func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
@@ -645,12 +648,24 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 
 	rawTS, hasTS := fields["typescript"]
 	rawOCI, hasOCI := fields["oci"]
-	if hasTS == hasOCI {
-		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one of typescript or oci"}
+	rawWasm, hasWasm := fields["wasm"]
+	declared := 0
+	if hasTS {
+		declared++
+	}
+	if hasOCI {
+		declared++
+	}
+	if hasWasm {
+		declared++
+	}
+	if declared != 1 {
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one of typescript, oci, or wasm"}
 	}
 
 	var runtime ExecutionRuntime
-	if hasTS {
+	switch {
+	case hasTS:
 		if bytes.Equal(bytes.TrimSpace(rawTS), []byte("null")) {
 			return &ExecuteInvalidRequestError{Reason: "runtime.typescript is required"}
 		}
@@ -659,7 +674,7 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 			return err
 		}
 		runtime.TypeScript = ts
-	} else {
+	case hasOCI:
 		if bytes.Equal(bytes.TrimSpace(rawOCI), []byte("null")) {
 			return &ExecuteInvalidRequestError{Reason: "runtime.oci is required"}
 		}
@@ -668,6 +683,15 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 			return err
 		}
 		runtime.OCI = oci
+	default:
+		if bytes.Equal(bytes.TrimSpace(rawWasm), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "runtime.wasm is required"}
+		}
+		var wasm WasmExecution
+		if err := decodeSingleJSONValue(rawWasm, &wasm); err != nil {
+			return err
+		}
+		runtime.Wasm = wasm
 	}
 
 	*r = runtime
@@ -675,16 +699,20 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 }
 
 func (r ExecutionRuntime) Validate() error {
-	tsErr := r.TypeScript.Validate()
-	ociErr := r.OCI.Validate()
-	switch {
-	case tsErr == nil && ociErr == nil:
-		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
-	case tsErr == nil || ociErr == nil:
-		return nil
-	default:
-		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
+	valid := 0
+	if err := r.TypeScript.Validate(); err == nil {
+		valid++
 	}
+	if err := r.OCI.Validate(); err == nil {
+		valid++
+	}
+	if err := r.Wasm.Validate(); err == nil {
+		valid++
+	}
+	if valid == 1 {
+		return nil
+	}
+	return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
 }
 
 func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
@@ -696,6 +724,9 @@ func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
 		if err := r.OCI.Validate(); err == nil {
 			return &ExecuteInvalidRequestError{Reason: "runtime.oci must not be declared for ts-service"}
 		}
+		if err := r.Wasm.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.wasm must not be declared for ts-service"}
+		}
 	case executePackageClassOCIService:
 		if err := r.OCI.Validate(); err != nil {
 			return err
@@ -703,8 +734,21 @@ func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
 		if err := r.TypeScript.Validate(); err == nil {
 			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for oci-service"}
 		}
+		if err := r.Wasm.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.wasm must not be declared for oci-service"}
+		}
+	case executePackageClassWasmService:
+		if err := r.Wasm.Validate(); err != nil {
+			return err
+		}
+		if err := r.TypeScript.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for wasm-service"}
+		}
+		if err := r.OCI.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.oci must not be declared for wasm-service"}
+		}
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service, oci-service, or wasm-service"}
 	}
 	return nil
 }
@@ -1219,6 +1263,7 @@ var (
 	executionRuntimeFields = map[string]struct{}{
 		"oci":        {},
 		"typescript": {},
+		"wasm":       {},
 	}
 	executionDataFields = map[string]struct{}{
 		"classes": {},
@@ -1286,8 +1331,10 @@ func statExecutionManifestArtifacts(manifest ExecutionManifest) error {
 		}
 	case executePackageClassOCIService:
 		return statOCIManifestArtifacts(manifest)
+	case executePackageClassWasmService:
+		return statWasmManifestArtifacts(manifest)
 	default:
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service, oci-service, or wasm-service"}
 	}
 	return nil
 }
@@ -1298,8 +1345,10 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		return composeTypeScriptTransientUnit(manifest)
 	case executePackageClassOCIService:
 		return composeOCITransientUnit(manifest)
+	case executePackageClassWasmService:
+		return composeWasmTransientUnit(manifest)
 	default:
-		return transientUnit{}, &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service, oci-service, or wasm-service"}
 	}
 }
 
