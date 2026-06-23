@@ -17,6 +17,12 @@ import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manife
 import { createAgentClient, isAgentClientError } from "./vita/agent-client.ts";
 import { applyNodeConfig } from "./vita/apply-node-config.ts";
 import { buildCapsuleRegistryConfig } from "./vita/capsule-registry-model.ts";
+import {
+  formatCapsuleRegistryPreviewMarker,
+  ON_DEVICE_CAPSULE_ENTRY,
+  ON_DEVICE_CAPSULE_REGISTRY,
+  readCapsuleRegistryPreview,
+} from "./vita/capsule-preview.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
 import { formatPdsSyncStateReadMarker, readPdsSyncStateSummary } from "./vita/pds-read.ts";
 import {
@@ -51,6 +57,7 @@ const APPLY_MARKER = "VITA-APPLY";
 const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
 const CAPSULE_MARKER = "VITA-CAPSULE";
 const CAPSULE_ERROR_MARKER = "VITA-CAPSULE-ERROR";
+const CAPSULE_PREVIEW_ERROR_MARKER = "VITA-CAPSULE-PREVIEW-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const APPLY_JSON_HEADERS = Object.freeze({
@@ -89,13 +96,6 @@ const INVALID_CONFIG = Object.freeze({
   }),
 });
 
-const TEST_CAPSULE_ENTRY = Object.freeze({
-  id: "local.test.capsule",
-  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-  state: "installed",
-  version: "1.0.0",
-}) satisfies CapsuleEntry;
-
 const FORCED_REJECT_PLAN = Object.freeze({
   operations: Object.freeze([
     Object.freeze({
@@ -115,10 +115,10 @@ const FORCED_INVALID_CAPSULE_PLAN = Object.freeze({
         desired: Object.freeze({
           capsules: Object.freeze([
             Object.freeze({
-              id: TEST_CAPSULE_ENTRY.id,
+              id: ON_DEVICE_CAPSULE_ENTRY.id,
               integrity: "sha256-AAAA",
-              state: TEST_CAPSULE_ENTRY.state,
-              version: TEST_CAPSULE_ENTRY.version,
+              state: ON_DEVICE_CAPSULE_ENTRY.state,
+              version: ON_DEVICE_CAPSULE_ENTRY.version,
             }),
           ]),
         }),
@@ -304,6 +304,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -315,10 +316,15 @@ async function emitAgentdConnectMarker(): Promise<void> {
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
     await emitApplyMarkers(state.state.hostname, agentTransport);
-    await emitCapsuleMarkers(agentTransport);
+    if (await emitCapsulePreviewMarker(client)) {
+      await emitCapsuleMarkers(agentTransport);
+    } else {
+      emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
   }
 
@@ -348,7 +354,7 @@ async function emitApplyMarkers(
 }
 
 async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
-  const config = buildCapsuleRegistryConfig(Object.freeze([TEST_CAPSULE_ENTRY]));
+  const config = buildCapsuleRegistryConfig(ON_DEVICE_CAPSULE_REGISTRY);
 
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -366,8 +372,16 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     return;
   }
 
-  emit(formatCommittedCapsuleMarker(TEST_CAPSULE_ENTRY, result.applyResult));
+  emit(formatCommittedCapsuleMarker(ON_DEVICE_CAPSULE_ENTRY, result.applyResult));
   await emitForcedCapsuleRejectMarker(agentTransport);
+}
+
+async function emitCapsulePreviewMarker(
+  client: Pick<AgentClient, "getState">,
+): Promise<boolean> {
+  const result = await readCapsuleRegistryPreview(client);
+  emit(formatCapsuleRegistryPreviewMarker(result));
+  return result.ok;
 }
 
 function hostnameConfig(currentHostname: string): unknown {
