@@ -73,7 +73,7 @@ const AGENTD_BASE_URL = "http://agentd";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
-const CAPSULE_BUNDLE_INTEGRITY = "sha256-Wiwzsgeadk6nTBJrxMe67QBdsAceNpHynbJRH2JAMZ8=";
+const CAPSULE_BUNDLE_INTEGRITY = "sha256-ZxeTpiUU3aU+z6sDmWsoRUWAo28E+2pW6puG3DmkuNk=";
 const BAD_CAPSULE_BUNDLE_INTEGRITY = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const CAPSULE_VOLUME_NAME = "state";
 const CAPSULE_VOLUME_PATH = "/var/lib/vita/runtime/volumes/local.test.capsule/state";

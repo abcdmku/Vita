@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/vita/agent/internal/jsonsafe"
 )
 
@@ -31,6 +32,14 @@ const (
 
 	cacheDirMode  = 0o700
 	cacheFileMode = 0o600
+
+	// Bundle manifests are inside the untrusted archive, so extraction is
+	// bounded before manifest validation to keep integrity-valid zstd bombs
+	// from exhausting disk or decoder memory.
+	maxCapsuleTarEntryBytes   = 16 * 1024 * 1024
+	maxCapsuleTarPayloadBytes = 64 * 1024 * 1024
+	maxCapsuleTarEntries      = 1024
+	maxCapsuleDecodedTarBytes = maxCapsuleTarPayloadBytes + 4*1024*1024
 )
 
 var (
@@ -426,8 +435,25 @@ func integrityHasher(algorithm string) (hash.Hash, error) {
 }
 
 func extractTar(ctx context.Context, reader io.Reader, dest string) error {
-	tarReader := tar.NewReader(reader)
+	decoder, err := zstd.NewReader(
+		reader,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(uint64(maxCapsuleDecodedTarBytes)),
+		zstd.WithDecoderMaxWindow(uint64(maxCapsuleTarEntryBytes)),
+	)
+	if err != nil {
+		return fmt.Errorf("create capsule zstd decoder: %w", err)
+	}
+	defer decoder.Close()
+
+	limitedArchive := &maxBytesReader{
+		reader:    decoder,
+		remaining: maxCapsuleDecodedTarBytes,
+		limit:     maxCapsuleDecodedTarBytes,
+	}
+	tarReader := tar.NewReader(limitedArchive)
 	entries := 0
+	var totalPayloadBytes int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -441,6 +467,12 @@ func extractTar(ctx context.Context, reader io.Reader, dest string) error {
 			return fmt.Errorf("read capsule tar entry: %w", err)
 		}
 		entries++
+		if entries > maxCapsuleTarEntries {
+			return fmt.Errorf("capsule tar archive exceeds entry limit (%d)", maxCapsuleTarEntries)
+		}
+		if header.Size < 0 {
+			return fmt.Errorf("capsule tar entry %q has negative size", header.Name)
+		}
 
 		entryName, err := safeArchiveName(header.Name)
 		if err != nil {
@@ -459,8 +491,15 @@ func extractTar(ctx context.Context, reader io.Reader, dest string) error {
 			if err := os.Chmod(target, cacheDirMode); err != nil {
 				return fmt.Errorf("secure capsule tar directory: %w", err)
 			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := writeTarFile(ctx, target, tarReader); err != nil {
+		case tar.TypeReg:
+			if header.Size > maxCapsuleTarEntryBytes {
+				return fmt.Errorf("capsule tar entry %q exceeds per-entry size limit (%d bytes)", header.Name, maxCapsuleTarEntryBytes)
+			}
+			if totalPayloadBytes > maxCapsuleTarPayloadBytes-header.Size {
+				return fmt.Errorf("capsule tar archive exceeds total payload size limit (%d bytes)", maxCapsuleTarPayloadBytes)
+			}
+			totalPayloadBytes += header.Size
+			if err := writeTarFile(ctx, target, tarReader, header.Size); err != nil {
 				return err
 			}
 		default:
@@ -473,7 +512,7 @@ func extractTar(ctx context.Context, reader io.Reader, dest string) error {
 	return nil
 }
 
-func writeTarFile(ctx context.Context, target string, reader io.Reader) error {
+func writeTarFile(ctx context.Context, target string, reader io.Reader, expectedSize int64) error {
 	if err := os.MkdirAll(filepath.Dir(target), cacheDirMode); err != nil {
 		return fmt.Errorf("create capsule tar file parent: %w", err)
 	}
@@ -492,8 +531,16 @@ func writeTarFile(ctx context.Context, target string, reader io.Reader) error {
 	if err := file.Chmod(cacheFileMode); err != nil {
 		return fmt.Errorf("secure capsule tar file: %w", err)
 	}
-	if err := copyWithContext(ctx, file, reader); err != nil {
+	limitedReader := &io.LimitedReader{R: reader, N: expectedSize + 1}
+	written, err := copyWithContextCount(ctx, file, limitedReader)
+	if err != nil {
 		return fmt.Errorf("write capsule tar file: %w", err)
+	}
+	if written > expectedSize || limitedReader.N == 0 {
+		return fmt.Errorf("capsule tar file exceeds declared size")
+	}
+	if written != expectedSize {
+		return fmt.Errorf("capsule tar file is truncated")
 	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("sync capsule tar file: %w", err)
@@ -504,6 +551,29 @@ func writeTarFile(ctx context.Context, target string, reader io.Reader) error {
 	}
 	closed = true
 	return nil
+}
+
+type maxBytesReader struct {
+	reader    io.Reader
+	remaining int64
+	limit     int64
+}
+
+func (r *maxBytesReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		var one [1]byte
+		n, err := r.reader.Read(one[:])
+		if n > 0 {
+			return 0, fmt.Errorf("capsule zstd stream exceeds decoded tar limit (%d bytes)", r.limit)
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 func safeArchiveName(name string) (string, error) {
@@ -613,27 +683,34 @@ func validVersion(value string) bool {
 }
 
 func copyWithContext(ctx context.Context, writer io.Writer, reader io.Reader) error {
+	_, err := copyWithContextCount(ctx, writer, reader)
+	return err
+}
+
+func copyWithContextCount(ctx context.Context, writer io.Writer, reader io.Reader) (int64, error) {
 	buffer := make([]byte, 32*1024)
+	var total int64
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return total, err
 		}
 
 		read, readErr := reader.Read(buffer)
 		if read > 0 {
 			written, writeErr := writer.Write(buffer[:read])
 			if writeErr != nil {
-				return writeErr
+				return total, writeErr
 			}
 			if written != read {
-				return io.ErrShortWrite
+				return total, io.ErrShortWrite
 			}
+			total += int64(written)
 		}
 		if errors.Is(readErr, io.EOF) {
-			return nil
+			return total, nil
 		}
 		if readErr != nil {
-			return readErr
+			return total, readErr
 		}
 	}
 }
