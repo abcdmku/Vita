@@ -148,13 +148,18 @@ test("invalid and unknown-capability configs fail closed with upstream rejection
   }
 });
 
-test("vendored safe-normalize has no static node import and matches upstream behavior", () => {
+test("vendored safe-normalize uses direct node:util import and matches upstream behavior", () => {
   const source = readFileSync(
     fileURLToPath(new URL("./vita/safe-normalize.ts", import.meta.url)),
     "utf8",
   );
 
-  assert.doesNotMatch(source, /from\s+["']node:/u);
+  assert.match(
+    source,
+    /import\s+\{\s*types\s+as\s+nodeTypes\s*\}\s+from\s+["']node:util["'];/u,
+  );
+  assert.doesNotMatch(source, /getBuiltinModule/u);
+  assert.doesNotMatch(source, /\?\?\s*false/u);
 
   const cyclic: Record<string, unknown> = {};
   cyclic.self = cyclic;
