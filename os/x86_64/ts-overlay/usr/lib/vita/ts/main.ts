@@ -11,6 +11,7 @@
 
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
 import { diffTransactionPlans, TransactionPlanDiffError } from "./vita/transaction-plan-diff.ts";
+import { explainTransactionPlanChange } from "./vita/transaction-plan-explain.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
@@ -20,6 +21,7 @@ const REJECT_MARKER = "VITA-EVAL-REJECT";
 const PREVIEW_MARKER = "VITA-PREVIEW";
 const PREVIEW_NOOP_MARKER = "VITA-PREVIEW-NOOP";
 const PREVIEW_ERROR_MARKER = "VITA-PREVIEW-ERROR";
+const EXPLAIN_MARKER = "VITA-EXPLAIN";
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -175,6 +177,17 @@ function runPreview(): number {
       `changed=${change.changed.length} ` +
       "status=OK",
   );
+
+  const explainLines = explainTransactionPlanChange(change);
+  emit(`${EXPLAIN_MARKER}: lines=${explainLines.length} status=OK`);
+
+  for (let index = 0; index < explainLines.length; index += 1) {
+    const line = explainLines[index];
+
+    if (line !== undefined) {
+      emit(`${EXPLAIN_MARKER}| ${line}`);
+    }
+  }
 
   if (
     noopChange.added.length !== 0 ||
