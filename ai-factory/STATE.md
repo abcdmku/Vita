@@ -60,8 +60,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     itself, manages capsules, and persists PDS state on-device — unprivileged runtime proposes, agentd validates +
     applies + fails closed. `wsl-verify ts` guards the full chain. (S5 2-boot verity persistence check in progress.)
     Host-verify caught real integration bugs throughout (var.mount RequiresMountsFor cascade → verity-only overlay).
-    **NEXT FRONTIER: wave 4 — capsule EXECUTION (fetch/extract/verify + workload launch), the larger parked work;**
-    plus the noted hardenings (SO_PEERCRED agentd auth per ADR-0008; safe-normalize direct node:util).
+    **NEXT FRONTIER: WAVE 4 — capsule EXECUTION (run workloads on-device), MAPPED (~4-8wk, design-first).** What
+    exists: the capsule registry/manifest/package-contract (id/version/integrity/state, healthChecks, resources,
+    volumes), `VOLUME_MOUNT_ROOT=/var/lib/vita/runtime/volumes`, the permission-broker, the registry Apply handler.
+    GAP: storage fetch/extract/verify-by-SRI (zero), a workload LAUNCHER + health poller (zero), `capsule.execute`
+    agentd handler (zero). Slice plan: **S2 ADR-0009 (execution model: systemd-transient+runc vs direct agentd
+    supervision vs nspawn — a real fork, HIGH unknowns, spike first) → S1 fetch/verify-by-SRI (R3) → S3 volumes (R3) →
+    S4 health poller (R2) → S5 workload state+audit (R2) → S6 capsule.execute orchestrator (R3, largest).** Each gets
+    a VITA-CAPSULE-FETCH/EXECUTED/HEALTH marker + host-verify. **STARTING with ADR-0009 (architect drafting + host-cap
+    spike).** Filed hardenings: SO_PEERCRED agentd auth (ADR-0008); safe-normalize direct node:util.
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
