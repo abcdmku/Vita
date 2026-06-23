@@ -93,7 +93,6 @@ func (osVolumeHost) Unmount(target string) error {
 var (
 	capsulePathIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,254}$`)
 	volumeNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	controlCharacter     = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 	dataClasses          = map[string]struct{}{
 		"app-state":     {},
 		"cache":         {},
