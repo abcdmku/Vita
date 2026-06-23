@@ -50,6 +50,7 @@ func main() {
 	registry, err := capabilities.NewRegistry(
 		accounts.NewCapability(),
 		backup.NewCapability(),
+		capsule.NewExecuteCapability(),
 		capsule.NewCapability(),
 		hostname.NewCapability(),
 		identity.NewCapability(),

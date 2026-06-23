@@ -202,17 +202,18 @@ func TestStateReturnsAllRegisteredCapabilitiesSortedAndReadIdentical(t *testing.
 		name    string
 		ordinal int
 	}{
-		{name: update.Name, ordinal: 13},
-		{name: timesync.Name, ordinal: 12},
-		{name: nodetime.Name, ordinal: 11},
-		{name: storage.Name, ordinal: 10},
-		{name: services.Name, ordinal: 9},
-		{name: pdssync.Name, ordinal: 8},
-		{name: nodeconfig.Name, ordinal: 7},
-		{name: network.Name, ordinal: 6},
-		{name: identity.Name, ordinal: 5},
-		{name: hostname.Name, ordinal: 4},
-		{name: capsule.Name, ordinal: 3},
+		{name: update.Name, ordinal: 14},
+		{name: timesync.Name, ordinal: 13},
+		{name: nodetime.Name, ordinal: 12},
+		{name: storage.Name, ordinal: 11},
+		{name: services.Name, ordinal: 10},
+		{name: pdssync.Name, ordinal: 9},
+		{name: nodeconfig.Name, ordinal: 8},
+		{name: network.Name, ordinal: 7},
+		{name: identity.Name, ordinal: 6},
+		{name: hostname.Name, ordinal: 5},
+		{name: capsule.Name, ordinal: 4},
+		{name: capsule.ExecuteName, ordinal: 3},
 		{name: backup.Name, ordinal: 2},
 		{name: accounts.Name, ordinal: 1},
 	}
@@ -343,6 +344,7 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	registry := mustRegistry(t,
 		&mockTxCapability{name: accounts.Name},
 		&mockTxCapability{name: backup.Name},
+		&mockTxCapability{name: capsule.ExecuteName},
 		&mockTxCapability{name: capsule.Name},
 		&mockTxCapability{name: nodetime.Name},
 		&mockTxCapability{name: network.Name},
@@ -364,7 +366,7 @@ func TestOperationsListsRegisteredNamesSorted(t *testing.T) {
 	}
 	var got OperationsResponse
 	decodeResponse(t, response, &got)
-	want := []string{accounts.Name, backup.Name, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
+	want := []string{accounts.Name, backup.Name, capsule.ExecuteName, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
 	if !reflect.DeepEqual(got.Operations, want) {
 		t.Fatalf("operations = %v, want %v", got.Operations, want)
 	}
@@ -506,6 +508,11 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		},
 	})
 	capsuleReadRaw := []byte(`{"capsules":[{"id":"dev.vita.notes","version":"1.0.0","integrity":"` + transportSHA256SRI + `","state":"installed"}]}` + "\n")
+	desiredExecute := capsule.ExecuteDesired{
+		ID:        "local.test.capsule",
+		Version:   "1.0.0",
+		Integrity: transportSHA256SRI,
+	}
 	registry := mustRegistry(t,
 		&routedTxCapability{
 			name:   nodeconfig.Name,
@@ -727,6 +734,37 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 			},
 		},
 		&routedTxCapability{
+			name:   capsule.ExecuteName,
+			events: &events,
+			handle: func(request capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+				if _, ok := request.(capsule.ExecuteReadRequest); !ok {
+					return nil, fmt.Errorf("capsule execute read request = %T, want capsule.ExecuteReadRequest", request)
+				}
+				return capsule.ExecuteReadResponse{
+					Last: &capsule.ExecuteStatus{
+						ID:         desiredExecute.ID,
+						Unit:       "vita-capsule-local.test.capsule.service",
+						DynamicUID: "61408",
+						Health:     "OK",
+						Status:     "OK",
+					},
+				}, nil
+			},
+			apply: func(request capabilities.TypedRequest) error {
+				typedRequest, ok := request.(capsule.ExecuteApplyRequest)
+				if !ok {
+					return fmt.Errorf("capsule execute request = %T, want capsule.ExecuteApplyRequest", request)
+				}
+				if typedRequest.Desired == nil {
+					return errors.New("capsule execute desired = nil")
+				}
+				if *typedRequest.Desired != desiredExecute {
+					return fmt.Errorf("capsule execute desired = %#v, want %#v", *typedRequest.Desired, desiredExecute)
+				}
+				return nil
+			},
+		},
+		&routedTxCapability{
 			name:   capsule.Name,
 			events: &events,
 			handle: func(request capabilities.TypedRequest) (capabilities.TypedResponse, error) {
@@ -757,7 +795,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names. Registration is proven below: /operations lists and /apply routes all thirteen registered
+	// names. Registration is proven below: /operations lists and /apply routes all fourteen registered
 	// capabilities and commits them in order.
 	operationsResponse := perform(handler, http.MethodGet, "/operations", "")
 	if operationsResponse.Code != http.StatusOK {
@@ -765,7 +803,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	}
 	var operations OperationsResponse
 	decodeResponse(t, operationsResponse, &operations)
-	wantOperations := []string{accounts.Name, backup.Name, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
+	wantOperations := []string{accounts.Name, backup.Name, capsule.ExecuteName, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
 	if !reflect.DeepEqual(operations.Operations, wantOperations) {
 		t.Fatalf("operations = %v, want %v", operations.Operations, wantOperations)
 	}
@@ -861,7 +899,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		t.Fatalf("accounts state raw = %s, want read raw = %s", accountsStateRaw, bytes.TrimSuffix(accountsReadResponse.Body.Bytes(), []byte("\n")))
 	}
 
-	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"time.sync","request":{"desired":{"enabled":true,"servers":["time.cloudflare.com","2001:db8::1"]}}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}},{"capability":"storage.layout","request":{"desired":{"subvolumes":[{"role":"system-state","path":"/data/system-state","quotaGiB":32},{"role":"user-data","path":"/data/user-data","quotaGiB":768},{"role":"app-state","path":"/data/app-state/local-search","appId":"local-search","quotaGiB":96},{"role":"snapshots","path":"/data/snapshots","quotaGiB":384},{"role":"local-backup-cache","path":"/data/local-backup-cache","quotaGiB":128}]}}},{"capability":"update.plan","request":{"desired":{"targetSlot":"b","bundle":{"ref":"https://updates.example.invalid/vita-os-1.3.0.raucb","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"1.3.0"}}}},{"capability":"backup.policy","request":{"desired":{"schedule":{"cron":"0 2 * * *"},"targets":[{"id":"target:system-state"},{"id":"target:user-data"}],"retention":{"count":7,"maxAgeDays":30},"recoveryKeyRef":{"id":"rk:owner-primary","handle":"rk_handle_owner_primary","keyStoreRef":"keystore:local-tpm"}}}},{"capability":"pds.sync-state","request":{"desired":{"repo":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","cursor":42,"repoHead":"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"}}},{"capability":"services.config","request":{"desired":{"services":[{"name":"ssh.service","enabled":true},{"name":"dbus.socket","enabled":false}]}}},{"capability":"accounts.config","request":{"desired":{"accounts":[{"name":"alice","uid":1001,"primaryGroup":"users","groups":["audio","video"],"shell":"/bin/bash","enabled":true},{"name":"backup","uid":1002,"primaryGroup":"users","groups":[],"shell":"/usr/sbin/nologin","enabled":false}]}}},{"capability":"capsule.registry","request":{"desired":{"capsules":[{"id":"dev.vita.notes","version":"1.0.0","integrity":"`+transportSHA256SRI+`","state":"installed"}]}}}]}`)
+	response := perform(handler, http.MethodPost, "/apply", `{"operations":[{"capability":"node.config","request":{"desired":{"mode":"maintenance","remoteAccess":"enabled"}}},{"capability":"time.set","request":{"desired":"2026-06-20T12:01:00Z"}},{"capability":"time.sync","request":{"desired":{"enabled":true,"servers":["time.cloudflare.com","2001:db8::1"]}}},{"capability":"hostname.set","request":{"desired":"vita-node-2"}},{"capability":"identity.attestation","request":{"desired":{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","handle":"alice.example.com","signingKeyRef":{"id":"key:identity-signing-primary","handle":"identity-signing-primary"}}}},{"capability":"network.policy","request":{"desired":{"allow":[{"proto":"tcp","port":443,"sourceCidr":"10.0.0.0/8","interface":"eth0"}]}}},{"capability":"storage.layout","request":{"desired":{"subvolumes":[{"role":"system-state","path":"/data/system-state","quotaGiB":32},{"role":"user-data","path":"/data/user-data","quotaGiB":768},{"role":"app-state","path":"/data/app-state/local-search","appId":"local-search","quotaGiB":96},{"role":"snapshots","path":"/data/snapshots","quotaGiB":384},{"role":"local-backup-cache","path":"/data/local-backup-cache","quotaGiB":128}]}}},{"capability":"update.plan","request":{"desired":{"targetSlot":"b","bundle":{"ref":"https://updates.example.invalid/vita-os-1.3.0.raucb","integrity":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"1.3.0"}}}},{"capability":"backup.policy","request":{"desired":{"schedule":{"cron":"0 2 * * *"},"targets":[{"id":"target:system-state"},{"id":"target:user-data"}],"retention":{"count":7,"maxAgeDays":30},"recoveryKeyRef":{"id":"rk:owner-primary","handle":"rk_handle_owner_primary","keyStoreRef":"keystore:local-tpm"}}}},{"capability":"pds.sync-state","request":{"desired":{"repo":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","cursor":42,"repoHead":"bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy"}}},{"capability":"services.config","request":{"desired":{"services":[{"name":"ssh.service","enabled":true},{"name":"dbus.socket","enabled":false}]}}},{"capability":"accounts.config","request":{"desired":{"accounts":[{"name":"alice","uid":1001,"primaryGroup":"users","groups":["audio","video"],"shell":"/bin/bash","enabled":true},{"name":"backup","uid":1002,"primaryGroup":"users","groups":[],"shell":"/usr/sbin/nologin","enabled":false}]}}},{"capability":"capsule.execute","request":{"desired":{"id":"local.test.capsule","version":"1.0.0","integrity":"`+transportSHA256SRI+`"}}},{"capability":"capsule.registry","request":{"desired":{"capsules":[{"id":"dev.vita.notes","version":"1.0.0","integrity":"`+transportSHA256SRI+`","state":"installed"}]}}}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
 	}
@@ -883,7 +921,8 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 		{Index: 9, Capability: pdssync.Name},
 		{Index: 10, Capability: services.Name},
 		{Index: 11, Capability: accounts.Name},
-		{Index: 12, Capability: capsule.Name},
+		{Index: 12, Capability: capsule.ExecuteName},
+		{Index: 13, Capability: capsule.Name},
 	}
 	if !reflect.DeepEqual(result.Applied, wantApplied) {
 		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
@@ -891,7 +930,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("Error = %#v, want nil", result.Error)
 	}
-	wantEvents := []string{nodeconfig.Name, nodetime.Name, timesync.Name, hostname.Name, identity.Name, network.Name, storage.Name, update.Name, backup.Name, pdssync.Name, services.Name, accounts.Name, capsule.Name}
+	wantEvents := []string{nodeconfig.Name, nodetime.Name, timesync.Name, hostname.Name, identity.Name, network.Name, storage.Name, update.Name, backup.Name, pdssync.Name, services.Name, accounts.Name, capsule.ExecuteName, capsule.Name}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
@@ -1349,7 +1388,7 @@ func mustRegistry(t *testing.T, registered ...capabilities.Capability) *capabili
 }
 
 func registeredCapabilityNames() []string {
-	return []string{accounts.Name, backup.Name, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
+	return []string{accounts.Name, backup.Name, capsule.ExecuteName, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
 }
 
 func assertCapabilityKeyOrder(t *testing.T, body string, names []string) {
