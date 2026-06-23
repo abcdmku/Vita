@@ -27,8 +27,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
   - **P1-032 installer** (real-disk install, R3 destructive) — in Codex round-4 re-review; 4 cross-review rounds
     hardened it (fail-closed system-disk detection incl. btrfs-subvol/overlay/squashfs, no lazy unmount,
     e2fsck-fatal, post-P1-029 `vita-data` growth). 71/71 loopback assertions.
-  - **NEXT:** merge P1-032 on approve → **WAVE 2** = control plane on-device + capsules + PDS on the persistent
-    TS runtime.
+  - **WAVE 2 STARTED (2026-06-22):** **P1-033 (config→plan evaluator ON-DEVICE) MERGED + HOST-VERIFIED** — the real
+    pure P9-001 evaluator (byte-identical vendoring + a proxy-resolver swap proven equivalent under Deno by the Opus
+    cross-reviewer) runs at boot under the unprivileged Deno sandbox: serial shows `VITA-EVAL: caps=13 ops=3
+    planHash=cb1cc2e0… status=OK` + `VITA-EVAL-REJECT` (fail-closed). Codex-built, Opus-cross-reviewed (approve),
+    `wsl-verify ts` now guards both VITA-TS + VITA-EVAL. **P1-034 (on-device PREVIEW: normalize+diff+explain →
+    VITA-PREVIEW) dispatched to an Opus builder** (Codex will cross-review). Follow-up noted: make safe-normalize's
+    proxy guardian structurally fail-CLOSED via the direct `node:util` import (proven-working as shipped on the pinned
+    Deno). NEXT slices: apply + a persistent PDS on the /var partition; then capsules.
+  - **NEXT (wave 1):** P1-032 installer still in round-5 codex↔opus cross-review (converging).
 - **Codex usage-limit window (~23:57–00:30 UTC):** per the owner, the loop did NOT idle — it switched the
   worker substrate to **Opus 4.8 subagents** (builders) with **independent Opus reviewers** as the R2/R3
   gate substitute (Codex `npm run review` was also down), + orchestrator independent verification. Landed
