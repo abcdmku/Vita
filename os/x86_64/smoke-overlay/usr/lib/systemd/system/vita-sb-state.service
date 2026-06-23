@@ -1,0 +1,21 @@
+# Vita SMOKE VM only — emit the Secure Boot enforcement witness token to ttyS0 early in boot.
+# Ordered before the serial getty so VITA-SB-STATE=... lands on the serial log even if the autologin
+# bash shell takes over the tty. WantedBy multi-user so it always runs on a normal boot. Smoke/test
+# only — shipped via the smoke-overlay --extra-tree; the production/full image never includes it.
+[Unit]
+Description=Vita Secure Boot state probe (smoke witness)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=serial-getty@ttyS0.service getty.target multi-user.target
+ConditionPathExists=/sys/firmware/efi/efivars
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Invoked via /bin/bash so it runs regardless of the file's exec bit (the overlay ships it 0644).
+ExecStart=/bin/bash /usr/lib/vita/sb-state-probe.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

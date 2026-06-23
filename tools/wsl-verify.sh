@@ -8,6 +8,7 @@
 #   boot   — headless QEMU boot of the EXISTING smoke disk, assert it reaches userspace
 #   smoke  — build then headless boot
 #   full   — full-mode build through verity-format (conversion + veritysetup), assert root hashes captured
+#   secboot— adversarial Secure Boot enforcement matrix (positive enrolls+enforces; negatives rejected)
 set -uo pipefail
 REPO=/home/borg/Vita
 MODE="${1:-smoke}"
@@ -169,6 +170,267 @@ probe() {
   esac
 }
 
+# ── Secure Boot adversarial matrix ──────────────────────────────────────────────────────────────────
+# Proves OUR TEST key is the enforced root of trust. virt-fw-vars enrolls PK=KEK=db (db.crt) into a
+# fresh OVMF varstore OFFLINE (User Mode = enforcing); every row then boots off a copy of that one store:
+#   POS    db-signed UKI -> boots to userspace (serial anchor: the enrolled rig boots a GOOD image).
+#   N1     unsigned UKI            -> firmware rejects (no kernel start + a firmware reject witness).
+#   N2     db-signed-then-tampered -> firmware rejects.
+#   N3     rogue-key-signed UKI    -> firmware rejects (key not enrolled).
+#   CTRLMS Vita-db-signed UKI on the MS code+vars pair -> REJECTED (db != MS-trusted; REQUIRED row).
+# Enforcement is proven by the POS-boots / negatives-rejected contrast on the SAME enrolled store (a
+# non-enforcing store would let the negatives boot -> they'd FAIL). N1/N2/N3 + CTRLMS boot in PARALLEL.
+# Each row: FRESH vars copy + FRESH per-row serial log; an offline sbverify tri-state gate proves a
+# well-formed-but-untrusted artifact exists BEFORE qemu (missing artifact => INVALID, never PASS).
+SBDIR="$REPO/os/x86_64/.secureboot"
+SBWORK="$REPO/os/x86_64/out/sb"
+SBCODE_SB=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+SBVARS_BLANK=/usr/share/OVMF/OVMF_VARS_4M.fd
+SBCODE_MS=/usr/share/OVMF/OVMF_CODE_4M.ms.fd
+SBVARS_MS=/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+
+sb_accel() { [ -e /dev/kvm ] && echo kvm || echo tcg; }
+
+# Boot one row. $1=label $2=disk.raw $3=code $4=vars-template $5=nonce $6=secs
+# Seeds a FRESH writable vars copy and a FRESH log named per label. Echoes the log path.
+sb_boot() {
+  local label="$1" disk="$2" code="$3" varstmpl="$4" nonce="$5" secs="${6:-90}"
+  local vars="$SBWORK/vars-$label.fd" log="$SBWORK/serial-$label.log"
+  mkdir -p "$SBWORK"
+  rm -f "$vars"; cp "$varstmpl" "$vars"
+  : > "$log"
+  local accel; accel=$(sb_accel)
+  local cpu=(-cpu max)
+  [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+  timeout "$secs" qemu-system-x86_64 -machine q35 -m 2048 "${cpu[@]}" \
+    -drive if=pflash,format=raw,readonly=on,file="$code" \
+    -drive if=pflash,format=raw,file="$vars" \
+    -drive file="$disk",format=raw,if=virtio \
+    -serial "file:$log" -display none -no-reboot >/dev/null 2>&1
+  echo "$log"
+}
+
+# Re-boot off an EXISTING (already-enrolled) writable vars file — for the enroll->enforce dance.
+# $1=label $2=disk $3=code $4=existing-vars $5=secs
+sb_reboot_same_vars() {
+  local label="$1" disk="$2" code="$3" vars="$4" secs="${5:-90}"
+  local log="$SBWORK/serial-$label.log"
+  : > "$log"
+  local accel; accel=$(sb_accel)
+  local cpu=(-cpu max)
+  [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+  timeout "$secs" qemu-system-x86_64 -machine q35 -m 2048 "${cpu[@]}" \
+    -drive if=pflash,format=raw,readonly=on,file="$code" \
+    -drive if=pflash,format=raw,file="$vars" \
+    -drive file="$disk",format=raw,if=virtio \
+    -serial "file:$log" -display none -no-reboot >/dev/null 2>&1
+  echo "$log"
+}
+
+# Classify a POSITIVE/CONTROL log. PASS = nonce echoes (log is THIS boot) + a userspace marker + no
+# firmware reject. The in-guest SB-state witness is NOT required here (see the function body). Prints PASS|FAIL.
+sb_classify_positive() {
+  # PASS = the legitimately-signed image booted on the ENROLLED+enforcing rig: the per-run nonce echoes
+  # (kernel cmdline -> the log is provably THIS boot) AND a userspace marker AND no firmware reject. We do
+  # NOT hard-require the in-guest VITA-SB-STATE witness — enforcement is proven by the NEGATIVE rows being
+  # rejected on the SAME enrolled vars (a non-enforcing varstore would let the negatives boot -> they'd FAIL).
+  local log="$1" nonce="$2"
+  grep -q -e "$nonce" "$log" 2>/dev/null || { echo FAIL; return; }
+  grep -q -e Multi-User "$log" 2>/dev/null || grep -q -e bash-5 "$log" 2>/dev/null || { echo FAIL; return; }
+  if sb_has_reject "$log"; then echo FAIL; else echo PASS; fi
+}
+
+# Firmware/shim reject witness. Single-word patterns only (no pipe inside one pattern). Kept tight to
+# firmware phrasing to avoid colliding with benign userspace "authenticated"/"verified" log lines.
+sb_has_reject() {
+  local log="$1"
+  grep -q -e "Security Violation" "$log" 2>/dev/null && return 0
+  grep -q -e "Access Denied" "$log" 2>/dev/null && return 0
+  grep -q -e "Verification failed" "$log" 2>/dev/null && return 0
+  grep -q -e "image authentication" "$log" 2>/dev/null && return 0
+  grep -q -e "not authenticated" "$log" 2>/dev/null && return 0
+  grep -q -e "could not be loaded" "$log" 2>/dev/null && return 0
+  return 1
+}
+
+# A negative ROW PASSES iff the firmware REFUSED to launch the image. BOTH required:
+#   (1) NO kernel-start markers and NO userspace markers (the kernel never ran), AND
+#   (2) a firmware reject WITNESS (sb_has_reject) — the positive discriminator that separates
+#       "firmware rejected" from a generic boot failure / timeout / wrong-ESP. The CTRL row proves
+#       the SAME enrolled rig boots a GOOD image in the same window, so (1)+(2) here is attributable
+#       to enforcement, not a broken rig.
+# The per-run nonce is NOT used here: it lives ONLY in the rejected UKI's embedded kernel cmdline, so
+# on a CORRECT rejection the kernel never prints it — gating on it scored every real rejection FAIL
+# and made the matrix unwinnable. Freshness is structural: every row boots into its own
+# `: > "$log"`-truncated per-row serial log (sb_boot/sb_reboot_same_vars). Prints PASS|FAIL.
+sb_classify_negative() {
+  local log="$1"
+  if grep -q -e Multi-User "$log" 2>/dev/null || grep -q -e bash-5 "$log" 2>/dev/null \
+     || grep -q -e VITA-SB-STATE=enabled "$log" 2>/dev/null \
+     || grep -q -e "Linux version" "$log" 2>/dev/null || grep -q -e "Freeing unused" "$log" 2>/dev/null; then
+    echo FAIL; return                                                # it booted the kernel -> NOT rejected
+  fi
+  # kernel never started: REQUIRE a firmware reject witness (absence alone could be timeout/abort/wrong-ESP).
+  if sb_has_reject "$log"; then echo PASS; else echo FAIL; fi
+}
+
+# Find the signed UKI on the built disk's ESP (offline), copy it out for sbsign/sbverify. $1=disk.raw
+# Echoes the extracted UKI path, or empty on failure. Uses a loop mount of the ESP partition.
+sb_extract_uki() {
+  local disk="$1" mnt="$SBWORK/esp" uki="$SBWORK/uki.efi"
+  mkdir -p "$mnt"
+  # detach any stale loop still backing this disk (mkosi/systemd-repart can leave one) so -f -P succeeds
+  local stale; for stale in $(losetup -j "$disk" -O NAME --noheadings 2>/dev/null); do losetup -d "$stale" 2>/dev/null; done
+  local loop; loop=$(losetup --show -f -P "$disk" 2>/dev/null) || { echo ""; return; }
+  local esp="" p
+  for p in "${loop}p1" "${loop}p2" "${loop}p15" "${loop}p3"; do
+    [ -b "$p" ] || continue
+    umount "$mnt" 2>/dev/null
+    if mount -o ro "$p" "$mnt" 2>/dev/null && [ -d "$mnt/EFI" ]; then esp="$p"; break; fi
+    umount "$mnt" 2>/dev/null
+  done
+  if [ -z "$esp" ]; then losetup -d "$loop" 2>/dev/null; echo ""; return; fi
+  # The UKI under --bootloader=uki is /EFI/BOOT/BOOTX64.EFI — uppercase .EFI, so MUST use -iname (the old
+  # -name '*.efi' silently missed it, which is why extraction failed). Try /EFI/Linux then the default path.
+  local found; found=$(find "$mnt/EFI/Linux" -iname '*.efi' 2>/dev/null | head -1)
+  [ -z "$found" ] && found=$(find "$mnt/EFI/BOOT" -iname '*.efi' 2>/dev/null | head -1)
+  [ -z "$found" ] && found=$(find "$mnt/EFI" -iname '*.efi' 2>/dev/null | head -1)
+  if [ -n "$found" ]; then cp "$found" "$uki"; else uki=""; fi
+  umount "$mnt" 2>/dev/null; losetup -d "$loop" 2>/dev/null
+  echo "$uki"
+}
+
+secboot() {
+  echo "===== SECURE BOOT MATRIX (virt-fw-vars enroll; parallel boots) ====="
+  local nonce="sbnonce-$$"
+  # Preconditions: TEST keystore + .secboot OVMF + blank vars + sbverify/sbsign/sbattach/virt-fw-vars.
+  [ -f "$SBDIR/db.key" ] && [ -f "$SBDIR/db.crt" ] || { echo "RESULT: FAIL (no TEST keystore; run tools/secureboot-test-keys.sh)"; return 1; }
+  [ -f "$SBDIR/rogue.key" ] && [ -f "$SBDIR/rogue.crt" ] || { echo "RESULT: FAIL (no rogue pair; run tools/secureboot-test-keys.sh)"; return 1; }
+  [ -f "$SBCODE_SB" ] || { echo "RESULT: FAIL (no $SBCODE_SB; apt install ovmf)"; return 1; }
+  [ -f "$SBVARS_BLANK" ] || { echo "RESULT: FAIL (no blank OVMF vars $SBVARS_BLANK; apt install ovmf)"; return 1; }
+  command -v sbverify >/dev/null || { echo "RESULT: FAIL (sbverify MISSING)"; return 1; }
+  command -v sbsign   >/dev/null || { echo "RESULT: FAIL (sbsign MISSING)"; return 1; }
+  command -v sbattach >/dev/null || { echo "RESULT: FAIL (sbattach MISSING; apt install sbsigntool)"; return 1; }
+  command -v virt-fw-vars >/dev/null || { echo "RESULT: FAIL (virt-fw-vars MISSING; apt install python3-virt-firmware)"; return 1; }
+  rm -rf "$SBWORK"; mkdir -p "$SBWORK"
+
+  # launch a boot in the BACKGROUND off a FRESH copy of $4; child of THIS shell so `wait` tracks it.
+  sb_launch() {   # $1=label $2=disk $3=code $4=vars-src $5=secs
+    local label="$1" disk="$2" code="$3" varsrc="$4" secs="${5:-120}"
+    local vars="$SBWORK/vars-$label.fd" log="$SBWORK/serial-$label.log"
+    rm -f "$vars"; cp "$varsrc" "$vars"; : > "$log"
+    local accel; accel=$(sb_accel); local cpu=(-cpu max); [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+    timeout "$secs" qemu-system-x86_64 -machine q35 -m 1024 "${cpu[@]}" \
+      -drive if=pflash,format=raw,readonly=on,file="$code" \
+      -drive if=pflash,format=raw,file="$vars" \
+      -drive file="$disk",format=raw,if=virtio \
+      -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
+  }
+  # replace the ESP UKI in disk $1 with file $2 (-iname: the UKI is BOOTX64.EFI, uppercase). returns 0 ok.
+  sb_replace_uki() {
+    local d="$1" newuki="$2" mnt="$SBWORK/espw" loop pp ok=1 stale
+    mkdir -p "$mnt"
+    for stale in $(losetup -j "$d" -O NAME --noheadings 2>/dev/null); do losetup -d "$stale" 2>/dev/null; done
+    loop=$(losetup --show -f -P "$d" 2>/dev/null) || return 1
+    for pp in "${loop}p1" "${loop}p2" "${loop}p15"; do
+      [ -b "$pp" ] || continue
+      umount "$mnt" 2>/dev/null
+      mount "$pp" "$mnt" 2>/dev/null && [ -d "$mnt/EFI" ] || { umount "$mnt" 2>/dev/null; continue; }
+      local tgt; tgt=$(find "$mnt/EFI/Linux" -iname '*.efi' 2>/dev/null | head -1)
+      [ -z "$tgt" ] && tgt=$(find "$mnt/EFI/BOOT" -iname '*.efi' 2>/dev/null | head -1)
+      [ -z "$tgt" ] && tgt=$(find "$mnt/EFI" -iname '*.efi' 2>/dev/null | head -1)
+      if [ -n "$tgt" ]; then cp "$newuki" "$tgt"; sync; ok=0; fi
+      umount "$mnt" 2>/dev/null; break
+    done
+    losetup -d "$loop" 2>/dev/null; return $ok
+  }
+
+  echo "----- build POSITIVE (db-signed UKI, --bootloader=uki) -----"
+  rm -f "$REPO"/os/x86_64/out/*.raw   # so a STALE disk from a prior run can't masquerade as this build's output
+  VITA_SECURE_BOOT=1 VITA_SB_NONCE="$nonce" \
+    node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -6
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "RESULT: FAIL (positive SB build failed)"; return 1; }
+  local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
+  [ -f "$disk" ] || { echo "RESULT: FAIL (positive build produced no disk)"; return 1; }
+  echo "disk=$disk"
+
+  echo "----- extract + offline-gate the signed UKI -----"
+  local uki; uki=$(sb_extract_uki "$disk")
+  { [ -n "$uki" ] && [ -f "$uki" ]; } || { echo "RESULT: FAIL (could not extract UKI from ESP)"; return 1; }
+  sbverify --cert "$SBDIR/db.crt" "$uki" >/dev/null 2>&1 || { echo "RESULT: FAIL (positive UKI NOT db-signed — mkosi sign no-op)"; return 1; }
+  echo "  positive UKI db-signed OK: $uki"
+
+  echo "----- enroll OUR db cert (PK=KEK=db) into a fresh OVMF varstore (offline, virt-fw-vars) -----"
+  local GUID=11111111-1111-1111-1111-111111111111
+  local VENROLL="$SBWORK/vars-enrolled.fd"
+  virt-fw-vars -i "$SBVARS_BLANK" -o "$VENROLL" --set-pk "$GUID" "$SBDIR/db.crt" --add-kek "$GUID" "$SBDIR/db.crt" --add-db "$GUID" "$SBDIR/db.crt" --sb >/dev/null 2>&1
+  [ -f "$VENROLL" ] || { echo "RESULT: FAIL (virt-fw-vars produced no enrolled varstore)"; return 1; }
+  echo "  enrolled vars: $VENROLL"
+
+  echo "----- build negatives (offline sbsign/sbverify, tri-state gates) -----"
+  local uki_n1="$SBWORK/uki-unsigned.efi" uki_n2="$SBWORK/uki-tampered.efi" uki_n3="$SBWORK/uki-rogue.efi"
+  # N1 unsigned: strip sig; require AFFIRMATIVE zero-sigs (db verify fails AND no "signature 1").
+  cp "$uki" "$uki_n1"; sbattach --remove "$uki_n1" >/dev/null 2>&1
+  local n1_invalid=1
+  if ! sbverify --cert "$SBDIR/db.crt" "$uki_n1" >/dev/null 2>&1 \
+     && ! sbverify --list "$uki_n1" 2>/dev/null | grep -q -e "signature 1"; then n1_invalid=0; fi
+  # N2 tampered: db-sign, then flip a byte deep in the PE; require pass-pre-flip, fail-post-flip.
+  sbsign --key "$SBDIR/db.key" --cert "$SBDIR/db.crt" --output "$uki_n2" "$uki" >/dev/null 2>&1
+  local n2_invalid=0
+  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 || n2_invalid=1
+  printf '\xff' | dd of="$uki_n2" bs=1 seek=8192 count=1 conv=notrunc >/dev/null 2>&1
+  sbverify --cert "$SBDIR/db.crt" "$uki_n2" >/dev/null 2>&1 && n2_invalid=1
+  # N3 wrong-key: sign with the NON-enrolled rogue key; require pass-vs-rogue, fail-vs-db.
+  cp "$uki" "$uki_n3"; sbattach --remove "$uki_n3" >/dev/null 2>&1
+  sbsign --key "$SBDIR/rogue.key" --cert "$SBDIR/rogue.crt" --output "$uki_n3" "$uki_n3" >/dev/null 2>&1
+  local n3_invalid=0
+  sbverify --cert "$SBDIR/rogue.crt" "$uki_n3" >/dev/null 2>&1 || n3_invalid=1
+  sbverify --cert "$SBDIR/db.crt"    "$uki_n3" >/dev/null 2>&1 && n3_invalid=1
+  echo "  offline gates: N1_invalid=$n1_invalid N2_invalid=$n2_invalid N3_invalid=$n3_invalid"
+
+  # place each negative UKI onto its own disk copy
+  local disk_n1="$SBWORK/disk-N1.raw" disk_n2="$SBWORK/disk-N2.raw" disk_n3="$SBWORK/disk-N3.raw"
+  cp "$disk" "$disk_n1"; cp "$disk" "$disk_n2"; cp "$disk" "$disk_n3"
+  { [ "$n1_invalid" = 0 ] && sb_replace_uki "$disk_n1" "$uki_n1"; } || n1_invalid=1
+  { [ "$n2_invalid" = 0 ] && sb_replace_uki "$disk_n2" "$uki_n2"; } || n2_invalid=1
+  { [ "$n3_invalid" = 0 ] && sb_replace_uki "$disk_n3" "$uki_n3"; } || n3_invalid=1
+
+  echo "----- boot POSITIVE (enrolled, enforcing; serial anchor) -----"
+  local plog; plog=$(sb_boot POS "$disk" "$SBCODE_SB" "$VENROLL" "$nonce" 150)
+  local r_pos; r_pos=$(sb_classify_positive "$plog" "$nonce")
+  echo "  POS=$r_pos"; tail -4 "$plog" 2>/dev/null
+
+  echo "----- boot NEGATIVES N1/N2/N3 (+CTRLMS) in PARALLEL off fresh enrolled-vars copies -----"
+  local do_ctrlms=0
+  [ "$n1_invalid" = 0 ] && sb_launch N1 "$disk_n1" "$SBCODE_SB" "$VENROLL" 120
+  [ "$n2_invalid" = 0 ] && sb_launch N2 "$disk_n2" "$SBCODE_SB" "$VENROLL" 120
+  [ "$n3_invalid" = 0 ] && sb_launch N3 "$disk_n3" "$SBCODE_SB" "$VENROLL" 120
+  if [ -f "$SBCODE_MS" ] && [ -f "$SBVARS_MS" ]; then do_ctrlms=1; sb_launch CTRLMS "$disk" "$SBCODE_MS" "$SBVARS_MS" 120; fi
+  wait
+  local r_n1=INVALID r_n2=INVALID r_n3=INVALID r_ctrlms=INVALID
+  [ "$n1_invalid" = 0 ] && r_n1=$(sb_classify_negative "$SBWORK/serial-N1.log")
+  [ "$n2_invalid" = 0 ] && r_n2=$(sb_classify_negative "$SBWORK/serial-N2.log")
+  [ "$n3_invalid" = 0 ] && r_n3=$(sb_classify_negative "$SBWORK/serial-N3.log")
+  # CTRLMS is a REQUIRED cross-check (db must NOT be MS-trusted). A missing MS OVMF pair is a hard FAIL,
+  # not a silent skip-pass — the acceptance host has it; a host without it cannot prove this row.
+  if [ "$do_ctrlms" = 1 ]; then r_ctrlms=$(sb_classify_negative "$SBWORK/serial-CTRLMS.log")
+  else r_ctrlms=FAIL; echo "  CTRLMS=FAIL (MS OVMF pair $SBCODE_MS / $SBVARS_MS absent — required cross-check cannot run)"; fi
+
+  echo "----- MATRIX -----"
+  printf '  %-8s %s\n' POS "$r_pos" N1 "$r_n1" N2 "$r_n2" N3 "$r_n3" CTRLMS "$r_ctrlms"
+  # PASS only if every row is PASS; any FAIL/INVALID fails the suite. Enforcement is proven by the
+  # POS-boots / negatives-rejected contrast on the SAME enrolled varstore.
+  local bad=""
+  for kv in POS:$r_pos N1:$r_n1 N2:$r_n2 N3:$r_n3 CTRLMS:$r_ctrlms; do
+    case "$kv" in *:PASS) ;; *) bad="$bad ${kv%%:*}";; esac
+  done
+  if [ -z "$bad" ]; then
+    echo "RESULT: PASS (Vita TEST key enrolled + enforced; unsigned/tampered/wrong-key all rejected)"
+  else
+    echo "RESULT: FAIL (rows not PASS:$bad)"; return 1
+  fi
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
@@ -178,5 +440,6 @@ case "$MODE" in
   probe) probe;;
   diag)  diag;;
   full)  build_full;;
+  secboot) secboot;;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac

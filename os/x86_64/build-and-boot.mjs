@@ -25,7 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { planRootBuild, PINNED_MKOSI_IMAGE } from "./build-root.mjs";
-import { planUKI } from "./uki.mjs";
+import { planUKI, TEST_KEY_PATH_ENV, TEST_CERT_PATH_ENV } from "./uki.mjs";
 import { planImageLayout } from "./image-layout.mjs";
 // NB: planVerity is imported dynamically in full mode only (verity.mjs pulls in a .ts helper) — see below.
 
@@ -218,14 +218,54 @@ if (MODE === "smoke") {
   const verityMode = process.env.VITA_VERITY === "1";
   const verity = verityMode ? ["--verity=hash"] : [];
   const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
+  // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
+  // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
+  // Enrollment is OFFLINE via virt-fw-vars (PK=KEK=db from db.crt into the OVMF varstore) — NOT mkosi
+  // --secure-boot-auto-enroll, which is a systemd-boot feature and is dead here (--bootloader=uki removes
+  // sd-boot; proven empirically: it staged no /loader/keys). Gated to SMOKE only — full mode signs
+  // per-slot UKIs via the explicit sbsign step (VITA_SB_KEY/VITA_SB_CERT); enabling mkosi --secure-boot
+  // there would double-sign. Reuses uki.mjs's TEST key env contract (VITA_TEST_SECUREBOOT_KEY_PATH/_CERT_PATH).
+  const secureBoot = process.env.VITA_SECURE_BOOT === "1";
+  const SB_DIR = join(HERE, ".secureboot");
+  const sbKey = process.env[TEST_KEY_PATH_ENV] ?? join(SB_DIR, "db.key");
+  const sbCert = process.env[TEST_CERT_PATH_ENV] ?? join(SB_DIR, "db.crt");
+  let sb = [];
+  let bootloaderPin = [];
+  if (secureBoot) {
+    // mkosi must be the NATIVE engine for SB: --secure-boot-key/-certificate are HOST paths the docker
+    // mkosi container would not see (REPO mounts at /work, not these paths). Fail fast rather than silently
+    // produce an unsigned image. (useNative is true on the build host; set VITA_MKOSI=native otherwise.)
+    if (!DRY && !useNative)
+      fail("VITA_SECURE_BOOT=1 requires the native mkosi engine — the SB key/cert are host paths not mounted " +
+           "into the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
+    // Pin the artifact shape: force a single UKI so the KERNEL (inside the UKI's .linux PE section)
+    // is what gets signed — mkosi's default could otherwise ship a bare vmlinuz + signed sd-boot,
+    // leaving the kernel unsigned and the whole "sign the UKI" premise moot.
+    bootloaderPin = ["--bootloader=uki"];
+    if (!DRY && (!existsSync(sbKey) || !existsSync(sbCert))) {
+      fail(
+        "VITA_SECURE_BOOT=1 needs the TEST keystore. Generate it (gitignored, throwaway, spec §16):\n" +
+        "       bash tools/secureboot-test-keys.sh\n" +
+        `     or set ${TEST_KEY_PATH_ENV}/${TEST_CERT_PATH_ENV}. Looked for:\n       ${sbKey}\n       ${sbCert}`);
+    }
+    sb = [
+      "--secure-boot=yes",
+      `--secure-boot-key=${sbKey}`,
+      `--secure-boot-certificate=${sbCert}`,
+      "--secure-boot-sign-tool=sbsign",
+    ];
+    log(`   (Secure Boot: sign UKI with TEST db key ${sbKey}; enrollment is offline via virt-fw-vars)`);
+  }
   const cmdline = `console=tty0 console=ttyS0,115200 ${rootOpts} systemd.firstboot=off` +
+    (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", ...incremental, ...verity, `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
+    ["--format", "disk", "--bootable=yes", ...incremental, ...verity, ...bootloaderPin, ...sb,
+     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   log(`   disk → ${disk}`);
-  if (!NO_BOOT) bootQemu(disk, { secureBoot: false });
+  if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
   process.exit(0);
 }
@@ -322,35 +362,76 @@ run("6 · RAUC bundle", "rauc",
 if (!NO_BOOT) bootQemu(imageRaw, { secureBoot: !NO_SIGN });
 log(`\n✓ full build complete → ${imageRaw}` + (NO_SIGN ? " (UNSIGNED)" : " (signed)"));
 
-function bootQemu(image, { secureBoot }) {
+function bootQemu(image, { secureBoot, sbCert }) {
   // Auto-detect OVMF firmware: Debian trixie ships ONLY the 4M variants; older Debian + other distros differ.
   const firstExisting = (paths) => paths.find((p) => existsSync(p)) ?? paths[0];
-  const ovmfCode = process.env.VITA_OVMF_CODE ?? firstExisting([
+  // Secure Boot REQUIRES the .secboot OVMF code build — the plain OVMF_CODE_4M.fd does NOT enforce SB
+  // even with SB vars enrolled, so an SB row booting on it is a silent false positive. Select the
+  // .secboot code whenever secureBoot is set and the orchestrator hasn't pinned VITA_OVMF_CODE.
+  const ovmfCode = process.env.VITA_OVMF_CODE ?? firstExisting(secureBoot ? [
+    "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",   // Debian trixie SB-enforcing
+    "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", // Fedora/RHEL/Arch
+  ] : [
     "/usr/share/OVMF/OVMF_CODE_4M.fd",     // Debian trixie / newer
     "/usr/share/OVMF/OVMF_CODE.fd",        // older Debian/Ubuntu
     "/usr/share/edk2/ovmf/OVMF_CODE.fd",   // Fedora/RHEL/Arch
   ]);
+  // The BLANK template (never *.ms.fd / *.snakeoil.fd — those already carry a FOREIGN PK). For SB we
+  // enroll OUR cert into a fresh copy of this base with virt-fw-vars (below).
   const ovmfVarsTemplate = process.env.VITA_OVMF_VARS_TEMPLATE ?? firstExisting([
     "/usr/share/OVMF/OVMF_VARS_4M.fd",
     "/usr/share/OVMF/OVMF_VARS.fd",
     "/usr/share/edk2/ovmf/OVMF_VARS.fd",
   ]);
-  const ovmfVars = process.env.VITA_OVMF_VARS ?? join(OUT, "OVMF_VARS.fd");
-  // QEMU needs a WRITABLE copy of the UEFI vars; seed it from the read-only system template once.
-  if (ovmfVars !== ovmfVarsTemplate) {
-    if (DRY) {
+  // SB uses a DISTINCT, ALWAYS-rebuilt vars file so a prior (non-SB or stale) OVMF_VARS.fd can never leak
+  // its state into an SB boot; the plain path keeps the seed-once default.
+  const ovmfVars = process.env.VITA_OVMF_VARS ?? join(OUT, secureBoot ? "OVMF_VARS.sb.fd" : "OVMF_VARS.fd");
+
+  if (secureBoot) {
+    // Load-bearing guards: the code MUST be a .secboot build (plain code does NOT enforce SB), and the
+    // vars base MUST NOT be a pre-enrolled MS/snakeoil store (we enroll OUR key into the blank base).
+    if (!/secboot/i.test(ovmfCode))
+      fail(`Secure Boot needs the .secboot OVMF code (got ${ovmfCode}). Install ovmf / set VITA_OVMF_CODE ` +
+           `to /usr/share/OVMF/OVMF_CODE_4M.secboot.fd — the plain code does NOT enforce SB.`);
+    if (/\.(ms|snakeoil)\.fd$/i.test(ovmfVarsTemplate))
+      fail(`Secure Boot vars base must be the blank store, not ${ovmfVarsTemplate} ` +
+           `(*.ms.fd/*.snakeoil.fd already carry a foreign PK — enroll OUR key into the blank OVMF_VARS_4M.fd).`);
+  }
+
+  // Build the writable UEFI vars. SB: enroll OUR cert (PK=KEK=db) into a fresh copy of the blank base with
+  // virt-fw-vars — the OFFLINE replacement for sd-boot auto-enroll (which --bootloader=uki removes). Setting
+  // PK flips the firmware Setup->User Mode = enforcing, OUR key as root of trust. Non-SB: seed once.
+  const SB_OWNER_GUID = "11111111-1111-1111-1111-111111111111";   // arbitrary TEST signature-owner GUID
+  if (DRY) {
+    if (secureBoot)
+      log(`   (enroll vars: virt-fw-vars -i ${ovmfVarsTemplate} -o ${ovmfVars} --set-pk/--add-kek/--add-db ${sbCert} --sb)`);
+    else if (ovmfVars !== ovmfVarsTemplate)
       log(`   (seed writable UEFI vars: cp ${ovmfVarsTemplate} ${ovmfVars})`);
-    } else if (!existsSync(ovmfVars)) {
-      if (!existsSync(ovmfVarsTemplate))
-        fail(`OVMF vars template not found at ${ovmfVarsTemplate} — \`apt install ovmf\` or set VITA_OVMF_VARS_TEMPLATE ` +
-             `(newer Debian uses /usr/share/OVMF/OVMF_VARS_4M.fd + OVMF_CODE_4M.fd — set VITA_OVMF_CODE/VITA_OVMF_VARS_TEMPLATE)`);
-      copyFileSync(ovmfVarsTemplate, ovmfVars);
-    }
+  } else if (secureBoot) {
+    if (!existsSync(ovmfVarsTemplate)) fail(`OVMF vars base not found at ${ovmfVarsTemplate} — \`apt install ovmf\``);
+    if (!existsSync(sbCert)) fail(`Secure Boot cert not found at ${sbCert}`);
+    if (spawnSync("virt-fw-vars", ["--help"], { stdio: "ignore" }).error)
+      fail("Secure Boot enrollment needs virt-fw-vars — `apt install python3-virt-firmware`");
+    run("6 · enroll db key into OVMF vars (virt-fw-vars, offline)", "virt-fw-vars", [
+      "-i", ovmfVarsTemplate, "-o", ovmfVars,
+      "--set-pk", SB_OWNER_GUID, sbCert, "--add-kek", SB_OWNER_GUID, sbCert, "--add-db", SB_OWNER_GUID, sbCert, "--sb",
+    ]);
+  } else if (ovmfVars !== ovmfVarsTemplate && !existsSync(ovmfVars)) {
+    if (!existsSync(ovmfVarsTemplate))
+      fail(`OVMF vars template not found at ${ovmfVarsTemplate} — \`apt install ovmf\` or set VITA_OVMF_VARS_TEMPLATE`);
+    copyFileSync(ovmfVarsTemplate, ovmfVars);
   }
   if (!DRY && !existsSync(ovmfCode))
-    fail(`OVMF code not found at ${ovmfCode} — set VITA_OVMF_CODE (e.g. /usr/share/OVMF/OVMF_CODE_4M.fd on newer Debian)`);
-  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"})`, "qemu-system-x86_64", [
-    "-machine", "q35", "-m", "2048", "-cpu", "host", "-enable-kvm",
+    fail(`OVMF code not found at ${ovmfCode} — set VITA_OVMF_CODE (e.g. /usr/share/OVMF/OVMF_CODE_4M.secboot.fd on newer Debian)`);
+  if (DRY || secureBoot) log(`   (OVMF code=${ovmfCode} vars=${ovmfVars} template=${ovmfVarsTemplate})`);
+
+  // -cpu host -enable-kvm needs /dev/kvm; fall back to TCG so a KVM-less host doesn't abort QEMU
+  // (an abort = no markers, which the SB matrix would otherwise mis-score). Override with VITA_QEMU_ACCEL.
+  const kvm = !DRY && existsSync("/dev/kvm");
+  const accel = process.env.VITA_QEMU_ACCEL ?? (kvm ? "kvm" : "tcg");
+  const cpu = accel === "kvm" ? ["-cpu", "host", "-enable-kvm"] : ["-cpu", "max"];
+  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
+    "-machine", "q35", "-m", "2048", ...cpu,
     "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
     "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
     "-drive", `file=${image},format=raw,if=virtio`,
