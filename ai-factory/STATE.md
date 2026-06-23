@@ -318,8 +318,17 @@ ONLY when VITA_VERITY=1 (default smoke/SB layout untouched). mkosi builds the ha
 the UKI. `wsl-verify verity` matrix GREEN: POS = boots with root on /dev/mapper/root (`device-mapper: verity`
 active) → multi-user; VNEG = one flipped byte in the root DATA partition → `device-mapper: verity: ... data block
 0 is corrupted` → root rejected. R3 Codex reviewer APPROVED (both non-blocking notes folded in: POS asserts
-/dev/mapper/root; native-mkosi verity guard); **MERGED to main (merge 90cafe0).** **NEXT:** step 3 (A/B + RAUC bundle),
-then step 4(b) real-key SB signing + RAUC bundle signing + N-of-M recovery (4b–d). RAUC + recovery need owner keys (§16).
+/dev/mapper/root; native-mkosi verity guard); **MERGED to main (merge 90cafe0).**
+
+**🏆 TRUSTED-BOOT CHAIN PROVEN END-TO-END (2026-06-22).** Built a COMBINED `VITA_SECURE_BOOT=1 VITA_VERITY=1`
+image and confirmed both pillars compose + enforce together at runtime: one db-signed UKI (`sbverify --cert
+db.crt` PASS) whose cmdline carries the verity `roothash=` (matches the root partition UUID), on a disk with a
+root-verity partition. Booted enrolled on `OVMF_CODE_4M.secboot.fd`: `SecureBoot-enforcing=yes` (VITA-SB-STATE=
+enabled) + `dm-verity-active=yes` (/dev/mapper/root) + reached multi-user → RESULT: PASS. So the full chain works:
+firmware → (verifies signature) signed UKI → (pins roothash) dm-verity → verified root → Vita agent. This is "make
+it vita and trusted boot" achieved with the TEST key. **NEXT:** step 4(b) swap the owner's REAL key (staged at
+/home/borg/vita-keys/, [[vita-owner-secureboot-cert]]) + re-prove; step 3 (A/B + RAUC bundle); then RAUC bundle
+signing + N-of-M recovery (4c–d, need owner keys §16).
 `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
