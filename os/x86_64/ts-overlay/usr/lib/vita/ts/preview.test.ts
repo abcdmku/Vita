@@ -266,6 +266,29 @@ test("fail-closed: a Proxy operations array (throwing trap) throws, not empty", 
   assert.throws(() => diffUpstream(current, desired), UpstreamDiffError);
 });
 
+test("fail-closed: a LYING (non-throwing) Proxy operations array faking length=0 throws, not empty", () => {
+  // Round-3 bypass: a non-throwing Proxy over a REAL ops array that passes
+  // `Array.isArray` and reports a fake `length: 0`, hiding the real operations. A
+  // per-operation iterate-then-validate loop would iterate ZERO ops and collapse to
+  // a benign empty diff (fail-OPEN). The single envelope `safeNormalize` gate
+  // rejects the Proxy itself before any length/index of the raw input is trusted.
+  const makeLyingOps = (): unknown[] =>
+    new Proxy([{ capability: "secret.cap", request: { v: 1 } }] as unknown[], {
+      get(target, key): unknown {
+        return key === "length" ? 0 : Reflect.get(target, key);
+      },
+    });
+
+  const currentVendored: TransactionPlan = { operations: makeLyingOps() as never };
+  const currentUpstream: TransactionPlan = { operations: makeLyingOps() as never };
+  const desired: TransactionPlan = { operations: [] };
+
+  // Both the vendored and upstream diffs must REFUSE (throw), not return an empty
+  // diff that silently hides the real operation.
+  assert.throws(() => diffVendored(currentVendored, desired), VendoredDiffError);
+  assert.throws(() => diffUpstream(currentUpstream, desired), UpstreamDiffError);
+});
+
 test("fail-closed: __proto__ capability name does not pollute the prototype", () => {
   const current = makePlan([{ capability: "__proto__", request: { v: 1 } }]);
   const desired = makePlan([{ capability: "__proto__", request: { v: 2 } }]);

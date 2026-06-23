@@ -170,12 +170,48 @@ test("fail-closed: a Proxy operations array (throwing index trap) throws, not em
   const current: TransactionPlan = { operations: hostileOps as never };
   const desired = plan([{ capability: "x", request: { v: 1 } }]);
 
-  // Array.isArray sees through the Proxy (target is an array), so iteration
-  // begins; the first index read trips the trap and surfaces as a typed throw.
+  // The envelope `safeNormalize` recurses into `operations` and rejects the Proxy
+  // (`util.types.isProxy`) before any length/index is trusted -> typed throw.
   assert.throws(
     () => diffTransactionPlans(current, desired),
     TransactionPlanDiffError,
   );
+});
+
+test("fail-closed: a LYING (non-throwing) Proxy operations array faking length=0 throws, not empty", () => {
+  // The round-3 bypass: a Proxy over a REAL operations array that does NOT throw
+  // but lies — `Array.isArray` passes (target is an array) and `length` reports a
+  // fake 0, hiding the real operations. A per-operation iterate-then-validate loop
+  // would see length 0, iterate ZERO operations, never reach `safeNormalize`, and
+  // return a benign empty/no-change diff (fail-OPEN). The single envelope gate
+  // rejects the Proxy itself (`util.types.isProxy`) BEFORE any length/index of the
+  // raw input is read -> typed throw, never an empty diff.
+  const realOps = [{ capability: "secret.cap", request: { v: 1 } }] as unknown[];
+  const lyingOps = new Proxy(realOps, {
+    get(target, key): unknown {
+      return key === "length" ? 0 : Reflect.get(target, key);
+    },
+  });
+
+  const current: TransactionPlan = { operations: lyingOps as never };
+  // A genuinely empty desired plan: a fail-OPEN diff would say "secret.cap removed"
+  // or "no changes" instead of refusing. We assert it REFUSES.
+  const desired: TransactionPlan = { operations: [] };
+
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
+
+  // And it must NOT silently return any diff (empty or otherwise).
+  let returnedWithoutThrowing = false;
+  try {
+    diffTransactionPlans(current, desired);
+    returnedWithoutThrowing = true;
+  } catch {
+    returnedWithoutThrowing = false;
+  }
+  assert.equal(returnedWithoutThrowing, false);
 });
 
 test("fail-closed: an accessor `request` on BOTH sides throws (never compares 'unchanged')", () => {

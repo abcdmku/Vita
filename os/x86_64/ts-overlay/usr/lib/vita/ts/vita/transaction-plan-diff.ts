@@ -23,22 +23,33 @@
 // **validate-or-throw, never a benign fallback** — on any malformed/exotic input
 // it REFUSES (throws `TransactionPlanDiffError`) instead of returning a benign
 // "no changes" result (which would be fail-OPEN: silently claiming "nothing
-// changed" when it could not actually compute the diff). Concretely:
-//   - It reuses the proven JSON guardian `safeNormalize` (P1-033) on EVERY
-//     operation. `safeNormalize` rejects Proxies, accessor/getter properties, and
-//     non-plain values (exotic prototypes like `Date`/`Map`/`Set`/`RegExp` are
-//     rejected as "Only plain objects are accepted" — verified). If it returns
-//     `{ ok: false }` for any operation, the plan is malformed → THROW.
-//   - It compares requests by their `safeNormalize`d canonical form (a stable,
-//     key-sorted JSON string of validated PlainJson data) — "changed" is decided
-//     on validated data only, never by invoking attacker-controlled accessors.
-//   - It iterates the operations array safely: it confirms a real array
-//     (`Array.isArray`, else throw), snapshots `length`, and index-accesses inside
-//     a try that rethrows as `TransactionPlanDiffError` (a Proxy index-trap throw
-//     SURFACES as a throw, it is never swallowed to an empty diff).
-//   - It builds capability-keyed maps with `Object.create(null)` so a spec-valid
-//     but JS-special capability name (`__proto__`, `constructor`) becomes a real
-//     own key instead of mutating a prototype.
+// changed" when it could not actually compute the diff).
+//
+// SINGLE-GATE design (no bypass): the ENTIRE plan envelope is run through the
+// proven JSON guardian `safeNormalize` (P1-033) FIRST, before any `length`/index
+// of the raw input is ever trusted. `safeNormalize`:
+//   - rejects Proxies at EVERY level via `util.types.isProxy` — including a LYING
+//     Proxy over an array that passes `Array.isArray` and reports a fake
+//     `length: 0` without throwing. Such a Proxy is rejected HERE (the envelope
+//     contains it), so it can never make the per-operation loop iterate zero ops
+//     and collapse to a benign empty diff.
+//   - rejects accessor/getter properties, array subclasses, exotic prototypes
+//     (`Date`/`Map`/`Set`/`RegExp` → "Only plain objects are accepted"), symbols,
+//     cycles, BigInt, and non-finite numbers — at every level.
+// If `safeNormalize` returns `{ ok: false }` for either plan → THROW.
+//
+// AFTER normalization we hold guaranteed-plain `PlainJson`: a REAL array, REAL
+// strings, REAL plain objects (no Proxy, no accessor, no exotic prototype). ALL
+// subsequent structural checks and the diff itself operate ONLY on that plain
+// snapshot — there are NO raw-input `length`/index reads anywhere. We then:
+//   - verify the normalized `operations` is a real array (else throw),
+//   - verify each operation is a plain object with a string `capability` and a
+//     plain-object `request` (else throw),
+//   - compare requests by their canonical (key-sorted) JSON, so "changed" is a
+//     deterministic string compare over trusted plain data only,
+//   - build capability-keyed maps with `Object.create(null)` so a spec-valid but
+//     JS-special capability name (`__proto__`, `constructor`) becomes a real own
+//     key instead of mutating a prototype.
 
 import type { PlanOperation, TransactionPlan } from "./evaluate.ts";
 import { safeNormalize } from "./safe-normalize.ts";
@@ -73,8 +84,8 @@ export function diffTransactionPlans(
   current: TransactionPlan,
   desired: TransactionPlan,
 ): TransactionPlanChange {
-  const currentByCapability = indexPlanByCapability(current);
-  const desiredByCapability = indexPlanByCapability(desired);
+  const currentByCapability = indexPlanByCapability(current, "current");
+  const desiredByCapability = indexPlanByCapability(desired, "desired");
 
   const added: string[] = [];
   const removed: string[] = [];
@@ -93,9 +104,9 @@ export function diffTransactionPlans(
       continue;
     }
 
-    // Present in both: compare the validated, canonicalized requests. Both forms
-    // are stable JSON strings of `safeNormalize`d PlainJson, so equality is a
-    // plain string compare over trusted data.
+    // Present in both: compare the canonicalized requests. Both forms are stable
+    // JSON strings of `safeNormalize`d PlainJson, so equality is a plain string
+    // compare over trusted data.
     if (currentByCapability[capability] !== desiredByCapability[capability]) {
       changed.push(capability);
     }
@@ -121,100 +132,81 @@ export function diffTransactionPlans(
   });
 }
 
-/** capability -> canonical (stable-JSON) form of its `safeNormalize`d request. */
+/** capability -> canonical (stable-JSON) form of its normalized request. */
 type CapabilityMap = Record<string, string>;
 
 /**
- * Build a null-prototype map { capability -> canonical request } from a plan's
- * operations. The whole plan and every operation go through the `safeNormalize`
- * guardian; anything it rejects (Proxy, accessor/getter, exotic prototype,
- * non-string capability, non-object request) makes the plan malformed and THROWS
- * `TransactionPlanDiffError` — it is never coerced to a benign value or skipped.
- * Later duplicate capabilities overwrite earlier ones (last-wins) deterministically.
+ * Build a null-prototype map { capability -> canonical request } from a plan.
+ *
+ * SINGLE-GATE: the WHOLE plan envelope is passed through `safeNormalize` FIRST.
+ * `safeNormalize` rejects Proxies (including a lying Proxy array reporting a fake
+ * `length`), accessor/getter properties, array subclasses, exotic prototypes,
+ * symbols, cycles, etc. at EVERY level — so a hostile plan is refused BEFORE any
+ * `length`/index of the raw input is ever read or trusted. If it returns
+ * `{ ok: false }` → the plan is malformed → THROW.
+ *
+ * Everything after the gate operates on guaranteed-plain `PlainJson` (a real
+ * array, real strings, real plain objects). There are NO raw-input length/index
+ * reads anywhere below. Duplicate capabilities overwrite earlier ones (last-wins)
+ * deterministically.
  */
-function indexPlanByCapability(plan: TransactionPlan): CapabilityMap {
-  const map: CapabilityMap = Object.create(null) as CapabilityMap;
+function indexPlanByCapability(plan: TransactionPlan, side: string): CapabilityMap {
+  // The ONE gate. After this, `normalized` is trusted plain JSON.
+  const normalizedPlan = safeNormalize(plan);
 
-  if (plan === null || typeof plan !== "object") {
-    throw new TransactionPlanDiffError("Plan must be an object.");
-  }
-
-  // Read `operations` without invoking accessors: an accessor `operations` is a
-  // TOCTOU hazard, so reject it rather than reading it. A Proxy whose descriptor
-  // trap throws surfaces as a typed error (never swallowed to an empty diff).
-  let operations: unknown;
-  try {
-    operations = readDataProperty(plan, "operations");
-  } catch (cause) {
+  if (!normalizedPlan.ok) {
     throw new TransactionPlanDiffError(
-      `Plan operations could not be read: ${describe(cause)}`,
+      `The ${side} plan is malformed: ${normalizedPlan.reason}`,
     );
   }
+
+  const planValue = normalizedPlan.value;
+
+  if (Array.isArray(planValue) || !isPlainJsonObject(planValue)) {
+    throw new TransactionPlanDiffError(`The ${side} plan must be an object.`);
+  }
+
+  // `operations` is now a real (own, data, plain) value or absent — a plain read
+  // of trusted PlainJson, never an accessor or a Proxy trap.
+  const operations = planValue["operations"];
 
   if (!Array.isArray(operations)) {
-    throw new TransactionPlanDiffError("Plan operations must be an array.");
-  }
-
-  // Snapshot the length once via a data descriptor; never trust a getter. A Proxy
-  // index/length trap that throws is rethrown as a typed error so it SURFACES.
-  let length: number;
-  try {
-    length = readArrayLength(operations);
-  } catch (cause) {
     throw new TransactionPlanDiffError(
-      `Plan operations length could not be read: ${describe(cause)}`,
+      `The ${side} plan operations must be an array.`,
     );
   }
 
-  for (let index = 0; index < length; index += 1) {
-    // A Proxy index-trap (or any hostile descriptor read) throws here; rethrow it
-    // as a typed error so it SURFACES rather than being swallowed to an empty diff.
-    let operation: unknown;
-    try {
-      operation = readIndex(operations, index);
-    } catch (cause) {
+  const map: CapabilityMap = Object.create(null) as CapabilityMap;
+
+  // `operations` is a real array of trusted PlainJson; `.length` and index access
+  // are intrinsic reads over plain data (no Proxy, no getter).
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+
+    if (operation === null || typeof operation !== "object" || Array.isArray(operation)) {
       throw new TransactionPlanDiffError(
-        `Plan operations[${index}] could not be read: ${describe(cause)}`,
+        `The ${side} plan operations[${index}] must be an object.`,
       );
     }
 
-    // Validate the ENTIRE operation through the proven guardian. This rejects
-    // Proxies, accessor/getter properties, and exotic prototypes at every level
-    // (verified: Date/Map/Set/RegExp -> "Only plain objects are accepted").
-    const normalized = safeNormalize(operation);
-
-    if (!normalized.ok) {
-      throw new TransactionPlanDiffError(
-        `Plan operations[${index}] is malformed: ${normalized.reason}`,
-      );
-    }
-
-    const normalizedOperation = normalized.value;
-
-    if (Array.isArray(normalizedOperation) || !isPlainJsonObject(normalizedOperation)) {
-      throw new TransactionPlanDiffError(
-        `Plan operations[${index}] must be an object.`,
-      );
-    }
-
-    const capability = normalizedOperation["capability"];
+    const capability = operation["capability"];
 
     if (typeof capability !== "string") {
       throw new TransactionPlanDiffError(
-        `Plan operations[${index}] has a non-string capability.`,
+        `The ${side} plan operations[${index}] has a non-string capability.`,
       );
     }
 
-    const request = normalizedOperation["request"];
+    const request = operation["request"];
 
     if (request === null || typeof request !== "object" || Array.isArray(request)) {
       throw new TransactionPlanDiffError(
-        `Plan operation "${capability}" has a non-object request.`,
+        `The ${side} plan operation "${capability}" has a non-object request.`,
       );
     }
 
-    // Canonicalize the validated request to a stable, key-sorted JSON string so
-    // "changed" is a deterministic string compare over trusted data only.
+    // Canonicalize the (already plain, already validated) request to a stable,
+    // key-sorted JSON string so "changed" is a deterministic string compare.
     const canonicalRequest = canonicalize(request);
 
     // Define as an own key (null-proto map ⇒ no prototype pollution even for
@@ -273,56 +265,6 @@ function canonicalizeObject(value: { readonly [key: string]: PlainJson }): strin
   return `{${entries.join(",")}}`;
 }
 
-/** Read `obj[key]` as a value ONLY if it is an own enumerable data property. */
-function readDataProperty(obj: object, key: string): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(obj, key);
-
-  if (!isReadableData(descriptor)) {
-    return undefined;
-  }
-
-  return descriptor.value;
-}
-
-/**
- * Read array element at `index` via its own data descriptor. Returns `undefined`
- * for an accessor/missing element. May throw if a hostile (e.g. Proxy) descriptor
- * read itself throws — the caller rethrows that as `TransactionPlanDiffError`.
- */
-function readIndex(array: unknown[], index: number): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
-
-  if (!isReadableData(descriptor)) {
-    return undefined;
-  }
-
-  return descriptor.value;
-}
-
-/**
- * Read an array's `length` from its own data descriptor, never via a getter.
- * Returns 0 for a non-integer / out-of-range / accessor length (fail-closed).
- */
-function readArrayLength(array: unknown[]): number {
-  const descriptor = Object.getOwnPropertyDescriptor(array, "length");
-
-  if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
-    return 0;
-  }
-
-  const length: unknown = descriptor.value;
-
-  if (
-    typeof length !== "number" ||
-    !Number.isSafeInteger(length) ||
-    length < 0
-  ) {
-    return 0;
-  }
-
-  return length;
-}
-
 /** Own enumerable string keys of a null-prototype CapabilityMap. */
 function ownKeys(map: CapabilityMap): string[] {
   const keys: string[] = [];
@@ -343,31 +285,8 @@ function hasOwnKey(map: CapabilityMap, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(map, key);
 }
 
-function isReadableData(
-  descriptor: PropertyDescriptor | undefined,
-): descriptor is PropertyDescriptor & { readonly value: unknown } {
-  if (descriptor === undefined) {
-    return false;
-  }
-
-  if (descriptor.enumerable !== true) {
-    return false;
-  }
-
-  // A data descriptor has `value`; an accessor descriptor has `get`/`set`.
-  return Object.prototype.hasOwnProperty.call(descriptor, "value");
-}
-
 function isPlainJsonObject(value: PlainJson): value is { readonly [key: string]: PlainJson } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function describe(cause: unknown): string {
-  if (cause instanceof Error) {
-    return cause.message;
-  }
-
-  return "unreadable";
 }
 
 function compareStrings(left: string, right: string): number {
