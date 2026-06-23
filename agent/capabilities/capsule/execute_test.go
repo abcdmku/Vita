@@ -1103,6 +1103,7 @@ func cloneGeneratedOCIConfig(config *generatedOCIConfig) *generatedOCIConfig {
 	cloned.Spec.Process.Capabilities.Inheritable = cloneStrings(config.Spec.Process.Capabilities.Inheritable)
 	cloned.Spec.Process.Capabilities.Permitted = cloneStrings(config.Spec.Process.Capabilities.Permitted)
 	cloned.Spec.Process.Capabilities.Ambient = cloneStrings(config.Spec.Process.Capabilities.Ambient)
+	cloned.Spec.Linux.Namespaces = append([]authoredOCILinuxNamespace(nil), config.Spec.Linux.Namespaces...)
 	return &cloned
 }
 

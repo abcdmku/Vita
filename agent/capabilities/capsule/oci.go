@@ -22,9 +22,8 @@ import (
 const (
 	hostileOCICapsuleID = "local.hostile-oci.capsule"
 
-	defaultCrunPath      = "/usr/lib/vita/bin/crun"
-	defaultOCIBundleRoot = "/run/vita-capsules/oci-bundles"
-	defaultOCIPathEnv    = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	defaultCrunPath   = "/usr/lib/vita/bin/crun"
+	defaultOCIPathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 	ociExecutorRootDirectory = "rootdir"
 	ociExecutorCrun          = "crun"
@@ -213,7 +212,7 @@ func composeOCICrunTransientUnit(manifest ExecutionManifest) (transientUnit, err
 	}
 
 	bundlePath := ociBundleDirectory(manifest)
-	properties := hardenedTransientUnitProperties(manifest, false)
+	properties := crunHardenedTransientUnitProperties(manifest)
 	properties = append(properties,
 		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
 		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
@@ -243,7 +242,7 @@ func composeOCICrunTransientUnit(manifest ExecutionManifest) (transientUnit, err
 func crunArgv(manifest ExecutionManifest, bundlePath string, runtimeDir string) []string {
 	return []string{
 		defaultCrunPath,
-		"--rootless",
+		"--rootless=true",
 		"--root",
 		path.Join("/run", runtimeDir, "crun"),
 		"run",
@@ -252,6 +251,29 @@ func crunArgv(manifest ExecutionManifest, bundlePath string, runtimeDir string) 
 		"--no-new-keyring",
 		manifest.ID,
 	}
+}
+
+func crunHardenedTransientUnitProperties(manifest ExecutionManifest) []systemdProperty {
+	base := hardenedTransientUnitProperties(manifest, false)
+	properties := make([]systemdProperty, 0, len(base)+1)
+	for _, property := range base {
+		switch {
+		case property.Name == "RestrictNamespaces":
+			properties = append(properties, systemdProperty{Name: "RestrictNamespaces", Value: "~user mnt pid"})
+		case property.Name == "SystemCallFilter" && property.Value == "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete":
+			// crun needs a user namespace to gain namespace-local setup rights, then a mount
+			// namespace to mount/pivot the rootfs before the workload starts. The unit still
+			// has zero host capabilities and NoNewPrivileges, and the OCI process keeps empty
+			// capability sets, so these syscalls cannot grant host privilege.
+			properties = append(properties,
+				systemdProperty{Name: "SystemCallFilter", Value: "unshare mount umount2 pivot_root chroot"},
+				systemdProperty{Name: "SystemCallFilter", Value: "~@resources @swap @reboot @raw-io @cpu-emulation @obsolete"},
+			)
+		default:
+			properties = append(properties, property)
+		}
+	}
+	return properties
 }
 
 type generatedOCIConfig struct {
@@ -263,6 +285,7 @@ type authoredOCISpec struct {
 	OCIVersion string             `json:"ociVersion"`
 	Process    authoredOCIProcess `json:"process"`
 	Root       authoredOCIRoot    `json:"root"`
+	Linux      authoredOCILinux   `json:"linux"`
 }
 
 type authoredOCIProcess struct {
@@ -285,6 +308,14 @@ type authoredOCICapabilities struct {
 type authoredOCIRoot struct {
 	Path     string `json:"path"`
 	Readonly bool   `json:"readonly"`
+}
+
+type authoredOCILinux struct {
+	Namespaces []authoredOCILinuxNamespace `json:"namespaces"`
+}
+
+type authoredOCILinuxNamespace struct {
+	Type string `json:"type"`
 }
 
 func authoredOCIRuntimeSpec(manifest ExecutionManifest) authoredOCISpec {
@@ -310,6 +341,13 @@ func authoredOCIRuntimeSpec(manifest ExecutionManifest) authoredOCISpec {
 		Root: authoredOCIRoot{
 			Path:     ociRootDirectory(manifest),
 			Readonly: true,
+		},
+		Linux: authoredOCILinux{
+			Namespaces: []authoredOCILinuxNamespace{
+				{Type: "user"},
+				{Type: "mount"},
+				{Type: "pid"},
+			},
 		},
 	}
 }
@@ -849,7 +887,7 @@ func safeOCIEnvKey(value string) bool {
 }
 
 func ociBundleDirectory(manifest ExecutionManifest) string {
-	return path.Join(defaultOCIBundleRoot, capsuleRuntimeDirectory(manifest.ID))
+	return path.Join("/run", capsuleRuntimeDirectory(manifest.ID), "bundle")
 }
 
 var (

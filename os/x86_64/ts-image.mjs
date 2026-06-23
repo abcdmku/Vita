@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
@@ -42,7 +42,8 @@ const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.crun-oci.capsule", "rootfs"),
 ]);
 
-function fail(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
+function fail(msg) { throw new Error(msg); }
+function die(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
 
 // ── Minimal INI-ish parser for ts-image.conf (Section.Key=Value; # comments) ───────────────────
@@ -144,7 +145,7 @@ async function stage(pin) {
   }
 }
 
-async function stageCrun(pin) {
+export async function stageCrun(pin) {
   mkdirSync(dirname(pin.binaryHostPath), { recursive: true });
   const work = mkdtempSync(join(tmpdir(), "vita-crun-"));
   try {
@@ -215,4 +216,11 @@ async function main() {
   log("\n✓ deno + crun staged. Now build with mkosi --extra-tree=os/x86_64/{agent-overlay,ts-overlay} (see build-and-boot wiring).");
 }
 
-main().catch((e) => fail(e?.stack ?? String(e)));
+function isMainModule() {
+  const entrypoint = process.argv[1];
+  return entrypoint !== undefined && import.meta.url === pathToFileURL(entrypoint).href;
+}
+
+if (isMainModule()) {
+  main().catch((e) => die(e?.stack ?? String(e)));
+}

@@ -1100,6 +1100,13 @@ async function emitCrunOCICapsuleMarkers(agentTransport: AgentTransport): Promis
       return;
     }
 
+    const health = await readCapsuleHealthState(agentTransport, state.status.id);
+    if (!health.ok || health.workload.status !== "OK" || health.workload.health !== "OK") {
+      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=unit_not_healthy status=FAILSAFE`);
+      await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
+      return;
+    }
+
     emit(formatCrunOCICapsuleMarker(state.status));
   } catch (cause) {
     const reason = agentClientErrorReason(cause, "transport_failed");

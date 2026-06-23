@@ -39,10 +39,10 @@ func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *tes
 
 	started := launcher.starts[0]
 	runtimeDir := capsuleRuntimeDirectory(entry.ID)
-	bundlePath := path.Join(defaultOCIBundleRoot, runtimeDir)
+	bundlePath := path.Join("/run", runtimeDir, "bundle")
 	wantArgv := []string{
 		defaultCrunPath,
-		"--rootless",
+		"--rootless=true",
 		"--root",
 		path.Join("/run", runtimeDir, "crun"),
 		"run",
@@ -61,6 +61,7 @@ func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *tes
 	assertProperty(t, props, "AmbientCapabilities", "")
 	assertProperty(t, props, "NoNewPrivileges", "yes")
 	assertProperty(t, props, "ProtectSystem", "strict")
+	assertProperty(t, props, "RestrictNamespaces", "~user mnt pid")
 	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX")
 	assertProperty(t, props, "RuntimeDirectory", runtimeDir)
 	assertProperty(t, props, "RuntimeDirectoryMode", "0700")
@@ -70,6 +71,9 @@ func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *tes
 	assertNoProperty(t, props, "RootDirectory")
 	assertNoProperty(t, props, "MountAPIVFS")
 	assertDoesNotContainProperty(t, props, "SystemCallFilter", "pkey_alloc pkey_free pkey_mprotect")
+	assertDoesNotContainProperty(t, props, "SystemCallFilter", "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete")
+	assertContainsProperty(t, props, "SystemCallFilter", "unshare mount umount2 pivot_root chroot")
+	assertContainsProperty(t, props, "SystemCallFilter", "~@resources @swap @reboot @raw-io @cpu-emulation @obsolete")
 
 	if started.OCIConfig == nil {
 		t.Fatal("OCIConfig = nil, want agent-authored crun config")
@@ -91,6 +95,10 @@ func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *tes
 	assertNoOCICapabilities(t, spec.Process.Capabilities)
 	if spec.Root.Path != ociRootDirectory(manifest) || !spec.Root.Readonly {
 		t.Fatalf("root = %#v, want read-only manifest rootfs %q", spec.Root, ociRootDirectory(manifest))
+	}
+	wantNamespaces := []authoredOCILinuxNamespace{{Type: "user"}, {Type: "mount"}, {Type: "pid"}}
+	if !reflect.DeepEqual(spec.Linux.Namespaces, wantNamespaces) {
+		t.Fatalf("linux namespaces = %#v, want %#v", spec.Linux.Namespaces, wantNamespaces)
 	}
 }
 
