@@ -941,11 +941,19 @@ func (s memoryExecutionManifestStore) Load(ctx context.Context, id string) (Exec
 }
 
 type recordingTransientLauncher struct {
-	starts []transientUnit
-	stops  []string
-	resets []string
-	status transientUnitStatus
-	err    error
+	starts          []transientUnit
+	stops           []string
+	resets          []string
+	confirmedLimits []confirmedOCILimits
+	status          transientUnitStatus
+	ociLimits       OCILimitsStatus
+	ociLimitsErr    error
+	err             error
+}
+
+type confirmedOCILimits struct {
+	unit   string
+	limits ExecutionResourceLimits
 }
 
 func (l *recordingTransientLauncher) StartTransientUnit(ctx context.Context, unit transientUnit) (transientUnitStatus, error) {
@@ -957,6 +965,20 @@ func (l *recordingTransientLauncher) StartTransientUnit(ctx context.Context, uni
 		return transientUnitStatus{}, l.err
 	}
 	return l.status, nil
+}
+
+func (l *recordingTransientLauncher) ConfirmOCILimits(ctx context.Context, unit string, limits ExecutionResourceLimits) (OCILimitsStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return OCILimitsStatus{}, err
+	}
+	l.confirmedLimits = append(l.confirmedLimits, confirmedOCILimits{
+		unit:   unit,
+		limits: limits,
+	})
+	if l.ociLimitsErr != nil {
+		return OCILimitsStatus{}, l.ociLimitsErr
+	}
+	return l.ociLimits, nil
 }
 
 func (l *recordingTransientLauncher) StopTransientUnit(ctx context.Context, unit string) error {

@@ -1,0 +1,31 @@
+{
+  "id": "local.hostile-oci.capsule",
+  "version": "1.0.0",
+  "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  "packageClass": "oci-service",
+  "runtime": {
+    "oci": {
+      "image": {
+        "digest": "sha256:180701765c7450078b22b783bcebd25187ab18f7c937c4d8e480813af36582b4",
+        "entrypoint": [
+          "/init"
+        ]
+      }
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 16
+  },
+  "healthChecks": [
+    {
+      "name": "lifecycle",
+      "type": "lifecycle",
+      "target": "self",
+      "intervalSeconds": 5,
+      "timeoutSeconds": 2
+    }
+  ]
+}

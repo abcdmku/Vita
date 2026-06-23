@@ -150,6 +150,7 @@ type ExecuteStatus struct {
 	Health     string                `json:"health"`
 	Status     string                `json:"status"`
 	Volumes    []ExecuteVolumeStatus `json:"volumes,omitempty"`
+	OCILimits  *OCILimitsStatus      `json:"ociLimits,omitempty"`
 }
 
 type ExecuteVolumeStatus struct {
@@ -283,6 +284,7 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 	}
 	last := *c.last
 	last.Volumes = cloneExecuteVolumeStatuses(c.last.Volumes)
+	last.OCILimits = cloneOCILimitsStatus(c.last.OCILimits)
 	if c.supervisor != nil {
 		for _, workload := range c.supervisor.Snapshot() {
 			if workload.Unit == last.Unit {
@@ -344,6 +346,24 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		return nil, &ExecuteStartError{Code: code, Err: err}
 	}
 
+	var ociLimits *OCILimitsStatus
+	if shouldConfirmOCILimitEnforcement(manifest) {
+		confirmed, err := c.launcher.ConfirmOCILimits(ctx, unit.Name, manifest.ResourceLimits)
+		confirmed = normalizeOCILimitsStatus(confirmed)
+		ociLimits = &confirmed
+		logOCILimitsStatus(manifest.ID, confirmed)
+		if err != nil || confirmed.Status != ociLimitStatusOK {
+			limitErr := err
+			if limitErr == nil {
+				limitErr = fmt.Errorf("oci cgroup limits not enforced: mem=%s tasks=%s cpu=%s", confirmed.Mem, confirmed.Tasks, confirmed.CPU)
+			}
+			if cleanupErr := stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name); cleanupErr != nil {
+				limitErr = errors.Join(limitErr, cleanupErr)
+			}
+			return nil, &ExecuteStartError{Code: "oci_limits_failed", Err: limitErr}
+		}
+	}
+
 	executeStatus := ExecuteStatus{
 		ID:         manifest.ID,
 		Unit:       unit.Name,
@@ -351,6 +371,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Health:     "OK",
 		Status:     "OK",
 		Volumes:    volumeStatuses(unit.Volumes),
+		OCILimits:  ociLimits,
 	}
 	c.setLast(executeStatus)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
@@ -409,6 +430,7 @@ func (c *ExecuteCapability) setLast(status ExecuteStatus) {
 		Health:     status.Health,
 		Status:     status.Status,
 		Volumes:    cloneExecuteVolumeStatuses(status.Volumes),
+		OCILimits:  cloneOCILimitsStatus(status.OCILimits),
 	}
 }
 
@@ -974,6 +996,7 @@ func (e *transientUnitStartError) Unwrap() error {
 
 type transientUnitLauncher interface {
 	StartTransientUnit(context.Context, transientUnit) (transientUnitStatus, error)
+	ConfirmOCILimits(context.Context, string, ExecutionResourceLimits) (OCILimitsStatus, error)
 	StopTransientUnit(context.Context, string) error
 	ResetFailedUnit(context.Context, string) error
 }
