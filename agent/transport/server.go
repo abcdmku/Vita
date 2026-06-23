@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +41,12 @@ import (
 const (
 	defaultMaxBodyBytes int64 = 1 << 20
 
-	DefaultUnixSocketPath             = "/run/vita-agent/agentd.sock"
-	DefaultUnixSocketMode fs.FileMode = 0o660
+	DefaultUnixSocketPath                = "/run/vita-agent/agentd.sock"
+	DefaultUnixSocketMode    fs.FileMode = 0o660
+	DefaultUnixPeerGroupName             = "vita-agent"
+
+	unixPeerAuthCapability = "transport.unix"
+	peerUnauthorizedReason = "peer_unauthorized"
 )
 
 type RequestDecoder func(json.RawMessage) (capabilities.TypedRequest, error)
@@ -175,6 +181,35 @@ type unixSocketListener struct {
 	once sync.Once
 }
 
+type UnixPeerAuthConfig struct {
+	GroupName  string
+	GroupID    *uint32
+	AuditStore AuditStore
+	Now        func() time.Time
+
+	readPeerInfo func(net.Conn) (unixPeerInfo, error)
+}
+
+type authenticatedUnixListener struct {
+	net.Listener
+	groupID      uint32
+	auditStore   AuditStore
+	now          func() time.Time
+	readPeerInfo func(net.Conn) (unixPeerInfo, error)
+}
+
+type peerCredentials struct {
+	PID int
+	UID uint32
+	GID uint32
+}
+
+type unixPeerInfo struct {
+	Credentials peerCredentials
+	Groups      []uint32
+	GroupSource string
+}
+
 func ListenUnixSocket(path string) (net.Listener, error) {
 	return ListenUnixSocketMode(path, DefaultUnixSocketMode)
 }
@@ -205,6 +240,53 @@ func ListenUnixSocketMode(path string, mode fs.FileMode) (net.Listener, error) {
 	return &unixSocketListener{Listener: listener, path: path}, nil
 }
 
+func ListenAuthenticatedUnixSocket(path string, config UnixPeerAuthConfig) (net.Listener, error) {
+	return ListenAuthenticatedUnixSocketMode(path, DefaultUnixSocketMode, config)
+}
+
+func ListenAuthenticatedUnixSocketMode(path string, mode fs.FileMode, config UnixPeerAuthConfig) (net.Listener, error) {
+	listener, err := ListenUnixSocketMode(path, mode)
+	if err != nil {
+		return nil, err
+	}
+
+	authenticated, err := AuthenticateUnixSocketListener(listener, config)
+	if err != nil {
+		closeErr := listener.Close()
+		return nil, errors.Join(err, closeErr)
+	}
+	return authenticated, nil
+}
+
+func AuthenticateUnixSocketListener(listener net.Listener, config UnixPeerAuthConfig) (net.Listener, error) {
+	if listener == nil {
+		return nil, errors.New("unix socket listener is required")
+	}
+
+	groupID, err := unixPeerAuthGroupID(config)
+	if err != nil {
+		return nil, err
+	}
+
+	now := config.Now
+	if now == nil {
+		now = time.Now
+	}
+
+	readPeerInfo := config.readPeerInfo
+	if readPeerInfo == nil {
+		readPeerInfo = readUnixPeerInfo
+	}
+
+	return &authenticatedUnixListener{
+		Listener:     listener,
+		groupID:      groupID,
+		auditStore:   config.AuditStore,
+		now:          now,
+		readPeerInfo: readPeerInfo,
+	}, nil
+}
+
 func (l *unixSocketListener) Close() error {
 	var closeErr error
 	var removeErr error
@@ -216,6 +298,104 @@ func (l *unixSocketListener) Close() error {
 		}
 	})
 	return errors.Join(closeErr, removeErr)
+}
+
+func (l *authenticatedUnixListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+
+		peer, authErr := l.readPeerInfo(conn)
+		if authErr == nil && peerAuthorizedForGroup(peer, l.groupID) {
+			return conn, nil
+		}
+
+		l.recordPeerUnauthorized(peer)
+		_ = conn.Close()
+	}
+}
+
+func (l *authenticatedUnixListener) recordPeerUnauthorized(peer unixPeerInfo) {
+	if l.auditStore == nil {
+		return
+	}
+
+	if _, err := l.auditStore.Append(auditlog.Event{
+		TimestampMillis: l.now().UTC().UnixMilli(),
+		ActorKind:       auditlog.ActorKindSystem,
+		ActorID:         peerAuditActorID(peer),
+		Capability:      unixPeerAuthCapability,
+		Operation:       auditlog.OperationRead,
+		Outcome:         auditlog.OutcomeRejected,
+		Reason:          peerUnauthorizedReason,
+	}); err != nil {
+		return
+	}
+}
+
+func unixPeerAuthGroupID(config UnixPeerAuthConfig) (uint32, error) {
+	if config.GroupID != nil {
+		return *config.GroupID, nil
+	}
+
+	groupName := config.GroupName
+	if groupName == "" {
+		groupName = DefaultUnixPeerGroupName
+	}
+
+	group, err := user.LookupGroup(groupName)
+	if err != nil {
+		return 0, fmt.Errorf("lookup unix peer auth group %q: %w", groupName, err)
+	}
+
+	gid, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parse unix peer auth group %q gid %q: %w", groupName, group.Gid, err)
+	}
+	return uint32(gid), nil
+}
+
+func peerAuthorizedForGroup(peer unixPeerInfo, groupID uint32) bool {
+	if peer.Credentials.GID == groupID {
+		return true
+	}
+	for _, gid := range peer.Groups {
+		if gid == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+func peerAuditActorID(peer unixPeerInfo) string {
+	if peer.Credentials.PID <= 0 {
+		return "peer:unknown"
+	}
+	return fmt.Sprintf("peer:pid:%d", peer.Credentials.PID)
+}
+
+func parseProcStatusGroups(data []byte) ([]uint32, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || key != "Groups" {
+			continue
+		}
+
+		fields := strings.Fields(value)
+		groups := make([]uint32, 0, len(fields))
+		for _, field := range fields {
+			gid, err := strconv.ParseUint(field, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("parse proc status group %q: %w", field, err)
+			}
+			groups = append(groups, uint32(gid))
+		}
+		return groups, nil
+	}
+
+	return nil, errors.New("proc status missing Groups line")
 }
 
 func NewHandler(config Config) (http.Handler, error) {
