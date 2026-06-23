@@ -58,12 +58,19 @@ const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
 const CAPSULE_MARKER = "VITA-CAPSULE";
 const CAPSULE_ERROR_MARKER = "VITA-CAPSULE-ERROR";
 const CAPSULE_PREVIEW_ERROR_MARKER = "VITA-CAPSULE-PREVIEW-ERROR";
+const CAPSULE_FETCH_MARKER = "VITA-CAPSULE-FETCH";
+const CAPSULE_FETCH_REJECT_MARKER = "VITA-CAPSULE-FETCH-REJECT";
+const CAPSULE_FETCH_ERROR_MARKER = "VITA-CAPSULE-FETCH-ERROR";
 const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
 const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
 const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
+const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
+const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
+const CAPSULE_BUNDLE_INTEGRITY = "sha256-2CR0HBzqwe6jE+rSVO6VZNx99AXq+fqZ/6dwa9itQ9w=";
+const BAD_CAPSULE_BUNDLE_INTEGRITY = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const APPLY_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
   "Content-Type": "application/json",
@@ -125,6 +132,38 @@ const FORCED_INVALID_CAPSULE_PLAN = Object.freeze({
               version: ON_DEVICE_CAPSULE_ENTRY.version,
             }),
           ]),
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const CAPSULE_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: ON_DEVICE_CAPSULE_ENTRY.id,
+          integrity: CAPSULE_BUNDLE_INTEGRITY,
+          ref: CAPSULE_BUNDLE_REF,
+          version: ON_DEVICE_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_BAD_CAPSULE_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: ON_DEVICE_CAPSULE_ENTRY.id,
+          integrity: BAD_CAPSULE_BUNDLE_INTEGRITY,
+          ref: CAPSULE_BUNDLE_REF,
+          version: ON_DEVICE_CAPSULE_ENTRY.version,
         }),
       }),
     }),
@@ -340,6 +379,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -355,6 +395,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       await emitCapsuleMarkers(agentTransport);
     } else {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     }
   } else {
@@ -362,6 +403,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
   }
 
@@ -395,6 +437,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
 
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -407,12 +450,17 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
 
   if (!result.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   emit(formatCommittedCapsuleMarker(ON_DEVICE_CAPSULE_ENTRY, result.applyResult));
-  await emitCapsuleExecuteMarkers(agentTransport);
+  if (await emitCapsuleFetchMarkers(agentTransport)) {
+    await emitCapsuleExecuteMarkers(agentTransport);
+  } else {
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+  }
   await emitForcedCapsuleRejectMarker(agentTransport);
 }
 
@@ -579,6 +627,57 @@ async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Pr
   emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
 }
 
+async function emitCapsuleFetchMarkers(agentTransport: AgentTransport): Promise<boolean> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const result = await client.apply(CAPSULE_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedCapsuleFetchRejectMarker(client);
+      return false;
+    }
+
+    emit(formatCapsuleFetchedMarker());
+  } catch {
+    emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    return false;
+  }
+
+  await emitForcedCapsuleFetchRejectMarker(client);
+  return true;
+}
+
+async function emitForcedCapsuleFetchRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_BAD_CAPSULE_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_FETCH_REJECT_MARKER}: reason=${capsuleFetchRejectReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_FETCH_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+}
+
 async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promise<void> {
   const client = createAgentClient({
     baseUrl: AGENTD_BASE_URL,
@@ -704,6 +803,26 @@ function formatCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
   );
 }
 
+function formatCapsuleFetchedMarker(): string {
+  return (
+    `${CAPSULE_FETCH_MARKER}: ` +
+    `id=${ON_DEVICE_CAPSULE_ENTRY.id} ` +
+    `sri=${shortSRI(CAPSULE_BUNDLE_INTEGRITY)} ` +
+    "verified=OK " +
+    "status=OK"
+  );
+}
+
+function capsuleFetchRejectReason(result: AgentApplyResult): string {
+  const message = result.error?.message.toLowerCase() ?? "";
+
+  if (message.includes("sri mismatch")) {
+    return "sri_mismatch";
+  }
+
+  return agentApplyResultReason(result);
+}
+
 function readStringField(
   value: Readonly<Record<string, unknown>>,
   key: string,
@@ -728,6 +847,18 @@ function agentApplyResultReason(result: AgentApplyResult): string {
 function markerToken(value: string): string {
   const token = value.replace(/[^A-Za-z0-9_.-]+/gu, "_");
   return token.length === 0 ? "unknown" : token;
+}
+
+function shortSRI(integrity: string): string {
+  const separator = integrity.indexOf("-");
+
+  if (separator <= 0) {
+    return markerToken(integrity);
+  }
+
+  const algorithm = integrity.slice(0, separator);
+  const token = integrity.slice(separator + 1, separator + 13);
+  return `${algorithm}-${token}`;
 }
 
 function stableStringify(value: unknown): string {

@@ -51,6 +51,7 @@ func main() {
 		accounts.NewCapability(),
 		backup.NewCapability(),
 		capsule.NewExecuteCapability(),
+		capsule.NewFetchCapability(),
 		capsule.NewCapability(),
 		hostname.NewCapability(),
 		identity.NewCapability(),

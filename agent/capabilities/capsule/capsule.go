@@ -3,7 +3,6 @@ package capsule
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,14 +12,17 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/internal/jsonsafe"
+	capsulestorage "github.com/vita/agent/storage/capsules"
 	"github.com/vita/agent/transaction"
 )
 
 const (
-	Name = "capsule.registry"
+	Name      = "capsule.registry"
+	FetchName = "capsule.fetch"
 
 	defaultStateRoot        = "/var/lib/vita-agent"
 	defaultRegistryFilename = "installed-capsule-registry.json"
@@ -314,6 +316,287 @@ func (u undoRegistry) Undo(ctx context.Context) error {
 	return u.fs.Replace(ctx, cloneSnapshot(u.prior))
 }
 
+type FetchDesired struct {
+	ID        string `json:"id"`
+	Version   string `json:"version"`
+	Ref       string `json:"ref"`
+	Integrity string `json:"integrity"`
+}
+
+func (d FetchDesired) Validate() error {
+	return validateFetchDesired(d, "desired")
+}
+
+func (d *FetchDesired) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, fetchDesiredFields); err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+
+	id, err := requiredStringField(fields, "id")
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+	version, err := requiredStringField(fields, "version")
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+	ref, err := requiredStringField(fields, "ref")
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+	integrity, err := requiredStringField(fields, "integrity")
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+
+	desired := FetchDesired{
+		ID:        id,
+		Version:   version,
+		Ref:       ref,
+		Integrity: integrity,
+	}
+	if err := desired.Validate(); err != nil {
+		return err
+	}
+
+	*d = desired
+	return nil
+}
+
+type FetchApplyRequest struct {
+	Desired *FetchDesired `json:"desired"`
+}
+
+func (FetchApplyRequest) CapabilityRequest() {}
+
+func (r *FetchApplyRequest) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, fetchApplyRequestFields); err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
+
+	rawDesired, ok := fields["desired"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawDesired), []byte("null")) {
+		return &FetchInvalidRequestError{Reason: "desired is required"}
+	}
+
+	var desired FetchDesired
+	if err := decodeSingleJSONValue(rawDesired, &desired); err != nil {
+		return err
+	}
+
+	*r = FetchApplyRequest{Desired: &desired}
+	return nil
+}
+
+func (r FetchApplyRequest) Validate() error {
+	if r.Desired == nil {
+		return &FetchInvalidRequestError{Reason: "desired is required"}
+	}
+	return r.Desired.Validate()
+}
+
+type FetchReadRequest struct{}
+
+func (FetchReadRequest) CapabilityRequest() {}
+
+func (FetchReadRequest) Validate() error { return nil }
+
+type FetchReadResponse struct {
+	Last *FetchStatus `json:"last,omitempty"`
+}
+
+func (FetchReadResponse) CapabilityResponse() {}
+
+type FetchStatus struct {
+	ID        string `json:"id"`
+	Version   string `json:"version"`
+	Ref       string `json:"ref"`
+	Integrity string `json:"integrity"`
+	LocalPath string `json:"localPath"`
+	Status    string `json:"status"`
+}
+
+type FetchCapability struct {
+	store capsuleFetchStore
+
+	mu   sync.Mutex
+	last *FetchStatus
+}
+
+type capsuleFetchStore interface {
+	FetchCapsuleFor(context.Context, string, string, string, string) (string, error)
+	CachePath(string, string) (string, error)
+	RemoveStagedCapsule(context.Context, string) error
+}
+
+type defaultFetchStore struct{}
+
+func (defaultFetchStore) FetchCapsuleFor(ctx context.Context, ref string, integrity string, id string, version string) (string, error) {
+	return capsulestorage.FetchCapsuleFor(ctx, ref, integrity, id, version)
+}
+
+func (defaultFetchStore) CachePath(id string, version string) (string, error) {
+	return capsulestorage.CachePath(id, version)
+}
+
+func (defaultFetchStore) RemoveStagedCapsule(ctx context.Context, localPath string) error {
+	return capsulestorage.RemoveStagedCapsule(ctx, localPath)
+}
+
+type FetchInvalidRequestError struct {
+	Reason string
+}
+
+func (e *FetchInvalidRequestError) Error() string {
+	return fmt.Sprintf("invalid capsule fetch request: %s", e.Reason)
+}
+
+func NewFetchCapability() *FetchCapability {
+	return newFetchCapability(defaultFetchStore{})
+}
+
+func newFetchCapability(store capsuleFetchStore) *FetchCapability {
+	return &FetchCapability{store: store}
+}
+
+func (c *FetchCapability) Name() string {
+	return FetchName
+}
+
+func (c *FetchCapability) Handle(ctx context.Context, req capabilities.TypedRequest) (capabilities.TypedResponse, error) {
+	if _, ok := req.(FetchReadRequest); !ok {
+		return nil, &FetchInvalidRequestError{Reason: "expected capsule.FetchReadRequest"}
+	}
+	if c == nil {
+		return nil, &FetchInvalidRequestError{Reason: "missing capsule fetch capability"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.last == nil {
+		return FetchReadResponse{}, nil
+	}
+	last := *c.last
+	return FetchReadResponse{Last: &last}, nil
+}
+
+func (c *FetchCapability) Apply(ctx context.Context, req capabilities.TypedRequest) (transaction.Undo, error) {
+	applyReq, ok := req.(FetchApplyRequest)
+	if !ok {
+		return nil, &FetchInvalidRequestError{Reason: "expected capsule.FetchApplyRequest"}
+	}
+	if c == nil || c.store == nil {
+		return nil, &FetchInvalidRequestError{Reason: "missing capsule fetch dependency"}
+	}
+	if applyReq.Desired == nil {
+		return nil, &FetchInvalidRequestError{Reason: "desired is required"}
+	}
+
+	desired := *applyReq.Desired
+	if err := validateFetchDesired(desired, "desired"); err != nil {
+		return nil, err
+	}
+
+	target, err := c.store.CachePath(desired.ID, desired.Version)
+	if err != nil {
+		return nil, err
+	}
+	preexisting := pathExists(target)
+
+	localPath, err := c.store.FetchCapsuleFor(ctx, desired.Ref, desired.Integrity, desired.ID, desired.Version)
+	if err != nil {
+		return nil, err
+	}
+	if localPath != target {
+		if !preexisting {
+			_ = c.store.RemoveStagedCapsule(ctx, localPath)
+		}
+		return nil, &FetchInvalidRequestError{Reason: "staged capsule path does not match request"}
+	}
+
+	status := FetchStatus{
+		ID:        desired.ID,
+		Version:   desired.Version,
+		Ref:       desired.Ref,
+		Integrity: desired.Integrity,
+		LocalPath: localPath,
+		Status:    "OK",
+	}
+	c.setLastFetch(status)
+
+	return fetchUndo{
+		capability:   c,
+		store:        c.store,
+		localPath:    localPath,
+		removeOnUndo: !preexisting,
+	}, nil
+}
+
+func (c *FetchCapability) setLastFetch(status FetchStatus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.last = &FetchStatus{
+		ID:        status.ID,
+		Version:   status.Version,
+		Ref:       status.Ref,
+		Integrity: status.Integrity,
+		LocalPath: status.LocalPath,
+		Status:    status.Status,
+	}
+}
+
+func (c *FetchCapability) clearLastFetch(localPath string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.last != nil && c.last.LocalPath == localPath {
+		c.last = nil
+	}
+}
+
+type fetchUndo struct {
+	capability   *FetchCapability
+	store        capsuleFetchStore
+	localPath    string
+	removeOnUndo bool
+}
+
+func (u fetchUndo) Undo(ctx context.Context) error {
+	if u.store == nil {
+		return &FetchInvalidRequestError{Reason: "missing capsule fetch dependency"}
+	}
+	if u.removeOnUndo {
+		if err := u.store.RemoveStagedCapsule(ctx, u.localPath); err != nil {
+			return err
+		}
+	}
+	if u.capability != nil {
+		u.capability.clearLastFetch(u.localPath)
+	}
+	return nil
+}
+
 type defaultFileSystem struct {
 	stateRoot string
 	path      string
@@ -417,6 +700,15 @@ func (fs defaultFileSystem) Replace(ctx context.Context, snapshot registrySnapsh
 }
 
 var (
+	fetchApplyRequestFields = map[string]struct{}{
+		"desired": {},
+	}
+	fetchDesiredFields = map[string]struct{}{
+		"id":        {},
+		"integrity": {},
+		"ref":       {},
+		"version":   {},
+	}
 	applyRequestFields = map[string]struct{}{
 		"desired": {},
 	}
@@ -433,7 +725,6 @@ var (
 	reverseDNSPattern      = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 	opaqueIDPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$`)
 	versionPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$`)
-	sriPattern             = regexp.MustCompile(`^sha(256|384|512)-([A-Za-z0-9+/]+={0,2})$`)
 	controlCharacter       = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 	privateKeyPattern      = regexp.MustCompile(`(?i)\b(?:private[-_\s]?key|openssh\s+private\s+key|age-secret-key|xprv|seed[-_\s]?phrase|mnemonic|recovery[-_\s]?phrase)\b`)
 	secretAssignment       = regexp.MustCompile(`(?i)\b(?:private[-_\s]?key|api[-_\s]?key|access[-_\s]?token|refresh[-_\s]?token|password|secret)\s*[:=]`)
@@ -461,6 +752,34 @@ func validateApplyRequest(req ApplyRequest) (Registry, error) {
 		return Registry{}, &InvalidRequestError{Reason: "desired is required"}
 	}
 	return normalizeRegistry(*req.Desired)
+}
+
+func validateFetchDesired(desired FetchDesired, field string) error {
+	if desired.ID == "" {
+		return &FetchInvalidRequestError{Reason: field + ".id is required"}
+	}
+	if !validCapsuleID(desired.ID) {
+		return &FetchInvalidRequestError{Reason: field + ".id must be a well-formed capsule id"}
+	}
+	if desired.Version == "" {
+		return &FetchInvalidRequestError{Reason: field + ".version is required"}
+	}
+	if !validVersion(desired.Version) {
+		return &FetchInvalidRequestError{Reason: field + ".version must be a safe non-inline version string"}
+	}
+	if desired.Ref == "" {
+		return &FetchInvalidRequestError{Reason: field + ".ref is required"}
+	}
+	if _, err := capsulestorage.ResolveLocalRef(desired.Ref); err != nil {
+		return &FetchInvalidRequestError{Reason: field + ".ref must be a local file artifact reference"}
+	}
+	if desired.Integrity == "" {
+		return &FetchInvalidRequestError{Reason: field + ".integrity is required"}
+	}
+	if !isValidSRI(desired.Integrity) {
+		return &FetchInvalidRequestError{Reason: field + ".integrity must be a real SRI integrity"}
+	}
+	return nil
 }
 
 func normalizeRegistry(registry Registry) (Registry, error) {
@@ -563,32 +882,12 @@ func containsInlineCapsuleMaterial(value string) bool {
 }
 
 func isValidSRI(value string) bool {
-	matches := sriPattern.FindStringSubmatch(value)
-	if len(matches) != 3 {
-		return false
-	}
+	return capsulestorage.IsValidIntegrity(value)
+}
 
-	expectedLength := 0
-	switch matches[1] {
-	case "256":
-		expectedLength = 32
-	case "384":
-		expectedLength = 48
-	case "512":
-		expectedLength = 64
-	default:
-		return false
-	}
-
-	digest := matches[2]
-	var decoded []byte
-	var err error
-	if strings.Contains(digest, "=") {
-		decoded, err = base64.StdEncoding.DecodeString(digest)
-	} else {
-		decoded, err = base64.RawStdEncoding.DecodeString(digest)
-	}
-	return err == nil && len(decoded) == expectedLength
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 func renderRegistry(registry Registry) ([]byte, error) {
