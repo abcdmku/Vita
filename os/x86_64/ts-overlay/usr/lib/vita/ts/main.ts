@@ -70,6 +70,9 @@ const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
 const CAPSULE_OCI_EXECUTED_MARKER = "VITA-CAPSULE-OCI-EXECUTED";
 const CAPSULE_OCI_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-OCI-EXECUTE-REJECT";
 const CAPSULE_OCI_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-OCI-EXECUTE-ERROR";
+const CAPSULE_WASM_EXECUTED_MARKER = "VITA-CAPSULE-WASM-EXECUTED";
+const CAPSULE_WASM_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-WASM-EXECUTE-REJECT";
+const CAPSULE_WASM_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-WASM-EXECUTE-ERROR";
 const CAPSULE_OCI_LIMITS_MARKER = "VITA-CAPSULE-OCI-LIMITS";
 const CAPSULE_NET_PARSE_MARKER = "VITA-CAPSULE-NET-PARSE";
 const CAPSULE_NET_REJECT_MARKER = "VITA-CAPSULE-NET-REJECT";
@@ -117,11 +120,25 @@ const INVALID_NET_CAPSULE_ENTRY = Object.freeze({
   state: "installed",
   version: "1.0.0",
 }) satisfies CapsuleEntry;
+const WASM_CAPSULE_ENTRY = Object.freeze({
+  id: "local.wasm.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
+const MISSING_WASM_CAPSULE_ENTRY = Object.freeze({
+  id: "local.missing-wasm.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
 const OCI_CAPSULE_REGISTRY = Object.freeze([
   ON_DEVICE_CAPSULE_ENTRY,
   OCI_CAPSULE_ENTRY,
   MISSING_OCI_CAPSULE_ENTRY,
   HOSTILE_OCI_CAPSULE_ENTRY,
+  WASM_CAPSULE_ENTRY,
+  MISSING_WASM_CAPSULE_ENTRY,
 ]) satisfies readonly CapsuleEntry[];
 const CAPSULE_NET_REGISTRY = Object.freeze([
   ON_DEVICE_CAPSULE_ENTRY,
@@ -379,6 +396,36 @@ const HOSTILE_OCI_LIMITS_EXECUTE_PLAN = Object.freeze({
   ]),
 }) satisfies AgentApplyPlan;
 
+const WASM_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: WASM_CAPSULE_ENTRY.id,
+          integrity: WASM_CAPSULE_ENTRY.integrity,
+          version: WASM_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_MISSING_WASM_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: MISSING_WASM_CAPSULE_ENTRY.id,
+          integrity: MISSING_WASM_CAPSULE_ENTRY.integrity,
+          version: MISSING_WASM_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
 // Config-change PREVIEW (P1-034): evaluate a CURRENT and a DESIRED config via the
 // real evaluator, then diff the two TransactionPlans by capability. The CURRENT
 // config is the same valid baseline as VALID_CONFIG; the DESIRED config differs in
@@ -562,6 +609,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -583,6 +631,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(formatOCILimitsFailureMarker());
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -596,6 +645,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -635,6 +685,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -653,6 +704,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -671,6 +723,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   await emitCapsuleOCIFetchMarkers(agentTransport);
   await emitOCICapsuleMarkers(agentTransport);
   await emitHostileOCILimitsMarker(agentTransport);
+  await emitWasmCapsuleMarkers(agentTransport);
 }
 
 async function emitCapsulePreviewMarker(
@@ -1156,6 +1209,72 @@ async function emitForcedOCICapsuleExecuteRejectMarker(
   emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
 }
 
+async function emitWasmCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const registryResult = await client.apply(OCI_CAPSULE_REGISTRY_PLAN);
+
+    if (registryResult.outcome !== "committed") {
+      emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: reason=${agentApplyResultReason(registryResult)} status=FAILSAFE`);
+      return;
+    }
+
+    const result = await client.apply(WASM_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: reason=${agentApplyResultReason(result)} status=FAILSAFE`);
+      await emitForcedWasmCapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    const state = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+
+    if (!state.ok || state.status.id !== WASM_CAPSULE_ENTRY.id) {
+      emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
+      await emitForcedWasmCapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    emit(formatWasmCapsuleExecutedMarker(state.status));
+  } catch (cause) {
+    const reason = agentClientErrorReason(cause, "transport_failed");
+    emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+    return;
+  }
+
+  await emitForcedWasmCapsuleExecuteRejectMarker(client);
+}
+
+async function emitForcedWasmCapsuleExecuteRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_MISSING_WASM_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_WASM_EXECUTE_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_WASM_EXECUTE_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+}
+
 type CapsuleExecuteReadResult =
   | {
       readonly ok: true;
@@ -1424,6 +1543,18 @@ function formatOCICapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `unit=${status.unit} ` +
     `uid=${status.dynamicUid} ` +
     "root=ro " +
+    `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function formatWasmCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
+  return (
+    `${CAPSULE_WASM_EXECUTED_MARKER}: ` +
+    `id=${status.id} ` +
+    `unit=${status.unit} ` +
+    `uid=${status.dynamicUid} ` +
+    "runtime=wasmtime " +
     `health=${status.health} ` +
     "status=OK"
   );
