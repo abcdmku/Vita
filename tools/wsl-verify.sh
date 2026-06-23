@@ -471,7 +471,10 @@ run_verity() {
   echo "----- POS: boot verity image (expect dm-verity active + userspace) -----"
   local plog; plog=$(verity_boot POS "$disk" 120)
   local r_pos=FAIL
-  if { grep -qa Multi-User "$plog" || grep -qa bash-5 "$plog"; } && grep -qa "device-mapper: verity" "$plog"; then r_pos=PASS; fi
+  # PASS = userspace reached AND dm-verity active AND the root is actually the verity device /dev/mapper/root
+  # (not just any verity volume) — so a non-verity boot cannot satisfy it.
+  if { grep -qa Multi-User "$plog" || grep -qa bash-5 "$plog"; } \
+     && grep -qa "device-mapper: verity" "$plog" && grep -qa "/dev/mapper/root" "$plog"; then r_pos=PASS; fi
   echo "  POS=$r_pos"; grep -a "device-mapper: verity" "$plog" 2>/dev/null | head -1
 
   echo "----- VNEG: tamper a byte in the root DATA partition (expect dm-verity reject) -----"

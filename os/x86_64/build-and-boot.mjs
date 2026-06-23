@@ -220,6 +220,11 @@ if (MODE === "smoke") {
   // os/x86_64/repart-verity/ (kept out of the DEFAULT layout so smoke/SB are unaffected). mkosi builds the
   // hash tree + bakes roothash= onto the UKI cmdline; the root is read-only so volatile=overlay gives writable /.
   const verityMode = process.env.VITA_VERITY === "1";
+  // Native mkosi only: --repart-directory is a HOST path the docker mkosi container would not see (REPO mounts
+  // at /work). Fail fast rather than silently build a non-verity image. (useNative is true on the build host.)
+  if (verityMode && !DRY && !useNative)
+    fail("VITA_VERITY=1 requires the native mkosi engine — --repart-directory is a host path not mounted into " +
+         "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
   const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
