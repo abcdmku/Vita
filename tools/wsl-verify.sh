@@ -96,26 +96,26 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for VITA-CONNECT (the LAST marker — main.ts order: TS->EVAL->PREVIEW->EXPLAIN->CONNECT). Its SUCCESS form
-  # proves the whole on-device chain incl. the unprivileged runtime reaching agentd over the unix socket (P1-035/S1).
-  # (VITA-CONNECT-ERROR does NOT match 'VITA-CONNECT:' so a failed connect correctly times out -> FAIL.)
+  # Wait for VITA-STATE (the LAST marker — order: TS->EVAL->PREVIEW->EXPLAIN->CONNECT->STATE). Its SUCCESS form proves
+  # the full on-device chain incl. the unprivileged runtime READING agentd's state over the unix socket (P1-035 S1 +
+  # P1-038 S2). (VITA-STATE-ERROR does NOT match 'VITA-STATE:' so a failed read correctly times out -> FAIL.)
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-CONNECT:' "$log" 2>/dev/null; then ok=1; echo "VITA-CONNECT marker found at ~${i}s"; break; fi
+    if grep -qa 'VITA-STATE:' "$log" 2>/dev/null; then ok=1; echo "VITA-STATE marker found at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn
+  local ts ev pv ex cn st
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
-  cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1)
-  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $ex"; echo "  $cn"
-  # PASS requires runtime + evaluator + preview + explain + the unix-socket connect to agentd (VITA-CONNECT success).
+  cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
+  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $ex"; echo "  $cn"; echo "  $st"
+  # PASS requires runtime + evaluator + preview + explain + connect + READ of agentd state (VITA-STATE success).
   if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ]; then
-    echo "RESULT: PASS (runtime + evaluator + preview + explain + agentd unix connect — full chain on-device)"
+    echo "RESULT: PASS (runtime + evaluator + preview + explain + agentd connect + state read — full chain on-device)"
   else
-    echo "RESULT: FAIL (missing a marker above; a failed connect shows VITA-CONNECT-ERROR)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|vita-explain|vita-connect|agentd|deno' | tail -14
+    echo "RESULT: FAIL (missing a marker above; failures show VITA-CONNECT-ERROR / VITA-STATE-ERROR)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|vita-explain|vita-connect|vita-state|agentd|deno' | tail -16
     return 1
   fi
 }
