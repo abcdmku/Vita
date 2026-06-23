@@ -6,7 +6,8 @@
 //
 // Determinism / supply chain:
 //   - NO remote imports. Every import is a relative path to a vendored file under this overlay.
-//   - NO filesystem or network access. The evaluator is pure control-plane logic.
+//   - NO broad filesystem or network access. The only I/O is a scoped AF_UNIX health probe to agentd
+//     after the pure evaluator/preview markers have run.
 //   - The representative configs below are fixed literals, so the emitted plan hash is stable.
 
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
@@ -22,6 +23,10 @@ const PREVIEW_MARKER = "VITA-PREVIEW";
 const PREVIEW_NOOP_MARKER = "VITA-PREVIEW-NOOP";
 const PREVIEW_ERROR_MARKER = "VITA-PREVIEW-ERROR";
 const EXPLAIN_MARKER = "VITA-EXPLAIN";
+const CONNECT_MARKER = "VITA-CONNECT";
+const CONNECT_ERROR_MARKER = "VITA-CONNECT-ERROR";
+const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
+const MAX_HEALTHZ_RESPONSE_BYTES = 64 * 1024;
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -92,7 +97,7 @@ function emit(line: string): void {
   console.log(line);
 }
 
-function main(): number {
+async function main(): Promise<number> {
   emit(`${TS_MARKER}: hello from Deno ${Deno.version.deno} status=OK`);
 
   const valid = evaluateNodeConfig(VALID_CONFIG, CAPABILITY_REGISTRY);
@@ -127,7 +132,13 @@ function main(): number {
     return 1;
   }
 
-  return runPreview();
+  const previewStatus = runPreview();
+  if (previewStatus !== 0) {
+    return previewStatus;
+  }
+
+  await emitAgentdConnectMarker();
+  return 0;
 }
 
 // Evaluate CURRENT + DESIRED configs and diff their TransactionPlans, emitting the
@@ -200,6 +211,214 @@ function runPreview(): number {
 
   emit(`${PREVIEW_NOOP_MARKER}: status=OK`);
   return 0;
+}
+
+async function emitAgentdConnectMarker(): Promise<void> {
+  try {
+    const health = await getAgentdHealth(AGENTD_SOCKET_PATH);
+
+    if (!health.healthy || health.version.length === 0) {
+      throw new Error("agentd healthz was not healthy");
+    }
+
+    emit(`${CONNECT_MARKER}: transport=unix peer=agentd healthz=OK status=OK`);
+  } catch {
+    emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
+  }
+}
+
+interface AgentdHealth {
+  readonly version: string;
+  readonly healthy: boolean;
+}
+
+async function getAgentdHealth(path: string): Promise<AgentdHealth> {
+  let conn: Deno.Conn | undefined;
+
+  try {
+    conn = await Deno.connect({ transport: "unix", path });
+    await writeAll(
+      conn,
+      new TextEncoder().encode(
+        "GET /healthz HTTP/1.1\r\n" +
+          "Host: agentd\r\n" +
+          "Accept: application/json\r\n" +
+          "Connection: close\r\n" +
+          "\r\n",
+      ),
+    );
+
+    const response = parseHttpResponse(await readAllText(conn));
+    if (response.statusCode !== 200) {
+      throw new Error(`agentd healthz returned HTTP ${response.statusCode}`);
+    }
+
+    return parseAgentdHealth(response.body);
+  } finally {
+    conn?.close();
+  }
+}
+
+async function writeAll(conn: Deno.Conn, data: Uint8Array): Promise<void> {
+  let offset = 0;
+
+  while (offset < data.length) {
+    const written = await conn.write(data.subarray(offset));
+
+    if (written <= 0) {
+      throw new Error("socket write made no progress");
+    }
+
+    offset += written;
+  }
+}
+
+async function readAllText(conn: Deno.Conn): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  const buffer = new Uint8Array(4096);
+  let total = 0;
+
+  while (true) {
+    const read = await conn.read(buffer);
+
+    if (read === null) {
+      break;
+    }
+
+    total += read;
+    if (total > MAX_HEALTHZ_RESPONSE_BYTES) {
+      throw new Error("agentd healthz response exceeded size limit");
+    }
+
+    chunks.push(buffer.slice(0, read));
+  }
+
+  return new TextDecoder().decode(concatChunks(chunks, total));
+}
+
+function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+
+    if (chunk !== undefined) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+  }
+
+  return out;
+}
+
+interface HttpResponse {
+  readonly statusCode: number;
+  readonly body: string;
+}
+
+function parseHttpResponse(raw: string): HttpResponse {
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  if (headerEnd < 0) {
+    throw new Error("agentd healthz response missing HTTP headers");
+  }
+
+  const headerLines = raw.slice(0, headerEnd).split("\r\n");
+  const statusLine = headerLines[0];
+  if (statusLine === undefined) {
+    throw new Error("agentd healthz response missing HTTP status");
+  }
+
+  const statusMatch = /^HTTP\/1\.[01] ([0-9]{3})(?:\s|$)/u.exec(statusLine);
+  const statusCodeText = statusMatch?.[1];
+  if (statusCodeText === undefined) {
+    throw new Error("agentd healthz response has invalid HTTP status");
+  }
+
+  const headers = new Map<string, string>();
+  for (let index = 1; index < headerLines.length; index += 1) {
+    const line = headerLines[index];
+
+    if (line === undefined || line.length === 0) {
+      continue;
+    }
+
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      throw new Error("agentd healthz response has invalid HTTP header");
+    }
+
+    headers.set(
+      line.slice(0, separator).trim().toLowerCase(),
+      line.slice(separator + 1).trim().toLowerCase(),
+    );
+  }
+
+  let body = raw.slice(headerEnd + 4);
+  const transferEncoding = headers.get("transfer-encoding") ?? "";
+  const encodings = transferEncoding.split(",");
+  for (let index = 0; index < encodings.length; index += 1) {
+    if (encodings[index]?.trim() === "chunked") {
+      body = decodeChunkedBody(body);
+      break;
+    }
+  }
+
+  return {
+    statusCode: Number.parseInt(statusCodeText, 10),
+    body,
+  };
+}
+
+function decodeChunkedBody(body: string): string {
+  let rest = body;
+  let decoded = "";
+
+  while (true) {
+    const lineEnd = rest.indexOf("\r\n");
+    if (lineEnd < 0) {
+      throw new Error("chunked healthz response is missing a chunk header");
+    }
+
+    const sizeText = rest.slice(0, lineEnd).split(";", 1)[0];
+    if (sizeText === undefined) {
+      throw new Error("chunked healthz response has an invalid chunk size");
+    }
+
+    const size = Number.parseInt(sizeText, 16);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error("chunked healthz response has an invalid chunk size");
+    }
+    if (size === 0) {
+      return decoded;
+    }
+
+    const chunkStart = lineEnd + 2;
+    const chunkEnd = chunkStart + size;
+    if (rest.length < chunkEnd + 2 || rest.slice(chunkEnd, chunkEnd + 2) !== "\r\n") {
+      throw new Error("chunked healthz response has an incomplete chunk");
+    }
+
+    decoded += rest.slice(chunkStart, chunkEnd);
+    rest = rest.slice(chunkEnd + 2);
+  }
+}
+
+function parseAgentdHealth(body: string): AgentdHealth {
+  const parsed: unknown = JSON.parse(body);
+
+  if (!isJsonObject(parsed)) {
+    throw new Error("agentd healthz response is not a JSON object");
+  }
+
+  const version = parsed["version"];
+  const healthy = parsed["healthy"];
+
+  if (typeof version !== "string" || typeof healthy !== "boolean") {
+    throw new Error("agentd healthz response is missing version or healthy");
+  }
+
+  return { version, healthy };
 }
 
 function stableStringify(value: unknown): string {
@@ -304,4 +523,10 @@ function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-Deno.exit(main());
+main().then((code) => {
+  Deno.exit(code);
+}).catch((err) => {
+  // Ported from S1 candidate B: a stray rejection must not fail the oneshot silently — fail-safe + exit nonzero.
+  console.error("VITA-MAIN-ERROR: status=FAILSAFE", err);
+  Deno.exit(1);
+});

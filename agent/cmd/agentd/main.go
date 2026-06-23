@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"time"
 
@@ -86,8 +92,65 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("vita agent listening on %s", listenAddr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	unixListener, err := transport.ListenUnixSocket(transport.DefaultUnixSocketPath)
+	if err != nil {
+		log.Fatalf("listen unix socket: %v", err)
+	}
+	defer func() {
+		if err := unixListener.Close(); err != nil {
+			log.Printf("close unix socket: %v", err)
+		}
+	}()
+	unixServer := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if err := serveUntilStopped(server, unixServer, unixListener); err != nil {
 		log.Fatalf("serve agent: %v", err)
 	}
+}
+
+func serveUntilStopped(tcpServer *http.Server, unixServer *http.Server, unixListener net.Listener) error {
+	errCh := make(chan error, 2)
+	go serveHTTP(errCh, "tcp "+tcpServer.Addr, func() error {
+		log.Printf("vita agent listening on %s", tcpServer.Addr)
+		return tcpServer.ListenAndServe()
+	})
+	go serveHTTP(errCh, "unix "+transport.DefaultUnixSocketPath, func() error {
+		log.Printf("vita agent listening on unix socket %s", transport.DefaultUnixSocketPath)
+		return unixServer.Serve(unixListener)
+	})
+
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, shutdownSignals()...)
+	defer signal.Stop(signalCh)
+
+	for {
+		select {
+		case sig := <-signalCh:
+			log.Printf("vita agent received %s; shutting down", sig)
+			return shutdownServers(tcpServer, unixServer)
+		case err := <-errCh:
+			if err == nil {
+				continue
+			}
+			return errors.Join(err, shutdownServers(tcpServer, unixServer))
+		}
+	}
+}
+
+func serveHTTP(errCh chan<- error, name string, serve func() error) {
+	if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errCh <- fmt.Errorf("%s: %w", name, err)
+		return
+	}
+	errCh <- nil
+}
+
+func shutdownServers(tcpServer *http.Server, unixServer *http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return errors.Join(tcpServer.Shutdown(ctx), unixServer.Shutdown(ctx))
 }
