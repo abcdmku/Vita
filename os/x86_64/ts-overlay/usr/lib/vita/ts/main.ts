@@ -10,12 +10,15 @@
 //   - The representative configs below are fixed literals, so the emitted plan hash is stable.
 
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
+import { diffTransactionPlans } from "./vita/transaction-plan-diff.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
 const TS_MARKER = "VITA-TS";
 const EVAL_MARKER = "VITA-EVAL";
 const REJECT_MARKER = "VITA-EVAL-REJECT";
+const PREVIEW_MARKER = "VITA-PREVIEW";
+const PREVIEW_NOOP_MARKER = "VITA-PREVIEW-NOOP";
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -44,6 +47,40 @@ const INVALID_CONFIG = Object.freeze({
     desired: Object.freeze({
       enabled: true,
       servers: Object.freeze([]),
+    }),
+  }),
+});
+
+// Config-change PREVIEW (P1-034): evaluate a CURRENT and a DESIRED config via the
+// real evaluator, then diff the two TransactionPlans by capability. The CURRENT
+// config is the same valid baseline as VALID_CONFIG; the DESIRED config differs in
+// exactly three ways so the preview demonstrates add + remove + change:
+//   - ADD     "network.policy"   (present in DESIRED, absent from CURRENT)
+//   - REMOVE  "time.sync"        (present in CURRENT, absent from DESIRED)
+//   - CHANGE  "node.config"      (request differs: mode normal -> maintenance)
+//   - keep    "hostname.set"     (identical in both -> not reported)
+const PREVIEW_CURRENT_CONFIG = VALID_CONFIG;
+
+const PREVIEW_DESIRED_CONFIG = Object.freeze({
+  "hostname.set": Object.freeze({
+    desired: "vita-node-7",
+  }),
+  "node.config": Object.freeze({
+    desired: Object.freeze({
+      mode: "maintenance",
+      remoteAccess: "disabled",
+    }),
+  }),
+  "network.policy": Object.freeze({
+    desired: Object.freeze({
+      allow: Object.freeze([
+        Object.freeze({
+          proto: "tcp",
+          port: 443,
+          sourceCidr: "10.0.0.5/24",
+          interface: "eth0",
+        }),
+      ]),
     }),
   }),
 });
@@ -83,7 +120,55 @@ function main(): number {
   const rejectionCode = firstRejection?.code ?? "NO_REJECTION";
   emit(`${REJECT_MARKER}: code=${rejectionCode} status=OK`);
 
-  return firstRejection === undefined ? 1 : 0;
+  if (firstRejection === undefined) {
+    return 1;
+  }
+
+  return runPreview();
+}
+
+// Evaluate CURRENT + DESIRED configs and diff their TransactionPlans, emitting the
+// grep-able preview markers. Returns 0 on success, non-zero on any failure.
+function runPreview(): number {
+  // Real change: CURRENT -> DESIRED adds/removes/changes one capability each.
+  const current = evaluateNodeConfig(PREVIEW_CURRENT_CONFIG, CAPABILITY_REGISTRY);
+  const desired = evaluateNodeConfig(PREVIEW_DESIRED_CONFIG, CAPABILITY_REGISTRY);
+
+  if (!current.ok) {
+    const code = current.rejections[0]?.code ?? "NO_REJECTION";
+    emit(`${PREVIEW_MARKER}: added=0 removed=0 changed=0 status=FAIL code=${code}`);
+    return 1;
+  }
+
+  if (!desired.ok) {
+    const code = desired.rejections[0]?.code ?? "NO_REJECTION";
+    emit(`${PREVIEW_MARKER}: added=0 removed=0 changed=0 status=FAIL code=${code}`);
+    return 1;
+  }
+
+  const change = diffTransactionPlans(current.plan, desired.plan);
+  emit(
+    `${PREVIEW_MARKER}: ` +
+      `added=${change.added.length} ` +
+      `removed=${change.removed.length} ` +
+      `changed=${change.changed.length} ` +
+      "status=OK",
+  );
+
+  // No-op change: CURRENT diffed against itself yields an empty diff.
+  const noopChange = diffTransactionPlans(current.plan, current.plan);
+
+  if (
+    noopChange.added.length !== 0 ||
+    noopChange.removed.length !== 0 ||
+    noopChange.changed.length !== 0
+  ) {
+    emit(`${PREVIEW_NOOP_MARKER}: status=FAIL`);
+    return 1;
+  }
+
+  emit(`${PREVIEW_NOOP_MARKER}: status=OK`);
+  return 0;
 }
 
 function stableStringify(value: unknown): string {
