@@ -58,8 +58,12 @@ const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
 const CAPSULE_MARKER = "VITA-CAPSULE";
 const CAPSULE_ERROR_MARKER = "VITA-CAPSULE-ERROR";
 const CAPSULE_PREVIEW_ERROR_MARKER = "VITA-CAPSULE-PREVIEW-ERROR";
+const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
+const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
+const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
+const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const APPLY_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
   "Content-Type": "application/json",
@@ -121,6 +125,36 @@ const FORCED_INVALID_CAPSULE_PLAN = Object.freeze({
               version: ON_DEVICE_CAPSULE_ENTRY.version,
             }),
           ]),
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: ON_DEVICE_CAPSULE_ENTRY.id,
+          integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
+          version: ON_DEVICE_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_INVALID_CAPSULE_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: "local.missing.capsule",
+          integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
+          version: ON_DEVICE_CAPSULE_ENTRY.version,
         }),
       }),
     }),
@@ -306,6 +340,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -320,12 +355,14 @@ async function emitAgentdConnectMarker(): Promise<void> {
       await emitCapsuleMarkers(agentTransport);
     } else {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
   }
 
   await emitPdsReadMarker(client);
@@ -358,6 +395,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
 
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -369,10 +407,12 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
 
   if (!result.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   emit(formatCommittedCapsuleMarker(ON_DEVICE_CAPSULE_ENTRY, result.applyResult));
+  await emitCapsuleExecuteMarkers(agentTransport);
   await emitForcedCapsuleRejectMarker(agentTransport);
 }
 
@@ -537,6 +577,144 @@ async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Pr
   }
 
   emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const result = await client.apply(CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedCapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    const state = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+
+    if (!state.ok) {
+      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedCapsuleExecuteRejectMarker(client);
+      return;
+    }
+
+    emit(formatCapsuleExecutedMarker(state.status));
+  } catch {
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  await emitForcedCapsuleExecuteRejectMarker(client);
+}
+
+async function emitForcedCapsuleExecuteRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_INVALID_CAPSULE_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_EXECUTE_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_EXECUTE_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+type CapsuleExecuteReadResult =
+  | {
+      readonly ok: true;
+      readonly status: CapsuleExecuteStatus;
+    }
+  | {
+      readonly ok: false;
+    };
+
+interface CapsuleExecuteStatus {
+  readonly id: string;
+  readonly unit: string;
+  readonly dynamicUid: string;
+  readonly health: "OK";
+  readonly status: "OK";
+}
+
+function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const last = value["last"];
+
+  if (!isJsonObject(last)) {
+    return { ok: false };
+  }
+
+  const id = readStringField(last, "id");
+  const unit = readStringField(last, "unit");
+  const dynamicUid = readStringField(last, "dynamicUid");
+  const health = readStringField(last, "health");
+  const status = readStringField(last, "status");
+
+  if (
+    id === undefined ||
+    unit === undefined ||
+    dynamicUid === undefined ||
+    health !== "OK" ||
+    status !== "OK"
+  ) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    status: {
+      dynamicUid,
+      health,
+      id,
+      status,
+      unit,
+    },
+  };
+}
+
+function formatCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
+  return (
+    `${CAPSULE_EXECUTED_MARKER}: ` +
+    `id=${status.id} ` +
+    `unit=${status.unit} ` +
+    `uid=${status.dynamicUid} ` +
+    `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function readStringField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const child = value[key];
+
+  if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
 }
 
 function applyResultReason(result: ApplyNodeApplyResult, fallback: string): string {
