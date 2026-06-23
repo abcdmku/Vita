@@ -227,8 +227,8 @@ sb_reboot_same_vars() {
   echo "$log"
 }
 
-# Classify a POSITIVE/CONTROL log. PASS needs the SB-state witness + a userspace marker + no reject
-# token, and the nonce must echo (log provably belongs to this boot). Prints PASS|FAIL.
+# Classify a POSITIVE/CONTROL log. PASS = nonce echoes (log is THIS boot) + a userspace marker + no
+# firmware reject. The in-guest SB-state witness is NOT required here (see the function body). Prints PASS|FAIL.
 sb_classify_positive() {
   # PASS = the legitimately-signed image booted on the ENROLLED+enforcing rig: the per-run nonce echoes
   # (kernel cmdline -> the log is provably THIS boot) AND a userspace marker AND no firmware reject. We do

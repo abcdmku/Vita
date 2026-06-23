@@ -232,6 +232,12 @@ if (MODE === "smoke") {
   let sb = [];
   let bootloaderPin = [];
   if (secureBoot) {
+    // mkosi must be the NATIVE engine for SB: --secure-boot-key/-certificate are HOST paths the docker
+    // mkosi container would not see (REPO mounts at /work, not these paths). Fail fast rather than silently
+    // produce an unsigned image. (useNative is true on the build host; set VITA_MKOSI=native otherwise.)
+    if (!DRY && !useNative)
+      fail("VITA_SECURE_BOOT=1 requires the native mkosi engine — the SB key/cert are host paths not mounted " +
+           "into the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
     // Pin the artifact shape: force a single UKI so the KERNEL (inside the UKI's .linux PE section)
     // is what gets signed — mkosi's default could otherwise ship a bare vmlinuz + signed sd-boot,
     // leaving the kernel unsigned and the whole "sign the UKI" premise moot.
