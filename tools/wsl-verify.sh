@@ -439,7 +439,8 @@ secboot() {
 # is proven by POS-boots-verified / VNEG-rejected on the same image. Reuses sb_accel.
 VWORK="$REPO/os/x86_64/out/verity-check"
 verity_boot() {   # $1=label $2=disk $3=secs ; plain OVMF (verity needs no SB). Echoes the log path.
-  local label="$1" d="$2" secs="${3:-90}" log="$VWORK/serial-$label.log"
+  local label="$1" d="$2" secs="${3:-90}"
+  local log="$VWORK/serial-$label.log"
   mkdir -p "$VWORK"; cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VWORK/vars-$label.fd"; : > "$log"
   local accel; accel=$(sb_accel); local cpu=(-cpu max); [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
   timeout "$secs" qemu-system-x86_64 -machine q35 -m 1024 "${cpu[@]}" \
