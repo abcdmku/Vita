@@ -10,7 +10,7 @@
 //   - The representative configs below are fixed literals, so the emitted plan hash is stable.
 
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
-import { diffTransactionPlans } from "./vita/transaction-plan-diff.ts";
+import { diffTransactionPlans, TransactionPlanDiffError } from "./vita/transaction-plan-diff.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 
@@ -19,6 +19,7 @@ const EVAL_MARKER = "VITA-EVAL";
 const REJECT_MARKER = "VITA-EVAL-REJECT";
 const PREVIEW_MARKER = "VITA-PREVIEW";
 const PREVIEW_NOOP_MARKER = "VITA-PREVIEW-NOOP";
+const PREVIEW_ERROR_MARKER = "VITA-PREVIEW-ERROR";
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -146,7 +147,27 @@ function runPreview(): number {
     return 1;
   }
 
-  const change = diffTransactionPlans(current.plan, desired.plan);
+  // The diff is fail-CLOSED-by-throwing: a malformed/exotic plan throws
+  // TransactionPlanDiffError rather than returning a benign "no changes". The
+  // evaluator's own output is always clean, so the normal path never throws — but
+  // we catch and emit an explicit fail-safe marker (NOT a bogus added=0/removed=0/
+  // changed=0) so the fail-closed wiring is provably in place end to end.
+  let change;
+  let noopChange;
+  try {
+    // Real change: CURRENT -> DESIRED adds/removes/changes one capability each.
+    change = diffTransactionPlans(current.plan, desired.plan);
+    // No-op change: CURRENT diffed against itself yields an empty diff.
+    noopChange = diffTransactionPlans(current.plan, current.plan);
+  } catch (cause) {
+    if (cause instanceof TransactionPlanDiffError) {
+      emit(`${PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
+      return 1;
+    }
+
+    throw cause;
+  }
+
   emit(
     `${PREVIEW_MARKER}: ` +
       `added=${change.added.length} ` +
@@ -154,9 +175,6 @@ function runPreview(): number {
       `changed=${change.changed.length} ` +
       "status=OK",
   );
-
-  // No-op change: CURRENT diffed against itself yields an empty diff.
-  const noopChange = diffTransactionPlans(current.plan, current.plan);
 
   if (
     noopChange.added.length !== 0 ||

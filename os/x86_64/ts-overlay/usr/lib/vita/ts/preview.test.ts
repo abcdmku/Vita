@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { diffTransactionPlans as diffUpstream } from "../../../../../../../sdk/typescript/src/transaction-plan-diff.ts";
-import { diffTransactionPlans as diffVendored } from "./vita/transaction-plan-diff.ts";
+import {
+  diffTransactionPlans as diffUpstream,
+  TransactionPlanDiffError as UpstreamDiffError,
+} from "../../../../../../../sdk/typescript/src/transaction-plan-diff.ts";
+import {
+  diffTransactionPlans as diffVendored,
+  TransactionPlanDiffError as VendoredDiffError,
+} from "./vita/transaction-plan-diff.ts";
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
@@ -174,7 +180,37 @@ test("upstream parity: vendored diff equals upstream diff on the corpus (zero dr
   }
 });
 
-test("fail-closed: a throwing getter on a request does not throw and reports changed", () => {
+// ---------------------------------------------------------------------------
+// Fail-CLOSED-by-throwing: the vendored diff REFUSES on malformed/exotic input,
+// identically to upstream (both throw TransactionPlanDiffError). It must NOT
+// return a benign empty/unchanged result (that would be fail-OPEN).
+// ---------------------------------------------------------------------------
+
+test("fail-closed: an accessor `request` on both sides throws (never compares 'unchanged')", () => {
+  function accessorRequest(): Record<string, unknown> {
+    const obj: Record<string, unknown> = {};
+    Object.defineProperty(obj, "desired", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return "value";
+      },
+    });
+    return obj;
+  }
+
+  const current: TransactionPlan = {
+    operations: [{ capability: "evil", request: accessorRequest() as never }],
+  };
+  const desired: TransactionPlan = {
+    operations: [{ capability: "evil", request: accessorRequest() as never }],
+  };
+
+  assert.throws(() => diffVendored(current, desired), VendoredDiffError);
+  assert.throws(() => diffUpstream(current, desired), UpstreamDiffError);
+});
+
+test("fail-closed: a throwing getter on a request throws (never benignly 'changed')", () => {
   const hostileRequest: Record<string, unknown> = {};
   let getterReads = 0;
   Object.defineProperty(hostileRequest, "desired", {
@@ -191,43 +227,43 @@ test("fail-closed: a throwing getter on a request does not throw and reports cha
   };
   const desired = makePlan([{ capability: "evil", request: { desired: "value" } }]);
 
-  let vendored: ReturnType<typeof diffVendored> | undefined;
-  let upstream: ReturnType<typeof diffUpstream> | undefined;
-  assert.doesNotThrow(() => {
-    vendored = diffVendored(current, desired);
-    upstream = diffUpstream(current, desired);
-  });
-
+  assert.throws(() => diffVendored(current, desired), VendoredDiffError);
+  assert.throws(() => diffUpstream(current, desired), UpstreamDiffError);
+  // safeNormalize rejects the accessor descriptor without ever invoking the getter.
   assert.equal(getterReads, 0);
-  assert.deepEqual(vendored, upstream);
-  assert.deepEqual(vendored?.changed, ["evil"]);
 });
 
-test("fail-closed: a shadowed forEach on the operations array does not subvert the diff", () => {
-  const hostileOps: unknown[] = [
-    { capability: "kept", request: { v: 1 } },
-    { capability: "gone", request: { v: 1 } },
-  ];
-  let forEachCalls = 0;
-  Object.defineProperty(hostileOps, "forEach", {
-    configurable: true,
-    enumerable: false,
-    value() {
-      forEachCalls += 1;
-      throw new Error("forEach must not be called on untrusted ops");
-    },
-    writable: true,
+test("fail-closed: a Date/Map/exotic-prototype request throws (never compares EQUAL)", () => {
+  const dateReq = new Date(0) as unknown as Record<string, unknown>;
+  const mapReq = new Map<string, unknown>() as unknown as Record<string, unknown>;
+
+  const currentDate: TransactionPlan = {
+    operations: [{ capability: "x", request: dateReq as never }],
+  };
+  const desiredMap: TransactionPlan = {
+    operations: [{ capability: "x", request: mapReq as never }],
+  };
+
+  assert.throws(() => diffVendored(currentDate, desiredMap), VendoredDiffError);
+  assert.throws(() => diffUpstream(currentDate, desiredMap), UpstreamDiffError);
+});
+
+test("fail-closed: a Proxy operations array (throwing trap) throws, not empty", () => {
+  const trap = (): never => {
+    throw new Error("hostile proxy trap");
+  };
+  const hostileOps = new Proxy([{ capability: "kept", request: { v: 1 } }] as unknown[], {
+    get: trap,
+    getOwnPropertyDescriptor: trap,
+    ownKeys: trap,
+    has: trap,
   });
 
   const current: TransactionPlan = { operations: hostileOps as never };
   const desired = makePlan([{ capability: "kept", request: { v: 1 } }]);
 
-  const vendored = diffVendored(current, desired);
-  const upstream = diffUpstream(current, desired);
-
-  assert.equal(forEachCalls, 0);
-  assert.deepEqual(vendored, upstream);
-  assert.deepEqual(vendored.removed, ["gone"]);
+  assert.throws(() => diffVendored(current, desired), VendoredDiffError);
+  assert.throws(() => diffUpstream(current, desired), UpstreamDiffError);
 });
 
 test("fail-closed: __proto__ capability name does not pollute the prototype", () => {
@@ -242,13 +278,59 @@ test("fail-closed: __proto__ capability name does not pollute the prototype", ()
   assert.equal(({} as Record<string, unknown>).v, undefined);
 });
 
-test("fail-closed: malformed (non-array) operations does not throw", () => {
+test("fail-closed: malformed (non-array) operations throws", () => {
   const malformed: TransactionPlan = { operations: "nope" as never };
   const valid = makePlan([{ capability: "a", request: { v: 1 } }]);
 
-  const vendored = diffVendored(malformed, valid);
-  const upstream = diffUpstream(malformed, valid);
+  assert.throws(() => diffVendored(malformed, valid), VendoredDiffError);
+  assert.throws(() => diffUpstream(malformed, valid), UpstreamDiffError);
+});
 
-  assert.deepEqual(vendored, upstream);
-  assert.deepEqual(vendored, { added: ["a"], changed: [], removed: [] });
+// ---------------------------------------------------------------------------
+// main.ts FAILSAFE wiring: mirror runPreview()'s exact try/catch so the marker
+// selection is covered without spawning Deno (main.ts calls Deno.exit at module
+// load). A TransactionPlanDiffError -> "VITA-PREVIEW-ERROR: status=FAILSAFE"
+// (NOT a bogus added=0 removed=0 changed=0); a clean plan -> "VITA-PREVIEW: ...".
+// ---------------------------------------------------------------------------
+
+function previewMarker(current: TransactionPlan, desired: TransactionPlan): string {
+  try {
+    const change = diffVendored(current, desired);
+    return (
+      "VITA-PREVIEW: " +
+      `added=${change.added.length} ` +
+      `removed=${change.removed.length} ` +
+      `changed=${change.changed.length} ` +
+      "status=OK"
+    );
+  } catch (cause) {
+    if (cause instanceof VendoredDiffError) {
+      return "VITA-PREVIEW-ERROR: status=FAILSAFE";
+    }
+
+    throw cause;
+  }
+}
+
+test("main.ts wiring: a malformed plan yields the FAILSAFE marker, not a bogus zero diff", () => {
+  const malformed: TransactionPlan = { operations: "nope" as never };
+  const valid = makePlan([{ capability: "a", request: { v: 1 } }]);
+
+  // The bug being guarded: a fail-OPEN diff would print "added=0 removed=0
+  // changed=0 status=OK" here. The fail-closed wiring must print FAILSAFE.
+  assert.equal(previewMarker(malformed, valid), "VITA-PREVIEW-ERROR: status=FAILSAFE");
+  assert.notEqual(
+    previewMarker(malformed, valid),
+    "VITA-PREVIEW: added=0 removed=0 changed=0 status=OK",
+  );
+});
+
+test("main.ts wiring: the clean evaluator path yields VITA-PREVIEW (never FAILSAFE)", () => {
+  const current = evaluatePlan(CURRENT_CONFIG);
+  const desired = evaluatePlan(DESIRED_CONFIG);
+
+  assert.equal(
+    previewMarker(current, desired),
+    "VITA-PREVIEW: added=1 removed=1 changed=1 status=OK",
+  );
 });

@@ -1,8 +1,8 @@
 // Transaction-plan PREVIEW diff (P1-034).
 //
-// Pure, deterministic, trust-boundary-safe diff of two `TransactionPlan`s (the
-// evaluator's own output, ADR-0007) by capability. Given a CURRENT plan and a
-// DESIRED plan it reports which capabilities are added / removed / changed:
+// Pure, deterministic, fail-CLOSED diff of two `TransactionPlan`s (the evaluator's
+// own output, ADR-0007) by capability. Given a CURRENT plan and a DESIRED plan it
+// reports which capabilities are added / removed / changed:
 //
 //   - added   : a capability with an operation in DESIRED but not CURRENT
 //   - removed : a capability with an operation in CURRENT but not DESIRED
@@ -13,23 +13,30 @@
 //
 // Trust boundary (AGENTS.md §General): although the two plans are normally the
 // evaluator's own trusted output, this module treats them as UNTRUSTED so it can
-// be reused by the controller's preview over operator-supplied plans. It MUST
-// NOT be subverted by a shape-valid but hostile input:
-//   - It iterates with indexed `for` loops over `Object.keys(...)` / a snapshotted
-//     array length — it never calls `.forEach`/`.map`/`.some`/`for…of` off the
-//     untrusted operation arrays (a shadowed/throwing method or hostile iterator
-//     would otherwise lie to or crash the diff).
+// be reused by the controller's preview over operator-supplied plans. It is
+// **validate-or-throw, never a benign fallback** — on any malformed/exotic input
+// it REFUSES (throws `TransactionPlanDiffError`) instead of returning a benign
+// "no changes" result (which would be fail-OPEN: silently claiming "nothing
+// changed" when it could not actually compute the diff). Concretely:
+//   - It reuses the proven JSON guardian `safeNormalize` (P1-033) on EVERY
+//     operation. `safeNormalize` rejects Proxies, accessor/getter properties, and
+//     non-plain values (exotic prototypes like `Date`/`Map`/`Set`/`RegExp` are
+//     rejected as "Only plain objects are accepted" — verified). If it returns
+//     `{ ok: false }` for any operation, the plan is malformed → THROW.
+//   - It compares requests by their `safeNormalize`d canonical form (a stable,
+//     key-sorted JSON string of validated PlainJson data) — "changed" is decided
+//     on validated data only, never by invoking attacker-controlled accessors.
+//   - It iterates the operations array safely: it confirms a real array
+//     (`Array.isArray`, else throw), snapshots `length`, and index-accesses inside
+//     a try that rethrows as `TransactionPlanDiffError` (a Proxy index-trap throw
+//     SURFACES as a throw, it is never swallowed to an empty diff).
 //   - It builds capability-keyed maps with `Object.create(null)` so a spec-valid
 //     but JS-special capability name (`__proto__`, `constructor`) becomes a real
 //     own key instead of mutating a prototype.
-//   - It deep-compares requests by reading ONLY own enumerable DATA properties via
-//     `Object.getOwnPropertyDescriptor` — it never invokes attacker-controlled
-//     getters/accessors. An accessor property, exotic prototype, or otherwise
-//     un-readable shape compares as NOT-equal (fail-closed: a capability it cannot
-//     prove identical is reported as `changed`, never silently treated as same).
-//   - It never throws on malformed input; it returns a well-formed result.
 
 import type { PlanOperation, TransactionPlan } from "../../../runtime/evaluator/src/evaluate.ts";
+import { safeNormalize } from "./safe-normalize.ts";
+import type { PlainJson } from "./safe-normalize.ts";
 
 export interface TransactionPlanChange {
   readonly added: readonly string[];
@@ -38,122 +45,178 @@ export interface TransactionPlanChange {
 }
 
 /**
- * Diff two transaction plans by capability. Pure, deterministic, fail-closed,
- * and trust-boundary-safe (see file header). Never throws.
+ * Thrown when a plan is malformed or hostile and the diff cannot be computed on
+ * validated data. The diff REFUSES rather than returning a benign empty/unchanged
+ * result (fail-closed-by-throwing). Callers at a trust boundary must catch this
+ * and surface a fail-safe error, NOT treat it as "no changes".
+ */
+export class TransactionPlanDiffError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "TransactionPlanDiffError";
+  }
+}
+
+/**
+ * Diff two transaction plans by capability. Pure, deterministic, and
+ * fail-CLOSED-by-throwing: any malformed/exotic input throws
+ * `TransactionPlanDiffError` rather than returning a benign result. The normal
+ * evaluator-output path is always clean, so this never throws there.
  */
 export function diffTransactionPlans(
   current: TransactionPlan,
   desired: TransactionPlan,
 ): TransactionPlanChange {
-  try {
-    const currentByCapability = indexPlanByCapability(current);
-    const desiredByCapability = indexPlanByCapability(desired);
+  const currentByCapability = indexPlanByCapability(current);
+  const desiredByCapability = indexPlanByCapability(desired);
 
-    const added: string[] = [];
-    const removed: string[] = [];
-    const changed: string[] = [];
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
 
-    const currentNames = ownKeys(currentByCapability);
-    for (let index = 0; index < currentNames.length; index += 1) {
-      const capability = currentNames[index];
+  const currentNames = ownKeys(currentByCapability);
+  for (let index = 0; index < currentNames.length; index += 1) {
+    const capability = currentNames[index];
 
-      if (capability === undefined) {
-        continue;
-      }
-
-      if (!hasOwnKey(desiredByCapability, capability)) {
-        removed.push(capability);
-        continue;
-      }
-
-      // Present in both: compare requests structurally. Fail-closed — if either
-      // request cannot be proven structurally identical (accessor, exotic shape),
-      // it is reported as `changed`.
-      const currentRequest = currentByCapability[capability];
-      const desiredRequest = desiredByCapability[capability];
-
-      if (!deepEqual(currentRequest, desiredRequest)) {
-        changed.push(capability);
-      }
+    if (capability === undefined) {
+      continue;
     }
 
-    const desiredNames = ownKeys(desiredByCapability);
-    for (let index = 0; index < desiredNames.length; index += 1) {
-      const capability = desiredNames[index];
-
-      if (capability === undefined) {
-        continue;
-      }
-
-      if (!hasOwnKey(currentByCapability, capability)) {
-        added.push(capability);
-      }
+    if (!hasOwnKey(desiredByCapability, capability)) {
+      removed.push(capability);
+      continue;
     }
 
-    return Object.freeze({
-      added: Object.freeze(added.sort(compareStrings)),
-      changed: Object.freeze(changed.sort(compareStrings)),
-      removed: Object.freeze(removed.sort(compareStrings)),
-    });
-  } catch {
-    // A trust boundary must never throw (a throw at a trust boundary is a DoS).
-    // Fail closed with an empty diff if the structural walk hit an unexpected
-    // hostile shape that escaped the per-step guards.
-    return Object.freeze({
-      added: Object.freeze<string[]>([]),
-      changed: Object.freeze<string[]>([]),
-      removed: Object.freeze<string[]>([]),
-    });
+    // Present in both: compare the validated, canonicalized requests. Both forms
+    // are stable JSON strings of `safeNormalize`d PlainJson, so equality is a
+    // plain string compare over trusted data.
+    if (currentByCapability[capability] !== desiredByCapability[capability]) {
+      changed.push(capability);
+    }
   }
+
+  const desiredNames = ownKeys(desiredByCapability);
+  for (let index = 0; index < desiredNames.length; index += 1) {
+    const capability = desiredNames[index];
+
+    if (capability === undefined) {
+      continue;
+    }
+
+    if (!hasOwnKey(currentByCapability, capability)) {
+      added.push(capability);
+    }
+  }
+
+  return Object.freeze({
+    added: Object.freeze(added.sort(compareStrings)),
+    changed: Object.freeze(changed.sort(compareStrings)),
+    removed: Object.freeze(removed.sort(compareStrings)),
+  });
 }
 
-type CapabilityMap = Record<string, unknown>;
+/** capability -> canonical (stable-JSON) form of its `safeNormalize`d request. */
+type CapabilityMap = Record<string, string>;
 
 /**
- * Build a null-prototype map { capability -> request } from a plan's operations.
- * Reads the operations array by index off a snapshotted length and reads
- * `capability`/`request` via own-data-property descriptors only — never invoking
- * a shadowed method or attacker getter. Later duplicate capabilities overwrite
- * earlier ones (last-wins) deterministically; a missing/non-string capability or
- * an exotic operation entry is skipped (fail-closed).
+ * Build a null-prototype map { capability -> canonical request } from a plan's
+ * operations. The whole plan and every operation go through the `safeNormalize`
+ * guardian; anything it rejects (Proxy, accessor/getter, exotic prototype,
+ * non-string capability, non-object request) makes the plan malformed and THROWS
+ * `TransactionPlanDiffError` — it is never coerced to a benign value or skipped.
+ * Later duplicate capabilities overwrite earlier ones (last-wins) deterministically.
  */
 function indexPlanByCapability(plan: TransactionPlan): CapabilityMap {
   const map: CapabilityMap = Object.create(null) as CapabilityMap;
 
   if (plan === null || typeof plan !== "object") {
-    return map;
+    throw new TransactionPlanDiffError("Plan must be an object.");
   }
 
-  const operations = readDataProperty(plan, "operations");
+  // Read `operations` without invoking accessors: an accessor `operations` is a
+  // TOCTOU hazard, so reject it rather than reading it. A Proxy whose descriptor
+  // trap throws surfaces as a typed error (never swallowed to an empty diff).
+  let operations: unknown;
+  try {
+    operations = readDataProperty(plan, "operations");
+  } catch (cause) {
+    throw new TransactionPlanDiffError(
+      `Plan operations could not be read: ${describe(cause)}`,
+    );
+  }
 
   if (!Array.isArray(operations)) {
-    return map;
+    throw new TransactionPlanDiffError("Plan operations must be an array.");
   }
 
-  // Snapshot the length once via a data descriptor; never trust a getter.
-  const length = readArrayLength(operations);
+  // Snapshot the length once via a data descriptor; never trust a getter. A Proxy
+  // index/length trap that throws is rethrown as a typed error so it SURFACES.
+  let length: number;
+  try {
+    length = readArrayLength(operations);
+  } catch (cause) {
+    throw new TransactionPlanDiffError(
+      `Plan operations length could not be read: ${describe(cause)}`,
+    );
+  }
 
   for (let index = 0; index < length; index += 1) {
-    const operation = readIndex(operations, index);
-
-    if (operation === null || typeof operation !== "object") {
-      continue;
+    // A Proxy index-trap (or any hostile descriptor read) throws here; rethrow it
+    // as a typed error so it SURFACES rather than being swallowed to an empty diff.
+    let operation: unknown;
+    try {
+      operation = readIndex(operations, index);
+    } catch (cause) {
+      throw new TransactionPlanDiffError(
+        `Plan operations[${index}] could not be read: ${describe(cause)}`,
+      );
     }
 
-    const capability = readDataProperty(operation as object, "capability");
+    // Validate the ENTIRE operation through the proven guardian. This rejects
+    // Proxies, accessor/getter properties, and exotic prototypes at every level
+    // (verified: Date/Map/Set/RegExp -> "Only plain objects are accepted").
+    const normalized = safeNormalize(operation);
+
+    if (!normalized.ok) {
+      throw new TransactionPlanDiffError(
+        `Plan operations[${index}] is malformed: ${normalized.reason}`,
+      );
+    }
+
+    const normalizedOperation = normalized.value;
+
+    if (Array.isArray(normalizedOperation) || !isPlainJsonObject(normalizedOperation)) {
+      throw new TransactionPlanDiffError(
+        `Plan operations[${index}] must be an object.`,
+      );
+    }
+
+    const capability = normalizedOperation["capability"];
 
     if (typeof capability !== "string") {
-      continue;
+      throw new TransactionPlanDiffError(
+        `Plan operations[${index}] has a non-string capability.`,
+      );
     }
 
-    const request = readDataProperty(operation as object, "request");
+    const request = normalizedOperation["request"];
+
+    if (request === null || typeof request !== "object" || Array.isArray(request)) {
+      throw new TransactionPlanDiffError(
+        `Plan operation "${capability}" has a non-object request.`,
+      );
+    }
+
+    // Canonicalize the validated request to a stable, key-sorted JSON string so
+    // "changed" is a deterministic string compare over trusted data only.
+    const canonicalRequest = canonicalize(request);
 
     // Define as an own key (null-proto map ⇒ no prototype pollution even for
     // `__proto__`/`constructor` capability names).
     Object.defineProperty(map, capability, {
       configurable: true,
       enumerable: true,
-      value: request,
+      value: canonicalRequest,
       writable: true,
     });
   }
@@ -162,121 +225,46 @@ function indexPlanByCapability(plan: TransactionPlan): CapabilityMap {
 }
 
 /**
- * Deep structural equality over JSON-shaped data, reading ONLY own enumerable
- * data properties (never accessors). Returns false (fail-closed) for any shape it
- * cannot prove identical: mismatched types, accessor properties, exotic objects,
- * cycles handled by the node budget. Pure; never throws on its own.
+ * Deterministic canonical JSON of already-validated PlainJson: object keys sorted,
+ * arrays in order. The input is trusted (post-`safeNormalize`), so this is a pure
+ * structural serialization with no trust-boundary concerns.
  */
-function deepEqual(left: unknown, right: unknown): boolean {
-  return deepEqualBounded(left, right, 0);
-}
-
-const MAX_DEPTH = 200;
-
-function deepEqualBounded(left: unknown, right: unknown, depth: number): boolean {
-  if (depth > MAX_DEPTH) {
-    return false;
+function canonicalize(value: PlainJson): string {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
   }
 
-  if (left === right) {
-    return true;
-  }
+  if (!isPlainJsonObject(value)) {
+    // A readonly PlainJson array.
+    const items: string[] = [];
 
-  const leftType = typeof left;
-  const rightType = typeof right;
-
-  if (leftType !== rightType) {
-    return false;
-  }
-
-  if (left === null || right === null) {
-    // One is null and (since `left === right` failed) the other is not.
-    return false;
-  }
-
-  if (leftType !== "object") {
-    // Primitives that were not `===` (e.g. NaN, or differing values) → not equal.
-    return false;
-  }
-
-  const leftIsArray = Array.isArray(left);
-  const rightIsArray = Array.isArray(right);
-
-  if (leftIsArray !== rightIsArray) {
-    return false;
-  }
-
-  if (leftIsArray && rightIsArray) {
-    return deepEqualArray(left, right, depth);
-  }
-
-  return deepEqualObject(left as object, right as object, depth);
-}
-
-function deepEqualArray(left: unknown[], right: unknown[], depth: number): boolean {
-  const leftLength = readArrayLength(left);
-  const rightLength = readArrayLength(right);
-
-  if (leftLength !== rightLength) {
-    return false;
-  }
-
-  for (let index = 0; index < leftLength; index += 1) {
-    const leftDescriptor = Object.getOwnPropertyDescriptor(left, String(index));
-    const rightDescriptor = Object.getOwnPropertyDescriptor(right, String(index));
-
-    if (!isReadableData(leftDescriptor) || !isReadableData(rightDescriptor)) {
-      return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      items.push(item === undefined ? "null" : canonicalize(item));
     }
 
-    if (!deepEqualBounded(leftDescriptor.value, rightDescriptor.value, depth + 1)) {
-      return false;
-    }
+    return `[${items.join(",")}]`;
   }
 
-  return true;
+  return canonicalizeObject(value);
 }
 
-function deepEqualObject(left: object, right: object, depth: number): boolean {
-  const leftKeys = ownStringKeys(left);
-  const rightKeys = ownStringKeys(right);
+function canonicalizeObject(value: { readonly [key: string]: PlainJson }): string {
+  const keys = Object.keys(value).sort(compareStrings);
+  const entries: string[] = [];
 
-  if (leftKeys.length !== rightKeys.length) {
-    return false;
-  }
-
-  // Sort both key sets so order differences do not count as a change.
-  const leftSorted = leftKeys.slice().sort(compareStrings);
-  const rightSorted = rightKeys.slice().sort(compareStrings);
-
-  for (let index = 0; index < leftSorted.length; index += 1) {
-    if (leftSorted[index] !== rightSorted[index]) {
-      return false;
-    }
-  }
-
-  for (let index = 0; index < leftSorted.length; index += 1) {
-    const key = leftSorted[index];
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
 
     if (key === undefined) {
-      return false;
+      continue;
     }
 
-    const leftDescriptor = Object.getOwnPropertyDescriptor(left, key);
-    const rightDescriptor = Object.getOwnPropertyDescriptor(right, key);
-
-    if (!isReadableData(leftDescriptor) || !isReadableData(rightDescriptor)) {
-      // An accessor (or otherwise un-readable own property) cannot be proven
-      // equal without invoking attacker code → fail-closed (not equal).
-      return false;
-    }
-
-    if (!deepEqualBounded(leftDescriptor.value, rightDescriptor.value, depth + 1)) {
-      return false;
-    }
+    const child = value[key];
+    entries.push(`${JSON.stringify(key)}:${child === undefined ? "null" : canonicalize(child)}`);
   }
 
-  return true;
+  return `{${entries.join(",")}}`;
 }
 
 /** Read `obj[key]` as a value ONLY if it is an own enumerable data property. */
@@ -290,7 +278,11 @@ function readDataProperty(obj: object, key: string): unknown {
   return descriptor.value;
 }
 
-/** Read array element at `index` ONLY if it is an own enumerable data property. */
+/**
+ * Read array element at `index` via its own data descriptor. Returns `undefined`
+ * for an accessor/missing element. May throw if a hostile (e.g. Proxy) descriptor
+ * read itself throws — the caller rethrows that as `TransactionPlanDiffError`.
+ */
 function readIndex(array: unknown[], index: number): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
 
@@ -323,30 +315,6 @@ function readArrayLength(array: unknown[]): number {
   }
 
   return length;
-}
-
-/** Own string keys of an object whose descriptors are enumerable. Symbols ignored. */
-function ownStringKeys(obj: object): string[] {
-  const keys = Reflect.ownKeys(obj);
-  const out: string[] = [];
-
-  for (let index = 0; index < keys.length; index += 1) {
-    const key = keys[index];
-
-    if (key === undefined || typeof key === "symbol") {
-      continue;
-    }
-
-    const descriptor = Object.getOwnPropertyDescriptor(obj, key);
-
-    if (descriptor === undefined || descriptor.enumerable !== true) {
-      continue;
-    }
-
-    out.push(key);
-  }
-
-  return out;
 }
 
 /** Own enumerable string keys of a null-prototype CapabilityMap. */
@@ -382,6 +350,18 @@ function isReadableData(
 
   // A data descriptor has `value`; an accessor descriptor has `get`/`set`.
   return Object.prototype.hasOwnProperty.call(descriptor, "value");
+}
+
+function isPlainJsonObject(value: PlainJson): value is { readonly [key: string]: PlainJson } {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function describe(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+
+  return "unreadable";
 }
 
 function compareStrings(left: string, right: string): number {

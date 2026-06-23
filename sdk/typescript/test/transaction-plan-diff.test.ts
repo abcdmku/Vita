@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { diffTransactionPlans } from "../src/transaction-plan-diff.ts";
+import {
+  diffTransactionPlans,
+  TransactionPlanDiffError,
+} from "../src/transaction-plan-diff.ts";
 import type { TransactionPlan } from "../src/transaction-plan-diff.ts";
 
 function plan(
@@ -145,53 +148,102 @@ test("capability named __proto__ is treated as a real key (no prototype pollutio
   assert.equal(({} as Record<string, unknown>).v, undefined);
 });
 
-test("trust boundary: a shadowed forEach on the operations array does not break the diff", () => {
-  // A hostile operations array that shadows `forEach`/`map`/iterator so that any
-  // code relying on those methods would be subverted. The diff uses indexed reads
-  // only, so it must still produce the correct result.
-  const hostileOps: unknown[] = [
-    { capability: "kept", request: { v: 1 } },
-    { capability: "gone", request: { v: 1 } },
-  ];
-  let forEachCalls = 0;
-  Object.defineProperty(hostileOps, "forEach", {
-    configurable: true,
-    enumerable: false,
-    value() {
-      forEachCalls += 1;
-      throw new Error("forEach should never be called on untrusted ops");
-    },
-    writable: true,
-  });
-  Object.defineProperty(hostileOps, Symbol.iterator, {
-    configurable: true,
-    enumerable: false,
-    value() {
-      throw new Error("iterator should never be used on untrusted ops");
-    },
-    writable: true,
+// ---------------------------------------------------------------------------
+// Fail-CLOSED-by-throwing: the diff REFUSES on malformed/exotic input. It must
+// NOT return a benign empty/unchanged result (that would be fail-OPEN, silently
+// claiming "no changes" when it could not compute the diff).
+// ---------------------------------------------------------------------------
+
+test("fail-closed: a Proxy operations array (throwing index trap) throws, not empty", () => {
+  // A Proxy whose get/getOwnPropertyDescriptor traps throw. A fail-OPEN diff with
+  // a top-level catch would swallow this to an empty diff; we must surface a throw.
+  const trap = (): never => {
+    throw new Error("hostile proxy trap");
+  };
+  const hostileOps = new Proxy([{ capability: "x", request: { v: 1 } }] as unknown[], {
+    get: trap,
+    getOwnPropertyDescriptor: trap,
+    ownKeys: trap,
+    has: trap,
   });
 
   const current: TransactionPlan = { operations: hostileOps as never };
-  const desired = plan([{ capability: "kept", request: { v: 1 } }]);
+  const desired = plan([{ capability: "x", request: { v: 1 } }]);
 
-  const result = diffTransactionPlans(current, desired);
-
-  assert.equal(forEachCalls, 0);
-  assert.deepEqual(result.removed, ["gone"]);
-  assert.deepEqual(result.added, []);
-  assert.deepEqual(result.changed, []);
+  // Array.isArray sees through the Proxy (target is an array), so iteration
+  // begins; the first index read trips the trap and surfaces as a typed throw.
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
 });
 
-test("trust boundary: a throwing getter on a request does not throw; compares as changed (fail-closed)", () => {
+test("fail-closed: an accessor `request` on BOTH sides throws (never compares 'unchanged')", () => {
+  function accessorRequest(): Record<string, unknown> {
+    const obj: Record<string, unknown> = {};
+    Object.defineProperty(obj, "desired", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return "value";
+      },
+    });
+    return obj;
+  }
+
+  const current: TransactionPlan = {
+    operations: [{ capability: "x", request: accessorRequest() as never }],
+  };
+  const desired: TransactionPlan = {
+    operations: [{ capability: "x", request: accessorRequest() as never }],
+  };
+
+  // safeNormalize rejects accessor properties -> the operation is malformed ->
+  // THROW. It must NOT collapse the accessor to `undefined` and compare equal.
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
+});
+
+test("fail-closed: a Date/Map/exotic-prototype `request` throws (never compares EQUAL)", () => {
+  // Exotic-prototype objects have no enumerable string keys, so a structural diff
+  // that walked own keys would see them as EQUAL and hide a real change. They must
+  // throw (safeNormalize: "Only plain objects are accepted.").
+  const dateReq = new Date(0) as unknown as Record<string, unknown>;
+  const mapReq = new Map<string, unknown>() as unknown as Record<string, unknown>;
+
+  const currentDate: TransactionPlan = {
+    operations: [{ capability: "x", request: dateReq as never }],
+  };
+  const desiredPlain = plan([{ capability: "x", request: { desired: "v" } }]);
+
+  assert.throws(
+    () => diffTransactionPlans(currentDate, desiredPlain),
+    TransactionPlanDiffError,
+  );
+
+  // Both sides exotic must also throw (would otherwise compare equal -> hidden).
+  const currentMap: TransactionPlan = {
+    operations: [{ capability: "x", request: mapReq as never }],
+  };
+  const desiredDate: TransactionPlan = {
+    operations: [{ capability: "x", request: dateReq as never }],
+  };
+
+  assert.throws(
+    () => diffTransactionPlans(currentMap, desiredDate),
+    TransactionPlanDiffError,
+  );
+});
+
+test("fail-closed: a throwing getter on a request throws as TransactionPlanDiffError (never silently)", () => {
   const hostileRequest: Record<string, unknown> = {};
-  let getterReads = 0;
   Object.defineProperty(hostileRequest, "desired", {
     configurable: true,
     enumerable: true,
     get() {
-      getterReads += 1;
-      throw new Error("getter should never be invoked by the diff");
+      throw new Error("getter should never be invoked benignly");
     },
   });
 
@@ -200,85 +252,52 @@ test("trust boundary: a throwing getter on a request does not throw; compares as
   };
   const desired = plan([{ capability: "evil", request: { desired: "value" } }]);
 
-  // Must not throw, must not invoke the getter, and must report the capability as
-  // changed (it cannot be proven identical without invoking attacker code).
-  let result: ReturnType<typeof diffTransactionPlans> | undefined;
-  assert.doesNotThrow(() => {
-    result = diffTransactionPlans(current, desired);
-  });
-
-  assert.equal(getterReads, 0);
-  assert.deepEqual(result?.changed, ["evil"]);
-  assert.deepEqual(result?.added, []);
-  assert.deepEqual(result?.removed, []);
+  // safeNormalize rejects the accessor property (it never invokes the getter), so
+  // the plan is malformed and the diff throws -- not a benign "changed".
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
 });
 
-test("trust boundary: a throwing-getter `request` that is identical-by-getter still reports changed (never reads getter)", () => {
-  // Both sides expose `desired` via an identical throwing getter. A naive diff
-  // that read the property would throw; ours must skip the getter and, unable to
-  // prove equality, report the capability as changed -- fail-closed, never throw.
-  function hostile(): Record<string, unknown> {
-    const obj: Record<string, unknown> = {};
-    Object.defineProperty(obj, "desired", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        throw new Error("no");
-      },
-    });
-    return obj;
-  }
-
-  const current: TransactionPlan = {
-    operations: [{ capability: "x", request: hostile() as never }],
-  };
-  const desired: TransactionPlan = {
-    operations: [{ capability: "x", request: hostile() as never }],
-  };
-
-  let result: ReturnType<typeof diffTransactionPlans> | undefined;
-  assert.doesNotThrow(() => {
-    result = diffTransactionPlans(current, desired);
-  });
-
-  assert.deepEqual(result?.changed, ["x"]);
-});
-
-test("trust boundary: a non-array / malformed operations does not throw, yields empty index", () => {
+test("fail-closed: non-array operations throws (not an empty index)", () => {
   const malformed: TransactionPlan = { operations: "not-an-array" as never };
   const valid = plan([{ capability: "a", request: { v: 1 } }]);
 
-  // malformed current -> "a" appears only in desired -> added; nothing else.
-  const result = diffTransactionPlans(malformed, valid);
-  assert.deepEqual(result, { added: ["a"], changed: [], removed: [] });
-
-  // malformed on both sides -> empty diff, no throw.
-  assert.deepEqual(diffTransactionPlans(malformed, { operations: 42 as never }), {
-    added: [],
-    changed: [],
-    removed: [],
-  });
+  assert.throws(
+    () => diffTransactionPlans(malformed, valid),
+    TransactionPlanDiffError,
+  );
 });
 
-test("trust boundary: an operation entry that is not a plain object is skipped", () => {
+test("fail-closed: an operation entry that is not a plain object throws", () => {
   const current: TransactionPlan = {
     operations: [
       { capability: "good", request: { v: 1 } },
       "garbage" as never,
-      null as never,
-      42 as never,
     ],
   };
   const desired = plan([{ capability: "good", request: { v: 1 } }]);
 
-  assert.deepEqual(diffTransactionPlans(current, desired), {
-    added: [],
-    changed: [],
-    removed: [],
-  });
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
 });
 
-test("trust boundary: duplicate capabilities are last-wins deterministically", () => {
+test("fail-closed: a non-object (primitive) request throws", () => {
+  const current: TransactionPlan = {
+    operations: [{ capability: "x", request: "not-an-object" as never }],
+  };
+  const desired = plan([{ capability: "x", request: { v: 1 } }]);
+
+  assert.throws(
+    () => diffTransactionPlans(current, desired),
+    TransactionPlanDiffError,
+  );
+});
+
+test("duplicate capabilities are last-wins deterministically", () => {
   const current = plan([
     { capability: "dup", request: { v: 1 } },
     { capability: "dup", request: { v: 2 } }, // last wins
