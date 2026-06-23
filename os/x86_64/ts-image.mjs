@@ -23,7 +23,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const CONFIG_PATH = join(HERE, "ts-image.conf");
 const OVERLAY_ROOT = join(HERE, "ts-overlay");
+const OCI_ROOTFS_PATH = join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs");
+const OCI_INIT_PATH = join(OCI_ROOTFS_PATH, "init");
 
 function fail(msg) { console.error(`\n✖ ts-image: ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
@@ -114,10 +116,26 @@ async function stage(pin) {
     if (!existsSync(extracted)) fail(`extraction did not produce ${extracted}`);
     copyFileSync(extracted, pin.binaryHostPath);
     chmodSync(pin.binaryHostPath, parseInt(pin.binaryMode, 8));
+    stageBakedOCIRootfs();
     log(`   staged deno ${pin.Version} → ${pin.binaryHostPath} (mode ${pin.binaryMode})`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+function stageBakedOCIRootfs() {
+  if (!existsSync(OCI_ROOTFS_PATH)) fail(`baked OCI rootfs missing: ${OCI_ROOTFS_PATH}`);
+  if (!existsSync(OCI_INIT_PATH)) fail(`baked OCI entrypoint missing: ${OCI_INIT_PATH}`);
+  chmodDirectories(OCI_ROOTFS_PATH);
+  chmodSync(OCI_INIT_PATH, 0o755);
+  log(`   staged baked OCI rootfs ${OCI_ROOTFS_PATH} (dirs 0755, init 0755)`);
+}
+
+function chmodDirectories(root) {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.isDirectory()) chmodDirectories(join(root, entry.name));
+  }
+  chmodSync(root, 0o755);
 }
 
 async function main() {

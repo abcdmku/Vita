@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +110,91 @@ func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T)
 	readResponse = response.(ExecuteReadResponse)
 	if readResponse.Last != nil {
 		t.Fatalf("Last after undo = %#v, want nil", readResponse.Last)
+	}
+}
+
+func TestExecuteComposesHardenedOCITransientUnitFromValidatedManifest(t *testing.T) {
+	ctx := context.Background()
+	entry := executeOCIEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		status: transientUnitStatus{DynamicUID: "61409"},
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{
+			entry.ID: executeOCIManifest(entry),
+		},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+
+	started := launcher.starts[0]
+	if started.Name != capsuleUnitName(entry.ID) {
+		t.Fatalf("unit name = %q, want %q", started.Name, capsuleUnitName(entry.ID))
+	}
+	wantArgv := []string{"/init", "--ready=ok"}
+	if !reflect.DeepEqual(started.Argv, wantArgv) {
+		t.Fatalf("argv = %v, want %v", started.Argv, wantArgv)
+	}
+
+	props := propertyValues(started.Properties)
+	assertProperty(t, props, "RootDirectory", "/usr/lib/vita/capsules/local.oci.capsule/rootfs")
+	assertProperty(t, props, "MountAPIVFS", "yes")
+	assertProperty(t, props, "DynamicUser", "yes")
+	assertProperty(t, props, "CapabilityBoundingSet", "")
+	assertProperty(t, props, "AmbientCapabilities", "")
+	assertProperty(t, props, "NoNewPrivileges", "yes")
+	assertProperty(t, props, "ProtectSystem", "strict")
+	assertProperty(t, props, "ProtectHome", "yes")
+	assertProperty(t, props, "PrivateTmp", "yes")
+	assertProperty(t, props, "PrivateDevices", "yes")
+	assertProperty(t, props, "RestrictNamespaces", "yes")
+	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX")
+	assertProperty(t, props, "MemoryMax", "67108864")
+	assertProperty(t, props, "CPUQuota", "25%")
+	assertProperty(t, props, "TasksMax", "32")
+	assertNoProperty(t, props, "Environment")
+	assertNoProperty(t, props, "RuntimeDirectory")
+	assertNoProperty(t, props, "StateDirectory")
+	assertNoProperty(t, props, "StateDirectoryMode")
+	assertContainsProperty(t, props, "SystemCallFilter", "@system-service")
+	assertContainsProperty(t, props, "SystemCallFilter", "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete")
+	assertDoesNotContainProperty(t, props, "SystemCallFilter", "pkey_alloc pkey_free pkey_mprotect")
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse, ok := response.(ExecuteReadResponse)
+	if !ok {
+		t.Fatalf("Handle returned %T, want ExecuteReadResponse", response)
+	}
+	if readResponse.Last == nil {
+		t.Fatal("ExecuteReadResponse.Last = nil, want execution status")
+	}
+	if readResponse.Last.ID != entry.ID || readResponse.Last.Unit != started.Name || readResponse.Last.DynamicUID != "61409" {
+		t.Fatalf("Last = %#v, want id/unit/uid from launcher", readResponse.Last)
+	}
+
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
+	}
+	if !reflect.DeepEqual(launcher.stops, []string{started.Name}) {
+		t.Fatalf("stops = %v, want [%s]", launcher.stops, started.Name)
+	}
+	if !reflect.DeepEqual(launcher.resets, []string{started.Name}) {
+		t.Fatalf("resets = %v, want [%s]", launcher.resets, started.Name)
 	}
 }
 
@@ -357,6 +445,43 @@ func TestExecutionManifestDecodesAndValidatesDataVolumes(t *testing.T) {
 	}
 }
 
+func TestExecutionManifestDecodesAndValidatesOCIRuntime(t *testing.T) {
+	if _, ok := executionRuntimeFields["oci"]; !ok {
+		t.Fatal("executionRuntimeFields is missing oci")
+	}
+
+	raw := []byte(`{
+		"id":"local.oci.capsule",
+		"version":"1.0.0",
+		"integrity":"` + validSHA256SRI + `",
+		"packageClass":"oci-service",
+		"runtime":{"oci":{"image":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entrypoint":["/init","--ready=ok"]}}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32}
+	}`)
+	var manifest ExecutionManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("Unmarshal valid OCI manifest returned error: %v", err)
+	}
+	if !reflect.DeepEqual(manifest.Runtime.OCI.Image.Entrypoint, []string{"/init", "--ready=ok"}) {
+		t.Fatalf("OCI entrypoint = %#v, want /init argv", manifest.Runtime.OCI.Image.Entrypoint)
+	}
+
+	ambiguous := strings.Replace(string(raw), `"runtime":{"oci":`, `"runtime":{"typescript":{"entrypoint":"main.ts"},"oci":`, 1)
+	if err := json.Unmarshal([]byte(ambiguous), &manifest); err == nil {
+		t.Fatal("Unmarshal accepted ambiguous OCI/typescript runtime")
+	}
+
+	relative := strings.Replace(string(raw), `"/init"`, `"init"`, 1)
+	if err := json.Unmarshal([]byte(relative), &manifest); err == nil {
+		t.Fatal("Unmarshal accepted non-absolute OCI entrypoint")
+	}
+
+	metachar := strings.Replace(string(raw), `"/init"`, `"/init;reboot"`, 1)
+	if err := json.Unmarshal([]byte(metachar), &manifest); err == nil {
+		t.Fatal("Unmarshal accepted OCI entrypoint with shell metacharacter")
+	}
+}
+
 func TestHealthChecksForUnitRewritesAliasesAndRejectsOtherLifecycleUnits(t *testing.T) {
 	unit := capsuleUnitName("local.test.capsule")
 	checks := []capsuleruntime.Check{
@@ -535,6 +660,217 @@ func TestExecuteRejectsInvalidVolumeManifestWithoutStartingUnit(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsOCIMissingRootfsWithoutStartingUnit(t *testing.T) {
+	ctx := context.Background()
+	entry := executeOCIEntry()
+	root := t.TempDir()
+	baseDir := filepath.Join(root, entry.ID)
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "manifest.json"), []byte(ociManifestJSON(entry)), 0o644); err != nil {
+		t.Fatalf("WriteFile manifest returned error: %v", err)
+	}
+
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{}
+	capability := newExecuteCapability(
+		fs,
+		fileExecutionManifestStore{root: root},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *ExecuteInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+	}
+	if invalid.ApplyErrorCode() != "rootfs_absent" {
+		t.Fatalf("ApplyErrorCode = %q, want rootfs_absent", invalid.ApplyErrorCode())
+	}
+	if len(launcher.starts) != 0 {
+		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+	}
+}
+
+func TestExecuteRejectsOCINonWorldExecutableEntrypointWithoutStartingUnit(t *testing.T) {
+	ctx := context.Background()
+	entry := executeOCIEntry()
+	root := t.TempDir()
+	baseDir := filepath.Join(root, entry.ID)
+	rootfs := filepath.Join(baseDir, "rootfs")
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		t.Fatalf("MkdirAll rootfs returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "manifest.json"), []byte(ociManifestJSON(entry)), 0o644); err != nil {
+		t.Fatalf("WriteFile manifest returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "init"), []byte("#!/bin/sh\n"), 0o744); err != nil {
+		t.Fatalf("WriteFile init returned error: %v", err)
+	}
+
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{}
+	capability := newExecuteCapability(
+		fs,
+		fileExecutionManifestStore{root: root},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *ExecuteInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+	}
+	if invalid.ApplyErrorCode() != "permission_denied" {
+		t.Fatalf("ApplyErrorCode = %q, want permission_denied", invalid.ApplyErrorCode())
+	}
+	if len(launcher.starts) != 0 {
+		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+	}
+}
+
+func TestExecuteRejectsInvalidOCIEntrypointWithoutStartingUnit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		entrypoint []string
+	}{
+		{name: "relative", entrypoint: []string{"init"}},
+		{name: "metachar", entrypoint: []string{"/init;reboot"}},
+		{name: "control", entrypoint: []string{"/init", "bad\narg"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			entry := executeOCIEntry()
+			manifest := executeOCIManifest(entry)
+			manifest.Runtime.OCI.Image.Entrypoint = tc.entrypoint
+			fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+			launcher := &recordingTransientLauncher{}
+			capability := newExecuteCapability(
+				fs,
+				memoryExecutionManifestStore{entry.ID: manifest},
+				launcher,
+			)
+
+			undo, err := capability.Apply(ctx, executeApply(entry))
+
+			if undo != nil {
+				t.Fatalf("Apply returned undo %v, want nil", undo)
+			}
+			var invalid *ExecuteInvalidRequestError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+			}
+			if len(launcher.starts) != 0 {
+				t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+			}
+		})
+	}
+}
+
+func TestExecuteOCIStartFailureReturnsSpecificDiagnosticCode(t *testing.T) {
+	ctx := context.Background()
+	entry := executeOCIEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		err: &transientUnitStartError{
+			Code: "exec_failed",
+			Diagnostics: transientUnitDiagnostics{
+				ActiveState:    "failed",
+				SubState:       "failed",
+				Result:         "exit-code",
+				ExecMainStatus: "203",
+			},
+			Err: errors.New("unit failed"),
+		},
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{entry.ID: executeOCIManifest(entry)},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var startErr *ExecuteStartError
+	if !errors.As(err, &startErr) {
+		t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
+	}
+	if startErr.ApplyErrorCode() != "exec_failed" {
+		t.Fatalf("ApplyErrorCode = %q, want exec_failed", startErr.ApplyErrorCode())
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+}
+
+func TestSystemdRunLauncherStartFailureIncludesUnitDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake systemd scripts require a POSIX shell")
+	}
+
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	systemctl := filepath.Join(dir, "systemctl")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile systemd-run returned error: %v", err)
+	}
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+case "$1" in
+  is-active)
+    exit 3
+    ;;
+  show)
+    printf '%s\n' \
+      'ActiveState=failed' \
+      'SubState=failed' \
+      'Result=exit-code' \
+      'ExecMainCode=exited' \
+      'ExecMainStatus=203'
+    exit 0
+    ;;
+  stop|reset-failed)
+    exit 0
+    ;;
+esac
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile systemctl returned error: %v", err)
+	}
+
+	launcher := systemdRunLauncher{
+		systemdRun: systemdRun,
+		systemctl:  systemctl,
+	}
+
+	_, err := launcher.StartTransientUnit(context.Background(), transientUnit{
+		Name: "vita-capsule-local-oci.service",
+		Argv: []string{"/init"},
+	})
+
+	var startErr *transientUnitStartError
+	if !errors.As(err, &startErr) {
+		t.Fatalf("StartTransientUnit error = %T %v, want transientUnitStartError", err, err)
+	}
+	if startErr.Code != "exec_failed" {
+		t.Fatalf("start error code = %q, want exec_failed", startErr.Code)
+	}
+	if startErr.Diagnostics.Result != "exit-code" || startErr.Diagnostics.ExecMainStatus != "203" || startErr.Diagnostics.ActiveState != "failed" {
+		t.Fatalf("diagnostics = %#v, want failed/exit-code/203", startErr.Diagnostics)
+	}
+}
+
 func TestExecuteVolumeStartFailureReturnsSpecificCode(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -648,6 +984,15 @@ func executeEntry() CapsuleEntry {
 	}
 }
 
+func executeOCIEntry() CapsuleEntry {
+	return CapsuleEntry{
+		ID:        "local.oci.capsule",
+		Version:   "1.0.0",
+		Integrity: validSHA256SRI,
+		State:     StateInstalled,
+	}
+}
+
 func executeManifest(entry CapsuleEntry) ExecutionManifest {
 	return ExecutionManifest{
 		ID:           entry.ID,
@@ -665,6 +1010,41 @@ func executeManifest(entry CapsuleEntry) ExecutionManifest {
 		},
 		baseDir: "/usr/lib/vita/capsules/local.test.capsule",
 	}
+}
+
+func executeOCIManifest(entry CapsuleEntry) ExecutionManifest {
+	return ExecutionManifest{
+		ID:           entry.ID,
+		Version:      entry.Version,
+		Integrity:    entry.Integrity,
+		PackageClass: executePackageClassOCIService,
+		Runtime: ExecutionRuntime{
+			OCI: OCIExecution{
+				Image: OCIImageExecution{
+					Digest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					Entrypoint: []string{"/init", "--ready=ok"},
+				},
+			},
+		},
+		ResourceLimits: ExecutionResourceLimits{
+			CPUCores:   0.25,
+			RamMiB:     64,
+			StorageMiB: 16,
+			TasksMax:   32,
+		},
+		baseDir: "/usr/lib/vita/capsules/local.oci.capsule",
+	}
+}
+
+func ociManifestJSON(entry CapsuleEntry) string {
+	return `{
+		"id":"` + entry.ID + `",
+		"version":"` + entry.Version + `",
+		"integrity":"` + entry.Integrity + `",
+		"packageClass":"oci-service",
+		"runtime":{"oci":{"image":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entrypoint":["/init"]}}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32}
+	}`
 }
 
 func executeApply(entry CapsuleEntry) ExecuteApplyRequest {
@@ -719,6 +1099,15 @@ func assertContainsProperty(t *testing.T, props map[string][]string, name string
 		}
 	}
 	t.Fatalf("%s = %v, want value %q", name, props[name], want)
+}
+
+func assertDoesNotContainProperty(t *testing.T, props map[string][]string, name string, want string) {
+	t.Helper()
+	for _, value := range props[name] {
+		if value == want {
+			t.Fatalf("%s = %v, want no value %q", name, props[name], want)
+		}
+	}
 }
 
 func executeVolumeSpec(t *testing.T, capsuleID string, name string) capsulestorage.VolumeSpec {

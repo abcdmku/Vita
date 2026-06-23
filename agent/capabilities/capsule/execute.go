@@ -33,7 +33,8 @@ const (
 	systemdRunPath     = "/usr/bin/systemd-run"
 	systemctlPath      = "/usr/bin/systemctl"
 
-	executePackageClassTSService = "ts-service"
+	executePackageClassTSService  = "ts-service"
+	executePackageClassOCIService = "oci-service"
 
 	maxCPUQuotaCores = 64
 	maxMemoryMiB     = 1024 * 1024
@@ -172,10 +173,18 @@ type ExecuteCapability struct {
 
 type ExecuteInvalidRequestError struct {
 	Reason string
+	Code   string
 }
 
 func (e *ExecuteInvalidRequestError) Error() string {
 	return fmt.Sprintf("invalid capsule execute request: %s", e.Reason)
+}
+
+func (e *ExecuteInvalidRequestError) ApplyErrorCode() string {
+	if e == nil || e.Code == "" {
+		return "capsule_execute_rejected"
+	}
+	return e.Code
 }
 
 type ExecuteStartError struct {
@@ -205,6 +214,20 @@ func (e *ExecuteStartError) ApplyErrorCode() string {
 		return "capsule_start_failed"
 	}
 	return e.Code
+}
+
+func executeStartFailureCode(manifest ExecutionManifest, unit transientUnit, err error) string {
+	if manifest.PackageClass == executePackageClassOCIService {
+		var startErr *transientUnitStartError
+		if errors.As(err, &startErr) && startErr.Code != "" {
+			return startErr.Code
+		}
+		return "oci_start_failed"
+	}
+	if len(unit.Volumes) > 0 {
+		return "capsule_volume_start_failed"
+	}
+	return "capsule_start_failed"
 }
 
 func NewExecuteCapability() *ExecuteCapability {
@@ -313,8 +336,8 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
-		code := "capsule_start_failed"
-		if len(unit.Volumes) > 0 {
+		code := executeStartFailureCode(manifest, unit, err)
+		if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
 			code = "capsule_volume_start_failed"
 			log.Printf("VITA-CAPSULE-VOLUME-ERROR: reason=%s status=FAILSAFE", code)
 		}
@@ -558,10 +581,12 @@ func (m ExecutionManifest) Validate() error {
 	if !isValidSRI(m.Integrity) {
 		return &ExecuteInvalidRequestError{Reason: "manifest.integrity must be a real SRI integrity"}
 	}
-	if m.PackageClass != executePackageClassTSService {
-		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service"}
+	switch m.PackageClass {
+	case executePackageClassTSService, executePackageClassOCIService:
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
 	}
-	if err := m.Runtime.Validate(); err != nil {
+	if err := m.Runtime.ValidateForPackageClass(m.PackageClass); err != nil {
 		return err
 	}
 	if err := m.ResourceLimits.Validate(); err != nil {
@@ -580,6 +605,7 @@ func (m ExecutionManifest) Validate() error {
 
 type ExecutionRuntime struct {
 	TypeScript TypeScriptExecution `json:"typescript"`
+	OCI        OCIExecution        `json:"oci"`
 }
 
 func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
@@ -595,17 +621,70 @@ func (r *ExecutionRuntime) UnmarshalJSON(raw []byte) error {
 		return &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 
-	var ts TypeScriptExecution
-	if err := requiredObjectField(fields, "typescript", &ts); err != nil {
-		return err
+	rawTS, hasTS := fields["typescript"]
+	rawOCI, hasOCI := fields["oci"]
+	if hasTS == hasOCI {
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one of typescript or oci"}
 	}
 
-	r.TypeScript = ts
+	var runtime ExecutionRuntime
+	if hasTS {
+		if bytes.Equal(bytes.TrimSpace(rawTS), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript is required"}
+		}
+		var ts TypeScriptExecution
+		if err := decodeSingleJSONValue(rawTS, &ts); err != nil {
+			return err
+		}
+		runtime.TypeScript = ts
+	} else {
+		if bytes.Equal(bytes.TrimSpace(rawOCI), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "runtime.oci is required"}
+		}
+		var oci OCIExecution
+		if err := decodeSingleJSONValue(rawOCI, &oci); err != nil {
+			return err
+		}
+		runtime.OCI = oci
+	}
+
+	*r = runtime
 	return nil
 }
 
 func (r ExecutionRuntime) Validate() error {
-	return r.TypeScript.Validate()
+	tsErr := r.TypeScript.Validate()
+	ociErr := r.OCI.Validate()
+	switch {
+	case tsErr == nil && ociErr == nil:
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
+	case tsErr == nil || ociErr == nil:
+		return nil
+	default:
+		return &ExecuteInvalidRequestError{Reason: "runtime must declare exactly one supported runtime"}
+	}
+}
+
+func (r ExecutionRuntime) ValidateForPackageClass(packageClass string) error {
+	switch packageClass {
+	case executePackageClassTSService:
+		if err := r.TypeScript.Validate(); err != nil {
+			return err
+		}
+		if err := r.OCI.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.oci must not be declared for ts-service"}
+		}
+	case executePackageClassOCIService:
+		if err := r.OCI.Validate(); err != nil {
+			return err
+		}
+		if err := r.TypeScript.Validate(); err == nil {
+			return &ExecuteInvalidRequestError{Reason: "runtime.typescript must not be declared for oci-service"}
+		}
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+	return nil
 }
 
 type ExecutionData struct {
@@ -821,15 +900,8 @@ func (s fileExecutionManifestStore) Load(ctx context.Context, id string) (Execut
 	}
 	manifest.baseDir = baseDir
 
-	entrypointPath, err := manifestEntrypointPath(manifest)
-	if err != nil {
+	if err := statExecutionManifestArtifacts(manifest); err != nil {
 		return ExecutionManifest{}, err
-	}
-	if _, err := os.Stat(entrypointPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ExecutionManifest{}, &ExecuteInvalidRequestError{Reason: "capsule entrypoint is absent"}
-		}
-		return ExecutionManifest{}, fmt.Errorf("stat capsule entrypoint: %w", err)
 	}
 
 	return manifest, nil
@@ -849,6 +921,55 @@ type transientUnit struct {
 
 type transientUnitStatus struct {
 	DynamicUID string
+}
+
+type transientUnitDiagnostics struct {
+	ActiveState    string
+	SubState       string
+	Result         string
+	ExecMainCode   string
+	ExecMainStatus string
+}
+
+type transientUnitStartError struct {
+	Code        string
+	Unit        string
+	Diagnostics transientUnitDiagnostics
+	Err         error
+}
+
+func (e *transientUnitStartError) Error() string {
+	if e == nil {
+		return "transient unit start failed"
+	}
+	detail := "transient unit start failed"
+	if e.Unit != "" {
+		detail = "transient unit " + e.Unit + " start failed"
+	}
+	if e.Code != "" {
+		detail += ": " + e.Code
+	}
+	if e.Diagnostics != (transientUnitDiagnostics{}) {
+		detail += fmt.Sprintf(
+			" (active=%s sub=%s result=%s execCode=%s execStatus=%s)",
+			e.Diagnostics.ActiveState,
+			e.Diagnostics.SubState,
+			e.Diagnostics.Result,
+			e.Diagnostics.ExecMainCode,
+			e.Diagnostics.ExecMainStatus,
+		)
+	}
+	if e.Err != nil {
+		detail += ": " + e.Err.Error()
+	}
+	return detail
+}
+
+func (e *transientUnitStartError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 type transientUnitLauncher interface {
@@ -871,15 +992,16 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	args = append(args, unit.Argv...)
 
 	if output, err := exec.CommandContext(ctx, l.systemdRun, args...).CombinedOutput(); err != nil {
-		return transientUnitStatus{}, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output)))
+		return transientUnitStatus{}, l.startError(ctx, unit.Name, fmt.Errorf("start capsule transient unit: %w: %s", err, strings.TrimSpace(string(output))))
 	}
 
 	if output, err := exec.CommandContext(ctx, l.systemctl, "is-active", "--quiet", unit.Name).CombinedOutput(); err != nil {
+		startErr := l.startError(ctx, unit.Name, fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))))
 		cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
-		return transientUnitStatus{}, errors.Join(
-			fmt.Errorf("capsule transient unit did not become active: %w: %s", err, strings.TrimSpace(string(output))),
-			cleanupErr,
-		)
+		if cleanupErr != nil {
+			startErr.Err = errors.Join(startErr.Err, cleanupErr)
+		}
+		return transientUnitStatus{}, startErr
 	}
 
 	uid, err := l.dynamicUID(ctx, unit.Name)
@@ -889,6 +1011,19 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 	}
 
 	return transientUnitStatus{DynamicUID: uid}, nil
+}
+
+func (l systemdRunLauncher) startError(ctx context.Context, unit string, cause error) *transientUnitStartError {
+	diagnostics, err := l.unitDiagnostics(ctx, unit)
+	if err != nil {
+		cause = errors.Join(cause, err)
+	}
+	return &transientUnitStartError{
+		Code:        classifyTransientUnitStartFailure(diagnostics, cause.Error()),
+		Unit:        unit,
+		Diagnostics: diagnostics,
+		Err:         cause,
+	}
 }
 
 func (l systemdRunLauncher) StopTransientUnit(ctx context.Context, unit string) error {
@@ -953,6 +1088,92 @@ func (l systemdRunLauncher) showUnitProperty(ctx context.Context, unit string, p
 	return strings.TrimSpace(string(output)), nil
 }
 
+func (l systemdRunLauncher) unitDiagnostics(ctx context.Context, unit string) (transientUnitDiagnostics, error) {
+	args := []string{
+		"show",
+		"--property=ActiveState",
+		"--property=SubState",
+		"--property=Result",
+		"--property=ExecMainCode",
+		"--property=ExecMainStatus",
+		unit,
+	}
+	output, err := exec.CommandContext(ctx, l.systemctl, args...).CombinedOutput()
+	if err != nil {
+		return transientUnitDiagnostics{}, fmt.Errorf("read capsule transient unit diagnostics: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	values := parseSystemctlShowProperties(output)
+	return transientUnitDiagnostics{
+		ActiveState:    values["ActiveState"],
+		SubState:       values["SubState"],
+		Result:         values["Result"],
+		ExecMainCode:   values["ExecMainCode"],
+		ExecMainStatus: values["ExecMainStatus"],
+	}, nil
+}
+
+func parseSystemctlShowProperties(output []byte) map[string]string {
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || name == "" {
+			continue
+		}
+		values[name] = value
+	}
+	return values
+}
+
+func classifyTransientUnitStartFailure(diagnostics transientUnitDiagnostics, detail string) string {
+	lowerDetail := strings.ToLower(detail)
+	switch {
+	case strings.Contains(lowerDetail, "permission denied") || strings.Contains(lowerDetail, "access denied"):
+		return "permission_denied"
+	case strings.Contains(lowerDetail, "failed at step namespace") ||
+		strings.Contains(lowerDetail, "mount namespacing") ||
+		strings.Contains(lowerDetail, "namespace"):
+		return "namespace_setup_failed"
+	case strings.Contains(lowerDetail, "rootdirectory") ||
+		strings.Contains(lowerDetail, "root directory") ||
+		strings.Contains(lowerDetail, "chroot"):
+		return "rootfs_inaccessible"
+	}
+
+	switch strings.TrimSpace(diagnostics.ExecMainStatus) {
+	case "203":
+		return "exec_failed"
+	case "210":
+		return "rootfs_inaccessible"
+	case "226":
+		return "namespace_setup_failed"
+	case "228":
+		return "seccomp_setup_failed"
+	}
+
+	if strings.TrimSpace(diagnostics.Result) == "signal" && strings.TrimSpace(diagnostics.ExecMainStatus) == "31" {
+		return "seccomp_blocked"
+	}
+
+	switch strings.TrimSpace(diagnostics.Result) {
+	case "exit-code":
+		return "process_exited"
+	case "timeout":
+		return "start_timeout"
+	case "resources":
+		return "resource_limit_failed"
+	case "signal", "core-dump":
+		return "process_signaled"
+	}
+	if diagnostics.ActiveState == "failed" || diagnostics.SubState == "failed" {
+		return "unit_failed"
+	}
+	return "unit_start_failed"
+}
+
 var (
 	executeApplyRequestFields = map[string]struct{}{
 		"desired": {},
@@ -973,6 +1194,7 @@ var (
 		"version":        {},
 	}
 	executionRuntimeFields = map[string]struct{}{
+		"oci":        {},
 		"typescript": {},
 	}
 	executionDataFields = map[string]struct{}{
@@ -1026,7 +1248,39 @@ func validateManifestMatchesRequest(manifest ExecutionManifest, desired ExecuteD
 	return nil
 }
 
+func statExecutionManifestArtifacts(manifest ExecutionManifest) error {
+	switch manifest.PackageClass {
+	case executePackageClassTSService:
+		entrypointPath, err := manifestEntrypointPath(manifest)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(entrypointPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return &ExecuteInvalidRequestError{Reason: "capsule entrypoint is absent"}
+			}
+			return fmt.Errorf("stat capsule entrypoint: %w", err)
+		}
+	case executePackageClassOCIService:
+		return statOCIManifestArtifacts(manifest)
+	default:
+		return &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+	return nil
+}
+
 func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
+	switch manifest.PackageClass {
+	case executePackageClassTSService:
+		return composeTypeScriptTransientUnit(manifest)
+	case executePackageClassOCIService:
+		return composeOCITransientUnit(manifest)
+	default:
+		return transientUnit{}, &ExecuteInvalidRequestError{Reason: "manifest.packageClass must be ts-service or oci-service"}
+	}
+}
+
+func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	entrypoint, err := manifestEntrypointPath(manifest)
 	if err != nil {
 		return transientUnit{}, err
@@ -1040,6 +1294,31 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 	argv := denoArgv(entrypoint, volumes)
+	properties := hardenedTransientUnitProperties(manifest, true)
+	properties = append(properties,
+		systemdProperty{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
+		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
+		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
+		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
+		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
+		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
+	)
+	if len(volumes) > 0 {
+		properties = append(properties,
+			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
+			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
+		)
+	}
+
+	return transientUnit{
+		Name:       unitName,
+		Argv:       argv,
+		Properties: properties,
+		Volumes:    volumes,
+	}, nil
+}
+
+func hardenedTransientUnitProperties(manifest ExecutionManifest, includeDenoPkey bool) []systemdProperty {
 	properties := []systemdProperty{
 		{Name: "Description", Value: "Vita capsule " + manifest.ID},
 		{Name: "Type", Value: "simple"},
@@ -1067,28 +1346,11 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 		{Name: "SystemCallArchitectures", Value: "native"},
 		{Name: "SystemCallFilter", Value: "@system-service"},
 		{Name: "SystemCallFilter", Value: "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete"},
-		{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"},
-		{Name: "UMask", Value: "0077"},
-		{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
-		{Name: "RuntimeDirectory", Value: runtimeDir},
-		{Name: "RuntimeDirectoryMode", Value: "0700"},
-		{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
-		{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
-		{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	}
-	if len(volumes) > 0 {
-		properties = append(properties,
-			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
-			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
-		)
+	if includeDenoPkey {
+		properties = append(properties, systemdProperty{Name: "SystemCallFilter", Value: "pkey_alloc pkey_free pkey_mprotect"})
 	}
-
-	return transientUnit{
-		Name:       unitName,
-		Argv:       argv,
-		Properties: properties,
-		Volumes:    volumes,
-	}, nil
+	return append(properties, systemdProperty{Name: "UMask", Value: "0077"})
 }
 
 func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount) []string {
