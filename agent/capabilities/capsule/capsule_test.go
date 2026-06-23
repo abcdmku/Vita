@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/vita/agent/capabilities"
+	capsulestorage "github.com/vita/agent/storage/capsules"
 	"github.com/vita/agent/transaction"
 )
 
@@ -405,6 +406,55 @@ func TestFetchCapabilityStagesAndUndoRemovesNewCacheEntry(t *testing.T) {
 	}
 }
 
+func TestFetchCapabilityStagesOCIImageWhenImageDigestPresent(t *testing.T) {
+	ctx := context.Background()
+	target := filepath.Join(t.TempDir(), "local.test.oci", "1.0.0")
+	imageDigest := "sha256:" + strings.Repeat("a", 64)
+	store := &recordingFetchStore{
+		target: target,
+		ociResult: capsulestorage.OCIFetchResult{
+			CapsulePath: target,
+			RootFSPath:  filepath.Join(target, "rootfs"),
+			ImageDigest: imageDigest,
+			Layers:      2,
+			Entrypoint:  []string{"/bin/vita-oci-test", "--serve"},
+			Env:         []string{"VITA_TEST=1"},
+		},
+	}
+	capability := newFetchCapability(store)
+	req := fetchOCIApply("local.test.oci", "1.0.0", "file:///staging/local.test.oci.tar.zst", validSHA256SRI, imageDigest)
+
+	undo, err := capability.Apply(ctx, req)
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if store.ociFetches != 1 || store.fetches != 0 {
+		t.Fatalf("fetch calls = oci:%d legacy:%d, want oci only", store.ociFetches, store.fetches)
+	}
+	if store.imageDigest != imageDigest {
+		t.Fatalf("imageDigest = %q, want %q", store.imageDigest, imageDigest)
+	}
+
+	response, err := capability.Handle(ctx, FetchReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse := response.(FetchReadResponse)
+	if readResponse.Last == nil {
+		t.Fatal("FetchReadResponse.Last = nil, want OCI status")
+	}
+	if readResponse.Last.RootFSPath != filepath.Join(target, "rootfs") ||
+		readResponse.Last.ImageDigest != imageDigest ||
+		readResponse.Last.Layers != 2 ||
+		!reflect.DeepEqual(readResponse.Last.Entrypoint, []string{"/bin/vita-oci-test", "--serve"}) ||
+		!reflect.DeepEqual(readResponse.Last.Env, []string{"VITA_TEST=1"}) {
+		t.Fatalf("FetchReadResponse.Last = %#v, want OCI metadata", readResponse.Last)
+	}
+}
+
 func TestFetchCapabilityRejectsInvalidRequestWithoutFetching(t *testing.T) {
 	ctx := context.Background()
 	store := &recordingFetchStore{target: filepath.Join(t.TempDir(), "target")}
@@ -631,14 +681,17 @@ type pathSmugglingRequest struct {
 func (pathSmugglingRequest) CapabilityRequest() {}
 
 type recordingFetchStore struct {
-	target    string
-	fetches   int
-	ref       string
-	integrity string
-	id        string
-	version   string
-	removed   []string
-	err       error
+	target      string
+	fetches     int
+	ociFetches  int
+	ref         string
+	integrity   string
+	id          string
+	version     string
+	imageDigest string
+	ociResult   capsulestorage.OCIFetchResult
+	removed     []string
+	err         error
 }
 
 func (s *recordingFetchStore) FetchCapsuleFor(ctx context.Context, ref string, integrity string, id string, version string) (string, error) {
@@ -654,6 +707,25 @@ func (s *recordingFetchStore) FetchCapsuleFor(ctx context.Context, ref string, i
 		return "", s.err
 	}
 	return s.target, nil
+}
+
+func (s *recordingFetchStore) FetchOCIImageFor(ctx context.Context, ref string, integrity string, id string, version string, imageDigest string) (capsulestorage.OCIFetchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return capsulestorage.OCIFetchResult{}, err
+	}
+	s.ociFetches++
+	s.ref = ref
+	s.integrity = integrity
+	s.id = id
+	s.version = version
+	s.imageDigest = imageDigest
+	if s.err != nil {
+		return capsulestorage.OCIFetchResult{}, s.err
+	}
+	if s.ociResult.CapsulePath == "" {
+		s.ociResult.CapsulePath = s.target
+	}
+	return s.ociResult, nil
 }
 
 func (s *recordingFetchStore) CachePath(string, string) (string, error) {
@@ -710,6 +782,17 @@ func fetchApply(id string, version string, ref string, integrity string) FetchAp
 		Version:   version,
 		Ref:       ref,
 		Integrity: integrity,
+	}
+	return FetchApplyRequest{Desired: &desired}
+}
+
+func fetchOCIApply(id string, version string, ref string, integrity string, imageDigest string) FetchApplyRequest {
+	desired := FetchDesired{
+		ID:          id,
+		Version:     version,
+		Ref:         ref,
+		Integrity:   integrity,
+		ImageDigest: &imageDigest,
 	}
 	return FetchApplyRequest{Desired: &desired}
 }
