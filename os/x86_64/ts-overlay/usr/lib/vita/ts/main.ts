@@ -20,6 +20,12 @@
 // Run model: `deno run` with NO --allow-* flags. The control-plane logic here is pure, so it
 // needs zero permissions; Deno's default-deny sandbox is the on-device least-privilege posture.
 
+// Ambient `Deno` namespace declaration (minimal, exact subset of Deno's own) so the repo-wide Node
+// `tsc` lane can keep this production entrypoint IN its include set without a root tsconfig edit. The
+// AUTHORITATIVE typecheck is `deno check` against Deno's real lib (see ../vendor/deno.shim.d.ts and
+// os/x86_64/ts-overlay/deno.json). On-device this directive is inert — Deno provides the real Deno.*.
+/// <reference path="./vendor/deno.shim.d.ts" />
+
 import {
   compareSemver,
   isValidSemver,

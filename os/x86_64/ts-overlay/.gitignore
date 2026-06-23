@@ -1,0 +1,9 @@
+# os-local ignore for the ts-overlay (P1-030). Scoped to THIS overlay so the rule lives next to the
+# thing it governs and the diff stays within os/ (no root .gitignore edit).
+#
+# The Deno runtime binary is a BUILD ARTIFACT, not source: os/x86_64/ts-image.mjs fetches the
+# version- + sha256-pinned upstream zip, verifies it, and stages the single `deno` executable here at
+# usr/lib/vita/deno before mkosi runs `--extra-tree`. It is large and reproducible from the pin, so
+# it is never committed. The committed TS sources under usr/lib/vita/ts/ (main.ts + vendor/*) and the
+# systemd unit + wants-symlink stay tracked — the path below is anchored to the FILE, not the dir.
+usr/lib/vita/deno
