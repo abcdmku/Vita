@@ -1,7 +1,10 @@
 # ADR-0010 — OCI capsule runtime (PROPOSED — pending OWNER sign-off)
 
-Status: **PROPOSED** (OWNER sign-off required before building — new workload-execution attack surface, per the
-ADR-0009 "OWNER MAY REDIRECT" precedent and spec §17/§7.1). Date: 2026-06-23.
+Status: **ACCEPTED** — OWNER signed off 2026-06-23 ("do them all and parallelize what you can with codex"): the
+arbitrary-native-code attack surface is ACCEPTED, and ALL THREE runtime approaches are greenlit to build in parallel —
+(A) `RootDirectory=` OCI [this ADR's primary path, slices 1-5], (B) crun-as-executor [full OCI fidelity, slice 6 now
+promoted to active], (C) a microVM/strong-isolation class [`microvm-service`]. The cgroup-enforcement-vs-hostile-image
+proof (slice 5) remains the gate before any UNTRUSTED OCI capsule runs. Date: 2026-06-23.
 
 ## Context
 Today (ADR-0009) only `ts-service` capsules run — as hardened systemd transient units whose ONLY workload is the
