@@ -1,6 +1,7 @@
 # ADR-0012 — WASM capsule runtime: wasm-service via wasmtime in the hardened transient unit
 
-Status: **ACCEPTED** — owner "do them all" (2026-06-23). Builds on ADR-0009 (systemd transient unit = universal
+Status: **ACCEPTED** — owner "do them all" (2026-06-23). (See ADR-0010 for the crun-as-executor outcome: DEFERRED —
+crun can't run rootless under Vita's strict hardening without re-granting privilege; RootDirectory is the OCI path.) Builds on ADR-0009 (systemd transient unit = universal
 jailer) + ADR-0010 (per-class executor inside ExecStart). Spec §21 Phase 4 "WASM component execution"; baseline
 Wasmtime 36 LTS. x86_64.
 

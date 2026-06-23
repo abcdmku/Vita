@@ -2,9 +2,19 @@
 
 Status: **ACCEPTED** — OWNER signed off 2026-06-23 ("do them all and parallelize what you can with codex"): the
 arbitrary-native-code attack surface is ACCEPTED, and ALL THREE runtime approaches are greenlit to build in parallel —
-(A) `RootDirectory=` OCI [this ADR's primary path, slices 1-5], (B) crun-as-executor [full OCI fidelity, slice 6 now
-promoted to active], (C) a microVM/strong-isolation class [`microvm-service`]. The cgroup-enforcement-vs-hostile-image
-proof (slice 5) remains the gate before any UNTRUSTED OCI capsule runs. Date: 2026-06-23.
+(A) `RootDirectory=` OCI [this ADR's primary path, slices 1-5 — DONE + boot-verified incl. the cgroup-enforcement gate],
+(B) crun-as-executor [full OCI fidelity], (C) a microVM/strong-isolation class [`microvm-service`]. The
+cgroup-enforcement-vs-hostile-image proof (slice 5) remains the gate before any UNTRUSTED OCI capsule runs.
+
+**CRUN OUTCOME (P1-056, 2026-06-23): DEFERRED — UNSUPPORTED UNDER THE CURRENT STRICT HARDENING.** Three attempts +
+adversarial review established that rootless crun INHERENTLY needs operations the ADR-0009 jail forbids — `unshare(CLONE_NEWUSER)`
+(blocked by `RestrictNamespaces=yes`), `pivot_root`/`mount` (denied by seccomp `@mount`), `chroot` (denied `@privileged`)
+— and no minimal allowlist that lets crun run was found WITHOUT re-granting privilege the jail is built to drop. The
+honest landing: `executor=crun` returns a clean `VITA-CAPSULE-OCI-CRUN-REJECT: reason=crun_unsupported_under_hardening`
+(NOT a false success — an earlier attempt's marker falsely reported health=OK while the unit res=failed; the review
+caught it). **`RootDirectory=` (A) is THE OCI path.** The attempt (crun staging + executor wiring) is preserved on
+origin `task/P1-056` for a future revisit if the namespace/seccomp tension is resolved; it is NOT merged (would bake an
+unused ~3MB crun binary into the immutable image). Date: 2026-06-23.
 
 ## Context
 Today (ADR-0009) only `ts-service` capsules run — as hardened systemd transient units whose ONLY workload is the
