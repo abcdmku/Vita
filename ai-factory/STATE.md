@@ -45,8 +45,15 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     healthz=OK`. Two parallel Codex candidates; Opus judge picked A + ported B's `.catch`. **Host-verify exposed a
     real bug: var.mount in smoke-overlay cascaded (RequiresMountsFor) to cancel vita-agentd on plain smoke → moved
     var.mount to a VERITY-ONLY overlay (conditional --extra-tree).** Also merged P1-036 (guardian fail-closed) +
-    P1-037 (on-device EXPLAIN) — boot shows VITA-TS/EVAL/PREVIEW/EXPLAIN/CONNECT. **NEXT: S2 (read /state →
-    VITA-STATE, R1) → S3 (apply keystone → VITA-APPLY, R3, parallel-candidates); then S4-S7 (PDS/capsule wire-up).**
+    P1-037 (on-device EXPLAIN). **APPLY CHAIN COMPLETE + HOST-VERIFIED (2026-06-23): the node RECONFIGURES ITSELF
+    ON-DEVICE END-TO-END.** S2 (P1-038, read /state, R1) + S3 (P1-039, apply keystone, R3 — 2 candidates, Opus judge
+    picked B for the minimal /apply-only write surface + markerToken-sanitized reject reason) both MERGED + verified.
+    One boot serial now shows the WHOLE chain: `VITA-TS → VITA-EVAL → VITA-PREVIEW → VITA-EXPLAIN → VITA-CONNECT →
+    VITA-STATE(caps=13) → VITA-APPLY: outcome=committed applied=1 audit=recorded → VITA-APPLY: outcome=rejected
+    reason=unknown_capability` (agentd re-validates every plan + fails closed; the unprivileged runtime only proposes
+    over the /apply-scoped unix transport; hostname unchanged = benign). `wsl-verify ts` guards the full chain incl.
+    APPLY commit+reject. **NEXT: S4 (PDS read via agentd → VITA-PDS, R2) ∥ S6 (capsule.registry apply → VITA-CAPSULE,
+    R2) — both unblocked (dep=S3), wire-up over agentd's EXISTING handlers; then S5 (PDS write) + S7 (capsule preview).**
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
