@@ -96,30 +96,32 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for VITA-PDS (the LAST marker — main() order ...APPLY -> CAPSULE -> PDS). Its presence implies the WHOLE
-  # on-device control-plane ran: eval/preview/explain (P1-033/34/37) + connect/state read (P1-035/38) + APPLY
-  # commit&reject (P1-039) + capsule.registry apply (P1-041) + PDS read (P1-040). A failed tail shows *-ERROR -> FAIL.
+  # Wait for a COMMITTED PDS WRITE (the LAST marker — main() order ...APPLY -> CAPSULE-PREVIEW -> CAPSULE -> PDS read
+  # -> PDS WRITE). Its presence implies the WHOLE on-device control-plane ran: eval/preview/explain (P1-033/34/37) +
+  # connect/state read (P1-035/38) + APPLY commit&reject (P1-039) + capsule preview (P1-043) + capsule apply commit&
+  # reject (P1-041) + PDS read (P1-040) + PDS write (P1-042). A failed tail shows *-ERROR and times out -> FAIL.
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-PDS:' "$log" 2>/dev/null; then ok=1; echo "VITA-PDS (last marker) at ~${i}s"; break; fi
+    if grep -qa 'VITA-PDS-WRITE: outcome=committed' "$log" 2>/dev/null; then ok=1; echo "VITA-PDS-WRITE committed (last marker) at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn st ac ar cc cr pds
+  local ts ev pv ex cn st ac ar cpv cc cr pds pw
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
   ac=$(grep -a 'VITA-APPLY: outcome=committed' "$log" | tail -1); ar=$(grep -a 'VITA-APPLY: outcome=rejected' "$log" | tail -1)
+  cpv=$(grep -a 'VITA-CAPSULE-PREVIEW:' "$log" | tail -1)
   cc=$(grep -aE 'VITA-CAPSULE:.*outcome=committed' "$log" | tail -1); cr=$(grep -aE 'VITA-CAPSULE:.*outcome=rejected' "$log" | tail -1)
-  pds=$(grep -a 'VITA-PDS:' "$log" | tail -1)
-  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cc" "$cr" "$pds"; do echo "  $m"; done
-  # PASS = full chain: runtime+evaluator+preview+explain+connect+state read + APPLY commit&reject + CAPSULE
-  # commit&reject (P1-041) + PDS read (P1-040) — the node proposes, the privileged agent validates+applies, fail-closed.
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ]; then
-    echo "RESULT: PASS (full control-plane on-device: eval->preview->explain->connect->read->APPLY+CAPSULE commit&reject->PDS)"
+  pds=$(grep -aE 'VITA-PDS: ' "$log" | tail -1); pw=$(grep -a 'VITA-PDS-WRITE: outcome=committed' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw"; do echo "  $m"; done
+  # PASS = the FULL on-device control plane: eval+preview+explain + connect+state read + APPLY commit&reject +
+  # capsule PREVIEW + capsule apply commit&reject + PDS read + PDS WRITE committed. Node proposes; agent validates.
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ]; then
+    echo "RESULT: PASS (full control-plane on-device: eval->preview->explain->connect->read->APPLY+CAPSULE-PREVIEW+CAPSULE commit&reject->PDS read+write)"
   else
     echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -20
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -24
     return 1
   fi
 }
