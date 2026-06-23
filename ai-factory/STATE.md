@@ -12,6 +12,23 @@ complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** +
 **"use opus in the meantime then back to codex after reset"** — run continuously; only stop on "stop" / §24.
 **93 contracts merged.**
+- **2026-06-22 — OS INSTALL WAVE (parallel Codex + Opus builders, codex↔opus cross-review, host-verified on
+  Borg51):** the bootable node gained the pieces to be a usable TypeScript OS. MERGED + HOST-VERIFIED:
+  - **P1-031 RAUC** A/B update bundle (deterministic manifest; declare-only signing, no key material).
+  - **P1-029 persistence** — verity ro-root + a persistent ext4 `/var` (`vita-data`, by-label `var.mount`,
+    `nofail`+`device-timeout=5s` so a plain-smoke image without the partition doesn't hang boot). `/var` persists.
+  - **P1-030 TypeScript runtime ON-DEVICE** — pinned Deno 2.8.3 runs `main.ts` at boot, UNPRIVILEGED
+    (DynamicUser, empty caps, NoNewPrivileges, ProtectSystem=strict, seccomp allow-list). `VITA-TS` marker proven
+    in BOTH plain-smoke and verity images. The TS-OS heart beats.
+  - **Two on-device-only bugs caught by independent host-verify (NOT code review)**: the `var.mount` 90s
+    boot-hang, and a seccomp SIGSYS kill of Deno — root-caused via `systemd-run` sandbox replication + kernel
+    audit to `syscall=330` (`pkey_alloc`, V8 PKU); fix allows back exactly the pkey family. `tools/wsl-verify.sh ts`
+    now regression-guards the marker.
+  - **P1-032 installer** (real-disk install, R3 destructive) — in Codex round-4 re-review; 4 cross-review rounds
+    hardened it (fail-closed system-disk detection incl. btrfs-subvol/overlay/squashfs, no lazy unmount,
+    e2fsck-fatal, post-P1-029 `vita-data` growth). 71/71 loopback assertions.
+  - **NEXT:** merge P1-032 on approve → **WAVE 2** = control plane on-device + capsules + PDS on the persistent
+    TS runtime.
 - **Codex usage-limit window (~23:57–00:30 UTC):** per the owner, the loop did NOT idle — it switched the
   worker substrate to **Opus 4.8 subagents** (builders) with **independent Opus reviewers** as the R2/R3
   gate substitute (Codex `npm run review` was also down), + orchestrator independent verification. Landed

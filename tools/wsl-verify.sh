@@ -77,6 +77,41 @@ boot_headless() {
   [ "$ok" = 1 ] && echo "RESULT: PASS (smoke boots to Multi-User)$agent" || { echo "RESULT: FAIL (no Multi-User marker in ${i}s)"; return 1; }
 }
 
+# P1-030 durable host-verify: prove the on-device TypeScript runtime actually EXECUTES. The vita-ts.service
+# oneshot runs /usr/lib/vita/ts/main.ts under the pinned, hardened Deno and prints "VITA-TS: ..." to the serial.
+# It's ordered after multi-user (After=vita-agentd) so the marker lands ~90s in — boot_headless's 90s window can
+# miss it, hence a dedicated longer-window check. Guards against regressions like the seccomp/pkey SIGSYS kill.
+boot_ts() {
+  disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
+  [ -f "$disk" ] || { echo "RESULT: FAIL (no disk to boot)"; return 1; }
+  echo "===== TS-RUNTIME BOOT ($disk) ====="
+  local code=/usr/share/OVMF/OVMF_CODE_4M.fd vars=/usr/share/OVMF/OVMF_VARS_4M.fd
+  [ -f "$code" ] || { code=/usr/share/OVMF/OVMF_CODE.fd; vars=/usr/share/OVMF/OVMF_VARS.fd; }
+  cp "$vars" "$REPO"/os/x86_64/out/OVMF_VARS.fd
+  local log="$REPO"/os/x86_64/out/serial.log; : > "$log"
+  local cpu="-cpu host -enable-kvm"; [ -e /dev/kvm ] || cpu="-cpu max"
+  timeout 150 qemu-system-x86_64 -machine q35 -m 2048 $cpu \
+    -drive if=pflash,format=raw,readonly=on,file="$code" \
+    -drive if=pflash,format=raw,file="$REPO"/os/x86_64/out/OVMF_VARS.fd \
+    -drive file="$disk",format=raw,if=virtio \
+    -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
+  local qpid=$! ok=0 i
+  for i in $(seq 1 140); do
+    if grep -qa 'VITA-TS:' "$log" 2>/dev/null; then ok=1; echo "VITA-TS marker found at ~${i}s"; break; fi
+    kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
+    sleep 1
+  done
+  kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
+  echo "----- VITA-TS line -----"; grep -a 'VITA-TS:' "$log" | tail -1
+  if [ "$ok" = 1 ]; then
+    echo "RESULT: PASS (TypeScript executed on-device under the unprivileged Deno sandbox)"
+  else
+    echo "RESULT: FAIL (no VITA-TS marker — service likely failed)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|deno' | tail -8
+    return 1
+  fi
+}
+
 build_full() {
   echo "===== FULL build (rootfs -> ext4 -> verity-format) ====="
   node os/x86_64/build-and-boot.mjs --mode=full --no-sign 2>&1 | tail -30
@@ -507,5 +542,6 @@ case "$MODE" in
   full)  build_full;;
   secboot) secboot;;
   verity) run_verity;;
+  ts)    build_smoke && boot_ts || echo "RESULT: FAIL";;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac
