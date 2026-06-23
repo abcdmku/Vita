@@ -177,6 +177,10 @@ type requestError struct {
 	message string
 }
 
+type codedApplyError interface {
+	ApplyErrorCode() string
+}
+
 type validatableRequest interface {
 	capabilities.TypedRequest
 	Validate() error
@@ -1094,8 +1098,15 @@ func resultError(err error) ResultError {
 	var applyErr *transaction.ApplyError
 	if errors.As(err, &applyErr) {
 		index := applyErr.Index
+		code := "apply_failed"
+		var coded codedApplyError
+		if errors.As(applyErr.Err, &coded) {
+			if value := coded.ApplyErrorCode(); value != "" {
+				code = value
+			}
+		}
 		return ResultError{
-			Code:       "apply_failed",
+			Code:       code,
 			Message:    applyErr.Error(),
 			Index:      &index,
 			Capability: applyErr.Capability,

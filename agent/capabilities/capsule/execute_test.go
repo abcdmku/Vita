@@ -12,6 +12,7 @@ import (
 
 	"github.com/vita/agent/capabilities"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
+	capsulestorage "github.com/vita/agent/storage/capsules"
 )
 
 func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T) {
@@ -67,6 +68,11 @@ func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T)
 	assertProperty(t, props, "MemoryMax", "67108864")
 	assertProperty(t, props, "CPUQuota", "25%")
 	assertProperty(t, props, "TasksMax", "32")
+	assertNoProperty(t, props, "StateDirectory")
+	assertNoProperty(t, props, "StateDirectoryMode")
+	assertNoProperty(t, props, "BindPaths")
+	assertNoProperty(t, props, "BindReadOnlyPaths")
+	assertNoProperty(t, props, "SupplementaryGroups")
 	assertContainsProperty(t, props, "SystemCallFilter", "@system-service")
 	assertContainsProperty(t, props, "SystemCallFilter", "pkey_alloc pkey_free pkey_mprotect")
 
@@ -101,6 +107,93 @@ func TestExecuteComposesHardenedTransientUnitFromValidatedManifest(t *testing.T)
 	readResponse = response.(ExecuteReadResponse)
 	if readResponse.Last != nil {
 		t.Fatalf("Last after undo = %#v, want nil", readResponse.Last)
+	}
+}
+
+func TestExecuteComposesStateDirectoryVolumeAndScopedDenoWrite(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	manifest := executeManifest(entry)
+	manifest.Data = ExecutionData{
+		Classes: []capsulestorage.DataClass{capsulestorage.DataClassAppState},
+		Volumes: []capsulestorage.VolumeSpec{
+			executeVolumeSpec(t, entry.ID, "state"),
+		},
+	}
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		status: transientUnitStatus{DynamicUID: "61408"},
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{
+			entry.ID: manifest,
+		},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply returned nil undo")
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+
+	started := launcher.starts[0]
+	volumePath := "/var/lib/vita/runtime/volumes/local.test.capsule/state"
+	wantArgv := []string{
+		defaultDenoPath,
+		"run",
+		"--no-remote",
+		"--cached-only",
+		"--no-config",
+		"--quiet",
+		"--allow-read=" + volumePath,
+		"--allow-write=" + volumePath,
+		"/usr/lib/vita/capsules/local.test.capsule/main.ts",
+	}
+	if !reflect.DeepEqual(started.Argv, wantArgv) {
+		t.Fatalf("argv = %v, want %v", started.Argv, wantArgv)
+	}
+
+	props := propertyValues(started.Properties)
+	assertProperty(t, props, "DynamicUser", "yes")
+	assertProperty(t, props, "StateDirectory", "vita/runtime/volumes/local.test.capsule/state")
+	assertProperty(t, props, "StateDirectoryMode", "0700")
+	assertNoProperty(t, props, "BindPaths")
+	assertNoProperty(t, props, "BindReadOnlyPaths")
+	assertNoProperty(t, props, "SupplementaryGroups")
+	if len(started.Volumes) != 1 {
+		t.Fatalf("Volumes length = %d, want 1", len(started.Volumes))
+	}
+	if started.Volumes[0].Path != volumePath || started.Volumes[0].StateDirectory != "vita/runtime/volumes/local.test.capsule/state" {
+		t.Fatalf("Volumes[0] = %#v, want state directory volume", started.Volumes[0])
+	}
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse := response.(ExecuteReadResponse)
+	if readResponse.Last == nil {
+		t.Fatal("ExecuteReadResponse.Last = nil, want execution status")
+	}
+	wantVolumes := []ExecuteVolumeStatus{
+		{
+			Name:           "state",
+			Path:           volumePath,
+			StateDirectory: "vita/runtime/volumes/local.test.capsule/state",
+			Access:         "read-write",
+			Mounted:        "OK",
+			Status:         "OK",
+		},
+	}
+	if !reflect.DeepEqual(readResponse.Last.Volumes, wantVolumes) {
+		t.Fatalf("Last.Volumes = %#v, want %#v", readResponse.Last.Volumes, wantVolumes)
 	}
 }
 
@@ -225,6 +318,42 @@ func TestExecutionManifestDecodesAndValidatesHealthChecks(t *testing.T) {
 	invalid := strings.Replace(string(raw), `"intervalSeconds":5`, `"intervalSeconds":0`, 1)
 	if err := json.Unmarshal([]byte(invalid), &manifest); err == nil {
 		t.Fatal("Unmarshal accepted an invalid health check")
+	}
+}
+
+func TestExecutionManifestDecodesAndValidatesDataVolumes(t *testing.T) {
+	if _, ok := executionManifestFields["data"]; !ok {
+		t.Fatal("executionManifestFields is missing data")
+	}
+
+	raw := []byte(`{
+		"id":"local.test.capsule",
+		"version":"1.0.0",
+		"integrity":"` + validSHA256SRI + `",
+		"packageClass":"ts-service",
+		"runtime":{"typescript":{"entrypoint":"main.ts"}},
+		"resourceLimits":{"cpuCores":0.25,"ramMiB":64,"storageMiB":16,"tasksMax":32},
+		"data":{
+			"classes":["app-state"],
+			"volumes":[
+				{"name":"state","mountPath":"/var/lib/vita/runtime/volumes/local.test.capsule/state","class":"app-state","access":"read-write","persistence":"persistent","backup":false,"sizeMiB":8}
+			]
+		}
+	}`)
+	var manifest ExecutionManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("Unmarshal valid manifest returned error: %v", err)
+	}
+	if len(manifest.Data.Volumes) != 1 {
+		t.Fatalf("Data.Volumes length = %d, want 1", len(manifest.Data.Volumes))
+	}
+	if manifest.Data.Volumes[0].Name != "state" || manifest.Data.Volumes[0].Access != capsulestorage.VolumeAccessReadWrite {
+		t.Fatalf("decoded volume = %#v, want state read-write", manifest.Data.Volumes[0])
+	}
+
+	invalid := strings.Replace(string(raw), `"persistence":"persistent"`, `"persistence":"ephemeral"`, 1)
+	if err := json.Unmarshal([]byte(invalid), &manifest); err == nil {
+		t.Fatal("Unmarshal accepted an unsupported ephemeral volume")
 	}
 }
 
@@ -374,6 +503,75 @@ func TestExecuteRejectsInvalidManifestWithoutStartingUnit(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsInvalidVolumeManifestWithoutStartingUnit(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	manifest := executeManifest(entry)
+	volume := executeVolumeSpec(t, entry.ID, "state")
+	volume.MountPath = "/var/lib/vita/runtime/volumes/local.test.capsule/other"
+	manifest.Data = ExecutionData{
+		Classes: []capsulestorage.DataClass{capsulestorage.DataClassAppState},
+		Volumes: []capsulestorage.VolumeSpec{volume},
+	}
+	launcher := &recordingTransientLauncher{}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{entry.ID: manifest},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *ExecuteInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+	}
+	if len(launcher.starts) != 0 {
+		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+	}
+}
+
+func TestExecuteVolumeStartFailureReturnsSpecificCode(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	manifest := executeManifest(entry)
+	manifest.Data = ExecutionData{
+		Classes: []capsulestorage.DataClass{capsulestorage.DataClassAppState},
+		Volumes: []capsulestorage.VolumeSpec{
+			executeVolumeSpec(t, entry.ID, "state"),
+		},
+	}
+	launcher := &recordingTransientLauncher{
+		err: errors.New("unit exited"),
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{entry.ID: manifest},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var startErr *ExecuteStartError
+	if !errors.As(err, &startErr) {
+		t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
+	}
+	if startErr.ApplyErrorCode() != "capsule_volume_start_failed" {
+		t.Fatalf("ApplyErrorCode = %q, want capsule_volume_start_failed", startErr.ApplyErrorCode())
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+}
+
 func TestExecuteApplyRejectsWrongRequestTypeWithoutStartingUnit(t *testing.T) {
 	ctx := context.Background()
 	launcher := &recordingTransientLauncher{}
@@ -418,10 +616,10 @@ func (l *recordingTransientLauncher) StartTransientUnit(ctx context.Context, uni
 	if err := ctx.Err(); err != nil {
 		return transientUnitStatus{}, err
 	}
+	l.starts = append(l.starts, cloneTransientUnit(unit))
 	if l.err != nil {
 		return transientUnitStatus{}, l.err
 	}
-	l.starts = append(l.starts, cloneTransientUnit(unit))
 	return l.status, nil
 }
 
@@ -481,10 +679,12 @@ func executeApply(entry CapsuleEntry) ExecuteApplyRequest {
 func cloneTransientUnit(unit transientUnit) transientUnit {
 	argv := append([]string(nil), unit.Argv...)
 	properties := append([]systemdProperty(nil), unit.Properties...)
+	volumes := append([]capsulestorage.VolumeMount(nil), unit.Volumes...)
 	return transientUnit{
 		Name:       unit.Name,
 		Argv:       argv,
 		Properties: properties,
+		Volumes:    volumes,
 	}
 }
 
@@ -504,6 +704,13 @@ func assertProperty(t *testing.T, props map[string][]string, name string, want s
 	}
 }
 
+func assertNoProperty(t *testing.T, props map[string][]string, name string) {
+	t.Helper()
+	if values := props[name]; len(values) != 0 {
+		t.Fatalf("%s = %v, want absent", name, values)
+	}
+}
+
 func assertContainsProperty(t *testing.T, props map[string][]string, name string, want string) {
 	t.Helper()
 	for _, value := range props[name] {
@@ -512,6 +719,23 @@ func assertContainsProperty(t *testing.T, props map[string][]string, name string
 		}
 	}
 	t.Fatalf("%s = %v, want value %q", name, props[name], want)
+}
+
+func executeVolumeSpec(t *testing.T, capsuleID string, name string) capsulestorage.VolumeSpec {
+	t.Helper()
+	mountPath, err := capsulestorage.VolumePath(capsuleID, name)
+	if err != nil {
+		t.Fatalf("VolumePath returned error: %v", err)
+	}
+	return capsulestorage.VolumeSpec{
+		Name:        name,
+		MountPath:   mountPath,
+		Class:       capsulestorage.DataClassAppState,
+		Access:      capsulestorage.VolumeAccessReadWrite,
+		Persistence: capsulestorage.VolumePersistencePersistent,
+		Backup:      false,
+		SizeMiB:     8,
+	}
 }
 
 type recordingHealthProber struct {

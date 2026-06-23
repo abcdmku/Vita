@@ -64,6 +64,8 @@ const CAPSULE_FETCH_ERROR_MARKER = "VITA-CAPSULE-FETCH-ERROR";
 const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
 const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
 const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
+const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
+const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
@@ -71,8 +73,10 @@ const AGENTD_BASE_URL = "http://agentd";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
-const CAPSULE_BUNDLE_INTEGRITY = "sha256-2CR0HBzqwe6jE+rSVO6VZNx99AXq+fqZ/6dwa9itQ9w=";
+const CAPSULE_BUNDLE_INTEGRITY = "sha256-Wiwzsgeadk6nTBJrxMe67QBdsAceNpHynbJRH2JAMZ8=";
 const BAD_CAPSULE_BUNDLE_INTEGRITY = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const CAPSULE_VOLUME_NAME = "state";
+const CAPSULE_VOLUME_PATH = "/var/lib/vita/runtime/volumes/local.test.capsule/state";
 const STATE_JSON_HEADERS = Object.freeze({
   Accept: "application/json",
 });
@@ -386,6 +390,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -403,6 +408,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     }
   } else {
@@ -412,6 +418,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
 
@@ -447,6 +454,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -461,6 +469,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -470,6 +479,8 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     await emitCapsuleExecuteMarkers(agentTransport);
   } else {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
   await emitForcedCapsuleRejectMarker(agentTransport);
 }
@@ -698,7 +709,9 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     const result = await client.apply(CAPSULE_EXECUTE_PLAN);
 
     if (result.outcome !== "committed") {
-      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      const reason = agentApplyResultReason(result);
+      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
@@ -707,13 +720,20 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     const state = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
 
     if (!state.ok) {
-      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
 
     emit(formatCapsuleExecutedMarker(state.status));
+    const volume = capsuleVolumeStatus(state.status);
+    if (volume === undefined) {
+      emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=volume_state_missing status=FAILSAFE`);
+    } else {
+      emit(formatCapsuleVolumeMarker(state.status, volume));
+    }
 
     const health = await readCapsuleHealthState(agentTransport, state.status.id);
     if (health.ok && health.workload.status === "OK" && health.workload.health === "OK") {
@@ -721,8 +741,10 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     } else {
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     }
-  } catch {
-    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+  } catch (cause) {
+    const reason = agentClientErrorReason(cause, "transport_failed");
+    emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+    emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -754,6 +776,7 @@ async function emitForcedCapsuleExecuteRejectMarker(
   }
 
   emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+  emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 type CapsuleExecuteReadResult =
@@ -770,6 +793,16 @@ interface CapsuleExecuteStatus {
   readonly unit: string;
   readonly dynamicUid: string;
   readonly health: "OK";
+  readonly status: "OK";
+  readonly volumes: readonly CapsuleVolumeStatus[];
+}
+
+interface CapsuleVolumeStatus {
+  readonly name: string;
+  readonly path: string;
+  readonly stateDirectory: string;
+  readonly access: string;
+  readonly mounted: "OK";
   readonly status: "OK";
 }
 
@@ -806,13 +839,15 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
   const dynamicUid = readStringField(last, "dynamicUid");
   const health = readStringField(last, "health");
   const status = readStringField(last, "status");
+  const volumes = parseCapsuleVolumeStatuses(last["volumes"]);
 
   if (
     id === undefined ||
     unit === undefined ||
     dynamicUid === undefined ||
     health !== "OK" ||
-    status !== "OK"
+    status !== "OK" ||
+    volumes === undefined
   ) {
     return { ok: false };
   }
@@ -825,7 +860,66 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
       id,
       status,
       unit,
+      volumes,
     },
+  };
+}
+
+function parseCapsuleVolumeStatuses(value: unknown): readonly CapsuleVolumeStatus[] | undefined {
+  if (value === undefined) {
+    return Object.freeze([]);
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const volumes: CapsuleVolumeStatus[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const volume = value[index];
+
+    if (!isJsonObject(volume)) {
+      return undefined;
+    }
+
+    const parsed = parseCapsuleVolumeStatus(volume);
+
+    if (parsed === undefined) {
+      return undefined;
+    }
+
+    volumes[volumes.length] = parsed;
+  }
+  return Object.freeze(volumes);
+}
+
+function parseCapsuleVolumeStatus(
+  value: Readonly<Record<string, unknown>>,
+): CapsuleVolumeStatus | undefined {
+  const name = readStringField(value, "name");
+  const volumePath = readStringField(value, "path");
+  const stateDirectory = readStringField(value, "stateDirectory");
+  const access = readStringField(value, "access");
+  const mounted = readStringField(value, "mounted");
+  const status = readStringField(value, "status");
+
+  if (
+    name === undefined ||
+    volumePath === undefined ||
+    stateDirectory === undefined ||
+    access === undefined ||
+    mounted !== "OK" ||
+    status !== "OK"
+  ) {
+    return undefined;
+  }
+
+  return {
+    access,
+    mounted,
+    name,
+    path: volumePath,
+    stateDirectory,
+    status,
   };
 }
 
@@ -836,6 +930,38 @@ function formatCapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
     `unit=${status.unit} ` +
     `uid=${status.dynamicUid} ` +
     `health=${status.health} ` +
+    "status=OK"
+  );
+}
+
+function capsuleVolumeStatus(status: CapsuleExecuteStatus): CapsuleVolumeStatus | undefined {
+  for (let index = 0; index < status.volumes.length; index += 1) {
+    const volume = status.volumes[index];
+
+    if (
+      volume !== undefined &&
+      volume.name === CAPSULE_VOLUME_NAME &&
+      volume.path === CAPSULE_VOLUME_PATH &&
+      volume.mounted === "OK" &&
+      volume.status === "OK"
+    ) {
+      return volume;
+    }
+  }
+
+  return undefined;
+}
+
+function formatCapsuleVolumeMarker(
+  status: CapsuleExecuteStatus,
+  volume: CapsuleVolumeStatus,
+): string {
+  return (
+    `${CAPSULE_VOLUME_MARKER}: ` +
+    `id=${status.id} ` +
+    `vol=${volume.name} ` +
+    `path=${volume.path} ` +
+    `mounted=${volume.mounted} ` +
     "status=OK"
   );
 }
@@ -982,6 +1108,14 @@ function applyResultReason(result: ApplyNodeApplyResult, fallback: string): stri
 
 function agentApplyResultReason(result: AgentApplyResult): string {
   return markerToken(result.error?.code ?? "transaction_rejected");
+}
+
+function agentClientErrorReason(cause: unknown, fallback: string): string {
+  if (isAgentClientError(cause) && cause.agentError !== undefined) {
+    return markerToken(cause.agentError.code);
+  }
+
+  return markerToken(fallback);
 }
 
 function markerToken(value: string): string {
