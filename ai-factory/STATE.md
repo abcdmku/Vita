@@ -52,8 +52,16 @@ Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + 
     VITA-STATE(caps=13) → VITA-APPLY: outcome=committed applied=1 audit=recorded → VITA-APPLY: outcome=rejected
     reason=unknown_capability` (agentd re-validates every plan + fails closed; the unprivileged runtime only proposes
     over the /apply-scoped unix transport; hostname unchanged = benign). `wsl-verify ts` guards the full chain incl.
-    APPLY commit+reject. **NEXT: S4 (PDS read via agentd → VITA-PDS, R2) ∥ S6 (capsule.registry apply → VITA-CAPSULE,
-    R2) — both unblocked (dep=S3), wire-up over agentd's EXISTING handlers; then S5 (PDS write) + S7 (capsule preview).**
+    APPLY commit+reject. **WAVE-2/3 CONTROL-PLANE-ON-DEVICE FRONTIER COMPLETE + HOST-VERIFIED (2026-06-23):** all
+    7 slices merged via codex↔opus cross-review (R3 gates = 2 parallel Codex candidates + an Opus judge). S4 (P1-040
+    PDS read) + S6 (P1-041 capsule apply) + S5 (P1-042 PDS write, R3) + S7 (P1-043 capsule preview) all done. ONE boot
+    serial shows the whole chain: `VITA-TS→EVAL→PREVIEW→EXPLAIN→CONNECT→STATE→APPLY(commit+reject)→CAPSULE-PREVIEW→
+    CAPSULE(install commit+reject)→PDS read→PDS-WRITE(committed cursor=42, read back)`. The node fully reconfigures
+    itself, manages capsules, and persists PDS state on-device — unprivileged runtime proposes, agentd validates +
+    applies + fails closed. `wsl-verify ts` guards the full chain. (S5 2-boot verity persistence check in progress.)
+    Host-verify caught real integration bugs throughout (var.mount RequiresMountsFor cascade → verity-only overlay).
+    **NEXT FRONTIER: wave 4 — capsule EXECUTION (fetch/extract/verify + workload launch), the larger parked work;**
+    plus the noted hardenings (SO_PEERCRED agentd auth per ADR-0008; safe-normalize direct node:util).
   - **P1-032 installer MERGED (2026-06-22)** after FIVE codex↔opus cross-review rounds + orchestrator-independent
     re-run of the 85-assertion loopback safety harness (ALL PASS) + `bash -n`. Real-disk install with fail-closed
     safety: refuses the running-system disk (incl. btrfs-subvol/overlay/squashfs/loop-backed roots, fail-closed when
