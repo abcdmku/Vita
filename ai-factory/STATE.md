@@ -326,9 +326,14 @@ db.crt` PASS) whose cmdline carries the verity `roothash=` (matches the root par
 root-verity partition. Booted enrolled on `OVMF_CODE_4M.secboot.fd`: `SecureBoot-enforcing=yes` (VITA-SB-STATE=
 enabled) + `dm-verity-active=yes` (/dev/mapper/root) + reached multi-user → RESULT: PASS. So the full chain works:
 firmware → (verifies signature) signed UKI → (pins roothash) dm-verity → verified root → Vita agent. This is "make
-it vita and trusted boot" achieved with the TEST key. **NEXT:** step 4(b) swap the owner's REAL key (staged at
-/home/borg/vita-keys/, [[vita-owner-secureboot-cert]]) + re-prove; step 3 (A/B + RAUC bundle); then RAUC bundle
-signing + N-of-M recovery (4c–d, need owner keys §16).
+it vita and trusted boot" achieved with the TEST key. **STEP 4(b) DONE — OWNER'S REAL KEY PROVEN (2026-06-22).**
+Rebuilt the combined image signed with the owner's real key (VITA_TEST_SECUREBOOT_KEY_PATH=/home/borg/vita-keys/
+vita-db.key via the existing merged pipeline — no code change); verified the UKI is signed by the REAL key + NOT
+by the test key (cross-check), enrolled the REAL cert, booted: RealKey-SB-enforcing=yes + dm-verity=yes + userspace
+=yes. So the enforced root of trust is now the OWNER'S key, not a throwaway ([[vita-owner-secureboot-cert]]).
+**NEXT (owner to choose direction — see below):** the trusted-boot FOUNDATION is complete; the remaining work is the
+TS OS USERSPACE (Deno/TS runtime + control plane + persistent data partition on-device = "usable Vita TS node"),
+then installer + step 3 (A/B + RAUC) for bare-metal install. RAUC signing + N-of-M recovery (4c–d) need owner keys (§16).
 `wsl-verify`: --incremental=yes (smoke re-builds in ~tens-of-sec vs ~5min; needs --cache-dir),
 fail-fast 90s boot window, + `probe`/`diag` modes. **NEXT:** (a) finish trusted boot — extract kernel/initrd from
 the rootfs for full-mode ukify (Codex is BACK → dispatch via `npm run dispatch`); (b) optionally chase the
