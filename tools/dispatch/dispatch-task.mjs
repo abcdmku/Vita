@@ -49,10 +49,14 @@ const git = (args, opts = {}) => spawnSync("git", args, { cwd: REPO, encoding: "
 const branch = `task/${id}`;
 const wt = join(REPO, ".vita-worktrees", id);
 
-// Fresh isolated worktree branched from current main HEAD (so the worker sees prior merged work).
+// Fresh isolated worktree branched from VITA_DISPATCH_BASE (default: main HEAD, so the worker sees
+// prior merged work). Set VITA_DISPATCH_BASE=task/<id> to re-dispatch a REVISION onto an existing
+// task branch's tip (the worker extends its own prior work — e.g. after a reviewer 'revise'); the
+// revised contract is still read live from the queue file, so edit it before re-dispatching.
+const base = process.env.VITA_DISPATCH_BASE || "HEAD";
 git(["worktree", "remove", "--force", wt]); // ignore failure if absent
 git(["worktree", "prune"]);
-const add = git(["worktree", "add", "--force", "-B", branch, wt, "HEAD"], { stdio: "inherit" });
+const add = git(["worktree", "add", "--force", "-B", branch, wt, base], { stdio: "inherit" });
 if (add.status !== 0) {
   console.error(`Could not create worktree at ${wt} for ${branch}.`);
   process.exit(5);
