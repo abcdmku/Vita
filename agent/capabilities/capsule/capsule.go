@@ -317,10 +317,11 @@ func (u undoRegistry) Undo(ctx context.Context) error {
 }
 
 type FetchDesired struct {
-	ID        string `json:"id"`
-	Version   string `json:"version"`
-	Ref       string `json:"ref"`
-	Integrity string `json:"integrity"`
+	ID          string  `json:"id"`
+	Version     string  `json:"version"`
+	Ref         string  `json:"ref"`
+	Integrity   string  `json:"integrity"`
+	ImageDigest *string `json:"imageDigest,omitempty"`
 }
 
 func (d FetchDesired) Validate() error {
@@ -356,12 +357,17 @@ func (d *FetchDesired) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return &FetchInvalidRequestError{Reason: err.Error()}
 	}
+	imageDigest, err := optionalStringPointerField(fields, "imageDigest")
+	if err != nil {
+		return &FetchInvalidRequestError{Reason: err.Error()}
+	}
 
 	desired := FetchDesired{
-		ID:        id,
-		Version:   version,
-		Ref:       ref,
-		Integrity: integrity,
+		ID:          id,
+		Version:     version,
+		Ref:         ref,
+		Integrity:   integrity,
+		ImageDigest: imageDigest,
 	}
 	if err := desired.Validate(); err != nil {
 		return err
@@ -424,12 +430,17 @@ type FetchReadResponse struct {
 func (FetchReadResponse) CapabilityResponse() {}
 
 type FetchStatus struct {
-	ID        string `json:"id"`
-	Version   string `json:"version"`
-	Ref       string `json:"ref"`
-	Integrity string `json:"integrity"`
-	LocalPath string `json:"localPath"`
-	Status    string `json:"status"`
+	ID          string   `json:"id"`
+	Version     string   `json:"version"`
+	Ref         string   `json:"ref"`
+	Integrity   string   `json:"integrity"`
+	LocalPath   string   `json:"localPath"`
+	RootFSPath  string   `json:"rootfsPath,omitempty"`
+	ImageDigest string   `json:"imageDigest,omitempty"`
+	Layers      int      `json:"layers,omitempty"`
+	Entrypoint  []string `json:"entrypoint,omitempty"`
+	Env         []string `json:"env,omitempty"`
+	Status      string   `json:"status"`
 }
 
 type FetchCapability struct {
@@ -441,6 +452,7 @@ type FetchCapability struct {
 
 type capsuleFetchStore interface {
 	FetchCapsuleFor(context.Context, string, string, string, string) (string, error)
+	FetchOCIImageFor(context.Context, string, string, string, string, string) (capsulestorage.OCIFetchResult, error)
 	CachePath(string, string) (string, error)
 	RemoveStagedCapsule(context.Context, string) error
 }
@@ -449,6 +461,10 @@ type defaultFetchStore struct{}
 
 func (defaultFetchStore) FetchCapsuleFor(ctx context.Context, ref string, integrity string, id string, version string) (string, error) {
 	return capsulestorage.FetchCapsuleFor(ctx, ref, integrity, id, version)
+}
+
+func (defaultFetchStore) FetchOCIImageFor(ctx context.Context, ref string, integrity string, id string, version string, imageDigest string) (capsulestorage.OCIFetchResult, error) {
+	return capsulestorage.FetchOCIImageFor(ctx, ref, integrity, id, version, imageDigest)
 }
 
 func (defaultFetchStore) CachePath(id string, version string) (string, error) {
@@ -523,9 +539,19 @@ func (c *FetchCapability) Apply(ctx context.Context, req capabilities.TypedReque
 	}
 	preexisting := pathExists(target)
 
-	localPath, err := c.store.FetchCapsuleFor(ctx, desired.Ref, desired.Integrity, desired.ID, desired.Version)
-	if err != nil {
-		return nil, err
+	localPath := ""
+	var ociResult capsulestorage.OCIFetchResult
+	if desired.ImageDigest != nil {
+		ociResult, err = c.store.FetchOCIImageFor(ctx, desired.Ref, desired.Integrity, desired.ID, desired.Version, *desired.ImageDigest)
+		if err != nil {
+			return nil, err
+		}
+		localPath = ociResult.CapsulePath
+	} else {
+		localPath, err = c.store.FetchCapsuleFor(ctx, desired.Ref, desired.Integrity, desired.ID, desired.Version)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if localPath != target {
 		if !preexisting {
@@ -535,12 +561,17 @@ func (c *FetchCapability) Apply(ctx context.Context, req capabilities.TypedReque
 	}
 
 	status := FetchStatus{
-		ID:        desired.ID,
-		Version:   desired.Version,
-		Ref:       desired.Ref,
-		Integrity: desired.Integrity,
-		LocalPath: localPath,
-		Status:    "OK",
+		ID:          desired.ID,
+		Version:     desired.Version,
+		Ref:         desired.Ref,
+		Integrity:   desired.Integrity,
+		LocalPath:   localPath,
+		RootFSPath:  ociResult.RootFSPath,
+		ImageDigest: ociResult.ImageDigest,
+		Layers:      ociResult.Layers,
+		Entrypoint:  cloneStrings(ociResult.Entrypoint),
+		Env:         cloneStrings(ociResult.Env),
+		Status:      "OK",
 	}
 	c.setLastFetch(status)
 
@@ -557,12 +588,17 @@ func (c *FetchCapability) setLastFetch(status FetchStatus) {
 	defer c.mu.Unlock()
 
 	c.last = &FetchStatus{
-		ID:        status.ID,
-		Version:   status.Version,
-		Ref:       status.Ref,
-		Integrity: status.Integrity,
-		LocalPath: status.LocalPath,
-		Status:    status.Status,
+		ID:          status.ID,
+		Version:     status.Version,
+		Ref:         status.Ref,
+		Integrity:   status.Integrity,
+		LocalPath:   status.LocalPath,
+		RootFSPath:  status.RootFSPath,
+		ImageDigest: status.ImageDigest,
+		Layers:      status.Layers,
+		Entrypoint:  cloneStrings(status.Entrypoint),
+		Env:         cloneStrings(status.Env),
+		Status:      status.Status,
 	}
 }
 
@@ -704,10 +740,11 @@ var (
 		"desired": {},
 	}
 	fetchDesiredFields = map[string]struct{}{
-		"id":        {},
-		"integrity": {},
-		"ref":       {},
-		"version":   {},
+		"id":          {},
+		"imageDigest": {},
+		"integrity":   {},
+		"ref":         {},
+		"version":     {},
 	}
 	applyRequestFields = map[string]struct{}{
 		"desired": {},
@@ -778,6 +815,14 @@ func validateFetchDesired(desired FetchDesired, field string) error {
 	}
 	if !isValidSRI(desired.Integrity) {
 		return &FetchInvalidRequestError{Reason: field + ".integrity must be a real SRI integrity"}
+	}
+	if desired.ImageDigest != nil {
+		if *desired.ImageDigest == "" {
+			return &FetchInvalidRequestError{Reason: field + ".imageDigest is required when present"}
+		}
+		if !capsulestorage.IsValidOCIDigest(*desired.ImageDigest) {
+			return &FetchInvalidRequestError{Reason: field + ".imageDigest must be sha256:<64 lowercase hex>"}
+		}
 	}
 	return nil
 }
@@ -1002,6 +1047,21 @@ func requiredStringField(fields map[string]json.RawMessage, key string) (string,
 	return value, nil
 }
 
+func optionalStringPointerField(fields map[string]json.RawMessage, key string) (*string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("%s must be a string", key)
+	}
+	var value string
+	if err := decodeSingleJSONValue(raw, &value); err != nil {
+		return nil, fmt.Errorf("%s must be a string", key)
+	}
+	return &value, nil
+}
+
 func decodeSingleJSONValue(raw []byte, target interface{}) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if err := decoder.Decode(target); err != nil {
@@ -1050,6 +1110,15 @@ func cloneBytes(in []byte) []byte {
 		return nil
 	}
 	out := make([]byte, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
 	copy(out, in)
 	return out
 }

@@ -61,6 +61,9 @@ const CAPSULE_PREVIEW_ERROR_MARKER = "VITA-CAPSULE-PREVIEW-ERROR";
 const CAPSULE_FETCH_MARKER = "VITA-CAPSULE-FETCH";
 const CAPSULE_FETCH_REJECT_MARKER = "VITA-CAPSULE-FETCH-REJECT";
 const CAPSULE_FETCH_ERROR_MARKER = "VITA-CAPSULE-FETCH-ERROR";
+const CAPSULE_OCI_FETCH_MARKER = "VITA-CAPSULE-OCI-FETCH";
+const CAPSULE_OCI_FETCH_REJECT_MARKER = "VITA-CAPSULE-OCI-FETCH-REJECT";
+const CAPSULE_OCI_FETCH_ERROR_MARKER = "VITA-CAPSULE-OCI-FETCH-ERROR";
 const CAPSULE_EXECUTED_MARKER = "VITA-CAPSULE-EXECUTED";
 const CAPSULE_EXECUTE_REJECT_MARKER = "VITA-CAPSULE-EXECUTE-REJECT";
 const CAPSULE_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-EXECUTE-ERROR";
@@ -75,6 +78,13 @@ const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
 const CAPSULE_BUNDLE_INTEGRITY = "sha256-ZxeTpiUU3aU+z6sDmWsoRUWAo28E+2pW6puG3DmkuNk=";
 const BAD_CAPSULE_BUNDLE_INTEGRITY = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const OCI_FETCH_CAPSULE_ID = "local.test.oci";
+const OCI_FETCH_CAPSULE_VERSION = "1.0.0";
+const OCI_IMAGE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.oci-image.tar";
+const OCI_IMAGE_TAMPERED_REF = "file:///usr/lib/vita/capsule-bundles/local.test.oci-image.tampered.tar";
+const OCI_IMAGE_INTEGRITY = "sha256-+sXvwUEoLRyQ8XaGpTAZr7ZeRM+3/18dd2zb5liruNs=";
+const OCI_IMAGE_TAMPERED_INTEGRITY = "sha256-kjEqlr0zeEJfbwhGjsnm8X8xna7YfXquFo4KTq8AeLY=";
+const OCI_IMAGE_DIGEST = "sha256:740bb2d1795bcf0764f483cde41fd7927b14f67ea6e6923cdda02a893315306b";
 const CAPSULE_VOLUME_NAME = "state";
 const CAPSULE_VOLUME_PATH = "/var/lib/vita/runtime/volumes/local.test.capsule/state";
 const STATE_JSON_HEADERS = Object.freeze({
@@ -173,6 +183,40 @@ const FORCED_BAD_CAPSULE_FETCH_PLAN = Object.freeze({
           integrity: BAD_CAPSULE_BUNDLE_INTEGRITY,
           ref: CAPSULE_BUNDLE_REF,
           version: ON_DEVICE_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const CAPSULE_OCI_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: OCI_FETCH_CAPSULE_ID,
+          imageDigest: OCI_IMAGE_DIGEST,
+          integrity: OCI_IMAGE_INTEGRITY,
+          ref: OCI_IMAGE_REF,
+          version: OCI_FETCH_CAPSULE_VERSION,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_TAMPERED_CAPSULE_OCI_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: OCI_FETCH_CAPSULE_ID,
+          imageDigest: OCI_IMAGE_DIGEST,
+          integrity: OCI_IMAGE_TAMPERED_INTEGRITY,
+          ref: OCI_IMAGE_TAMPERED_REF,
+          version: OCI_FETCH_CAPSULE_VERSION,
         }),
       }),
     }),
@@ -389,6 +433,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -407,6 +452,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     } else {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -417,6 +463,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -453,6 +500,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -468,6 +516,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
   if (!result.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
@@ -483,6 +532,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
   await emitForcedCapsuleRejectMarker(agentTransport);
+  await emitCapsuleOCIFetchMarkers(agentTransport);
 }
 
 async function emitCapsulePreviewMarker(
@@ -697,6 +747,56 @@ async function emitForcedCapsuleFetchRejectMarker(
   }
 
   emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitCapsuleOCIFetchMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const result = await client.apply(CAPSULE_OCI_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedCapsuleOCIFetchRejectMarker(client);
+      return;
+    }
+
+    emit(formatCapsuleOCIFetchedMarker());
+  } catch {
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  await emitForcedCapsuleOCIFetchRejectMarker(client);
+}
+
+async function emitForcedCapsuleOCIFetchRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_TAMPERED_CAPSULE_OCI_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${capsuleOCIFetchRejectReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promise<void> {
@@ -976,11 +1076,44 @@ function formatCapsuleFetchedMarker(): string {
   );
 }
 
+function formatCapsuleOCIFetchedMarker(): string {
+  return (
+    `${CAPSULE_OCI_FETCH_MARKER}: ` +
+    `id=${OCI_FETCH_CAPSULE_ID} ` +
+    `image-digest=${shortOCIDigest(OCI_IMAGE_DIGEST)} ` +
+    "layers=1 " +
+    "verified=OK " +
+    "status=OK"
+  );
+}
+
 function capsuleFetchRejectReason(result: AgentApplyResult): string {
   const message = result.error?.message.toLowerCase() ?? "";
 
   if (message.includes("sri mismatch")) {
     return "sri_mismatch";
+  }
+
+  return agentApplyResultReason(result);
+}
+
+function capsuleOCIFetchRejectReason(result: AgentApplyResult): string {
+  const message = result.error?.message.toLowerCase() ?? "";
+
+  if (message.includes("sri mismatch")) {
+    return "sri_mismatch";
+  }
+  if (message.includes("digest mismatch")) {
+    return "digest_mismatch";
+  }
+  if (message.includes("whiteout")) {
+    return "whiteout";
+  }
+  if (message.includes("bomb") || message.includes("entry limit") || message.includes("payload size limit")) {
+    return "bomb";
+  }
+  if (message.includes("traversal") || message.includes("escapes capsule root")) {
+    return "traversal";
   }
 
   return agentApplyResultReason(result);
@@ -1132,6 +1265,18 @@ function shortSRI(integrity: string): string {
 
   const algorithm = integrity.slice(0, separator);
   const token = integrity.slice(separator + 1, separator + 13);
+  return `${algorithm}-${token}`;
+}
+
+function shortOCIDigest(digest: string): string {
+  const separator = digest.indexOf(":");
+
+  if (separator <= 0) {
+    return markerToken(digest);
+  }
+
+  const algorithm = digest.slice(0, separator);
+  const token = digest.slice(separator + 1, separator + 13);
   return `${algorithm}-${token}`;
 }
 
