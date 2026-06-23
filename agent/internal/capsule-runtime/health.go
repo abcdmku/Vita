@@ -198,7 +198,11 @@ func (s *Supervisor) StartWorkload(spec WorkloadSpec) {
 	if s == nil || spec.ID == "" || spec.Unit == "" {
 		return
 	}
-	spec.Checks = checksForWorkload(spec)
+	checks, err := ChecksForUnit(spec.Checks, spec.Unit)
+	if err != nil {
+		return
+	}
+	spec.Checks = checks
 
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &workloadState{
@@ -220,8 +224,8 @@ func (s *Supervisor) StartWorkload(spec WorkloadSpec) {
 
 	for i, check := range spec.Checks {
 		key := checkKey(i, check)
-		s.pollCheck(ctx, spec, key, check)
-		go s.runCheck(ctx, spec, key, check)
+		s.pollCheck(ctx, spec, state, key, check)
+		go s.runCheck(ctx, spec, state, key, check)
 	}
 }
 
@@ -270,7 +274,7 @@ func (s *Supervisor) Snapshot() []WorkloadStatus {
 	return out
 }
 
-func (s *Supervisor) runCheck(ctx context.Context, spec WorkloadSpec, key string, check Check) {
+func (s *Supervisor) runCheck(ctx context.Context, spec WorkloadSpec, state *workloadState, key string, check Check) {
 	for {
 		timer := time.NewTimer(s.nextDelay(spec, check))
 		select {
@@ -283,18 +287,21 @@ func (s *Supervisor) runCheck(ctx context.Context, spec WorkloadSpec, key string
 			}
 			return
 		case <-timer.C:
-			s.pollCheck(ctx, spec, key, check)
+			s.pollCheck(ctx, spec, state, key, check)
 		}
 	}
 }
 
-func (s *Supervisor) pollCheck(ctx context.Context, spec WorkloadSpec, key string, check Check) {
+func (s *Supervisor) pollCheck(ctx context.Context, spec WorkloadSpec, expected *workloadState, key string, check Check) {
 	status, err := s.prober.PollHealth(ctx, check)
 	if err != nil {
 		status = StatusUnknown
 	}
 	if !validStatus(status) {
 		status = StatusUnknown
+	}
+	if err := ctx.Err(); err != nil {
+		return
 	}
 
 	var restarts *int
@@ -303,12 +310,15 @@ func (s *Supervisor) pollCheck(ctx context.Context, spec WorkloadSpec, key strin
 			restarts = &value
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	state, ok := s.workloads[spec.Unit]
-	if !ok {
+	if !ok || state != expected {
 		return
 	}
 	state.statuses[key] = status
@@ -653,13 +663,34 @@ func checkKey(index int, check Check) string {
 	return strconv.Itoa(index) + ":" + check.Name
 }
 
-func checksForWorkload(spec WorkloadSpec) []Check {
-	checks := make([]Check, len(spec.Checks))
-	copy(checks, spec.Checks)
-	for i := range checks {
-		if checks[i].Type == CheckTypeLifecycle && (checks[i].Target == "self" || checks[i].Target == "unit") {
-			checks[i].Target = spec.Unit
+func ChecksForUnit(checks []Check, unit string) ([]Check, error) {
+	out := make([]Check, len(checks))
+	copy(out, checks)
+	for i := range out {
+		if err := out[i].Validate(); err != nil {
+			return nil, fmt.Errorf("health check %d: %w", i, err)
 		}
+		if out[i].Type != CheckTypeLifecycle {
+			continue
+		}
+		switch out[i].Target {
+		case "self", "unit":
+			if err := validateLifecycleTarget(unit); err != nil {
+				return nil, fmt.Errorf("health check %d lifecycle unit: %w", i, err)
+			}
+			out[i].Target = unit
+		case unit:
+		default:
+			return nil, fmt.Errorf("health check %d lifecycle target must be the capsule unit", i)
+		}
+	}
+	return out, nil
+}
+
+func checksForWorkload(spec WorkloadSpec) []Check {
+	checks, err := ChecksForUnit(spec.Checks, spec.Unit)
+	if err != nil {
+		return []Check{}
 	}
 	return checks
 }
@@ -718,6 +749,9 @@ func validateHTTPTarget(target string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("http health target must include a host")
 	}
+	if !isLoopbackHost(parsed.Hostname()) {
+		return fmt.Errorf("http health target must be loopback")
+	}
 	return nil
 }
 
@@ -727,6 +761,10 @@ func validateTCPTarget(target string) error {
 	}
 	if _, _, err := net.SplitHostPort(target); err != nil {
 		return fmt.Errorf("tcp health target must be host:port: %w", err)
+	}
+	host, _, _ := net.SplitHostPort(target)
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("tcp health target must be loopback")
 	}
 	return nil
 }

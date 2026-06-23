@@ -273,7 +273,11 @@ func NewHandler(config Config) (http.Handler, error) {
 
 	capsuleWorkloads := config.CapsuleWorkloads
 	if capsuleWorkloads == nil {
-		capsuleWorkloads = capsuleWorkloadSnapshotFunc(registry)
+		var err error
+		capsuleWorkloads, err = capsuleWorkloadSnapshotFunc(registry)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	names := registry.Names()
@@ -547,20 +551,20 @@ func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
 	return request, request != nil
 }
 
-func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) func() []capsuleruntime.WorkloadStatus {
+func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) (func() []capsuleruntime.WorkloadStatus, error) {
 	if registry == nil {
-		return nil
+		return nil, nil
 	}
 
 	capability, ok := registry.Lookup(capsule.ExecuteName)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	source, ok := capability.(capsuleWorkloadSource)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("%s capability does not expose capsule workloads", capsule.ExecuteName)
 	}
-	return source.Workloads
+	return source.Workloads, nil
 }
 
 func normalizeCapsuleWorkloads(workloads []capsuleruntime.WorkloadStatus) []capsuleruntime.WorkloadStatus {

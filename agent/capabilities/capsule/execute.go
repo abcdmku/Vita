@@ -264,6 +264,10 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	if err != nil {
 		return nil, err
 	}
+	healthChecks, err := healthChecksForUnit(manifest.HealthChecks, unit.Name)
+	if err != nil {
+		return nil, &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
 
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
@@ -278,7 +282,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Status:     "OK",
 	}
 	c.setLast(executeStatus)
-	c.startWorkload(manifest, unit.Name)
+	c.startWorkload(manifest.ID, unit.Name, healthChecks)
 
 	return executeUndo{
 		capability: c,
@@ -342,14 +346,14 @@ func (c *ExecuteCapability) clearLast(unit string) {
 	}
 }
 
-func (c *ExecuteCapability) startWorkload(manifest ExecutionManifest, unit string) {
+func (c *ExecuteCapability) startWorkload(id string, unit string, checks []capsuleruntime.Check) {
 	if c.supervisor == nil {
 		return
 	}
 	c.supervisor.StartWorkload(capsuleruntime.WorkloadSpec{
-		ID:     manifest.ID,
+		ID:     id,
 		Unit:   unit,
-		Checks: healthChecksForUnit(manifest.HealthChecks, unit),
+		Checks: checks,
 	})
 }
 
@@ -913,15 +917,8 @@ func composeTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
 	}, nil
 }
 
-func healthChecksForUnit(checks []capsuleruntime.Check, unit string) []capsuleruntime.Check {
-	out := make([]capsuleruntime.Check, len(checks))
-	copy(out, checks)
-	for i := range out {
-		if out[i].Type == capsuleruntime.CheckTypeLifecycle && (out[i].Target == "self" || out[i].Target == "unit") {
-			out[i].Target = unit
-		}
-	}
-	return out
+func healthChecksForUnit(checks []capsuleruntime.Check, unit string) ([]capsuleruntime.Check, error) {
+	return capsuleruntime.ChecksForUnit(checks, unit)
 }
 
 func manifestEntrypointPath(manifest ExecutionManifest) (string, error) {

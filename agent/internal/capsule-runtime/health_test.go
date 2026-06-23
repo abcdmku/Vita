@@ -91,6 +91,41 @@ func TestPollHealthTCP(t *testing.T) {
 	}
 }
 
+func TestPollHealthRejectsNonLoopbackTargetsWithoutEgress(t *testing.T) {
+	tests := []Check{
+		{
+			Name:            "http",
+			Type:            CheckTypeHTTP,
+			Target:          "http://example.com/health",
+			IntervalSeconds: 1,
+			TimeoutSeconds:  1,
+		},
+		{
+			Name:            "tcp",
+			Type:            CheckTypeTCP,
+			Target:          "8.8.8.8:53",
+			IntervalSeconds: 1,
+			TimeoutSeconds:  1,
+		},
+	}
+
+	for _, check := range tests {
+		t.Run(string(check.Type), func(t *testing.T) {
+			if err := check.Validate(); err == nil {
+				t.Fatal("Validate accepted a non-loopback health target")
+			}
+
+			status, err := PollHealth(context.Background(), check)
+			if err == nil {
+				t.Fatal("PollHealth returned nil error for a non-loopback health target")
+			}
+			if status != StatusUnknown {
+				t.Fatalf("PollHealth non-loopback status = %q, want %q", status, StatusUnknown)
+			}
+		})
+	}
+}
+
 func TestPollHealthLifecycle(t *testing.T) {
 	prober := healthProber{
 		systemctl: &fakeSystemctl{
@@ -196,6 +231,72 @@ func TestSupervisorPollerUpdatesWorkloadStatus(t *testing.T) {
 	}
 }
 
+func TestSupervisorDropsStalePollAfterWorkloadReplacement(t *testing.T) {
+	unit := "vita-capsule-test.service"
+	check := Check{
+		Name:            "lifecycle",
+		Type:            CheckTypeLifecycle,
+		Target:          unit,
+		IntervalSeconds: 1,
+		TimeoutSeconds:  1,
+	}
+	key := checkKey(0, check)
+	prober := &blockingStatusProber{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		done:     make(chan struct{}),
+		status:   StatusDown,
+		restarts: 99,
+	}
+	supervisor := NewSupervisor(Options{Prober: prober})
+
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	oldState := &workloadState{
+		id:       "old",
+		unit:     unit,
+		cancel:   oldCancel,
+		statuses: map[string]Status{key: StatusUnknown},
+	}
+	supervisor.mu.Lock()
+	supervisor.workloads[unit] = oldState
+	supervisor.mu.Unlock()
+
+	go supervisor.pollCheck(oldCtx, WorkloadSpec{ID: "old", Unit: unit, Checks: []Check{check}}, oldState, key, check)
+
+	select {
+	case <-prober.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale probe did not start")
+	}
+
+	newState := &workloadState{
+		id:       "new",
+		unit:     unit,
+		cancel:   func() {},
+		statuses: map[string]Status{key: StatusOK},
+		restarts: 7,
+	}
+	supervisor.mu.Lock()
+	oldState.cancel()
+	supervisor.workloads[unit] = newState
+	supervisor.mu.Unlock()
+
+	close(prober.release)
+	select {
+	case <-prober.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale probe did not finish")
+	}
+
+	snapshot := supervisor.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot length = %d, want 1: %#v", len(snapshot), snapshot)
+	}
+	if snapshot[0].ID != "new" || snapshot[0].Status != StatusOK || snapshot[0].Health != StatusOK || snapshot[0].Restarts != 7 {
+		t.Fatalf("stale poll clobbered replacement workload: %#v", snapshot[0])
+	}
+}
+
 func waitForWorkloadStatus(t *testing.T, supervisor *Supervisor, want Status, wantRestarts int) {
 	t.Helper()
 
@@ -282,4 +383,26 @@ func (p *mutableProber) calls() int {
 	defer p.mu.Unlock()
 
 	return p.count
+}
+
+type blockingStatusProber struct {
+	once     sync.Once
+	started  chan struct{}
+	release  chan struct{}
+	done     chan struct{}
+	status   Status
+	restarts int
+}
+
+func (p *blockingStatusProber) PollHealth(context.Context, Check) (Status, error) {
+	p.once.Do(func() {
+		close(p.started)
+	})
+	<-p.release
+	close(p.done)
+	return p.status, nil
+}
+
+func (p *blockingStatusProber) Restarts(context.Context, string) (int, error) {
+	return p.restarts, nil
 }
