@@ -96,22 +96,24 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
-  # Wait for VITA-EVAL (the evaluator marker, printed AFTER VITA-TS) — its presence implies the whole chain ran.
+  # Wait for VITA-PREVIEW (the LAST marker main.ts prints — after VITA-TS + VITA-EVAL) — its presence implies the
+  # whole on-device chain ran: Deno runtime (P1-030) -> evaluator (P1-033) -> preview diff (P1-034).
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-EVAL:' "$log" 2>/dev/null; then ok=1; echo "VITA-EVAL marker found at ~${i}s"; break; fi
+    if grep -qa 'VITA-PREVIEW:' "$log" 2>/dev/null; then ok=1; echo "VITA-PREVIEW marker found at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev rej
-  ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1); rej=$(grep -a 'VITA-EVAL-REJECT:' "$log" | tail -1)
-  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $rej"
-  # PASS requires BOTH the runtime marker (VITA-TS) AND the on-device evaluator marker (VITA-EVAL) — P1-030 + P1-033.
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ]; then
-    echo "RESULT: PASS (Deno runtime + the real config→plan evaluator executed on-device, unprivileged)"
+  local ts ev pv noop
+  ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
+  pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); noop=$(grep -a 'VITA-PREVIEW-NOOP:' "$log" | tail -1)
+  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $pv"; echo "  $noop"
+  # PASS requires the runtime (VITA-TS, P1-030) + evaluator (VITA-EVAL, P1-033) + preview diff (VITA-PREVIEW, P1-034).
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ]; then
+    echo "RESULT: PASS (Deno runtime + config→plan evaluator + config-change preview all executed on-device)"
   else
-    echo "RESULT: FAIL (missing VITA-TS and/or VITA-EVAL — service likely failed)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|deno' | tail -10
+    echo "RESULT: FAIL (missing VITA-TS / VITA-EVAL / VITA-PREVIEW — service likely failed)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|vita-preview|deno' | tail -12
     return 1
   fi
 }
