@@ -251,6 +251,74 @@ func TestFetchOCIImageRejectsLayerStackEntryCapWithoutStaging(t *testing.T) {
 	assertCacheRootEmpty(t, cacheRoot)
 }
 
+func TestFetchOCIImageRejectsWhiteoutPayloadOverEntryCapWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	fixture := newOCILayoutFixture(t, []ociTestLayer{
+		{entries: []ociLayerEntry{
+			{name: "bin/vita-oci-test", body: "#!/bin/sh\n", mode: 0o755},
+			{name: "etc/delete", body: "delete\n"},
+		}},
+		{entries: []ociLayerEntry{
+			{name: "etc/.wh.delete", size: maxCapsuleTarEntryBytes + 1, fill: 'w'},
+		}},
+	})
+	source := writeArtifact(t, fixture.archive)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageDigest)
+
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on whiteout bomb", result)
+	}
+	if !errors.Is(err, ErrOCIBomb) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIBomb", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+}
+
+func TestFetchOCIImageRejectsLayerStackDecodedByteCapWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	firstTrailing := int64(maxCapsuleDecodedTarBytes / 2)
+	secondTrailing := int64(maxCapsuleDecodedTarBytes) - firstTrailing + 1
+	fixture := newOCILayoutFixture(t, []ociTestLayer{
+		{archive: gzipLayerArchiveWithTrailingData(t, []ociLayerEntry{
+			{name: "bin/vita-oci-test", body: "#!/bin/sh\n", mode: 0o755},
+		}, firstTrailing)},
+		{archive: gzipLayerArchiveWithTrailingData(t, nil, secondTrailing)},
+	})
+	source := writeArtifact(t, fixture.archive)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageDigest)
+
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on decoded-byte bomb", result)
+	}
+	if !errors.Is(err, ErrOCIBomb) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIBomb", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+}
+
+func TestFetchOCIImageRejectsLyingHeaderDecodedBombWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	fixture := newOCILayoutFixture(t, []ociTestLayer{
+		{archive: gzipLayerArchiveWithLyingHeader(t, 1, maxCapsuleDecodedTarBytes)},
+	})
+	source := writeArtifact(t, fixture.archive)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageDigest)
+
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on lying-header bomb", result)
+	}
+	if !errors.Is(err, ErrOCIBomb) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIBomb", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+}
+
 func TestFetchOCIImageRejectsTraversalAndLinksWithoutStaging(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -260,6 +328,7 @@ func TestFetchOCIImageRejectsTraversalAndLinksWithoutStaging(t *testing.T) {
 		{name: "relative parent", entry: ociLayerEntry{name: "../evil", body: "owned"}, wantErr: ErrOCITraversal},
 		{name: "absolute path", entry: ociLayerEntry{name: "/evil", body: "owned"}, wantErr: ErrOCITraversal},
 		{name: "symlink", entry: ociLayerEntry{name: "link", typeflag: tar.TypeSymlink, linkname: "../evil"}, wantErr: ErrOCITraversal},
+		{name: "hardlink", entry: ociLayerEntry{name: "link", typeflag: tar.TypeLink, linkname: "../evil"}, wantErr: ErrOCITraversal},
 	}
 
 	for _, tt := range tests {
@@ -293,6 +362,7 @@ func TestFetchOCIImageRejectsTraversalAndLinksWithoutStaging(t *testing.T) {
 
 type ociTestLayer struct {
 	entries []ociLayerEntry
+	archive []byte
 }
 
 type ociLayerEntry struct {
@@ -327,7 +397,10 @@ func newOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture 
 	layerDescriptors := make([]ociDescriptor, 0, len(layers))
 	layerDigests := make([]string, 0, len(layers))
 	for _, layer := range layers {
-		layerBytes := gzipLayerArchive(t, layer.entries)
+		layerBytes := layer.archive
+		if layerBytes == nil {
+			layerBytes = gzipLayerArchive(t, layer.entries)
+		}
 		layerDigest := digestBytes(layerBytes)
 		layerDigests = append(layerDigests, layerDigest)
 		files[blobName(layerDigest)] = layerBytes
@@ -384,6 +457,79 @@ func gzipLayerArchive(t *testing.T, entries []ociLayerEntry) []byte {
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
 	writer := tar.NewWriter(gzipWriter)
+	writeOCITestLayerEntries(t, writer, entries)
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar writer Close returned error: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzip writer Close returned error: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func gzipLayerArchiveWithTrailingData(t *testing.T, entries []ociLayerEntry, trailingBytes int64) []byte {
+	t.Helper()
+
+	var tarBuffer bytes.Buffer
+	writer := tar.NewWriter(&tarBuffer)
+	writeOCITestLayerEntries(t, writer, entries)
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar writer Close returned error: %v", err)
+	}
+	if trailingBytes > 0 {
+		if _, err := io.Copy(&tarBuffer, io.LimitReader(repeatingByteReader{b: 't'}, trailingBytes)); err != nil {
+			t.Fatalf("trailing tar data write returned error: %v", err)
+		}
+	}
+	return gzipBytes(t, tarBuffer.Bytes())
+}
+
+func gzipLayerArchiveWithLyingHeader(t *testing.T, declaredSize int64, trailingBytes int64) []byte {
+	t.Helper()
+
+	var tarBuffer bytes.Buffer
+	writer := tar.NewWriter(&tarBuffer)
+	if err := writer.WriteHeader(&tar.Header{
+		Name:     "bin/vita-oci-test",
+		Mode:     0o755,
+		Size:     declaredSize,
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatalf("WriteHeader returned error: %v", err)
+	}
+	if declaredSize > 0 {
+		if _, err := io.Copy(writer, io.LimitReader(repeatingByteReader{b: '#'}, declaredSize)); err != nil {
+			t.Fatalf("declared tar body write returned error: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar writer Close returned error: %v", err)
+	}
+	if trailingBytes > 0 {
+		if _, err := io.Copy(&tarBuffer, io.LimitReader(repeatingByteReader{b: 'x'}, trailingBytes)); err != nil {
+			t.Fatalf("lying tar body write returned error: %v", err)
+		}
+	}
+	return gzipBytes(t, tarBuffer.Bytes())
+}
+
+func gzipBytes(t *testing.T, content []byte) []byte {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	if _, err := gzipWriter.Write(content); err != nil {
+		t.Fatalf("gzip Write returned error: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzip writer Close returned error: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func writeOCITestLayerEntries(t *testing.T, writer *tar.Writer, entries []ociLayerEntry) {
+	t.Helper()
+
 	for _, entry := range entries {
 		typeflag := entry.typeflag
 		if typeflag == 0 {
@@ -421,13 +567,6 @@ func gzipLayerArchive(t *testing.T, entries []ociLayerEntry) []byte {
 			}
 		}
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("tar writer Close returned error: %v", err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatalf("gzip writer Close returned error: %v", err)
-	}
-	return buffer.Bytes()
 }
 
 func archiveOCILayout(t *testing.T, files map[string][]byte) []byte {

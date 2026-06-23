@@ -554,25 +554,39 @@ func writeTarFile(ctx context.Context, target string, reader io.Reader, expected
 }
 
 type maxBytesReader struct {
-	reader    io.Reader
-	remaining int64
-	limit     int64
+	reader       io.Reader
+	remaining    int64
+	remainingRef *int64
+	limit        int64
+	limitErr     error
 }
 
 func (r *maxBytesReader) Read(p []byte) (int, error) {
-	if r.remaining == 0 {
+	remaining := r.remaining
+	if r.remainingRef != nil {
+		remaining = *r.remainingRef
+	}
+	if remaining == 0 {
 		var one [1]byte
 		n, err := r.reader.Read(one[:])
 		if n > 0 {
+			if r.limitErr != nil {
+				return 0, r.limitErr
+			}
 			return 0, fmt.Errorf("capsule zstd stream exceeds decoded tar limit (%d bytes)", r.limit)
 		}
 		return 0, err
 	}
-	if int64(len(p)) > r.remaining {
-		p = p[:r.remaining]
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
 	}
 	n, err := r.reader.Read(p)
-	r.remaining -= int64(n)
+	remaining -= int64(n)
+	if r.remainingRef != nil {
+		*r.remainingRef = remaining
+	} else {
+		r.remaining = remaining
+	}
 	return n, err
 }
 

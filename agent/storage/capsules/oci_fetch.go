@@ -108,8 +108,9 @@ type ociRuntimeConfig struct {
 }
 
 type ociLayerCaps struct {
-	entries      int
-	payloadBytes int64
+	entries                  int
+	payloadBytes             int64
+	decodedTarBytesRemaining int64
 }
 
 func FetchOCIImageFor(ctx context.Context, ref string, integrity string, id string, version string, imageDigest string) (OCIFetchResult, error) {
@@ -256,7 +257,7 @@ func fetchOCIImage(ctx context.Context, ref string, integrity string, expected M
 		log.Printf("VITA-CAPSULE-OCI-FETCH-ERROR: status=FAILSAFE")
 		return OCIFetchResult{}, fmt.Errorf("create OCI rootfs: %w", err)
 	}
-	caps := &ociLayerCaps{}
+	caps := newOCILayerCaps()
 	for _, layer := range verified.Manifest.Layers {
 		if err := applyOCILayer(ctx, layoutDir, rootfs, layer, caps); err != nil {
 			logOCIReject(err)
@@ -545,6 +546,12 @@ func ociArtifactTarReader(artifact *os.File) (io.Reader, func(), error) {
 	return nil, func() {}, fmt.Errorf("create OCI zstd artifact decoder: %w", err)
 }
 
+func newOCILayerCaps() *ociLayerCaps {
+	return &ociLayerCaps{
+		decodedTarBytesRemaining: maxCapsuleDecodedTarBytes,
+	}
+}
+
 func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descriptor ociDescriptor, caps *ociLayerCaps) error {
 	reader, closeReader, err := ociLayerTarReader(layoutDir, descriptor)
 	if err != nil {
@@ -552,7 +559,13 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 	}
 	defer closeReader()
 
-	tarReader := tar.NewReader(reader)
+	limitedReader := &maxBytesReader{
+		reader:       reader,
+		remainingRef: &caps.decodedTarBytesRemaining,
+		limit:        maxCapsuleDecodedTarBytes,
+		limitErr:     rejectOCI(ErrOCIBomb, "OCI layer stack exceeds decompressed size limit (%d bytes)", maxCapsuleDecodedTarBytes),
+	}
+	tarReader := tar.NewReader(limitedReader)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -560,6 +573,9 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
+			if err := drainOCILayerRemainder(ctx, limitedReader); err != nil {
+				return err
+			}
 			return nil
 		}
 		if err != nil {
@@ -572,6 +588,9 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 		if header.Size < 0 {
 			return rejectOCI(ErrOCIBomb, "OCI layer tar entry %q has negative size", header.Name)
 		}
+		if err := reserveOCILayerEntryPayload(caps, header); err != nil {
+			return err
+		}
 
 		entryName, err := safeArchiveName(header.Name)
 		if err != nil {
@@ -583,6 +602,9 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 			}
 			if header.Size > 0 {
 				if _, err := io.Copy(io.Discard, io.LimitReader(tarReader, header.Size)); err != nil {
+					if errors.Is(err, ErrOCIBomb) {
+						return err
+					}
 					return rejectOCI(ErrOCIWhiteout, "discard OCI whiteout payload: %v", err)
 				}
 			}
@@ -600,13 +622,6 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 				return err
 			}
 		case tar.TypeReg:
-			if header.Size > maxCapsuleTarEntryBytes {
-				return rejectOCI(ErrOCIBomb, "OCI layer tar entry %q exceeds per-entry size limit (%d bytes)", header.Name, maxCapsuleTarEntryBytes)
-			}
-			if caps.payloadBytes > maxCapsuleTarPayloadBytes-header.Size {
-				return rejectOCI(ErrOCIBomb, "OCI layer stack exceeds total payload size limit (%d bytes)", maxCapsuleTarPayloadBytes)
-			}
-			caps.payloadBytes += header.Size
 			if err := writeLayerFile(ctx, target, tarReader, header.Size, executableFileMode(header.Mode)); err != nil {
 				return err
 			}
@@ -614,6 +629,27 @@ func applyOCILayer(ctx context.Context, layoutDir string, rootfs string, descrip
 			return rejectOCI(ErrOCITraversal, "OCI layer tar entry %q has unsupported type %d", header.Name, header.Typeflag)
 		}
 	}
+}
+
+func drainOCILayerRemainder(ctx context.Context, reader io.Reader) error {
+	if _, err := copyWithContextCount(ctx, io.Discard, reader); err != nil {
+		if errors.Is(err, ErrOCIBomb) {
+			return err
+		}
+		return rejectOCI(ErrOCIBomb, "read OCI layer trailing data: %v", err)
+	}
+	return nil
+}
+
+func reserveOCILayerEntryPayload(caps *ociLayerCaps, header *tar.Header) error {
+	if header.Size > maxCapsuleTarEntryBytes {
+		return rejectOCI(ErrOCIBomb, "OCI layer tar entry %q exceeds per-entry size limit (%d bytes)", header.Name, maxCapsuleTarEntryBytes)
+	}
+	if caps.payloadBytes > maxCapsuleTarPayloadBytes-header.Size {
+		return rejectOCI(ErrOCIBomb, "OCI layer stack exceeds total payload size limit (%d bytes)", maxCapsuleTarPayloadBytes)
+	}
+	caps.payloadBytes += header.Size
+	return nil
 }
 
 func ociLayerTarReader(layoutDir string, descriptor ociDescriptor) (io.Reader, func(), error) {
