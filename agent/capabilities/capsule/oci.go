@@ -27,6 +27,7 @@ const (
 
 	ociExecutorRootDirectory = "rootdir"
 	ociExecutorCrun          = "crun"
+	ociCrunUnsupportedCode   = "crun_unsupported_under_hardening"
 
 	ociLimitValueEnforced    = "enforced"
 	ociLimitValueNotEnforced = "not_enforced"
@@ -203,40 +204,13 @@ func composeOCIRootDirectoryTransientUnit(manifest ExecutionManifest) (transient
 }
 
 func composeOCICrunTransientUnit(manifest ExecutionManifest) (transientUnit, error) {
-	unitName := capsuleUnitName(manifest.ID)
-	runtimeDir := capsuleRuntimeDirectory(manifest.ID)
-	limits := manifest.ResourceLimits
-	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
-	if err != nil {
-		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
+	if err := manifest.Runtime.ValidateForPackageClass(executePackageClassOCIService); err != nil {
+		return transientUnit{}, err
 	}
-
-	bundlePath := ociBundleDirectory(manifest)
-	properties := crunHardenedTransientUnitProperties(manifest)
-	properties = append(properties,
-		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
-		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
-		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
-		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
-		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
-	)
-	if len(volumes) > 0 {
-		properties = append(properties,
-			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
-			systemdProperty{Name: "StateDirectoryMode", Value: capsulestorage.StateDirectoryMode()},
-		)
+	return transientUnit{}, &ExecuteInvalidRequestError{
+		Code:   ociCrunUnsupportedCode,
+		Reason: "runtime.oci.executor=crun is unsupported under the current no-capability hardening",
 	}
-
-	return transientUnit{
-		Name:       unitName,
-		Argv:       crunArgv(manifest, bundlePath, runtimeDir),
-		Properties: properties,
-		Volumes:    volumes,
-		OCIConfig: &generatedOCIConfig{
-			BundlePath: bundlePath,
-			Spec:       authoredOCIRuntimeSpec(manifest),
-		},
-	}, nil
 }
 
 func crunArgv(manifest ExecutionManifest, bundlePath string, runtimeDir string) []string {

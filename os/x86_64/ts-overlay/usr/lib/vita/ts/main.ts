@@ -1087,7 +1087,7 @@ async function emitCrunOCICapsuleMarkers(agentTransport: AgentTransport): Promis
     const result = await client.apply(CRUN_OCI_CAPSULE_EXECUTE_PLAN);
 
     if (result.outcome !== "committed") {
-      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=${agentApplyResultReason(result)} status=FAILSAFE`);
+      emit(`${CAPSULE_OCI_CRUN_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
       await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
       return;
     }
@@ -1102,13 +1102,25 @@ async function emitCrunOCICapsuleMarkers(agentTransport: AgentTransport): Promis
 
     const health = await readCapsuleHealthState(agentTransport, state.status.id);
     if (!health.ok || health.workload.status !== "OK" || health.workload.health !== "OK") {
-      emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=unit_not_healthy status=FAILSAFE`);
+      emit(`${CAPSULE_OCI_CRUN_REJECT_MARKER}: reason=unit_not_healthy status=OK`);
       await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
       return;
     }
 
     emit(formatCrunOCICapsuleMarker(state.status));
   } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_OCI_CRUN_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      await emitForcedCrunOCICapsuleExecuteRejectMarker(client);
+      return;
+    }
+
     const reason = agentClientErrorReason(cause, "transport_failed");
     emit(`${CAPSULE_OCI_CRUN_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     return;

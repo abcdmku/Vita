@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *testing.T) {
+func TestExecuteRejectsCrunExecutorUnderCurrentHardening(t *testing.T) {
 	ctx := context.Background()
 	entry := executeCrunOCIEntry()
 	manifest := executeCrunOCIManifest(entry)
@@ -27,78 +27,31 @@ func TestExecuteComposesRootlessCrunOCITransientUnitFromValidatedManifest(t *tes
 	)
 
 	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var invalid *ExecuteInvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Apply error = %T %v, want ExecuteInvalidRequestError", err, err)
+	}
+	if invalid.ApplyErrorCode() != ociCrunUnsupportedCode {
+		t.Fatalf("ApplyErrorCode = %q, want %q", invalid.ApplyErrorCode(), ociCrunUnsupportedCode)
+	}
+	if len(launcher.starts) != 0 {
+		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+	}
+	if len(launcher.confirmedLimits) != 0 {
+		t.Fatalf("ConfirmOCILimits calls = %d, want 0", len(launcher.confirmedLimits))
+	}
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
-		t.Fatalf("Apply returned error: %v", err)
+		t.Fatalf("Handle returned error: %v", err)
 	}
-	if undo == nil {
-		t.Fatal("Apply returned nil undo")
-	}
-	if len(launcher.starts) != 1 {
-		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
-	}
-
-	started := launcher.starts[0]
-	runtimeDir := capsuleRuntimeDirectory(entry.ID)
-	bundlePath := path.Join("/run", runtimeDir, "bundle")
-	wantArgv := []string{
-		defaultCrunPath,
-		"--rootless=true",
-		"--root",
-		path.Join("/run", runtimeDir, "crun"),
-		"run",
-		"--bundle",
-		bundlePath,
-		"--no-new-keyring",
-		entry.ID,
-	}
-	if !reflect.DeepEqual(started.Argv, wantArgv) {
-		t.Fatalf("argv = %v, want %v", started.Argv, wantArgv)
-	}
-
-	props := propertyValues(started.Properties)
-	assertProperty(t, props, "DynamicUser", "yes")
-	assertProperty(t, props, "CapabilityBoundingSet", "")
-	assertProperty(t, props, "AmbientCapabilities", "")
-	assertProperty(t, props, "NoNewPrivileges", "yes")
-	assertProperty(t, props, "ProtectSystem", "strict")
-	assertProperty(t, props, "RestrictNamespaces", "~user mnt pid")
-	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX")
-	assertProperty(t, props, "RuntimeDirectory", runtimeDir)
-	assertProperty(t, props, "RuntimeDirectoryMode", "0700")
-	assertProperty(t, props, "MemoryMax", "67108864")
-	assertProperty(t, props, "CPUQuota", "25%")
-	assertProperty(t, props, "TasksMax", "32")
-	assertNoProperty(t, props, "RootDirectory")
-	assertNoProperty(t, props, "MountAPIVFS")
-	assertDoesNotContainProperty(t, props, "SystemCallFilter", "pkey_alloc pkey_free pkey_mprotect")
-	assertDoesNotContainProperty(t, props, "SystemCallFilter", "~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete")
-	assertContainsProperty(t, props, "SystemCallFilter", "unshare mount umount2 pivot_root chroot")
-	assertContainsProperty(t, props, "SystemCallFilter", "~@resources @swap @reboot @raw-io @cpu-emulation @obsolete")
-
-	if started.OCIConfig == nil {
-		t.Fatal("OCIConfig = nil, want agent-authored crun config")
-	}
-	if started.OCIConfig.BundlePath != bundlePath {
-		t.Fatalf("BundlePath = %q, want %q", started.OCIConfig.BundlePath, bundlePath)
-	}
-	spec := started.OCIConfig.Spec
-	if !reflect.DeepEqual(spec.Process.Args, manifest.Runtime.OCI.Image.Entrypoint) {
-		t.Fatalf("process args = %#v, want manifest entrypoint %#v", spec.Process.Args, manifest.Runtime.OCI.Image.Entrypoint)
-	}
-	wantEnv := []string{defaultOCIPathEnv, "VITA_EXECUTOR=crun"}
-	if !reflect.DeepEqual(spec.Process.Env, wantEnv) {
-		t.Fatalf("process env = %#v, want %#v", spec.Process.Env, wantEnv)
-	}
-	if !spec.Process.NoNewPrivileges {
-		t.Fatal("process noNewPrivileges = false, want true")
-	}
-	assertNoOCICapabilities(t, spec.Process.Capabilities)
-	if spec.Root.Path != ociRootDirectory(manifest) || !spec.Root.Readonly {
-		t.Fatalf("root = %#v, want read-only manifest rootfs %q", spec.Root, ociRootDirectory(manifest))
-	}
-	wantNamespaces := []authoredOCILinuxNamespace{{Type: "user"}, {Type: "mount"}, {Type: "pid"}}
-	if !reflect.DeepEqual(spec.Linux.Namespaces, wantNamespaces) {
-		t.Fatalf("linux namespaces = %#v, want %#v", spec.Linux.Namespaces, wantNamespaces)
+	readResponse := response.(ExecuteReadResponse)
+	if readResponse.Last != nil {
+		t.Fatalf("Last = %#v, want nil after crun reject", readResponse.Last)
 	}
 }
 
