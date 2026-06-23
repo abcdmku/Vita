@@ -1096,8 +1096,15 @@ async function emitMicroVMCapsuleMarkers(agentTransport: AgentTransport): Promis
       await emitForcedMicroVMCapsuleRejectMarker(client);
       return;
     }
+    const readiness = capsuleMicroVMReadiness(state.status);
 
-    emit(formatMicroVMCapsuleMarker(state.status));
+    if (readiness === undefined) {
+      emit(`${CAPSULE_MICROVM_ERROR_MARKER}: reason=workload_readiness_missing status=FAILSAFE`);
+      await emitForcedMicroVMCapsuleRejectMarker(client);
+      return;
+    }
+
+    emit(formatMicroVMCapsuleMarker(state.status, readiness));
   } catch {
     emit(`${CAPSULE_MICROVM_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -1147,7 +1154,14 @@ interface CapsuleExecuteStatus {
   readonly dynamicUid: string;
   readonly health: "OK";
   readonly status: "OK";
+  readonly isolation?: string;
+  readonly pid1?: string;
   readonly volumes: readonly CapsuleVolumeStatus[];
+}
+
+interface CapsuleMicroVMReadiness {
+  readonly isolation: "nspawn";
+  readonly pid1: "own";
 }
 
 interface CapsuleVolumeStatus {
@@ -1192,6 +1206,8 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
   const dynamicUid = readStringField(last, "dynamicUid");
   const health = readStringField(last, "health");
   const status = readStringField(last, "status");
+  const isolation = readOptionalStringField(last, "isolation");
+  const pid1 = readOptionalStringField(last, "pid1");
   const volumes = parseCapsuleVolumeStatuses(last["volumes"]);
 
   if (
@@ -1205,15 +1221,21 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
     return { ok: false };
   }
 
+  const parsedStatus: CapsuleExecuteStatus = {
+    dynamicUid,
+    health,
+    id,
+    status,
+    unit,
+    volumes,
+  };
+
   return {
     ok: true,
     status: {
-      dynamicUid,
-      health,
-      id,
-      status,
-      unit,
-      volumes,
+      ...parsedStatus,
+      ...(isolation === undefined ? {} : { isolation }),
+      ...(pid1 === undefined ? {} : { pid1 }),
     },
   };
 }
@@ -1299,12 +1321,26 @@ function formatOCICapsuleExecutedMarker(status: CapsuleExecuteStatus): string {
   );
 }
 
-function formatMicroVMCapsuleMarker(status: CapsuleExecuteStatus): string {
+function capsuleMicroVMReadiness(status: CapsuleExecuteStatus): CapsuleMicroVMReadiness | undefined {
+  if (status.isolation !== "nspawn" || status.pid1 !== "own") {
+    return undefined;
+  }
+
+  return {
+    isolation: status.isolation,
+    pid1: status.pid1,
+  };
+}
+
+function formatMicroVMCapsuleMarker(
+  status: CapsuleExecuteStatus,
+  readiness: CapsuleMicroVMReadiness,
+): string {
   return (
     `${CAPSULE_MICROVM_MARKER}: ` +
     `id=${status.id} ` +
-    "isolation=nspawn " +
-    "pid1=own " +
+    `isolation=${readiness.isolation} ` +
+    `pid1=${readiness.pid1} ` +
     `health=${status.health} ` +
     "status=OK"
   );
@@ -1490,6 +1526,23 @@ function readStringField(
   key: string,
 ): string | undefined {
   const child = value[key];
+
+  if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
+}
+
+function readOptionalStringField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const child = value[key];
+
+  if (child === undefined) {
+    return undefined;
+  }
 
   if (typeof child !== "string" || child.length === 0) {
     return undefined;

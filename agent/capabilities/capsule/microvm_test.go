@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -14,7 +15,15 @@ func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) 
 	entry := executeMicroVMEntry()
 	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
 	launcher := &recordingTransientLauncher{
-		status: transientUnitStatus{DynamicUID: "0"},
+		status: transientUnitStatus{
+			DynamicUID: "0",
+			MicroVM: &microVMReadinessStatus{
+				Isolation: "nspawn",
+				PID1:      "own",
+				Health:    "OK",
+				Status:    "OK",
+			},
+		},
 	}
 	capability := newExecuteCapability(
 		fs,
@@ -58,25 +67,30 @@ func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) 
 	if len(started.Volumes) != 0 {
 		t.Fatalf("volumes = %v, want none", started.Volumes)
 	}
+	if started.MicroVMReadiness == nil || started.MicroVMReadiness.ID != entry.ID {
+		t.Fatalf("MicroVMReadiness = %#v, want id %q", started.MicroVMReadiness, entry.ID)
+	}
 
 	props := propertyValues(started.Properties)
 	assertProperty(t, props, "Type", "simple")
-	assertProperty(t, props, "NoNewPrivileges", "yes")
 	assertProperty(t, props, "AmbientCapabilities", "")
-	assertProperty(t, props, "ProtectSystem", "strict")
 	assertProperty(t, props, "ProtectHome", "yes")
 	assertProperty(t, props, "PrivateTmp", "yes")
-	assertProperty(t, props, "PrivateDevices", "yes")
 	assertProperty(t, props, "RestrictNamespaces", "mnt pid ipc uts user net cgroup")
 	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX AF_NETLINK")
+	assertProperty(t, props, "Environment", "TMPDIR=/run/vita-capsule-local.microvm.capsule-022e7cca-nspawn")
+	assertProperty(t, props, "RuntimeDirectory", "vita-capsule-local.microvm.capsule-022e7cca-nspawn")
+	assertProperty(t, props, "RuntimeDirectoryMode", "0700")
 	assertProperty(t, props, "MemoryMax", "67108864")
 	assertProperty(t, props, "CPUQuota", "25%")
 	assertProperty(t, props, "TasksMax", "32")
+	assertNoProperty(t, props, "NoNewPrivileges")
+	assertNoProperty(t, props, "ProtectSystem")
+	assertNoProperty(t, props, "PrivateDevices")
+	assertNoProperty(t, props, "CapabilityBoundingSet")
 	assertNoProperty(t, props, "RootDirectory")
 	assertNoProperty(t, props, "MountAPIVFS")
 	assertNoProperty(t, props, "DynamicUser")
-	assertNoProperty(t, props, "StateDirectory")
-	assertNoProperty(t, props, "StateDirectoryMode")
 
 	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
@@ -91,6 +105,9 @@ func TestExecuteComposesMicroVMTransientUnitFromValidatedManifest(t *testing.T) 
 	}
 	if readResponse.Last.ID != entry.ID || readResponse.Last.Unit != started.Name || readResponse.Last.DynamicUID != "0" {
 		t.Fatalf("Last = %#v, want id/unit/uid from launcher", readResponse.Last)
+	}
+	if readResponse.Last.Isolation != "nspawn" || readResponse.Last.PID1 != "own" {
+		t.Fatalf("Last microvm proof = isolation=%q pid1=%q, want nspawn/own", readResponse.Last.Isolation, readResponse.Last.PID1)
 	}
 
 	if err := undo.Undo(ctx); err != nil {
@@ -182,6 +199,144 @@ func TestExecuteRejectsMicroVMMissingRootfsWithoutStartingUnit(t *testing.T) {
 	}
 	if len(launcher.starts) != 0 {
 		t.Fatalf("StartTransientUnit calls = %d, want 0", len(launcher.starts))
+	}
+}
+
+func TestExecuteRejectsMicroVMWithoutReadinessProofAfterStart(t *testing.T) {
+	ctx := context.Background()
+	entry := executeMicroVMEntry()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	launcher := &recordingTransientLauncher{
+		status: transientUnitStatus{DynamicUID: "0"},
+	}
+	capability := newExecuteCapability(
+		fs,
+		memoryExecutionManifestStore{entry.ID: executeMicroVMManifest(entry)},
+		launcher,
+	)
+
+	undo, err := capability.Apply(ctx, executeApply(entry))
+
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var startErr *ExecuteStartError
+	if !errors.As(err, &startErr) {
+		t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
+	}
+	if startErr.ApplyErrorCode() != "microvm_readiness_failed" {
+		t.Fatalf("ApplyErrorCode = %q, want microvm_readiness_failed", startErr.ApplyErrorCode())
+	}
+	if len(launcher.starts) != 1 {
+		t.Fatalf("StartTransientUnit calls = %d, want 1", len(launcher.starts))
+	}
+	if !reflect.DeepEqual(launcher.stops, []string{launcher.starts[0].Name}) {
+		t.Fatalf("stops = %v, want [%s]", launcher.stops, launcher.starts[0].Name)
+	}
+	if !reflect.DeepEqual(launcher.resets, []string{launcher.starts[0].Name}) {
+		t.Fatalf("resets = %v, want [%s]", launcher.resets, launcher.starts[0].Name)
+	}
+
+	response, err := capability.Handle(ctx, ExecuteReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse, ok := response.(ExecuteReadResponse)
+	if !ok {
+		t.Fatalf("Handle returned %T, want ExecuteReadResponse", response)
+	}
+	if readResponse.Last != nil {
+		t.Fatalf("ExecuteReadResponse.Last = %#v, want nil after rejected readiness", readResponse.Last)
+	}
+}
+
+func TestParseMicroVMReadinessRequiresOwnPIDProof(t *testing.T) {
+	probe := microVMReadinessProbe{ID: "local.microvm.capsule"}
+
+	status, ok := parseMicroVMReadiness([]byte(`
+noise
+VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=2 pid1=own status=OK
+`), probe)
+	if !ok {
+		t.Fatal("parseMicroVMReadiness rejected valid readiness marker")
+	}
+	if status.Isolation != "nspawn" || status.PID1 != "own" || status.Health != "OK" || status.Status != "OK" {
+		t.Fatalf("status = %#v, want nspawn/own/OK", status)
+	}
+
+	rejects := map[string]string{
+		"wrong id":       "VITA-CAPSULE-MICROVM-WORKLOAD: id=other.capsule pid=2 pid1=own status=OK",
+		"host pid":       "VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=412 pid1=own status=OK",
+		"unexpected pid": "VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=2 pid1=unexpected status=OK",
+		"bad status":     "VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=2 pid1=own status=FAIL",
+	}
+	for name, line := range rejects {
+		t.Run(name, func(t *testing.T) {
+			if parsed, ok := parseMicroVMReadiness([]byte(line), probe); ok {
+				t.Fatalf("parseMicroVMReadiness accepted %#v, want reject", parsed)
+			}
+		})
+	}
+}
+
+func TestSystemdRunLauncherReadsMicroVMReadinessFromJournal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake systemd scripts require a POSIX shell")
+	}
+
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	systemctl := filepath.Join(dir, "systemctl")
+	journalctl := filepath.Join(dir, "journalctl")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile systemd-run returned error: %v", err)
+	}
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+case "$1" in
+  is-active)
+    exit 0
+    ;;
+  show)
+    if [ "$2" = "--property=UID" ]; then
+      printf '61408\n'
+      exit 0
+    fi
+    printf '%s\n' 'ActiveState=active' 'SubState=running' 'Result=success' 'ExecMainCode=0' 'ExecMainStatus=0'
+    exit 0
+    ;;
+  stop|reset-failed)
+    exit 0
+    ;;
+esac
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile systemctl returned error: %v", err)
+	}
+	if err := os.WriteFile(journalctl, []byte(`#!/bin/sh
+printf '%s\n' 'VITA-CAPSULE-MICROVM-WORKLOAD: id=local.microvm.capsule pid=1 pid1=own status=OK'
+exit 0
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile journalctl returned error: %v", err)
+	}
+
+	launcher := systemdRunLauncher{
+		systemdRun: systemdRun,
+		systemctl:  systemctl,
+		journalctl: journalctl,
+	}
+	status, err := launcher.StartTransientUnit(context.Background(), transientUnit{
+		Name:             "vita-capsule-local-microvm.service",
+		Argv:             []string{defaultNspawnPath, "--directory=/rootfs", "--", "/init"},
+		MicroVMReadiness: &microVMReadinessProbe{ID: "local.microvm.capsule"},
+	})
+	if err != nil {
+		t.Fatalf("StartTransientUnit returned error: %v", err)
+	}
+	if status.DynamicUID != "61408" {
+		t.Fatalf("DynamicUID = %q, want 61408", status.DynamicUID)
+	}
+	if status.MicroVM == nil || status.MicroVM.Isolation != "nspawn" || status.MicroVM.PID1 != "own" {
+		t.Fatalf("MicroVM = %#v, want measured nspawn/own readiness", status.MicroVM)
 	}
 }
 

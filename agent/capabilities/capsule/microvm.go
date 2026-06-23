@@ -36,22 +36,21 @@ func composeMicroVMTransientUnit(manifest ExecutionManifest) (transientUnit, err
 	argv = append(argv, manifest.Runtime.OCI.Image.Entrypoint...)
 
 	return transientUnit{
-		Name:       unitName,
-		Argv:       argv,
-		Properties: properties,
+		Name:             unitName,
+		Argv:             argv,
+		Properties:       properties,
+		MicroVMReadiness: &microVMReadinessProbe{ID: manifest.ID},
 	}, nil
 }
 
 func hardenedMicroVMTransientUnitProperties(manifest ExecutionManifest) []systemdProperty {
+	runtimeDir := capsuleRuntimeDirectory(manifest.ID) + "-nspawn"
 	return []systemdProperty{
 		{Name: "Description", Value: "Vita capsule " + manifest.ID + " microvm-service"},
 		{Name: "Type", Value: "simple"},
-		{Name: "NoNewPrivileges", Value: "yes"},
 		{Name: "AmbientCapabilities", Value: ""},
-		{Name: "ProtectSystem", Value: "strict"},
 		{Name: "ProtectHome", Value: "yes"},
 		{Name: "PrivateTmp", Value: "yes"},
-		{Name: "PrivateDevices", Value: "yes"},
 		{Name: "ProtectKernelTunables", Value: "yes"},
 		{Name: "ProtectKernelModules", Value: "yes"},
 		{Name: "ProtectKernelLogs", Value: "yes"},
@@ -62,6 +61,9 @@ func hardenedMicroVMTransientUnitProperties(manifest ExecutionManifest) []system
 		{Name: "RestrictAddressFamilies", Value: "AF_UNIX AF_NETLINK"},
 		{Name: "LockPersonality", Value: "yes"},
 		{Name: "SystemCallArchitectures", Value: "native"},
+		{Name: "Environment", Value: "TMPDIR=/run/" + runtimeDir},
+		{Name: "RuntimeDirectory", Value: runtimeDir},
+		{Name: "RuntimeDirectoryMode", Value: "0700"},
 		{Name: "UMask", Value: "0077"},
 	}
 }

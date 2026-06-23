@@ -1060,11 +1060,17 @@ func cloneTransientUnit(unit transientUnit) transientUnit {
 	argv := append([]string(nil), unit.Argv...)
 	properties := append([]systemdProperty(nil), unit.Properties...)
 	volumes := append([]capsulestorage.VolumeMount(nil), unit.Volumes...)
+	var readiness *microVMReadinessProbe
+	if unit.MicroVMReadiness != nil {
+		probe := *unit.MicroVMReadiness
+		readiness = &probe
+	}
 	return transientUnit{
-		Name:       unit.Name,
-		Argv:       argv,
-		Properties: properties,
-		Volumes:    volumes,
+		Name:             unit.Name,
+		Argv:             argv,
+		Properties:       properties,
+		Volumes:          volumes,
+		MicroVMReadiness: readiness,
 	}
 }
 
