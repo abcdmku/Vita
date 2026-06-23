@@ -431,6 +431,67 @@ secboot() {
   fi
 }
 
+# ── Verity adversarial check (dm-verity root ENFORCEMENT) ─────────────────────────────────────────────
+# POS  = the VITA_VERITY=1 image boots with the root mounted through /dev/mapper/root (dm-verity ACTIVE).
+# VNEG = one byte flipped in the root DATA partition -> dm-verity detects the block doesn't match the hash
+#        tree at mount -> the root does NOT reach userspace + a verity-corruption witness appears.
+# Static gate first: the build must produce a root-verity partition (else --verity was a no-op). Enforcement
+# is proven by POS-boots-verified / VNEG-rejected on the same image. Reuses sb_accel.
+VWORK="$REPO/os/x86_64/out/verity-check"
+verity_boot() {   # $1=label $2=disk $3=secs ; plain OVMF (verity needs no SB). Echoes the log path.
+  local label="$1" d="$2" secs="${3:-90}" log="$VWORK/serial-$label.log"
+  mkdir -p "$VWORK"; cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VWORK/vars-$label.fd"; : > "$log"
+  local accel; accel=$(sb_accel); local cpu=(-cpu max); [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+  timeout "$secs" qemu-system-x86_64 -machine q35 -m 1024 "${cpu[@]}" \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file="$VWORK/vars-$label.fd" \
+    -drive file="$d",format=raw,if=virtio \
+    -serial "file:$log" -display none -no-reboot >/dev/null 2>&1
+  echo "$log"
+}
+run_verity() {
+  echo "===== VERITY MATRIX (dm-verity root enforcement) ====="
+  rm -rf "$VWORK"; mkdir -p "$VWORK"
+  echo "----- build VITA_VERITY=1 -----"
+  rm -f "$REPO"/os/x86_64/out/*.raw
+  VITA_VERITY=1 node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -6
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "RESULT: FAIL (verity build failed)"; return 1; }
+  local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
+  [ -f "$disk" ] || { echo "RESULT: FAIL (no disk)"; return 1; }
+  echo "disk=$disk"
+
+  echo "----- static gate: root-verity partition present -----"
+  sfdisk -d "$disk" 2>/dev/null | grep -iq 2c7357ed || { echo "RESULT: FAIL (no root-verity partition — --verity was a no-op)"; return 1; }
+  local rstart; rstart=$(sfdisk -d "$disk" 2>/dev/null | grep -i 4f68bce3 | sed -n 's/.*start=[ ]*\([0-9]*\).*/\1/p' | head -1)
+  [ -n "$rstart" ] || { echo "RESULT: FAIL (root data partition not found)"; return 1; }
+  local roff=$(( rstart * 512 ))
+  echo "  root-verity partition OK; root data at sector $rstart"
+
+  echo "----- POS: boot verity image (expect dm-verity active + userspace) -----"
+  local plog; plog=$(verity_boot POS "$disk" 120)
+  local r_pos=FAIL
+  if { grep -qa Multi-User "$plog" || grep -qa bash-5 "$plog"; } && grep -qa "device-mapper: verity" "$plog"; then r_pos=PASS; fi
+  echo "  POS=$r_pos"; grep -a "device-mapper: verity" "$plog" 2>/dev/null | head -1
+
+  echo "----- VNEG: tamper a byte in the root DATA partition (expect dm-verity reject) -----"
+  local dneg="$VWORK/disk-VNEG.raw"; cp "$disk" "$dneg"
+  printf '\xff' | dd of="$dneg" bs=1 seek=$(( roff + 1024 )) count=1 conv=notrunc >/dev/null 2>&1   # ext4 superblock area, read at mount
+  local nlog; nlog=$(verity_boot VNEG "$dneg" 90)
+  local r_neg=FAIL
+  # PASS = root did NOT reach userspace AND a dm-verity corruption witness is present (not a generic failure).
+  if ! grep -qa Multi-User "$nlog" && ! grep -qa bash-5 "$nlog" \
+     && grep -qaiE 'verity:.*corrupt|is corrupted|verity:.*(invalid|metadata)' "$nlog"; then r_neg=PASS; fi
+  echo "  VNEG=$r_neg"; grep -aiE 'verity:.*(corrupt|invalid)|is corrupted' "$nlog" 2>/dev/null | head -2
+
+  echo "----- MATRIX -----"
+  printf '  %-6s %s\n' POS "$r_pos" VNEG "$r_neg"
+  if [ "$r_pos" = PASS ] && [ "$r_neg" = PASS ]; then
+    echo "RESULT: PASS (verity root boots verified; tampered root rejected by dm-verity)"
+  else
+    echo "RESULT: FAIL (POS=$r_pos VNEG=$r_neg)"; return 1
+  fi
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
@@ -441,5 +502,6 @@ case "$MODE" in
   diag)  diag;;
   full)  build_full;;
   secboot) secboot;;
+  verity) run_verity;;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac
