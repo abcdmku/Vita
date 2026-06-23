@@ -14,3 +14,7 @@ import "errors"
 
 // ErrUnsupported is returned by the non-Linux stubs.
 var ErrUnsupported = errors.New("sysdeps: operation not supported on this platform")
+
+// ErrNotMounted is returned when an unmount target is already absent from the
+// current mount namespace.
+var ErrNotMounted = errors.New("sysdeps: target is not mounted")
