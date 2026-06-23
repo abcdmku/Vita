@@ -1139,6 +1139,44 @@ func TestLoopbackTCPAddrGuard(t *testing.T) {
 	}
 }
 
+func TestUnixPeerGroupAuthAcceptsSupplementaryGroup(t *testing.T) {
+	const targetGID uint32 = 4242
+	peer := unixPeerInfo{
+		Credentials: peerCredentials{PID: 123, UID: 1000, GID: 61000},
+		Groups:      []uint32{1000, targetGID},
+		GroupSource: "SO_PEERGROUPS",
+	}
+
+	if !peerAuthorizedForGroup(peer, targetGID) {
+		t.Fatal("peer with DynamicUser-like primary gid and vita-agent supplementary group was rejected")
+	}
+}
+
+func TestUnixPeerGroupAuthRejectsPeerOutsideGroup(t *testing.T) {
+	const targetGID uint32 = 4242
+	peer := unixPeerInfo{
+		Credentials: peerCredentials{PID: 123, UID: 1000, GID: 61000},
+		Groups:      []uint32{1000, 1001},
+		GroupSource: "SO_PEERGROUPS",
+	}
+
+	if peerAuthorizedForGroup(peer, targetGID) {
+		t.Fatal("peer outside vita-agent group was authorized")
+	}
+}
+
+func TestParseProcStatusGroups(t *testing.T) {
+	groups, err := parseProcStatusGroups([]byte("Name:\tdeno\nPid:\t123\nGroups:\t1000 4242 65535\n"))
+	if err != nil {
+		t.Fatalf("parseProcStatusGroups returned error: %v", err)
+	}
+
+	want := []uint32{1000, 4242, 65535}
+	if !reflect.DeepEqual(groups, want) {
+		t.Fatalf("groups = %v, want %v", groups, want)
+	}
+}
+
 type handlerConfig struct {
 	registry     *capabilities.Registry
 	discoverer   hardware.Discoverer

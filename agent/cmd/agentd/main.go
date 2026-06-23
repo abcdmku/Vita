@@ -76,7 +76,6 @@ func main() {
 		log.Fatalf("build audit log store: %v", err)
 	}
 
-	// No auth is wired yet; the control surface is intentionally loopback-only.
 	handler, err := transport.NewHandler(transport.Config{
 		Version:    agentVersion,
 		StartedAt:  startedAt,
@@ -93,7 +92,9 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	unixListener, err := transport.ListenUnixSocket(transport.DefaultUnixSocketPath)
+	unixListener, err := transport.ListenAuthenticatedUnixSocket(transport.DefaultUnixSocketPath, transport.UnixPeerAuthConfig{
+		AuditStore: auditStore,
+	})
 	if err != nil {
 		log.Fatalf("listen unix socket: %v", err)
 	}
