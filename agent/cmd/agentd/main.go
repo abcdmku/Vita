@@ -34,6 +34,7 @@ import (
 const (
 	agentVersion = "dev"
 	listenAddr   = "127.0.0.1:8786"
+	devTCPEnv    = "VITA_AGENT_DEV_TCP"
 
 	// stateRoot mirrors the per-capability state root convention so the audit
 	// trail lives alongside the capabilities' persisted state.
@@ -68,10 +69,6 @@ func main() {
 		log.Fatalf("build capability registry: %v", err)
 	}
 
-	if !transport.IsLoopbackTCPAddr(listenAddr) {
-		log.Fatalf("refusing to bind agent control surface to non-loopback address %s", listenAddr)
-	}
-
 	auditStore, err := auditlog.NewStore(auditlog.OSFileSystem{}, filepath.Join(stateRoot, auditLogFilename), auditLogMaxEvents)
 	if err != nil {
 		log.Fatalf("build audit log store: %v", err)
@@ -87,10 +84,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)
 	}
-	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
+	tcpServer, transports, err := devTCPServerFromEnv(listenAddr, handler)
+	if err != nil {
+		log.Fatalf("build dev tcp control transport: %v", err)
 	}
 
 	unixListener, err := transport.ListenAuthenticatedUnixSocket(transport.DefaultUnixSocketPath, transport.UnixPeerAuthConfig{
@@ -109,17 +105,45 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if err := serveUntilStopped(server, unixServer, unixListener); err != nil {
+	log.Printf("vita agent startup transports=%s", transports)
+
+	if err := serveUntilStopped(tcpServer, unixServer, unixListener); err != nil {
 		log.Fatalf("serve agent: %v", err)
 	}
 }
 
+func devTCPServerFromEnv(addr string, handler http.Handler) (*http.Server, string, error) {
+	if os.Getenv(devTCPEnv) != "1" {
+		return nil, "unix", nil
+	}
+
+	server, err := newDevTCPServer(addr, handler)
+	if err != nil {
+		return nil, "", err
+	}
+	return server, "unix+tcp(dev)", nil
+}
+
+func newDevTCPServer(addr string, handler http.Handler) (*http.Server, error) {
+	if !transport.IsLoopbackTCPAddr(addr) {
+		return nil, fmt.Errorf("refusing to bind agent control surface to non-loopback address %s", addr)
+	}
+
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}, nil
+}
+
 func serveUntilStopped(tcpServer *http.Server, unixServer *http.Server, unixListener net.Listener) error {
 	errCh := make(chan error, 2)
-	go serveHTTP(errCh, "tcp "+tcpServer.Addr, func() error {
-		log.Printf("vita agent listening on %s", tcpServer.Addr)
-		return tcpServer.ListenAndServe()
-	})
+	if tcpServer != nil {
+		go serveHTTP(errCh, "tcp "+tcpServer.Addr, func() error {
+			log.Printf("vita agent listening on %s", tcpServer.Addr)
+			return tcpServer.ListenAndServe()
+		})
+	}
 	go serveHTTP(errCh, "unix "+transport.DefaultUnixSocketPath, func() error {
 		log.Printf("vita agent listening on unix socket %s", transport.DefaultUnixSocketPath)
 		return unixServer.Serve(unixListener)
@@ -155,5 +179,12 @@ func shutdownServers(tcpServer *http.Server, unixServer *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	return errors.Join(tcpServer.Shutdown(ctx), unixServer.Shutdown(ctx))
+	var shutdownErrs []error
+	if tcpServer != nil {
+		shutdownErrs = append(shutdownErrs, tcpServer.Shutdown(ctx))
+	}
+	if unixServer != nil {
+		shutdownErrs = append(shutdownErrs, unixServer.Shutdown(ctx))
+	}
+	return errors.Join(shutdownErrs...)
 }
