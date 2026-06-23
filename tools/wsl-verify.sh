@@ -96,18 +96,22 @@ boot_ts() {
     -drive file="$disk",format=raw,if=virtio \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1 &
   local qpid=$! ok=0 i
+  # Wait for VITA-EVAL (the evaluator marker, printed AFTER VITA-TS) — its presence implies the whole chain ran.
   for i in $(seq 1 140); do
-    if grep -qa 'VITA-TS:' "$log" 2>/dev/null; then ok=1; echo "VITA-TS marker found at ~${i}s"; break; fi
+    if grep -qa 'VITA-EVAL:' "$log" 2>/dev/null; then ok=1; echo "VITA-EVAL marker found at ~${i}s"; break; fi
     kill -0 "$qpid" 2>/dev/null || { echo "qemu exited early at ~${i}s"; break; }
     sleep 1
   done
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  echo "----- VITA-TS line -----"; grep -a 'VITA-TS:' "$log" | tail -1
-  if [ "$ok" = 1 ]; then
-    echo "RESULT: PASS (TypeScript executed on-device under the unprivileged Deno sandbox)"
+  local ts ev rej
+  ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1); rej=$(grep -a 'VITA-EVAL-REJECT:' "$log" | tail -1)
+  echo "----- markers -----"; echo "  $ts"; echo "  $ev"; echo "  $rej"
+  # PASS requires BOTH the runtime marker (VITA-TS) AND the on-device evaluator marker (VITA-EVAL) — P1-030 + P1-033.
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ]; then
+    echo "RESULT: PASS (Deno runtime + the real config→plan evaluator executed on-device, unprivileged)"
   else
-    echo "RESULT: FAIL (no VITA-TS marker — service likely failed)"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|deno' | tail -8
+    echo "RESULT: FAIL (missing VITA-TS and/or VITA-EVAL — service likely failed)"
+    sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-ts|vita-eval|deno' | tail -10
     return 1
   fi
 }
