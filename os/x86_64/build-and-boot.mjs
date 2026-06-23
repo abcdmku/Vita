@@ -215,8 +215,12 @@ if (MODE === "smoke") {
   // A verity root is read-only, so systemd.volatile=overlay gives a writable / overlay. The deterministic
   // verity/uki/image-layout planners remain the SPEC; mkosi does the actual verity build (it runs on the host,
   // unlike the .ts-importing planners). This is step 2's pragmatic path.
+  // VITA_VERITY=1: build a dm-verity-protected root. --verity=hash alone is a NO-OP — mkosi needs explicit
+  // root(Verity=data) + root-verity(Verity=hash) partition defs, supplied via --repart-directory pointing at
+  // os/x86_64/repart-verity/ (kept out of the DEFAULT layout so smoke/SB are unaffected). mkosi builds the
+  // hash tree + bakes roothash= onto the UKI cmdline; the root is read-only so volatile=overlay gives writable /.
   const verityMode = process.env.VITA_VERITY === "1";
-  const verity = verityMode ? ["--verity=hash"] : [];
+  const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
   const rootOpts = verityMode ? "ro systemd.volatile=overlay" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
