@@ -159,16 +159,21 @@ type ExecuteStatus struct {
 }
 
 type ExecuteNetworkStatus struct {
-	Ingress       int    `json:"ingress"`
-	Egress        int    `json:"egress"`
-	NetNS         string `json:"netns,omitempty"`
-	Loopback      string `json:"loopback,omitempty"`
-	Isolation     string `json:"isolation,omitempty"`
-	EgressAllowed string `json:"egressAllowed,omitempty"`
-	EgressReach   string `json:"egressReach,omitempty"`
-	EgressDenied  string `json:"egressDenied,omitempty"`
-	EgressDrop    string `json:"egressDrop,omitempty"`
-	ProofPath     string `json:"-"`
+	Ingress           int    `json:"ingress"`
+	Egress            int    `json:"egress"`
+	NetNS             string `json:"netns,omitempty"`
+	Loopback          string `json:"loopback,omitempty"`
+	Isolation         string `json:"isolation,omitempty"`
+	IngressPort       int    `json:"ingressPort,omitempty"`
+	IngressReach      string `json:"ingressReach,omitempty"`
+	IngressDeniedPort int    `json:"ingressDeniedPort,omitempty"`
+	IngressDrop       string `json:"ingressDrop,omitempty"`
+	EgressAllowed     string `json:"egressAllowed,omitempty"`
+	EgressReach       string `json:"egressReach,omitempty"`
+	EgressDenied      string `json:"egressDenied,omitempty"`
+	EgressDrop        string `json:"egressDrop,omitempty"`
+	IngressHostAddr   string `json:"-"`
+	ProofPath         string `json:"-"`
 }
 
 type ExecuteVolumeStatus struct {
@@ -555,6 +560,9 @@ func (c *ExecuteCapability) refreshNetworkProof(ctx context.Context, status *Exe
 			status.Network.EgressReach = capsuleEgressReachOK
 			status.Network.EgressDrop = capsuleEgressDropEnforced
 		}
+	}
+	if proof.Ingress != nil {
+		refreshCapsuleIngressProof(ctx, status.Network, *proof.Ingress)
 	}
 }
 
@@ -2444,10 +2452,16 @@ func executeNetworkStatus(networkPolicy *ExecutionNetwork, netns *capsuleNetns, 
 	}
 	if check != nil && check.Status == capsuleNetnsMeasuredStatusOK && check.Isolation == capsuleNetnsIsolationEnforced {
 		status.Isolation = capsuleNetnsIsolationEnforced
-		if check.Egress != nil && check.Egress.Status == capsuleEgressStatusOK {
+		if check.Egress != nil && check.Egress.Status == capsuleEgressStatusOK && len(networkPolicy.Egress) > 0 {
 			status.EgressAllowed = check.Egress.AllowedCIDR
 			status.EgressDenied = check.Egress.DeniedCIDR
 			status.EgressDrop = check.Egress.Drop
+		}
+		if check.Ingress != nil && check.Ingress.Status == capsuleIngressStatusOK {
+			status.IngressHostAddr = check.Ingress.HostAddr
+			status.IngressPort = check.Ingress.Port
+			status.IngressDeniedPort = check.Ingress.DeniedPort
+			status.IngressDrop = check.Ingress.Drop
 		}
 	}
 	return status

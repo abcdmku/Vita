@@ -47,14 +47,16 @@ type capsuleNetnsCheck struct {
 	Isolation  string
 	Status     string
 	Egress     *capsuleEgressCheck
+	Ingress    *capsuleIngressCheck
 }
 
 type capsuleNetnsProof struct {
-	ID       string              `json:"id"`
-	Loopback string              `json:"loopback"`
-	External string              `json:"external"`
-	Egress   *capsuleEgressProof `json:"egress,omitempty"`
-	Status   string              `json:"status"`
+	ID       string               `json:"id"`
+	Loopback string               `json:"loopback"`
+	External string               `json:"external"`
+	Egress   *capsuleEgressProof  `json:"egress,omitempty"`
+	Ingress  *capsuleIngressProof `json:"ingress,omitempty"`
+	Status   string               `json:"status"`
 }
 
 type capsuleNetnsManager interface {
@@ -88,7 +90,15 @@ func capsuleNetnsForNetwork(unitName string, proofPath string, policy *Execution
 	if err != nil {
 		return capsuleNetns{}, err
 	}
-	if egress != nil {
+	ingress, err := capsuleIngressConfigForUnit(unitName, policy)
+	if err != nil {
+		return capsuleNetns{}, err
+	}
+	if egress != nil || ingress != nil {
+		if egress == nil {
+			egress = capsuleBaseEgressConfigForUnit(unitName)
+		}
+		egress.Ingress = ingress
 		netns.Private = false
 		netns.Egress = egress
 		setCapsuleNetnsPaths(defaultNetnsRoot, &netns)
@@ -297,6 +307,7 @@ func (m defaultCapsuleNetnsManager) Check(ctx context.Context, netns capsuleNetn
 			Isolation:  capsuleNetnsIsolationEnforced,
 			Status:     capsuleNetnsMeasuredStatusOK,
 			Egress:     &egressCheck,
+			Ingress:    egressCheck.Ingress,
 		}, nil
 	}
 	if !onlyLoopback {

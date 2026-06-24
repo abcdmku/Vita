@@ -630,6 +630,11 @@ func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 		readResponse.Last.Network.EgressDrop != capsuleEgressDropEnforced {
 		t.Fatalf("Last.Network = %#v, want netns name, enforced isolation, and egress drop", readResponse.Last.Network)
 	}
+	if readResponse.Last.Network.IngressPort != 8787 ||
+		readResponse.Last.Network.IngressDeniedPort == 0 ||
+		readResponse.Last.Network.IngressDrop != capsuleIngressDropEnforced {
+		t.Fatalf("Last.Network = %#v, want ingress port, denied port, and enforced drop", readResponse.Last.Network)
+	}
 	if err := undo.Undo(ctx); err != nil {
 		t.Fatalf("Undo returned error: %v", err)
 	}
@@ -1322,6 +1327,13 @@ func validExecutionNetworkNoEgress() *ExecutionNetwork {
 			},
 		},
 		Egress: []ExecutionNetworkEgressRule{},
+	}
+}
+
+func validExecutionNetworkNoGrants() *ExecutionNetwork {
+	return &ExecutionNetwork{
+		Ingress: []ExecutionNetworkIngressRule{},
+		Egress:  []ExecutionNetworkEgressRule{},
 	}
 }
 

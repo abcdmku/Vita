@@ -1,6 +1,8 @@
 const VOLUME_PATH = "/var/lib/vita/runtime/volumes/local.test.capsule/state";
 const RECORD_PATH = `${VOLUME_PATH}/record.txt`;
 const CAPSULE_ID = "local.test.capsule";
+const INGRESS_GRANTED_PORT = 8787;
+const INGRESS_DENIED_PORT = 8788;
 
 Deno.writeTextFileSync(
   RECORD_PATH,
@@ -8,9 +10,10 @@ Deno.writeTextFileSync(
   { append: true },
 );
 
+const ingressListener = startIngressListener();
 const proofPath = Deno.env.get("VITA_CAPSULE_NETNS_PROOF");
 if (proofPath !== undefined && proofPath.length > 0) {
-  const proof = await measureNetworkNamespace();
+  const proof = await measureNetworkNamespace(ingressListener);
   Deno.writeTextFileSync(proofPath, `${JSON.stringify(proof)}\n`);
 }
 
@@ -20,7 +23,7 @@ setInterval(() => {
   // Keep the proof capsule active so agentd can confirm systemd state and read DynamicUser's uid.
 }, 60_000);
 
-async function measureNetworkNamespace(): Promise<{
+async function measureNetworkNamespace(ingress: IngressListenerStatus): Promise<{
   readonly egress?: {
     readonly allowed: string;
     readonly denied: string;
@@ -30,6 +33,12 @@ async function measureNetworkNamespace(): Promise<{
   };
   readonly external: "FAIL" | "REACHABLE" | "TIMEOUT";
   readonly id: string;
+  readonly ingress: {
+    readonly deniedPort: number;
+    readonly listener: "OK" | "FAIL";
+    readonly port: number;
+    readonly status: "OK" | "FAIL";
+  };
   readonly loopback: "OK" | "FAIL";
   readonly status: "OK" | "FAIL";
 }> {
@@ -49,45 +58,63 @@ async function measureNetworkNamespace(): Promise<{
     ...(egressProof === undefined ? {} : { egress: egressProof }),
     external,
     id: CAPSULE_ID,
+    ingress: {
+      deniedPort: INGRESS_DENIED_PORT,
+      listener: ingress.listener,
+      port: INGRESS_GRANTED_PORT,
+      status: ingress.listener,
+    },
     loopback,
-    status: loopback === "OK" && external === "FAIL" && (egressProof === undefined || egressProof.status === "OK")
+    status: loopback === "OK" &&
+        external === "FAIL" &&
+        ingress.listener === "OK" &&
+        (egressProof === undefined || egressProof.status === "OK")
       ? "OK"
       : "FAIL",
   };
 }
 
 async function measureLoopback(): Promise<boolean> {
-  let listener: Deno.Listener | undefined;
-  let accepted: Promise<void> | undefined;
   try {
-    listener = Deno.listen({
-      hostname: "127.0.0.1",
-      port: 8787,
-      transport: "tcp",
-    });
-    const activeListener = listener;
-    accepted = (async () => {
-      const conn = await activeListener.accept();
-      conn.close();
-    })();
-
     const conn = await Deno.connect({
       hostname: "127.0.0.1",
-      port: 8787,
+      port: INGRESS_GRANTED_PORT,
       transport: "tcp",
     });
     conn.close();
-    await accepted;
     return true;
   } catch {
-    listener?.close();
-    listener = undefined;
-    if (accepted !== undefined) {
-      await accepted.catch(() => undefined);
-    }
     return false;
-  } finally {
-    listener?.close();
+  }
+}
+
+type IngressListenerStatus = {
+  readonly listener: "OK" | "FAIL";
+};
+
+function startIngressListener(): IngressListenerStatus {
+  try {
+    const listener = Deno.listen({
+      hostname: "0.0.0.0",
+      port: INGRESS_GRANTED_PORT,
+      transport: "tcp",
+    });
+    void acceptIngress(listener);
+    return { listener: "OK" };
+  } catch {
+    return { listener: "FAIL" };
+  }
+}
+
+async function acceptIngress(listener: Deno.Listener): Promise<void> {
+  while (true) {
+    try {
+      const conn = await listener.accept();
+      conn.close();
+    } catch {
+      listener.close();
+      return;
+    }
   }
 }
 

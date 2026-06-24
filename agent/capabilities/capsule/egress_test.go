@@ -170,9 +170,9 @@ func TestComposeTypeScriptWithEgressGrantUsesNamedNetns(t *testing.T) {
 	}
 }
 
-func TestComposeTypeScriptNetworkWithoutEgressStaysPrivateLoopbackOnly(t *testing.T) {
+func TestComposeTypeScriptNetworkWithoutGrantsStaysPrivateLoopbackOnly(t *testing.T) {
 	manifest := executeManifest(executeEntry())
-	manifest.Network = validExecutionNetworkNoEgress()
+	manifest.Network = validExecutionNetworkNoGrants()
 
 	unit, err := composeTypeScriptTransientUnit(manifest)
 	if err != nil {
