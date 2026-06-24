@@ -120,6 +120,8 @@ const TAR_PREFIX_OFFSET = 345;
 const TAR_PREFIX_BYTES = 155;
 const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd] as const;
 const CAPSULE_MANIFEST_BASENAME = "manifest.json";
+const MAX_CAPSULE_TAR_PAYLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_CAPSULE_DECODED_TAR_BYTES = MAX_CAPSULE_TAR_PAYLOAD_BYTES + 4 * 1024 * 1024;
 const EXECUTION_MANIFEST_FIELDS = new Set([
   "data",
   "healthChecks",
@@ -671,13 +673,23 @@ function capsuleTarBytes(bytes: Uint8Array):
   }
 
   try {
+    const decompressed = zstdDecompressSync(bytes, {
+      maxOutputLength: MAX_CAPSULE_DECODED_TAR_BYTES,
+    });
+    if (decompressed.length > MAX_CAPSULE_DECODED_TAR_BYTES) {
+      return {
+        error: error("POLICY_REJECTED", [], "Catalog package artifact zstd output exceeds the decoded capsule limit."),
+        ok: false,
+      };
+    }
+
     return {
       ok: true,
-      value: zstdDecompressSync(bytes),
+      value: decompressed,
     };
   } catch {
     return {
-      error: error("POLICY_REJECTED", [], "Catalog package artifact zstd decompression failed."),
+      error: error("POLICY_REJECTED", [], "Catalog package artifact zstd decompression failed or exceeds the decoded capsule limit."),
       ok: false,
     };
   }
@@ -2532,6 +2544,7 @@ interface ParsedNetworkPrefix {
   readonly address: string;
   readonly bits: number;
   readonly ipv4: number | undefined;
+  readonly ipv6: readonly number[] | undefined;
 }
 
 function parseNetworkDestination(value: string): ParsedNetworkPrefix | undefined {
@@ -2546,6 +2559,7 @@ function parseNetworkDestination(value: string): ParsedNetworkPrefix | undefined
     bits: address.family === 4 ? 32 : 128,
     family: address.family,
     ipv4: address.ipv4,
+    ipv6: address.ipv6,
   };
 }
 
@@ -2572,11 +2586,16 @@ function parseCidrPrefix(value: string): ParsedNetworkPrefix | undefined {
     if (((address.ipv4 & mask) >>> 0) !== address.ipv4) return undefined;
   }
 
+  if (address.family === 6 && address.ipv6 !== undefined && !ipv6HostBitsZero(address.ipv6, bits)) {
+    return undefined;
+  }
+
   return {
     address: addressValue,
     bits,
     family: address.family,
     ipv4: address.ipv4,
+    ipv6: address.ipv6,
   };
 }
 
@@ -2590,15 +2609,20 @@ function parseIpAddress(value: string): ParsedNetworkPrefix | undefined {
       bits: 32,
       family,
       ipv4: parsed,
+      ipv6: undefined,
     };
   }
 
   if (family === 6) {
+    const parsed = parseIpv6(value);
+    if (parsed === undefined) return undefined;
+
     return {
       address: value,
       bits: 128,
       family,
       ipv4: undefined,
+      ipv6: parsed,
     };
   }
 
@@ -2622,10 +2646,100 @@ function parseIpv4(value: string): number | undefined {
   return out >>> 0;
 }
 
+function parseIpv6(value: string): readonly number[] | undefined {
+  if (value === "" || value.includes("%")) return undefined;
+
+  const separator = value.indexOf("::");
+  if (separator !== -1 && value.indexOf("::", separator + 2) !== -1) return undefined;
+
+  const leftValue = separator === -1 ? value : value.slice(0, separator);
+  const rightValue = separator === -1 ? "" : value.slice(separator + 2);
+  const left = leftValue === "" ? [] : leftValue.split(":");
+  const right = rightValue === "" ? [] : rightValue.split(":");
+  const expandedLeft = expandIpv4Hextet(left);
+  const expandedRight = expandIpv4Hextet(right);
+  if (expandedLeft === undefined || expandedRight === undefined) return undefined;
+
+  let groups: readonly string[];
+  if (separator === -1) {
+    groups = expandedLeft;
+    if (groups.length !== 8) return undefined;
+  } else {
+    const missing = 8 - expandedLeft.length - expandedRight.length;
+    if (missing < 1) return undefined;
+    groups = [...expandedLeft, ...Array.from({ length: missing }, () => "0"), ...expandedRight];
+  }
+
+  const bytes: number[] = [];
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    if (group === undefined || !/^[0-9A-Fa-f]{1,4}$/u.test(group)) return undefined;
+
+    const parsed = Number.parseInt(group, 16);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 0xffff) return undefined;
+    bytes[bytes.length] = (parsed >> 8) & 0xff;
+    bytes[bytes.length] = parsed & 0xff;
+  }
+
+  return bytes;
+}
+
+function expandIpv4Hextet(parts: readonly string[]): readonly string[] | undefined {
+  const out: string[] = [];
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === undefined || part === "") return undefined;
+
+    if (part.includes(".")) {
+      if (index !== parts.length - 1) return undefined;
+      const ipv4 = parseIpv4(part);
+      if (ipv4 === undefined) return undefined;
+
+      out[out.length] = ((ipv4 >>> 16) & 0xffff).toString(16);
+      out[out.length] = (ipv4 & 0xffff).toString(16);
+      continue;
+    }
+
+    out[out.length] = part;
+  }
+
+  return out;
+}
+
+function ipv6HostBitsZero(bytes: readonly number[], bits: number): boolean {
+  if (bytes.length !== 16) return false;
+
+  const fullBytes = Math.floor(bits / 8);
+  const partialBits = bits % 8;
+  let index = fullBytes;
+
+  if (partialBits > 0) {
+    const byte = bytes[index];
+    if (byte === undefined) return false;
+
+    const mask = (0xff << (8 - partialBits)) & 0xff;
+    if ((byte & ~mask) !== 0) return false;
+    index += 1;
+  }
+
+  for (; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) return false;
+  }
+
+  return true;
+}
+
 function sourceCoversAll(prefix: ParsedNetworkPrefix): boolean {
   if (prefix.bits !== 0) return false;
   if (prefix.family === 4) return prefix.ipv4 === 0;
-  return prefix.address === "::" || prefix.address === "0:0:0:0:0:0:0:0";
+  if (prefix.ipv6 === undefined) return false;
+
+  for (let index = 0; index < prefix.ipv6.length; index += 1) {
+    if (prefix.ipv6[index] !== 0) return false;
+  }
+
+  return true;
 }
 
 function isLoopbackHost(host: string): boolean {

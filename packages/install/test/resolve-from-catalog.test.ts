@@ -236,6 +236,25 @@ test("capsule artifact must be zstd and use a root manifest.json", () => {
   );
 });
 
+test("capsule artifact decoded zstd output is capped fail-closed", () => {
+  const oversizedArtifact = zstdCompressSync(Buffer.alloc(69 * 1024 * 1024));
+
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: signCatalog(validCatalog({
+        artifactIntegrity: sri(oversizedArtifact, "sha512"),
+        entry: validInstallEntry(),
+        lockfile: validNpmLockfile(),
+      })),
+      mirrorStore: validMirrorStore(oversizedArtifact),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
+});
+
 test("capsule artifact SRI mismatch rejects before install planning", () => {
   const fixture = signedFixture();
   const tamperedArtifact = packageArtifactBytes({
@@ -251,6 +270,49 @@ test("capsule artifact SRI mismatch rejects before install planning", () => {
       version: "1.2.3",
     }),
     "INTEGRITY_MISMATCH",
+  );
+});
+
+test("capsule ExecutionManifest rejects non-canonical IPv6 CIDRs", () => {
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        network: {
+          egress: [],
+          ingress: [
+            {
+              interface: "eth0",
+              name: "private-v6",
+              port: 8443,
+              protocol: "tcp",
+              public: false,
+              sourceCidr: "2001:db8::1/64",
+            },
+          ],
+        },
+      }),
+    })),
+    "POLICY_REJECTED",
+  );
+
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        network: {
+          egress: [
+            {
+              destinations: ["2001:db8::1/64"],
+              interface: "eth0",
+              name: "egress-v6",
+              ports: [443],
+              protocol: "tcp",
+            },
+          ],
+          ingress: [],
+        },
+      }),
+    })),
+    "POLICY_REJECTED",
   );
 });
 
