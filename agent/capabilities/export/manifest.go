@@ -147,10 +147,16 @@ func ValidateManifest(manifest Manifest) error {
 		total += entry.Bytes
 		if i > 0 {
 			prev := manifest.Entries[i-1]
-			switch compareEntries(prev, entry) {
-			case 0:
+			// Path uniqueness is the manifest invariant: the bundle content lookup is
+			// keyed by path ALONE (see export.go VerifyBundle), so two entries sharing a
+			// path — even with different kinds — would let one output path be claimed
+			// twice. Reject duplicate paths regardless of kind (fail-closed); a non-zero
+			// compareEntries with an equal path means same path/different kind, which the
+			// kind-aware sort order would otherwise wave through.
+			if prev.Path == entry.Path {
 				return bundleError("duplicate_path", "export manifest contains duplicate entry path")
-			case 1:
+			}
+			if compareEntries(prev, entry) == 1 {
 				return bundleError("invalid_manifest", "export manifest entries must be sorted")
 			}
 		}

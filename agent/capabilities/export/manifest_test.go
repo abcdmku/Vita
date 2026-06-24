@@ -144,6 +144,32 @@ func TestParseManifestRejectsInlineSecretMetadata(t *testing.T) {
 	})
 }
 
+func TestParseManifestRejectsDuplicatePathRegardlessOfKind(t *testing.T) {
+	// Two entries SHARE a path but differ in kind. They are already in canonical
+	// (compareEntries) order — "config" < "file" — so the sort check passes; only the
+	// path-uniqueness invariant catches them. The bundle lookup is keyed by path ALONE,
+	// so allowing this would let one output path be claimed twice.
+	content := []byte("dup")
+	integrity := SHA256Integrity(content)
+	entries := []Entry{
+		{Path: "dup.txt", Kind: EntryKindConfig, Bytes: int64(len(content)), Integrity: integrity},
+		{Path: "dup.txt", Kind: EntryKindFile, Bytes: int64(len(content)), Integrity: integrity},
+	}
+	if compareEntries(entries[0], entries[1]) != -1 {
+		t.Fatalf("test precondition: entries must be in canonical sort order (config < file)")
+	}
+	root := mustRootDigest(t, entries)
+	raw := []byte(
+		`{"entries":[` +
+			`{"bytes":3,"integrity":"` + integrity + `","kind":"config","path":"dup.txt"},` +
+			`{"bytes":3,"integrity":"` + integrity + `","kind":"file","path":"dup.txt"}` +
+			`],"formatVersion":1,"rootDigest":"` + root + `"}` + "\n",
+	)
+
+	_, err := ParseManifest(raw)
+	assertBundleCode(t, err, "duplicate_path")
+}
+
 func validManifest(t *testing.T, contents map[string][]byte) Manifest {
 	t.Helper()
 

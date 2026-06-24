@@ -127,7 +127,10 @@ func DefaultGrants() []Grant {
 	return []Grant{
 		{Name: "runtime-files", Root: "owner", Access: AccessReadWrite},
 		{Name: "runtime-files-ro", Root: "owner-ro", Access: AccessReadOnly},
-		{Name: "export", Root: "owner", Access: AccessReadWrite},
+		// Export writes land under a DEDICATED scope (/var/lib/vita/files/export/export),
+		// NOT the owner data namespace, so exported bundles never co-mingle with the
+		// runtime-files owner root.
+		{Name: "export", Root: "export", Access: AccessReadWrite},
 	}
 }
 
