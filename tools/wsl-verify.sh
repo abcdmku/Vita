@@ -116,7 +116,7 @@ boot_ts() {
   done
   sleep 1  # grace for any trailing marker flush
   kill "$qpid" 2>/dev/null; pkill -f qemu-system-x86_64 >/dev/null 2>&1
-  local ts ev pv ex cn st ac ar cpv cc cr pds pw cx cxr fe hl vo of oe ol np we nn eg ig fl pr dr bk vu pd rf
+  local ts ev pv ex cn st ac ar cpv cc cr pds pw cx cxr fe hl vo of oe ol np we nn eg ig fl pr dr bk vu pd rf xp sh
   ts=$(grep -a 'VITA-TS:' "$log" | tail -1); ev=$(grep -a 'VITA-EVAL:' "$log" | tail -1)
   pv=$(grep -a 'VITA-PREVIEW:' "$log" | tail -1); ex=$(grep -a 'VITA-EXPLAIN:' "$log" | tail -1)
   cn=$(grep -aE 'VITA-CONNECT(-ERROR)?:' "$log" | tail -1); st=$(grep -aE 'VITA-STATE(-ERROR)?:' "$log" | tail -1)
@@ -142,14 +142,16 @@ boot_ts() {
   vu=$(grep -aE 'VITA-UI:.*apply=committed status=OK' "$log" | tail -1)
   pd=$(grep -aE 'VITA-PROTECT-DASH:.*status=OK' "$log" | tail -1)
   rf=$(grep -aE 'VITA-RESTORE-FULL:.*verified=OK.*status=OK' "$log" | tail -1)
-  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl" "$vo" "$of" "$oe" "$ol" "$np" "$we" "$nn" "$eg" "$ig" "$fl" "$pr" "$dr" "$bk" "$vu" "$pd" "$rf"; do echo "  $m"; done
+  xp=$(grep -aE 'VITA-EXPORT:.*verify=OK status=OK' "$log" | tail -1)
+  sh=$(grep -aE 'VITA-STORAGE-HEALTH:.*status=OK' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl" "$vo" "$of" "$oe" "$ol" "$np" "$we" "$nn" "$eg" "$ig" "$fl" "$pr" "$dr" "$bk" "$vu" "$pd" "$rf" "$xp" "$sh"; do echo "  $m"; done
   # PASS = the FULL on-device control plane THROUGH RUNNING A CAPSULE: ...+ PDS read/write + capsule.execute (the node
   # spawns a hardened transient-unit workload, W4-S1) + its fail-closed reject + FETCH (SRI-verified, P1-045) + capsule
   # HEALTH supervised via /state (P1-047) + a per-capsule persistent VOLUME via StateDirectory (P1-046) + an OCI image
   # FETCHED+two-level-digest-verified+assembled (P1-053, W5) + capsule NETWORK grants parsed+validated (P1-057, W6-S1,
   # capsules still network-mute). Node proposes; agent validates+spawns.
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ] && [ -n "$vo" ] && [ -n "$of" ] && [ -n "$oe" ] && [ -n "$ol" ] && [ -n "$np" ] && [ -n "$we" ] && [ -n "$nn" ] && [ -n "$eg" ] && [ -n "$ig" ] && [ -n "$fl" ] && [ -n "$pr" ] && [ -n "$dr" ] && [ -n "$bk" ] && [ -n "$vu" ] && [ -n "$pd" ] && [ -n "$rf" ]; then
-    echo "RESULT: PASS (full control-plane: fetch+execute+health+volume+OCI(fetch/run/limits)+NET-PARSE+NET-NS+NET-EGRESS+NET-INGRESS + Phase4/5: FILES(roundtrip)+PDS-REPO+DRIFT+BACKUP(measured restore)+CONTROLLER-UI(VITA-UI)+PROTECT-DASH(measured)+RESTORE-FULL(measured re-hash) — wave5 OCI + wave6 net S1-S4 + 14 features)"
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ] && [ -n "$vo" ] && [ -n "$of" ] && [ -n "$oe" ] && [ -n "$ol" ] && [ -n "$np" ] && [ -n "$we" ] && [ -n "$nn" ] && [ -n "$eg" ] && [ -n "$ig" ] && [ -n "$fl" ] && [ -n "$pr" ] && [ -n "$dr" ] && [ -n "$bk" ] && [ -n "$vu" ] && [ -n "$pd" ] && [ -n "$rf" ] && [ -n "$xp" ] && [ -n "$sh" ]; then
+    echo "RESULT: PASS (full control-plane: fetch+execute+health+volume+OCI(fetch/run/limits)+NET-PARSE+NET-NS+NET-EGRESS+NET-INGRESS + Phase4/5: FILES(roundtrip)+PDS-REPO+DRIFT+BACKUP(measured restore)+CONTROLLER-UI(VITA-UI)+PROTECT-DASH(measured)+RESTORE-FULL(measured re-hash)+EXPORT(verifiable)+STORAGE-HEALTH(measured) — wave5 OCI + wave6 net S1-S4 + 16 features)"
   else
     echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
     sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -28
