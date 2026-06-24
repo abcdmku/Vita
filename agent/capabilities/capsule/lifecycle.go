@@ -664,10 +664,22 @@ func (c *LifecycleCapability) stopManifest(ctx context.Context, manifest Executi
 	if unit.NetNS != nil && c.execute.netns == nil {
 		return false, lifecycleInvalid("missing capsule netns manager")
 	}
+	// Tear down the LIVE namespace the start path created, not a fresh one recomposed
+	// from the manifest. composeTransientUnit rebuilds the netns descriptor from static
+	// manifest fields only; on-device that descriptor is missing the runtime state
+	// (systemd-assigned path, the live egress veth/nft identifiers and host probe
+	// handle), so tearing it down fails (capsule_lifecycle_stop_failed). The execute
+	// capability retains the exact descriptor it created — prefer it. Fall back to the
+	// recomposed descriptor when no live netns was retained (e.g. older state or the
+	// unit-test fakes), preserving prior behavior.
+	teardownNetns := unit.NetNS
+	if live := c.execute.currentNetns(); live != nil {
+		teardownNetns = live
+	}
 	stopErr := stopAndUnlinkTransientUnit(ctx, c.execute.launcher, unit.Name)
 	var teardownErr error
-	if unit.NetNS != nil {
-		teardownErr = c.execute.netns.Teardown(ctx, *unit.NetNS)
+	if teardownNetns != nil {
+		teardownErr = c.execute.netns.Teardown(ctx, *teardownNetns)
 	}
 	if err := errors.Join(stopErr, teardownErr); err != nil {
 		return true, err

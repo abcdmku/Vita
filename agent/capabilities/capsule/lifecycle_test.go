@@ -557,6 +557,48 @@ func TestLifecycleStopTeardownFailureRestoresPriorRunningInstance(t *testing.T) 
 	}
 }
 
+// TestLifecycleStopTearsDownLiveNetns asserts the lifecycle stop tears down the
+// EXACT network namespace descriptor the start path created (retained by the
+// execute capability), not a fresh descriptor recomposed from the manifest. On a
+// real boot the recomposed descriptor is missing the runtime state, which made the
+// on-device teardown fail (capsule_lifecycle_stop_failed). We discriminate the two
+// descriptors with a proof path the netns manager stamps only on the live one.
+func TestLifecycleStopTearsDownLiveNetns(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	const liveProofPath = "/run/vita-agent/netns/live-proof-marker.json"
+	netns := &recordingNetnsManager{proofPath: liveProofPath}
+	manifest := lifecycleNetworkManifest(t, entry, lifecyclePolicyFail)
+	execute := lifecycleNetworkExecute(t, entry, manifest, launcher, netns)
+	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     entry.ID,
+			Unit:   capsuleUnitName(entry.ID),
+			Status: capsuleruntime.StatusOK,
+			Health: capsuleruntime.StatusOK,
+		}}
+	})
+
+	live := execute.currentNetns()
+	if live == nil || live.ProofPath != liveProofPath {
+		t.Fatalf("retained live netns = %#v, want proof path %q", live, liveProofPath)
+	}
+	netns.tornDown = nil
+
+	if _, err := lifecycle.Apply(ctx, LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpStop, ID: entry.ID}}); err != nil {
+		t.Fatalf("stop Apply returned error: %v", err)
+	}
+	if len(netns.tornDown) != 1 {
+		t.Fatalf("netns teardowns = %d, want exactly 1", len(netns.tornDown))
+	}
+	if netns.tornDown[0].ProofPath != liveProofPath {
+		t.Fatalf("torn-down netns proof path = %q, want the live descriptor %q (not a recomposed one)", netns.tornDown[0].ProofPath, liveProofPath)
+	}
+}
+
 func TestLifecycleRemediateHonorsManifestPolicy(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -635,7 +677,7 @@ func TestLifecycleRejectsNonComputedRunningUnit(t *testing.T) {
 		t.Fatal("missing seeded execution")
 	}
 	status.Unit = "ssh.service"
-	execute.setLastManifest(status, &manifest)
+	execute.setLastManifest(status, &manifest, execute.currentNetns())
 	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
 	lifecycle := lifecycleCapabilityForTest(execute, archive, nil)
 	calls = nil
