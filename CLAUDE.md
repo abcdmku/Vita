@@ -155,3 +155,23 @@ Workers are **GPT-5.5 at xhigh reasoning** via Codex (`tools/dispatch/dispatch-t
 overridable by env: `VITA_WORKER_MODEL=gpt-5.5`, `VITA_WORKER_EFFORT=xhigh`. Auth via
 `OPENAI_API_KEY` or `codex login`. If neither is present, `dispatch` exits with instructions and you
 fall back to direct implementation for R0/R1 only. Workers read [AGENTS.md](AGENTS.md) automatically.
+
+### 8.1 MAXIMIZE PARALLELISM (standing owner order — never serialize)
+The owner has repeatedly directed: do NOT process one slice at a time. The failure mode is "one
+dispatch/review/boot, then wait/report." Instead, every tick launch a **burst** and keep the whole
+pipeline saturated:
+- **8–12 Codex builders in flight at all times** — `npm run dispatch -- <id>` runs in an isolated
+  worktree; fire many as parallel background tasks in ONE message. When in-flight builds drop below ~8,
+  dispatch more — never let the queue drain. Use `VITA_DISPATCH_BASE=task/<id>` to re-dispatch a revision
+  onto a branch tip.
+- **Run MULTIPLE Codex reviews concurrently** — `npm run review -- <id>` is the R2–R4 gate and is NOT
+  Anthropic-quota-limited (it stays available when Workflow/Agent subagents are throttled). Launch all
+  pending reviews at once.
+- **Keep a DEEP authored contract queue** — author the next wave AHEAD of need, many at once (a
+  contract-authoring Workflow when Anthropic quota is up; otherwise author them yourself — the main loop
+  is never quota-limited). Decompose every missing feature into THIN independent slices across all arcs so
+  they build concurrently.
+- **The ONLY hard serial bottleneck is the single Borg51 QEMU boot** (one VM at a time). Everything else —
+  builds, Codex reviews, authoring, pushes, conflict resolution — runs concurrently. Batch-boot
+  (merge several review-approved slices, then ONE boot checks all their markers + node-survival). Never
+  let the serial boot stall the parallel build/review work. (See memory `vita-parallelize-hard`.)
