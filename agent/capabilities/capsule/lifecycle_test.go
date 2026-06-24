@@ -3,6 +3,7 @@ package capsule
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -556,6 +557,48 @@ func TestLifecycleStopTeardownFailureRestoresPriorRunningInstance(t *testing.T) 
 	}
 }
 
+// TestLifecycleStopTearsDownLiveNetns asserts the lifecycle stop tears down the
+// EXACT network namespace descriptor the start path created (retained by the
+// execute capability), not a fresh descriptor recomposed from the manifest. On a
+// real boot the recomposed descriptor is missing the runtime state, which made the
+// on-device teardown fail (capsule_lifecycle_stop_failed). We discriminate the two
+// descriptors with a proof path the netns manager stamps only on the live one.
+func TestLifecycleStopTearsDownLiveNetns(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	const liveProofPath = "/run/vita-agent/netns/live-proof-marker.json"
+	netns := &recordingNetnsManager{proofPath: liveProofPath}
+	manifest := lifecycleNetworkManifest(t, entry, lifecyclePolicyFail)
+	execute := lifecycleNetworkExecute(t, entry, manifest, launcher, netns)
+	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     entry.ID,
+			Unit:   capsuleUnitName(entry.ID),
+			Status: capsuleruntime.StatusOK,
+			Health: capsuleruntime.StatusOK,
+		}}
+	})
+
+	live := execute.currentNetns()
+	if live == nil || live.ProofPath != liveProofPath {
+		t.Fatalf("retained live netns = %#v, want proof path %q", live, liveProofPath)
+	}
+	netns.tornDown = nil
+
+	if _, err := lifecycle.Apply(ctx, LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpStop, ID: entry.ID}}); err != nil {
+		t.Fatalf("stop Apply returned error: %v", err)
+	}
+	if len(netns.tornDown) != 1 {
+		t.Fatalf("netns teardowns = %d, want exactly 1", len(netns.tornDown))
+	}
+	if netns.tornDown[0].ProofPath != liveProofPath {
+		t.Fatalf("torn-down netns proof path = %q, want the live descriptor %q (not a recomposed one)", netns.tornDown[0].ProofPath, liveProofPath)
+	}
+}
+
 func TestLifecycleRemediateHonorsManifestPolicy(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -634,7 +677,7 @@ func TestLifecycleRejectsNonComputedRunningUnit(t *testing.T) {
 		t.Fatal("missing seeded execution")
 	}
 	status.Unit = "ssh.service"
-	execute.setLastManifest(status, &manifest)
+	execute.setLastManifest(status, &manifest, execute.currentNetns())
 	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
 	lifecycle := lifecycleCapabilityForTest(execute, archive, nil)
 	calls = nil
@@ -1099,4 +1142,100 @@ func (a *racingLifecycleArchive) Restore(ctx context.Context, req backup.Archive
 	a.restoreIDs = append(a.restoreIDs, req.BackupID)
 	a.lastID = a.racingID
 	return backup.ArchiveRestoreResult{BackupID: req.BackupID, Files: 1, Restored: true}, archiveCallUndo{calls: a.calls}, nil
+}
+
+// TestLifecycleBackupPlanResolvesDynamicUserStateDirectorySymlink reproduces the
+// on-device boot failure (VITA-CAPSULE-LIFECYCLE-ERROR reason=update_capsule_lifecycle_backup_failed):
+// systemd's StateDirectory= under DynamicUser places the real volume directory beneath
+// /var/lib/private and leaves the declared mountPath as a SYMLINK to it. The archive
+// walker rejects a top-level source root that is a symlink, so the lifecycle backup must
+// resolve the declared path to its real directory. This asserts the resolved source root
+// is the real directory (not the symlink) while preserving the volume-name suffix and the
+// shared restore root.
+func TestLifecycleBackupPlanResolvesDynamicUserStateDirectorySymlink(t *testing.T) {
+	base := t.TempDir()
+	// Real directory systemd would create under /var/lib/private/...
+	realDir := filepath.Join(base, "private", "vita", "runtime", "volumes", "local.test.capsule", "state")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir real state dir: %v", err)
+	}
+	// Declared mountPath that systemd leaves as a symlink to the real directory.
+	declaredParent := filepath.Join(base, "vita", "runtime", "volumes", "local.test.capsule")
+	if err := os.MkdirAll(declaredParent, 0o700); err != nil {
+		t.Fatalf("mkdir declared parent: %v", err)
+	}
+	declared := filepath.Join(declaredParent, "state")
+	if err := os.Symlink(realDir, declared); err != nil {
+		t.Skipf("symlink unsupported on this host: %v", err)
+	}
+
+	status := ExecuteStatus{
+		ID:   "local.test.capsule",
+		Unit: capsuleUnitName("local.test.capsule"),
+		Volumes: []ExecuteVolumeStatus{{
+			Name:    "state",
+			Path:    declared,
+			Mounted: "OK",
+			Status:  "OK",
+		}},
+	}
+
+	plan, err := lifecycleBackupPlanFor(status, transientUnit{})
+	if err != nil {
+		t.Fatalf("lifecycleBackupPlanFor returned error: %v", err)
+	}
+	if len(plan.sourceRoots) != 1 {
+		t.Fatalf("source roots = %#v, want exactly one", plan.sourceRoots)
+	}
+	root := plan.sourceRoots[0]
+	if root.Name != "state" {
+		t.Fatalf("source root name = %q, want state", root.Name)
+	}
+
+	wantReal, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("evalsymlinks real dir: %v", err)
+	}
+	if root.Path != wantReal {
+		t.Fatalf("source root path = %q, want resolved real directory %q (must not be the symlink)", root.Path, wantReal)
+	}
+	info, err := os.Lstat(root.Path)
+	if err != nil {
+		t.Fatalf("lstat resolved root: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		t.Fatalf("resolved source root must be a real directory, got mode %v", info.Mode())
+	}
+	if filepath.Base(root.Path) != "state" {
+		t.Fatalf("resolved source root must keep the volume-name suffix, got %q", root.Path)
+	}
+	if plan.restoreRoot != filepath.Dir(wantReal) {
+		t.Fatalf("restore root = %q, want %q", plan.restoreRoot, filepath.Dir(wantReal))
+	}
+}
+
+// TestLifecycleBackupPlanFallsBackWhenVolumePathMissing keeps the archive's
+// tolerate-missing behavior: when the declared volume path is not present on disk (a
+// not-yet-provisioned volume), resolution falls back to the cleaned declared path rather
+// than failing the plan.
+func TestLifecycleBackupPlanFallsBackWhenVolumePathMissing(t *testing.T) {
+	declared := filepath.Join(t.TempDir(), "vita", "runtime", "volumes", "local.test.capsule", "state")
+	status := ExecuteStatus{
+		ID:   "local.test.capsule",
+		Unit: capsuleUnitName("local.test.capsule"),
+		Volumes: []ExecuteVolumeStatus{{
+			Name:    "state",
+			Path:    declared,
+			Mounted: "OK",
+			Status:  "OK",
+		}},
+	}
+
+	plan, err := lifecycleBackupPlanFor(status, transientUnit{})
+	if err != nil {
+		t.Fatalf("lifecycleBackupPlanFor returned error: %v", err)
+	}
+	if len(plan.sourceRoots) != 1 || plan.sourceRoots[0].Path != filepath.Clean(declared) {
+		t.Fatalf("source roots = %#v, want fallback to cleaned declared path %q", plan.sourceRoots, filepath.Clean(declared))
+	}
 }

@@ -200,6 +200,7 @@ type ExecuteCapability struct {
 	mu           sync.Mutex
 	last         *ExecuteStatus
 	lastManifest *ExecutionManifest
+	lastNetns    *capsuleNetns
 }
 
 type ExecuteInvalidRequestError struct {
@@ -484,7 +485,7 @@ func (c *ExecuteCapability) startValidatedManifest(ctx context.Context, desired 
 		OCILimits:  ociLimits,
 		Network:    executeNetworkStatus(manifest.Network, unit.NetNS, netnsCheck),
 	}
-	c.setLastManifest(executeStatus, &manifest)
+	c.setLastManifest(executeStatus, &manifest, createdNetns)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
 	for _, volume := range unit.Volumes {
 		log.Printf("VITA-CAPSULE-VOLUME: id=%s vol=%s path=%s mounted=OK status=OK", manifest.ID, volume.Name, volume.Path)
@@ -533,10 +534,10 @@ func (c *ExecuteCapability) installedEntry(ctx context.Context, desired ExecuteD
 }
 
 func (c *ExecuteCapability) setLast(status ExecuteStatus) {
-	c.setLastManifest(status, nil)
+	c.setLastManifest(status, nil, nil)
 }
 
-func (c *ExecuteCapability) setLastManifest(status ExecuteStatus, manifest *ExecutionManifest) {
+func (c *ExecuteCapability) setLastManifest(status ExecuteStatus, manifest *ExecutionManifest, netns *capsuleNetns) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -554,10 +555,18 @@ func (c *ExecuteCapability) setLastManifest(status ExecuteStatus, manifest *Exec
 	}
 	if manifest == nil {
 		c.lastManifest = nil
+		c.lastNetns = nil
 		return
 	}
 	cloned := cloneExecutionManifest(*manifest)
 	c.lastManifest = &cloned
+	// Retain the LIVE network namespace exactly as the start path created it (the
+	// systemd-assigned runtime path, the egress veth/nft identifiers, and any host
+	// probe handle). The lifecycle stop/teardown must act on this real descriptor —
+	// recomposing the netns from the manifest alone loses the runtime state and makes
+	// the on-device teardown fail (capsule_lifecycle_stop_failed). Single-owner
+	// handoff: the descriptor is consumed once when the running unit is torn down.
+	c.lastNetns = netns
 }
 
 func (c *ExecuteCapability) clearLast(unit string) {
@@ -567,7 +576,22 @@ func (c *ExecuteCapability) clearLast(unit string) {
 	if c.last != nil && c.last.Unit == unit {
 		c.last = nil
 		c.lastManifest = nil
+		c.lastNetns = nil
 	}
+}
+
+// currentNetns returns the LIVE capsule network namespace descriptor captured at
+// start time for the running capsule, or nil if the running capsule has no network
+// namespace (or none is running). The lifecycle controller reuses this exact
+// descriptor to tear down the real namespace instead of recomposing one from the
+// manifest.
+func (c *ExecuteCapability) currentNetns() *capsuleNetns {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastNetns
 }
 
 func (c *ExecuteCapability) refreshNetworkProof(ctx context.Context, status *ExecuteStatus) {
@@ -1611,9 +1635,30 @@ func (l systemdRunLauncher) StopTransientUnit(ctx context.Context, unit string) 
 
 func (l systemdRunLauncher) ResetFailedUnit(ctx context.Context, unit string) error {
 	if output, err := exec.CommandContext(ctx, l.systemctl, "reset-failed", unit).CombinedOutput(); err != nil {
-		return fmt.Errorf("reset capsule transient unit: %w: %s", err, strings.TrimSpace(string(output)))
+		trimmed := strings.TrimSpace(string(output))
+		// A transient unit that stopped cleanly auto-vanishes, so `systemctl
+		// reset-failed` exits non-zero reporting the unit is "not loaded". That
+		// absence IS the desired post-stop state — reset-failed only matters when
+		// the unit still exists in a failed state — so treat not-loaded/no-such-unit
+		// as success. Every other reset-failed error stays fail-closed.
+		if resetFailedUnitAbsent(trimmed) {
+			return nil
+		}
+		return fmt.Errorf("reset capsule transient unit: %w: %s", err, trimmed)
 	}
 	return nil
+}
+
+// resetFailedUnitAbsent reports whether a `systemctl reset-failed` failure means
+// the unit no longer exists (it was never loaded / has no such unit), which after
+// a clean stop is the intended outcome rather than a real failure. It is
+// deliberately narrow: only the unit-absent diagnostics match, so genuine
+// reset-failed errors are never swallowed.
+func resetFailedUnitAbsent(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "not loaded") ||
+		strings.Contains(lower, "no such unit") ||
+		strings.Contains(lower, "not found")
 }
 
 func (l systemdRunLauncher) dynamicUID(ctx context.Context, unit string) (string, error) {

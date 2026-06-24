@@ -664,10 +664,22 @@ func (c *LifecycleCapability) stopManifest(ctx context.Context, manifest Executi
 	if unit.NetNS != nil && c.execute.netns == nil {
 		return false, lifecycleInvalid("missing capsule netns manager")
 	}
+	// Tear down the LIVE namespace the start path created, not a fresh one recomposed
+	// from the manifest. composeTransientUnit rebuilds the netns descriptor from static
+	// manifest fields only; on-device that descriptor is missing the runtime state
+	// (systemd-assigned path, the live egress veth/nft identifiers and host probe
+	// handle), so tearing it down fails (capsule_lifecycle_stop_failed). The execute
+	// capability retains the exact descriptor it created — prefer it. Fall back to the
+	// recomposed descriptor when no live netns was retained (e.g. older state or the
+	// unit-test fakes), preserving prior behavior.
+	teardownNetns := unit.NetNS
+	if live := c.execute.currentNetns(); live != nil {
+		teardownNetns = live
+	}
 	stopErr := stopAndUnlinkTransientUnit(ctx, c.execute.launcher, unit.Name)
 	var teardownErr error
-	if unit.NetNS != nil {
-		teardownErr = c.execute.netns.Teardown(ctx, *unit.NetNS)
+	if teardownNetns != nil {
+		teardownErr = c.execute.netns.Teardown(ctx, *teardownNetns)
 	}
 	if err := errors.Join(stopErr, teardownErr); err != nil {
 		return true, err
@@ -780,15 +792,27 @@ func lifecycleBackupPlanFor(status ExecuteStatus, unit transientUnit) (lifecycle
 		if volume.Name == "" || volume.Path == "" {
 			return lifecycleBackupPlan{}, lifecycleInvalid("capsule volume status is incomplete")
 		}
-		cleaned := filepath.Clean(volume.Path)
+		declared := filepath.Clean(volume.Path)
+		if filepath.Base(declared) != volume.Name {
+			return lifecycleBackupPlan{}, lifecycleInvalid("capsule volume path must end with the volume name")
+		}
+		// systemd provisions a capsule volume's StateDirectory under DynamicUser, which
+		// places the real directory beneath /var/lib/private and leaves the declared
+		// mountPath (e.g. /var/lib/vita/runtime/volumes/<id>/state) as a SYMLINK to it.
+		// The archive walker rejects a top-level source root that is a symlink (it must be
+		// a real directory), so backing up the declared mountPath directly fails the
+		// backup-before-update with capsule_lifecycle_backup_failed. Resolve the volume
+		// path to its real on-disk directory so the backup measures the actual state bytes
+		// and the restore writes them back through the same canonical location. Resolution
+		// falls back to the cleaned declared path when the directory is not present on disk
+		// (e.g. a not-yet-provisioned volume), preserving the archive's tolerate-missing
+		// behavior and the unit-test fakes.
+		cleaned := resolveLifecycleVolumePath(declared)
 		parent := filepath.Dir(cleaned)
 		if restoreRoot == "" {
 			restoreRoot = parent
 		} else if restoreRoot != parent {
 			return lifecycleBackupPlan{}, lifecycleInvalid("capsule volumes must share a restore root")
-		}
-		if filepath.Base(cleaned) != volume.Name {
-			return lifecycleBackupPlan{}, lifecycleInvalid("capsule volume path must end with the volume name")
 		}
 		roots = append(roots, backup.ArchiveSourceRoot{Name: volume.Name, Path: cleaned})
 	}
@@ -805,6 +829,22 @@ func lifecycleBackupPlanFor(status ExecuteStatus, unit transientUnit) (lifecycle
 		sourceRoots: roots,
 		restoreRoot: restoreRoot,
 	}, nil
+}
+
+// resolveLifecycleVolumePath resolves a capsule volume's declared mountPath to its
+// real on-disk directory. systemd's StateDirectory= under DynamicUser places the real
+// directory beneath /var/lib/private and leaves the declared mountPath as a symlink to
+// it; the archive walker requires a real directory as a top-level source root, so the
+// lifecycle backup must follow that symlink. EvalSymlinks resolves every component and
+// requires the path to exist; when it does not (a not-yet-provisioned volume, or the
+// unit-test fakes that point at paths with no on-disk presence), fall back to the
+// already-cleaned declared path so the archive's tolerate-missing behavior still applies.
+func resolveLifecycleVolumePath(cleaned string) string {
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	return filepath.Clean(resolved)
 }
 
 func normalizeLifecycleTarget(id string, target *LifecycleTarget) (CapsuleEntry, ExecutionManifest, error) {
