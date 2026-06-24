@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -59,6 +60,24 @@ func SetNetworkNamespace(fd int) error {
 // Privileged: requires CAP_SYS_ADMIN.
 func BindMount(source string, target string) error {
 	return unix.Mount(source, target, "none", unix.MS_BIND, "")
+}
+
+// EnsureSharedBindMount makes target a bind mount with shared propagation.
+// Privileged: requires CAP_SYS_ADMIN.
+func EnsureSharedBindMount(target string) error {
+	mounted, shared, err := mountInfoForTarget(target)
+	if err != nil {
+		return err
+	}
+	if !mounted {
+		if err := unix.Mount(target, target, "none", unix.MS_BIND, ""); err != nil {
+			return err
+		}
+	}
+	if shared {
+		return nil
+	}
+	return unix.Mount("", target, "none", unix.MS_SHARED|unix.MS_REC, "")
 }
 
 // UnmountDetach lazily detaches a mount.
@@ -196,6 +215,32 @@ func DeleteNftTable(family string, table string) error {
 		return fmt.Errorf("nft delete table: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func mountInfoForTarget(target string) (mounted bool, shared bool, err error) {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 7 || fields[4] != target {
+			continue
+		}
+		for _, field := range fields[6:] {
+			if field == "-" {
+				break
+			}
+			if strings.HasPrefix(field, "shared:") {
+				return true, true, nil
+			}
+		}
+		return true, false, nil
+	}
+	return false, false, nil
 }
 
 func netlinkRequest(msgType uint16, flags uint16, payload []byte) error {

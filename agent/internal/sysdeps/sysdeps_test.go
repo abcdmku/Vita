@@ -17,6 +17,13 @@ func TestPackageContract(t *testing.T) {
 	var _ func(int64, int64) error = SetRealtimeClock
 	var _ func() (int64, int64, error) = RealtimeClock
 	var _ func(string) error = SetHostname
+	var _ func() error = UnshareNetworkNamespace
+	var _ func(int) error = SetNetworkNamespace
+	var _ func(string, string) error = BindMount
+	var _ func(string) error = EnsureSharedBindMount
+	var _ func(string) error = UnmountDetach
+	var _ func() error = SetLoopbackUp
+	var _ func(string) error = SetLinkUp
 	var _ func(string, string) error = CreateVeth
 	var _ func(string) error = DeleteLink
 	var _ func(string, int) error = MoveLinkToNetns

@@ -20,7 +20,7 @@ import (
 const (
 	defaultNetnsRoot = "/run/vita-agent/netns"
 
-	capsuleNetnsPathBase = "/proc/self/ns/net"
+	capsuleNetnsPathBase = "/proc/thread-self/ns/net"
 	capsuleNetnsFileName = "netns"
 	capsuleNetnsDirMode  = 0o700
 	capsuleNetnsFileMode = 0o600
@@ -139,6 +139,9 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	}
 	if err := os.Chmod(root, capsuleNetnsDirMode); err != nil {
 		return capsuleNetns{}, capsuleNetnsStepError("chmod_root", err)
+	}
+	if err := sysdeps.EnsureSharedBindMount(root); err != nil {
+		return capsuleNetns{}, capsuleNetnsStepError("root_shared", err)
 	}
 	if err := os.Mkdir(netns.Dir, capsuleNetnsDirMode); err != nil {
 		return capsuleNetns{}, capsuleNetnsStepError("mkdir_netns", err)

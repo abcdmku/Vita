@@ -260,8 +260,8 @@ func (c defaultCapsuleEgressConfigurator) Check(ctx context.Context, netns capsu
 	if err := validateCapsuleEgressConfig(config); err != nil {
 		return capsuleEgressCheck{}, err
 	}
-	if !capsuleEgressInterfacesUp(interfaces, config.CapsuleInterface) {
-		return capsuleEgressCheck{}, capsuleNetnsStepError("egress_check_link", fmt.Errorf("capsule egress interface %s is not up", config.CapsuleInterface))
+	if err := capsuleEgressInterfacesReady(interfaces, config.CapsuleInterface); err != nil {
+		return capsuleEgressCheck{}, err
 	}
 
 	var table []byte
@@ -428,21 +428,41 @@ func tableContainsDestination(table string, destination string) bool {
 	return false
 }
 
-func capsuleEgressInterfacesUp(interfaces []net.Interface, capsuleInterface string) bool {
+func capsuleEgressInterfacesReady(interfaces []net.Interface, capsuleInterface string) error {
 	loopbackUp := false
+	loopbackSeen := false
+	capsuleSeen := false
 	capsuleUp := false
 	for _, iface := range interfaces {
-		if iface.Name == "lo" && iface.Flags&net.FlagLoopback != 0 && iface.Flags&net.FlagUp != 0 {
-			loopbackUp = true
+		if iface.Name == "lo" {
+			loopbackSeen = true
+			if iface.Flags&net.FlagLoopback != 0 && iface.Flags&net.FlagUp != 0 {
+				loopbackUp = true
+			}
 			continue
 		}
-		if iface.Name == capsuleInterface && iface.Flags&net.FlagUp != 0 {
-			capsuleUp = true
+		if iface.Name == capsuleInterface {
+			capsuleSeen = true
+			if iface.Flags&net.FlagUp != 0 {
+				capsuleUp = true
+			}
 			continue
 		}
-		return false
+		return capsuleNetnsStepError("egress_check_link_extra", fmt.Errorf("capsule network namespace exposes unexpected interface %s", iface.Name))
 	}
-	return loopbackUp && capsuleUp
+	if !loopbackSeen {
+		return capsuleNetnsStepError("egress_check_lo_absent", errors.New("capsule network namespace loopback interface is absent"))
+	}
+	if !loopbackUp {
+		return capsuleNetnsStepError("egress_check_lo_down", errors.New("capsule network namespace loopback interface is present but down"))
+	}
+	if !capsuleSeen {
+		return capsuleNetnsStepError("egress_check_link_absent", fmt.Errorf("capsule egress interface %s is absent", capsuleInterface))
+	}
+	if !capsuleUp {
+		return capsuleNetnsStepError("egress_check_link_down", fmt.Errorf("capsule egress interface %s is present but down", capsuleInterface))
+	}
+	return nil
 }
 
 type capsuleEgressNamesResult struct {

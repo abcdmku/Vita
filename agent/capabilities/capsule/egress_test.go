@@ -2,6 +2,7 @@ package capsule
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -211,6 +212,56 @@ func TestCapsuleEgressProofRefreshRequiresMeasuredReachAndDrop(t *testing.T) {
 	(&ExecuteCapability{}).refreshNetworkProof(context.Background(), &status)
 	if status.Network.EgressReach != "" {
 		t.Fatalf("Network after refresh without agent drop = %#v, want no egress reach", status.Network)
+	}
+}
+
+func TestCapsuleEgressInterfacesReadyDiagnosesAbsentAndDown(t *testing.T) {
+	tests := []struct {
+		name       string
+		interfaces []net.Interface
+		wantReason string
+	}{
+		{
+			name:       "absent capsule link",
+			interfaces: []net.Interface{{Name: "lo", Flags: net.FlagUp | net.FlagLoopback}},
+			wantReason: "capsule_netns_failed:egress_check_link_absent",
+		},
+		{
+			name: "down capsule link",
+			interfaces: []net.Interface{
+				{Name: "lo", Flags: net.FlagUp | net.FlagLoopback},
+				{Name: "vc123", Flags: 0},
+			},
+			wantReason: "capsule_netns_failed:egress_check_link_down",
+		},
+		{
+			name: "unexpected link",
+			interfaces: []net.Interface{
+				{Name: "lo", Flags: net.FlagUp | net.FlagLoopback},
+				{Name: "vc123", Flags: net.FlagUp},
+				{Name: "eth0", Flags: net.FlagUp},
+			},
+			wantReason: "capsule_netns_failed:egress_check_link_extra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := capsuleEgressInterfacesReady(tt.interfaces, "vc123")
+			if err == nil {
+				t.Fatal("capsuleEgressInterfacesReady accepted invalid interface set")
+			}
+			if reason := capsuleNetnsFailureReason(err); reason != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+
+	if err := capsuleEgressInterfacesReady([]net.Interface{
+		{Name: "lo", Flags: net.FlagUp | net.FlagLoopback},
+		{Name: "vc123", Flags: net.FlagUp},
+	}, "vc123"); err != nil {
+		t.Fatalf("capsuleEgressInterfacesReady returned error for ready links: %v", err)
 	}
 }
 

@@ -20,6 +20,9 @@ func SetNetworkNamespace(fd int) error { return ErrUnsupported }
 // BindMount is unsupported off Linux.
 func BindMount(source string, target string) error { return ErrUnsupported }
 
+// EnsureSharedBindMount is unsupported off Linux.
+func EnsureSharedBindMount(target string) error { return ErrUnsupported }
+
 // UnmountDetach is unsupported off Linux.
 func UnmountDetach(target string) error { return ErrUnsupported }
 
