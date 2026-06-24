@@ -135,6 +135,64 @@ func TestLifecycleUpdateRollsBackMeasuredUnhealthyNewVersion(t *testing.T) {
 	}
 }
 
+func TestLifecycleUpdateRequiresMeasuredSupervisorStatusWithoutChecks(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	next := lifecycleEntry("2.0.0")
+	targetManifest := lifecycleManifest(t, next, lifecyclePolicyFail)
+	targetManifest.HealthChecks = nil
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     next.ID,
+			Unit:   capsuleUnitName(next.ID),
+			Status: capsuleruntime.StatusUnknown,
+			Health: capsuleruntime.StatusUnknown,
+		}}
+	})
+	lifecycle.pollInterval = time.Second
+	calls = nil
+	launcher.calls = &calls
+	archive.calls = &calls
+
+	undo, err := lifecycle.Apply(ctx, lifecycleUpdateRequest(next, targetManifest))
+	if err == nil {
+		t.Fatal("Apply returned nil error, want measured health rejection")
+	}
+	if undo != nil {
+		t.Fatalf("Apply returned undo %#v, want nil on rejected unmeasured update", undo)
+	}
+	var opErr *LifecycleOperationError
+	if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_unhealthy" {
+		t.Fatalf("Apply error = %T %v, want capsule_lifecycle_unhealthy", err, err)
+	}
+
+	wantOrder := []string{
+		"backup.create",
+		"backup.verify",
+		"stop:" + capsuleUnitName(entry.ID),
+		"reset:" + capsuleUnitName(entry.ID),
+		"start:" + capsuleUnitName(entry.ID),
+		"stop:" + capsuleUnitName(entry.ID),
+		"reset:" + capsuleUnitName(entry.ID),
+		"backup.restore",
+		"start:" + capsuleUnitName(entry.ID),
+	}
+	if !reflect.DeepEqual(calls, wantOrder) {
+		t.Fatalf("call order = %#v, want %#v", calls, wantOrder)
+	}
+	if len(archive.restores) != 1 || archive.restores[0].BackupID != lifecycleBackupID {
+		t.Fatalf("restore requests = %#v, want same backup id", archive.restores)
+	}
+	status, _, ok := execute.currentExecution()
+	if !ok || status.Version != entry.Version {
+		t.Fatalf("current execution = %#v ok=%v, want prior version restarted", status, ok)
+	}
+}
+
 func TestLifecycleUpdateBackupFailureAbortsBeforeStopStart(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -269,6 +327,94 @@ func TestLifecycleRestartAndStopRecordRestoringUndos(t *testing.T) {
 	if !reflect.DeepEqual(calls, []string{"start:" + capsuleUnitName(entry.ID)}) {
 		t.Fatalf("stop undo calls = %#v, want start", calls)
 	}
+}
+
+func TestLifecycleRestartFailureRestoresPriorRunningInstance(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+
+	t.Run("start failure", func(t *testing.T) {
+		calls := []string{}
+		launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+		execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+		lifecycle := lifecycleCapabilityForTest(execute, &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}, func() []capsuleruntime.WorkloadStatus {
+			return []capsuleruntime.WorkloadStatus{{
+				ID:     entry.ID,
+				Unit:   capsuleUnitName(entry.ID),
+				Status: capsuleruntime.StatusOK,
+				Health: capsuleruntime.StatusOK,
+			}}
+		})
+		calls = nil
+		launcher.calls = &calls
+		launcher.startErrs = []error{errors.New("restart start failed"), nil}
+
+		undo, err := lifecycle.Apply(ctx, LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpRestart, ID: entry.ID}})
+		if err == nil {
+			t.Fatal("restart Apply returned nil error, want start failure")
+		}
+		if undo != nil {
+			t.Fatalf("restart Apply returned undo %#v, want nil on rejected restart", undo)
+		}
+		var opErr *LifecycleOperationError
+		if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_start_failed" {
+			t.Fatalf("Apply error = %T %v, want capsule_lifecycle_start_failed", err, err)
+		}
+		if !reflect.DeepEqual(calls, []string{
+			"stop:" + capsuleUnitName(entry.ID),
+			"reset:" + capsuleUnitName(entry.ID),
+			"start:" + capsuleUnitName(entry.ID),
+			"start:" + capsuleUnitName(entry.ID),
+		}) {
+			t.Fatalf("restart calls = %#v, want stop/reset/start/restore-start", calls)
+		}
+		status, _, ok := execute.currentExecution()
+		if !ok || status.Version != entry.Version {
+			t.Fatalf("current execution = %#v ok=%v, want prior version restarted", status, ok)
+		}
+	})
+
+	t.Run("health gate failure", func(t *testing.T) {
+		calls := []string{}
+		launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+		execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+		lifecycle := lifecycleCapabilityForTest(execute, &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}, func() []capsuleruntime.WorkloadStatus {
+			return []capsuleruntime.WorkloadStatus{{
+				ID:     entry.ID,
+				Unit:   capsuleUnitName(entry.ID),
+				Status: capsuleruntime.StatusDown,
+				Health: capsuleruntime.StatusUnhealthy,
+			}}
+		})
+		calls = nil
+		launcher.calls = &calls
+
+		undo, err := lifecycle.Apply(ctx, LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpRestart, ID: entry.ID}})
+		if err == nil {
+			t.Fatal("restart Apply returned nil error, want health failure")
+		}
+		if undo != nil {
+			t.Fatalf("restart Apply returned undo %#v, want nil on rejected restart", undo)
+		}
+		var opErr *LifecycleOperationError
+		if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_unhealthy" {
+			t.Fatalf("Apply error = %T %v, want capsule_lifecycle_unhealthy", err, err)
+		}
+		if !reflect.DeepEqual(calls, []string{
+			"stop:" + capsuleUnitName(entry.ID),
+			"reset:" + capsuleUnitName(entry.ID),
+			"start:" + capsuleUnitName(entry.ID),
+			"stop:" + capsuleUnitName(entry.ID),
+			"reset:" + capsuleUnitName(entry.ID),
+			"start:" + capsuleUnitName(entry.ID),
+		}) {
+			t.Fatalf("restart calls = %#v, want failed restart stopped and prior restarted", calls)
+		}
+		status, _, ok := execute.currentExecution()
+		if !ok || status.Version != entry.Version {
+			t.Fatalf("current execution = %#v ok=%v, want prior version restarted", status, ok)
+		}
+	})
 }
 
 func TestLifecycleRemediateHonorsManifestPolicy(t *testing.T) {
@@ -480,12 +626,13 @@ func assertLifecycleRejected(t *testing.T, undo interface{}, err error, code str
 }
 
 type orderedLifecycleLauncher struct {
-	calls  *[]string
-	starts []transientUnit
-	stops  []string
-	resets []string
-	status transientUnitStatus
-	err    error
+	calls     *[]string
+	starts    []transientUnit
+	stops     []string
+	resets    []string
+	status    transientUnitStatus
+	err       error
+	startErrs []error
 }
 
 func (l *orderedLifecycleLauncher) StartTransientUnit(ctx context.Context, unit transientUnit) (transientUnitStatus, error) {
@@ -496,7 +643,13 @@ func (l *orderedLifecycleLauncher) StartTransientUnit(ctx context.Context, unit 
 		*l.calls = append(*l.calls, "start:"+unit.Name)
 	}
 	l.starts = append(l.starts, cloneTransientUnit(unit))
-	if l.err != nil {
+	if len(l.startErrs) > 0 {
+		err := l.startErrs[0]
+		l.startErrs = l.startErrs[1:]
+		if err != nil {
+			return transientUnitStatus{}, err
+		}
+	} else if l.err != nil {
 		return transientUnitStatus{}, l.err
 	}
 	status := l.status

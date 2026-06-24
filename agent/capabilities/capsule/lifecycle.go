@@ -459,10 +459,12 @@ func (c *LifecycleCapability) applyRestart(ctx context.Context, desired Lifecycl
 	}
 	newUndo, status, err := c.startManifest(ctx, current.entry, current.manifest)
 	if err != nil {
-		return nil, lifecycleOpError("capsule_lifecycle_start_failed", err)
+		rollbackErr := c.restartPrior(ctx, current)
+		return nil, lifecycleOpError("capsule_lifecycle_start_failed", errors.Join(err, rollbackErr))
 	}
 	if err := c.waitHealthy(ctx, current.entry.ID, status.Unit, checks); err != nil {
-		return nil, lifecycleOpError("capsule_lifecycle_unhealthy", errors.Join(newUndo.Undo(ctx), err))
+		rollbackErr := errors.Join(newUndo.Undo(ctx), c.restartPrior(ctx, current))
+		return nil, lifecycleOpError("capsule_lifecycle_unhealthy", errors.Join(err, rollbackErr))
 	}
 
 	c.setLast(LifecycleStatus{
@@ -660,10 +662,12 @@ func (c *LifecycleCapability) restoreAndRestart(ctx context.Context, plan lifecy
 	return errors.Join(restoreErr, startErr)
 }
 
+func (c *LifecycleCapability) restartPrior(ctx context.Context, prior lifecycleCurrent) error {
+	_, _, err := c.startManifest(ctx, prior.entry, prior.manifest)
+	return err
+}
+
 func (c *LifecycleCapability) waitHealthy(ctx context.Context, id string, unit string, checks []capsuleruntime.Check) error {
-	if len(checks) == 0 {
-		return nil
-	}
 	if c.healthSnapshot == nil {
 		return lifecycleOpError("capsule_lifecycle_health_unavailable", errors.New("missing capsule health source"))
 	}
