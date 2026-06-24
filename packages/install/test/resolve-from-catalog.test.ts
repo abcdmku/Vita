@@ -12,6 +12,7 @@ import type {
 import type { MirrorStore } from "../src/mirror.ts";
 import type { CatalogEntry } from "../../catalog/src/catalog-entry.ts";
 import type {
+  CatalogAppVersion,
   CatalogPayload,
   SignedCatalogManifest,
 } from "../../catalog/src/catalog-manifest.ts";
@@ -24,9 +25,29 @@ import type {
   PackageContract,
 } from "../../../sdk/manifests/src/package-contract.ts";
 import type { CapabilityGrant } from "../../../runtime/permission-broker/src/grants.ts";
+import { safeNormalize } from "../../../sdk/typescript/src/safe-normalize.ts";
+import type { PlainJson, PlainJsonObject } from "../../../sdk/typescript/src/safe-normalize.ts";
 
 interface InstallEntryFixture extends CatalogEntry {
   readonly requestedCapabilities: readonly CapabilityGrant[];
+}
+
+interface ExecutionManifestFixture {
+  readonly id: string;
+  readonly version: string;
+  readonly integrity: string;
+  readonly packageClass: "ts-service" | "oci-service" | "wasm-service";
+  readonly runtime: {
+    readonly typescript: {
+      readonly entrypoint: string;
+    };
+  };
+  readonly resourceLimits: {
+    readonly cpuCores: number;
+    readonly ramMiB: number;
+    readonly storageMiB: number;
+    readonly tasksMax: number;
+  };
 }
 
 type MutableJsonObject = { [key: string]: unknown };
@@ -89,7 +110,11 @@ test("legacy metadata envelope is not accepted as the package artifact", () => {
   }));
   const result = resolveFromCatalog({
     appId: "com.vita.notes",
-    catalog: signCatalog(validCatalog(sri(metadataBytes, "sha512"))),
+    catalog: signCatalog(validCatalog({
+      artifactIntegrity: sri(metadataBytes, "sha512"),
+      entry: validInstallEntry(),
+      lockfile: validNpmLockfile(),
+    })),
     mirrorStore: validMirrorStore(metadataBytes),
     trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
     version: "1.2.3",
@@ -98,9 +123,9 @@ test("legacy metadata envelope is not accepted as the package artifact", () => {
   assertRejects(result, "POLICY_REJECTED");
 });
 
-test("artifact contract id and version must match the verified catalog selection", () => {
+test("capsule ExecutionManifest id and version must match the verified catalog selection", () => {
   const mismatchedApp = signedFixture({
-    packageContract: validPackageContract({ id: "com.other.app" }),
+    executionManifest: validExecutionManifest({ id: "com.other.app" }),
   });
   assertRejects(
     resolveFromCatalog({
@@ -114,7 +139,7 @@ test("artifact contract id and version must match the verified catalog selection
   );
 
   const mismatchedVersion = signedFixture({
-    packageContract: validPackageContract({ version: "9.9.9" }),
+    executionManifest: validExecutionManifest({ version: "9.9.9" }),
   });
   assertRejects(
     resolveFromCatalog({
@@ -128,9 +153,52 @@ test("artifact contract id and version must match the verified catalog selection
   );
 });
 
-test("artifact manifest own __proto__ field rejects instead of mutating the candidate prototype", () => {
-  const manifest = validInstallEntry() as InstallEntryFixture & MutableJsonObject;
-  Object.defineProperty(manifest, "__proto__", {
+test("capsule ExecutionManifest nested __proto__ field rejects fail-closed", () => {
+  const manifest = validExecutionManifest() as ExecutionManifestFixture & MutableJsonObject;
+  const runtime = manifest.runtime as unknown as MutableJsonObject;
+  Object.defineProperty(runtime, "__proto__", {
+    configurable: true,
+    enumerable: true,
+    value: { typescript: { entrypoint: "main.ts" } },
+    writable: true,
+  });
+  const artifactBytes = packageArtifactBytes({ manifest });
+  const result = resolveFromCatalog({
+    appId: "com.vita.notes",
+    catalog: signCatalog(validCatalog({
+      artifactIntegrity: sri(artifactBytes, "sha512"),
+      entry: validInstallEntry(),
+      lockfile: validNpmLockfile(),
+    })),
+    mirrorStore: validMirrorStore(artifactBytes),
+    trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+    version: "1.2.3",
+  });
+
+  assertRejects(result, "POLICY_REJECTED");
+});
+
+test("capsule ExecutionManifest duplicate JSON keys reject before last-wins parsing", () => {
+  const manifestJson = `{"id":"com.other.app",${JSON.stringify(validExecutionManifest()).slice(1)}`;
+  const artifactBytes = packageArtifactBytesFromManifestJson(manifestJson);
+  const result = resolveFromCatalog({
+    appId: "com.vita.notes",
+    catalog: signCatalog(validCatalog({
+      artifactIntegrity: sri(artifactBytes, "sha512"),
+      entry: validInstallEntry(),
+      lockfile: validNpmLockfile(),
+    })),
+    mirrorStore: validMirrorStore(artifactBytes),
+    trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+    version: "1.2.3",
+  });
+
+  assertRejects(result, "POLICY_REJECTED");
+});
+
+test("catalog install entry own __proto__ field rejects instead of mutating the candidate prototype", () => {
+  const entry = validInstallEntry() as InstallEntryFixture & MutableJsonObject;
+  Object.defineProperty(entry, "__proto__", {
     configurable: true,
     enumerable: true,
     value: {
@@ -138,19 +206,20 @@ test("artifact manifest own __proto__ field rejects instead of mutating the cand
     },
     writable: true,
   });
-  const artifactBytes = packageArtifactBytes({
-    lockfile: validNpmLockfile(),
-    manifest,
-  });
+  const artifactBytes = packageArtifactBytes({ manifest: validExecutionManifest() });
   const result = resolveFromCatalog({
     appId: "com.vita.notes",
-    catalog: signCatalog(validCatalog(sri(artifactBytes, "sha512"))),
+    catalog: signCatalog(validCatalog({
+      artifactIntegrity: sri(artifactBytes, "sha512"),
+      entry,
+      lockfile: validNpmLockfile(),
+    })),
     mirrorStore: validMirrorStore(artifactBytes),
     trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
     version: "1.2.3",
   });
 
-  assertRejects(result, "POLICY_REJECTED");
+  assertRejects(result, "CATALOG_UNVERIFIED");
 });
 
 test("tampered catalog rejects as CATALOG_UNVERIFIED before mirror resolution", () => {
@@ -362,6 +431,7 @@ function signedFixture(
   options: {
     readonly requestedCapabilities?: readonly CapabilityGrant[];
     readonly packageContract?: PackageContract;
+    readonly executionManifest?: ExecutionManifestFixture;
   } = {},
 ): {
   readonly artifactBytes: Uint8Array;
@@ -369,26 +439,33 @@ function signedFixture(
   readonly catalog: SignedCatalogManifest;
 } {
   const entry = validInstallEntry(options);
+  const lockfile = validNpmLockfile();
   const artifactBytes = packageArtifactBytes({
-    lockfile: validNpmLockfile(),
-    manifest: entry,
+    manifest: options.executionManifest ?? validExecutionManifest(),
   });
   const artifactIntegrity = sri(artifactBytes, "sha512");
 
   return {
     artifactBytes,
     artifactIntegrity,
-    catalog: signCatalog(validCatalog(artifactIntegrity)),
+    catalog: signCatalog(validCatalog({
+      artifactIntegrity,
+      entry,
+      lockfile,
+    })),
   };
 }
 
 function packageArtifactBytes(value: {
-  readonly lockfile: MutableJsonObject;
-  readonly manifest: InstallEntryFixture;
+  readonly manifest: ExecutionManifestFixture | MutableJsonObject;
 }): Uint8Array {
+  return packageArtifactBytesFromManifestJson(JSON.stringify(value.manifest));
+}
+
+function packageArtifactBytesFromManifestJson(manifestJson: string): Uint8Array {
   return zstdCompressSync(tarArchive({
-    "lockfile.json": bytes(JSON.stringify(value.lockfile)),
-    "manifest.json": bytes(JSON.stringify(value.manifest)),
+    "main.ts": bytes("export default {};\n"),
+    "manifest.json": bytes(manifestJson),
   }));
 }
 
@@ -460,15 +537,21 @@ function roundUpToTarBlock(size: number): number {
   return Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
 }
 
-function validCatalog(artifactIntegrity: string): CatalogPayload {
+function validCatalog(options: {
+  readonly artifactIntegrity: string;
+  readonly entry: InstallEntryFixture;
+  readonly lockfile: MutableJsonObject;
+}): CatalogPayload {
   return {
     apps: [
       {
         id: "com.vita.notes",
         versions: [
           {
+            entry: plainJsonObject(options.entry),
             grantsSummary: ["capability.network.ingress", "capability.storage.app-state"],
-            integrity: artifactIntegrity,
+            integrity: options.artifactIntegrity,
+            lockfile: plainJsonObject(options.lockfile),
             packageRef,
             riskSummary: "R1",
             version: "1.2.3",
@@ -513,6 +596,31 @@ function validInstallEntry(
     signingPublisher: contract.signingPublisher,
     trustTier: "verified",
     vulnerabilityStatus: contract.vulnerabilityStatus,
+  };
+}
+
+function validExecutionManifest(
+  options: {
+    readonly id?: string;
+    readonly version?: string;
+  } = {},
+): ExecutionManifestFixture {
+  return {
+    id: options.id ?? "com.vita.notes",
+    integrity: sri(bytes("execution manifest declared integrity"), "sha256"),
+    packageClass: "ts-service",
+    resourceLimits: {
+      cpuCores: 1,
+      ramMiB: 256,
+      storageMiB: 512,
+      tasksMax: 64,
+    },
+    runtime: {
+      typescript: {
+        entrypoint: "main.ts",
+      },
+    },
+    version: options.version ?? "1.2.3",
   };
 }
 
@@ -680,18 +788,48 @@ function reorderedSignedCatalog(manifest: SignedCatalogManifest): SignedCatalogM
       generatedAt: manifest.catalog.generatedAt,
       catalogVersion: manifest.catalog.catalogVersion,
       apps: manifest.catalog.apps.map((app) => ({
-        versions: app.versions.map((version) => ({
-          riskSummary: version.riskSummary,
-          packageRef: version.packageRef,
-          version: version.version,
-          integrity: version.integrity,
-          grantsSummary: version.grantsSummary,
-        })),
+        versions: app.versions.map(reorderedCatalogVersion),
         id: app.id,
       })),
       schemaVersion: manifest.catalog.schemaVersion,
     },
   };
+}
+
+function reorderedCatalogVersion(
+  version: CatalogAppVersion,
+): CatalogAppVersion {
+  const out = {
+    grantsSummary: version.grantsSummary,
+    integrity: version.integrity,
+    packageRef: version.packageRef,
+    riskSummary: version.riskSummary,
+    version: version.version,
+  };
+
+  if (version.entry !== undefined && version.lockfile !== undefined) {
+    return {
+      ...out,
+      entry: version.entry,
+      lockfile: version.lockfile,
+    };
+  }
+
+  if (version.entry !== undefined) {
+    return {
+      ...out,
+      entry: version.entry,
+    };
+  }
+
+  if (version.lockfile !== undefined) {
+    return {
+      ...out,
+      lockfile: version.lockfile,
+    };
+  }
+
+  return out;
 }
 
 function sri(value: Uint8Array, algorithm: SriAlgorithm): string {
@@ -700,6 +838,19 @@ function sri(value: Uint8Array, algorithm: SriAlgorithm): string {
 
 function bytes(value: string): Uint8Array {
   return Buffer.from(value, "utf8");
+}
+
+function plainJsonObject(value: unknown): PlainJsonObject {
+  const normalized = safeNormalize(value, { maxDepth: 128, maxNodes: 100_000 });
+  if (!normalized.ok || !isPlainJsonObject(normalized.value)) {
+    assert.fail("expected JSON object fixture");
+  }
+
+  return normalized.value;
+}
+
+function isPlainJsonObject(value: PlainJson): value is PlainJsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function digest(value: string): ImmutableDigest {

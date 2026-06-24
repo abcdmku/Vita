@@ -5,6 +5,7 @@ import { safeNormalize } from "../../../sdk/typescript/src/safe-normalize.ts";
 import type { PlainJson, PlainJsonObject } from "../../../sdk/typescript/src/safe-normalize.ts";
 import { canonicalizeCatalogBytes } from "./catalog-canonical.ts";
 import { validateCatalogEntry } from "./catalog-entry.ts";
+import { validateLockfilePolicy } from "./lockfile-policy.ts";
 
 export type CatalogRiskClass = "R0" | "R1" | "R2" | "R3" | "R4";
 
@@ -14,6 +15,8 @@ export interface CatalogAppVersion {
   readonly integrity: string;
   readonly riskSummary: CatalogRiskClass;
   readonly grantsSummary: readonly string[];
+  readonly entry?: PlainJsonObject;
+  readonly lockfile?: PlainJsonObject;
 }
 
 export interface CatalogApp {
@@ -63,12 +66,15 @@ const CATALOG_FIELDS = new Set(["schemaVersion", "catalogVersion", "generatedAt"
 const SIGNATURE_FIELDS = new Set(["algorithm", "keyId", "value"]);
 const APP_FIELDS = new Set(["id", "versions"]);
 const VERSION_FIELDS = new Set([
+  "entry",
   "version",
   "packageRef",
   "integrity",
+  "lockfile",
   "riskSummary",
   "grantsSummary",
 ]);
+const INSTALL_ENTRY_EXTRA_FIELD = "requestedCapabilities";
 const RISK_CLASSES = new Set(["R0", "R1", "R2", "R3", "R4"]);
 
 const REFERENCE_PROBE_ENTRY = Object.freeze({
@@ -442,6 +448,8 @@ function readCatalogAppVersion(
   const integrity = readRequiredString(value, "integrity", [...path, "integrity"], errors);
   const riskSummary = readRequiredString(value, "riskSummary", [...path, "riskSummary"], errors);
   const grantsSummary = readGrantsSummary(value.grantsSummary, [...path, "grantsSummary"], errors);
+  const entry = readOptionalInstallEntry(value.entry, [...path, "entry"], errors);
+  const lockfile = readOptionalLockfile(value.lockfile, [...path, "lockfile"], errors);
 
   if (packageRef !== undefined) {
     validatePackageReference(packageRef, [...path, "packageRef"], errors);
@@ -462,13 +470,132 @@ function readCatalogAppVersion(
     return undefined;
   }
 
-  return Object.freeze({
+  const versionEntry: {
+    version: string;
+    packageRef: string;
+    integrity: string;
+    riskSummary: CatalogRiskClass;
+    grantsSummary: readonly string[];
+    entry?: PlainJsonObject;
+    lockfile?: PlainJsonObject;
+  } = {
     grantsSummary,
     integrity,
     packageRef,
     riskSummary,
     version,
-  });
+  };
+
+  if (entry !== undefined) {
+    versionEntry.entry = entry;
+  }
+
+  if (lockfile !== undefined) {
+    versionEntry.lockfile = lockfile;
+  }
+
+  return Object.freeze(versionEntry);
+}
+
+function readOptionalInstallEntry(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: CatalogVerificationError[],
+): PlainJsonObject | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!plainObject(value)) {
+    addError(errors, path, "Expected install entry object.");
+    return undefined;
+  }
+
+  if (!Object.hasOwn(value, INSTALL_ENTRY_EXTRA_FIELD)) {
+    addError(errors, [...path, INSTALL_ENTRY_EXTRA_FIELD], "Required field is missing.");
+    return undefined;
+  }
+
+  if (!Array.isArray(value[INSTALL_ENTRY_EXTRA_FIELD])) {
+    addError(errors, [...path, INSTALL_ENTRY_EXTRA_FIELD], "Expected requested capabilities array.");
+    return undefined;
+  }
+
+  const candidate = catalogEntryCandidate(value);
+  const result = validateCatalogEntry(candidate);
+  if (!result.ok) {
+    appendPrefixedErrors(errors, path, result.errors);
+    return undefined;
+  }
+
+  return value;
+}
+
+function readOptionalLockfile(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: CatalogVerificationError[],
+): PlainJsonObject | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!plainObject(value)) {
+    addError(errors, path, "Expected lockfile object.");
+    return undefined;
+  }
+
+  const policy = validateLockfilePolicy(value);
+  if (!policy.ok) {
+    appendPrefixedErrors(errors, path, policy.violations);
+    return undefined;
+  }
+
+  return value;
+}
+
+function catalogEntryCandidate(value: PlainJsonObject): PlainJsonObject {
+  const candidate = Object.create(null) as Record<string, PlainJson>;
+  const keys = sortedKeys(value);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key === undefined || key === INSTALL_ENTRY_EXTRA_FIELD) {
+      continue;
+    }
+
+    const child = value[key];
+    if (child !== undefined) {
+      Object.defineProperty(candidate, key, {
+        configurable: true,
+        enumerable: true,
+        value: child,
+        writable: true,
+      });
+    }
+  }
+
+  return candidate;
+}
+
+function appendPrefixedErrors(
+  errors: CatalogVerificationError[],
+  path: Path,
+  childErrors: readonly { readonly path: string; readonly message: string }[],
+): void {
+  const prefix = formatPath(path);
+
+  for (let index = 0; index < childErrors.length; index += 1) {
+    const childError = childErrors[index];
+    if (childError === undefined) {
+      continue;
+    }
+
+    errors[errors.length] = {
+      message: childError.message,
+      path: childError.path === "" ? prefix : `${prefix}/${childError.path}`,
+    };
+  }
 }
 
 function readGrantsSummary(

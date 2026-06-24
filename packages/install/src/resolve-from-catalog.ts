@@ -88,8 +88,19 @@ interface LocatedCatalogVersion {
 }
 
 interface CatalogPackageArtifact {
-  readonly manifest: PlainJson;
-  readonly lockfile: PlainJson;
+  readonly manifest: ExecutionManifest;
+}
+
+interface ExecutionManifest {
+  readonly id: string;
+  readonly version: string;
+  readonly integrity: string;
+  readonly packageClass: PackageContract["packageClass"] | "oci-service" | "wasm-service";
+}
+
+interface CatalogInstallMetadata {
+  readonly entry: PlainJsonObject;
+  readonly lockfile: PlainJsonObject;
 }
 
 type Path = readonly string[];
@@ -107,7 +118,27 @@ const TAR_PREFIX_OFFSET = 345;
 const TAR_PREFIX_BYTES = 155;
 const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd] as const;
 const CAPSULE_MANIFEST_BASENAME = "manifest.json";
-const CAPSULE_LOCKFILE_BASENAMES = new Set(["lockfile.json", "package-lock.json", "deno.lock"]);
+const EXECUTION_MANIFEST_FIELDS = new Set([
+  "data",
+  "healthChecks",
+  "id",
+  "integrity",
+  "lifecyclePolicy",
+  "network",
+  "packageClass",
+  "resourceLimits",
+  "runtime",
+  "version",
+]);
+const EXECUTION_PACKAGE_CLASSES = new Set(["ts-service", "oci-service", "wasm-service"]);
+const EXECUTION_RUNTIME_FIELDS = new Set(["typescript", "oci", "wasm"]);
+const TYPESCRIPT_RUNTIME_FIELDS = new Set(["entrypoint"]);
+const RESOURCE_LIMIT_FIELDS = new Set(["cpuCores", "ramMiB", "storageMiB", "tasksMax"]);
+const OPTIONAL_EXECUTION_OBJECT_FIELDS = new Set(["data", "lifecyclePolicy", "network"]);
+const REVERSE_DNS_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
+const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/u;
+const EXECUTION_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/u;
 
 export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
   try {
@@ -153,7 +184,20 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
     const artifact = parsePackageArtifact(artifactBytes.value);
     if (!artifact.ok) return reject([artifact.error]);
 
-    const contract = inlinePackageContract(artifact.value.manifest);
+    const manifestMatch = verifySelectedManifest(
+      artifact.value.manifest,
+      request.value.appId,
+      request.value.version,
+    );
+    if (!manifestMatch.ok) return reject([manifestMatch.error]);
+
+    const metadata = readCatalogInstallMetadata(
+      located.value.entry,
+      ["catalog", "apps", String(located.value.appIndex), "versions", String(located.value.versionIndex)],
+    );
+    if (!metadata.ok) return reject([metadata.error]);
+
+    const contract = inlinePackageContract(metadata.value.entry);
     if (!contract.ok) return reject([contract.error]);
 
     const contractMatch = verifySelectedContract(
@@ -163,12 +207,12 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
     );
     if (!contractMatch.ok) return reject([contractMatch.error]);
 
-    const mirrorResult = resolveFromMirror(artifact.value.lockfile, request.value.mirrorStore);
+    const mirrorResult = resolveFromMirror(metadata.value.lockfile, request.value.mirrorStore);
     if (!mirrorResult.ok) {
       return reject(mirrorResult.errors.map(mirrorResolutionError));
     }
 
-    const installPlan = resolveInstallPlan(artifact.value.manifest, artifact.value.lockfile);
+    const installPlan = resolveInstallPlan(metadata.value.entry, metadata.value.lockfile);
     if (!installPlan.ok) {
       return reject(installPlan.errors.map(installPlanError));
     }
@@ -541,14 +585,13 @@ function parsePackageArtifact(bytes: Uint8Array):
   const manifest = parseArtifactJson(files.value.manifest, [CAPSULE_MANIFEST_BASENAME]);
   if (!manifest.ok) return { error: manifest.error, ok: false };
 
-  const lockfile = parseArtifactJson(files.value.lockfile, [files.value.lockfilePath]);
-  if (!lockfile.ok) return { error: lockfile.error, ok: false };
+  const executionManifest = readExecutionManifest(manifest.value, [CAPSULE_MANIFEST_BASENAME]);
+  if (!executionManifest.ok) return { error: executionManifest.error, ok: false };
 
   return {
     ok: true,
     value: {
-      lockfile: lockfile.value,
-      manifest: manifest.value,
+      manifest: executionManifest.value,
     },
   };
 }
@@ -587,8 +630,6 @@ function readCapsuleFiles(bytes: Uint8Array):
       readonly ok: true;
       readonly value: {
         readonly manifest: Uint8Array;
-        readonly lockfile: Uint8Array;
-        readonly lockfilePath: string;
       };
     }
   | {
@@ -597,8 +638,6 @@ function readCapsuleFiles(bytes: Uint8Array):
     } {
   let offset = 0;
   let manifest: Uint8Array | undefined;
-  let lockfile: Uint8Array | undefined;
-  let lockfilePath: string | undefined;
 
   while (offset < bytes.length) {
     if (offset + TAR_BLOCK_BYTES > bytes.length) {
@@ -610,7 +649,7 @@ function readCapsuleFiles(bytes: Uint8Array):
 
     const header = bytes.subarray(offset, offset + TAR_BLOCK_BYTES);
     if (isZeroBlock(header)) {
-      return readCapsuleFilesResult(manifest, lockfile, lockfilePath);
+      return readCapsuleFilesResult(manifest);
     }
 
     if (!validTarChecksum(header)) {
@@ -657,36 +696,22 @@ function readCapsuleFiles(bytes: Uint8Array):
         }
 
         manifest = bytes.slice(dataStart, dataEnd);
-      } else if (CAPSULE_LOCKFILE_BASENAMES.has(basename)) {
-        if (lockfile !== undefined) {
-          return {
-            error: error("POLICY_REJECTED", [basename], "Capsule artifact contains ambiguous lockfiles."),
-            ok: false,
-          };
-        }
-
-        lockfile = bytes.slice(dataStart, dataEnd);
-        lockfilePath = basename;
       }
     }
 
     offset = nextOffset;
   }
 
-  return readCapsuleFilesResult(manifest, lockfile, lockfilePath);
+  return readCapsuleFilesResult(manifest);
 }
 
 function readCapsuleFilesResult(
   manifest: Uint8Array | undefined,
-  lockfile: Uint8Array | undefined,
-  lockfilePath: string | undefined,
 ):
   | {
       readonly ok: true;
       readonly value: {
         readonly manifest: Uint8Array;
-        readonly lockfile: Uint8Array;
-        readonly lockfilePath: string;
       };
     }
   | {
@@ -700,18 +725,9 @@ function readCapsuleFilesResult(
     };
   }
 
-  if (lockfile === undefined || lockfilePath === undefined) {
-    return {
-      error: error("POLICY_REJECTED", ["lockfile.json"], "Capsule artifact lockfile is required."),
-      ok: false,
-    };
-  }
-
   return {
     ok: true,
     value: {
-      lockfile,
-      lockfilePath,
       manifest,
     },
   };
@@ -727,9 +743,27 @@ function parseArtifactJson(bytes: Uint8Array, path: Path):
       readonly error: ResolveFromCatalogError;
     } {
   let parsed: unknown;
+  let text: string;
 
   try {
-    parsed = JSON.parse(TEXT_DECODER.decode(bytes));
+    text = TEXT_DECODER.decode(bytes);
+  } catch {
+    return {
+      error: error("POLICY_REJECTED", path, "Capsule artifact JSON file is invalid."),
+      ok: false,
+    };
+  }
+
+  const duplicateKey = findDuplicateJsonObjectKey(text);
+  if (duplicateKey !== undefined) {
+    return {
+      error: error("POLICY_REJECTED", path, `Capsule artifact JSON file contains duplicate object key ${duplicateKey}.`),
+      ok: false,
+    };
+  }
+
+  try {
+    parsed = JSON.parse(text);
   } catch {
     return {
       error: error("POLICY_REJECTED", path, "Capsule artifact JSON file is invalid."),
@@ -749,6 +783,699 @@ function parseArtifactJson(bytes: Uint8Array, path: Path):
     ok: true,
     value: normalized.value,
   };
+}
+
+interface JsonKeyCursor {
+  readonly text: string;
+  index: number;
+  duplicate: string | undefined;
+  failed: boolean;
+}
+
+function findDuplicateJsonObjectKey(text: string): string | undefined {
+  const cursor: JsonKeyCursor = {
+    duplicate: undefined,
+    failed: false,
+    index: 0,
+    text,
+  };
+
+  parseJsonValue(cursor);
+  return cursor.duplicate;
+}
+
+function parseJsonValue(cursor: JsonKeyCursor): void {
+  if (cursor.duplicate !== undefined || cursor.failed) return;
+
+  skipJsonWhitespace(cursor);
+  const char = cursor.text[cursor.index];
+
+  if (char === "{") {
+    parseJsonObject(cursor);
+  } else if (char === "[") {
+    parseJsonArray(cursor);
+  } else if (char === "\"") {
+    parseJsonString(cursor);
+  } else if (char === "t") {
+    consumeJsonLiteral(cursor, "true");
+  } else if (char === "f") {
+    consumeJsonLiteral(cursor, "false");
+  } else if (char === "n") {
+    consumeJsonLiteral(cursor, "null");
+  } else {
+    consumeJsonNumber(cursor);
+  }
+}
+
+function parseJsonObject(cursor: JsonKeyCursor): void {
+  cursor.index += 1;
+  skipJsonWhitespace(cursor);
+
+  if (cursor.text[cursor.index] === "}") {
+    cursor.index += 1;
+    return;
+  }
+
+  const keys = new Set<string>();
+  while (cursor.index < cursor.text.length) {
+    const key = parseJsonString(cursor);
+    if (key === undefined) return;
+
+    if (keys.has(key)) {
+      cursor.duplicate = key;
+      return;
+    }
+    keys.add(key);
+
+    skipJsonWhitespace(cursor);
+    if (cursor.text[cursor.index] !== ":") {
+      cursor.failed = true;
+      return;
+    }
+    cursor.index += 1;
+
+    parseJsonValue(cursor);
+    if (cursor.duplicate !== undefined || cursor.failed) return;
+
+    skipJsonWhitespace(cursor);
+    const delimiter = cursor.text[cursor.index];
+    if (delimiter === "}") {
+      cursor.index += 1;
+      return;
+    }
+    if (delimiter !== ",") {
+      cursor.failed = true;
+      return;
+    }
+    cursor.index += 1;
+    skipJsonWhitespace(cursor);
+  }
+
+  cursor.failed = true;
+}
+
+function parseJsonArray(cursor: JsonKeyCursor): void {
+  cursor.index += 1;
+  skipJsonWhitespace(cursor);
+
+  if (cursor.text[cursor.index] === "]") {
+    cursor.index += 1;
+    return;
+  }
+
+  while (cursor.index < cursor.text.length) {
+    parseJsonValue(cursor);
+    if (cursor.duplicate !== undefined || cursor.failed) return;
+
+    skipJsonWhitespace(cursor);
+    const delimiter = cursor.text[cursor.index];
+    if (delimiter === "]") {
+      cursor.index += 1;
+      return;
+    }
+    if (delimiter !== ",") {
+      cursor.failed = true;
+      return;
+    }
+    cursor.index += 1;
+  }
+
+  cursor.failed = true;
+}
+
+function parseJsonString(cursor: JsonKeyCursor): string | undefined {
+  if (cursor.text[cursor.index] !== "\"") {
+    cursor.failed = true;
+    return undefined;
+  }
+
+  cursor.index += 1;
+  let value = "";
+
+  while (cursor.index < cursor.text.length) {
+    const code = cursor.text.charCodeAt(cursor.index);
+    cursor.index += 1;
+
+    if (code === 0x22) {
+      return value;
+    }
+
+    if (code === 0x5c) {
+      const escaped = readJsonEscape(cursor);
+      if (escaped === undefined) return undefined;
+      value += escaped;
+      continue;
+    }
+
+    if (code <= 0x1f) {
+      cursor.failed = true;
+      return undefined;
+    }
+
+    value += String.fromCharCode(code);
+  }
+
+  cursor.failed = true;
+  return undefined;
+}
+
+function readJsonEscape(cursor: JsonKeyCursor): string | undefined {
+  const char = cursor.text[cursor.index];
+  cursor.index += 1;
+
+  if (char === "\"" || char === "\\" || char === "/") return char;
+  if (char === "b") return "\b";
+  if (char === "f") return "\f";
+  if (char === "n") return "\n";
+  if (char === "r") return "\r";
+  if (char === "t") return "\t";
+
+  if (char !== "u") {
+    cursor.failed = true;
+    return undefined;
+  }
+
+  const hex = cursor.text.slice(cursor.index, cursor.index + 4);
+  if (!/^[0-9A-Fa-f]{4}$/u.test(hex)) {
+    cursor.failed = true;
+    return undefined;
+  }
+
+  cursor.index += 4;
+  return String.fromCharCode(Number.parseInt(hex, 16));
+}
+
+function consumeJsonLiteral(cursor: JsonKeyCursor, literal: string): void {
+  if (cursor.text.startsWith(literal, cursor.index)) {
+    cursor.index += literal.length;
+    return;
+  }
+
+  cursor.failed = true;
+}
+
+function consumeJsonNumber(cursor: JsonKeyCursor): void {
+  const start = cursor.index;
+  while (cursor.index < cursor.text.length) {
+    const char = cursor.text[cursor.index];
+    if (
+      char === undefined ||
+      char === "," ||
+      char === "]" ||
+      char === "}" ||
+      jsonWhitespace(char)
+    ) {
+      break;
+    }
+    cursor.index += 1;
+  }
+
+  if (cursor.index === start) {
+    cursor.failed = true;
+  }
+}
+
+function skipJsonWhitespace(cursor: JsonKeyCursor): void {
+  while (cursor.index < cursor.text.length) {
+    const char = cursor.text[cursor.index];
+    if (char === undefined || !jsonWhitespace(char)) return;
+    cursor.index += 1;
+  }
+}
+
+function jsonWhitespace(char: string): boolean {
+  return char === " " || char === "\n" || char === "\r" || char === "\t";
+}
+
+function readExecutionManifest(
+  value: PlainJson,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: ExecutionManifest;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "Expected capsule ExecutionManifest object."),
+      ok: false,
+    };
+  }
+
+  const unsafeKey = findUnsafeObjectKey(value, path);
+  if (unsafeKey !== undefined) {
+    return {
+      error: error("POLICY_REJECTED", unsafeKey, "Capsule ExecutionManifest contains an unsafe object key."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_MANIFEST_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const id = requiredString(value, "id", path);
+  if (!id.ok) return { error: id.error, ok: false };
+  if (!validExecutionID(id.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "id"], "ExecutionManifest id is not a valid capsule id."),
+      ok: false,
+    };
+  }
+
+  const version = requiredString(value, "version", path);
+  if (!version.ok) return { error: version.error, ok: false };
+  if (!validExecutionVersion(version.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "version"], "ExecutionManifest version is not valid."),
+      ok: false,
+    };
+  }
+
+  const integrity = requiredString(value, "integrity", path);
+  if (!integrity.ok) return { error: integrity.error, ok: false };
+  if (!parseSriIntegrity(integrity.value).ok) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "integrity"], "ExecutionManifest integrity is not valid SRI."),
+      ok: false,
+    };
+  }
+
+  const packageClass = requiredString(value, "packageClass", path);
+  if (!packageClass.ok) return { error: packageClass.error, ok: false };
+  if (!EXECUTION_PACKAGE_CLASSES.has(packageClass.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "packageClass"], "ExecutionManifest packageClass is not supported."),
+      ok: false,
+    };
+  }
+
+  const runtime = readExecutionRuntime(value.runtime, packageClass.value, [...path, "runtime"]);
+  if (!runtime.ok) return { error: runtime.error, ok: false };
+
+  const limits = readExecutionResourceLimits(value.resourceLimits, [...path, "resourceLimits"]);
+  if (!limits.ok) return { error: limits.error, ok: false };
+
+  const optionalObjects = validateOptionalExecutionObjects(value, path);
+  if (!optionalObjects.ok) return { error: optionalObjects.error, ok: false };
+
+  return {
+    ok: true,
+    value: {
+      id: id.value,
+      integrity: integrity.value,
+      packageClass: packageClass.value as ExecutionManifest["packageClass"],
+      version: version.value,
+    },
+  };
+}
+
+function readExecutionRuntime(
+  value: PlainJson | undefined,
+  packageClass: string,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest runtime is required."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_RUNTIME_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const keys = sortedKeys(value);
+  if (keys.length !== 1) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest runtime must declare exactly one runtime."),
+      ok: false,
+    };
+  }
+
+  const runtimeKind = keys[0];
+  if (runtimeKind === undefined) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest runtime must declare exactly one runtime."),
+      ok: false,
+    };
+  }
+
+  if (
+    (packageClass === "ts-service" && runtimeKind !== "typescript") ||
+    (packageClass === "oci-service" && runtimeKind !== "oci") ||
+    (packageClass === "wasm-service" && runtimeKind !== "wasm")
+  ) {
+    return {
+      error: error("POLICY_REJECTED", [...path, runtimeKind], "ExecutionManifest runtime does not match packageClass."),
+      ok: false,
+    };
+  }
+
+  const runtimeValue = value[runtimeKind];
+  if (!plainObject(runtimeValue)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, runtimeKind], "ExecutionManifest runtime descriptor must be an object."),
+      ok: false,
+    };
+  }
+
+  if (runtimeKind !== "typescript") {
+    return { ok: true };
+  }
+
+  const runtimeUnknown = unknownField(runtimeValue, TYPESCRIPT_RUNTIME_FIELDS, [...path, runtimeKind]);
+  if (runtimeUnknown !== undefined) {
+    return {
+      error: runtimeUnknown,
+      ok: false,
+    };
+  }
+
+  const entrypoint = requiredString(runtimeValue, "entrypoint", [...path, runtimeKind]);
+  if (!entrypoint.ok) return { error: entrypoint.error, ok: false };
+  if (entrypoint.value !== "main.ts") {
+    return {
+      error: error("POLICY_REJECTED", [...path, runtimeKind, "entrypoint"], "TypeScript capsule entrypoint must be main.ts."),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function readExecutionResourceLimits(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest resourceLimits object is required."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, RESOURCE_LIMIT_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const cpu = requiredNumber(value, "cpuCores", path);
+  if (!cpu.ok) return { error: cpu.error, ok: false };
+  if (!Number.isFinite(cpu.value) || cpu.value <= 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "cpuCores"], "ExecutionManifest cpuCores must be positive."),
+      ok: false,
+    };
+  }
+
+  const intFields = ["ramMiB", "storageMiB", "tasksMax"] as const;
+  for (let index = 0; index < intFields.length; index += 1) {
+    const field = intFields[index];
+    if (field === undefined) continue;
+
+    const valueResult = requiredNumber(value, field, path);
+    if (!valueResult.ok) return { error: valueResult.error, ok: false };
+    if (!Number.isSafeInteger(valueResult.value) || valueResult.value <= 0) {
+      return {
+        error: error("POLICY_REJECTED", [...path, field], "ExecutionManifest resource limit must be a positive integer."),
+        ok: false,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+function validateOptionalExecutionObjects(
+  value: PlainJsonObject,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  const keys = sortedKeys(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key === undefined) continue;
+
+    const child = value[key];
+    if (key === "healthChecks") {
+      if (!Array.isArray(child)) {
+        return {
+          error: error("POLICY_REJECTED", [...path, key], "ExecutionManifest healthChecks must be an array when present."),
+          ok: false,
+        };
+      }
+    } else if (OPTIONAL_EXECUTION_OBJECT_FIELDS.has(key) && !plainObject(child)) {
+      return {
+        error: error("POLICY_REJECTED", [...path, key], "ExecutionManifest optional field must be an object when present."),
+        ok: false,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+function readCatalogInstallMetadata(
+  entry: CatalogAppVersion,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: CatalogInstallMetadata;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (entry.entry === undefined) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "entry"], "Catalog install entry metadata is required."),
+      ok: false,
+    };
+  }
+
+  if (entry.lockfile === undefined) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "lockfile"], "Catalog lockfile metadata is required."),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      entry: entry.entry,
+      lockfile: entry.lockfile,
+    },
+  };
+}
+
+function verifySelectedManifest(
+  manifest: ExecutionManifest,
+  appId: string,
+  version: string,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (manifest.id !== appId) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        [CAPSULE_MANIFEST_BASENAME, "id"],
+        "Resolved capsule manifest id does not match the selected catalog app.",
+      ),
+      ok: false,
+    };
+  }
+
+  if (manifest.version !== version) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        [CAPSULE_MANIFEST_BASENAME, "version"],
+        "Resolved capsule manifest version does not match the selected catalog version.",
+      ),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function requiredString(
+  value: PlainJsonObject,
+  key: string,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!Object.hasOwn(value, key)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Required field is missing."),
+      ok: false,
+    };
+  }
+
+  const child = value[key];
+  if (typeof child !== "string" || child === "") {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Expected non-empty string."),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: child,
+  };
+}
+
+function requiredNumber(
+  value: PlainJsonObject,
+  key: string,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: number;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!Object.hasOwn(value, key)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Required field is missing."),
+      ok: false,
+    };
+  }
+
+  const child = value[key];
+  if (typeof child !== "number") {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Expected number."),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: child,
+  };
+}
+
+function unknownField(
+  value: PlainJsonObject,
+  allowed: ReadonlySet<string>,
+  path: Path,
+): ResolveFromCatalogError | undefined {
+  const keys = sortedKeys(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key !== undefined && !allowed.has(key)) {
+      return error("POLICY_REJECTED", [...path, key], "Unknown field.");
+    }
+  }
+
+  return undefined;
+}
+
+function findUnsafeObjectKey(value: PlainJson, path: Path): Path | undefined {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const child = value[index];
+      if (child === undefined) continue;
+
+      const found = findUnsafeObjectKey(child, [...path, String(index)]);
+      if (found !== undefined) return found;
+    }
+
+    return undefined;
+  }
+
+  if (!plainObject(value)) {
+    return undefined;
+  }
+
+  const keys = sortedKeys(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key === undefined) continue;
+
+    if (key === "__proto__" || key === "constructor") {
+      return [...path, key];
+    }
+
+    const child = value[key];
+    if (child !== undefined) {
+      const found = findUnsafeObjectKey(child, [...path, key]);
+      if (found !== undefined) return found;
+    }
+  }
+
+  return undefined;
+}
+
+function validExecutionID(value: string): boolean {
+  return value.length <= 160 &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/u.test(value) &&
+    (REVERSE_DNS_PATTERN.test(value) || OPAQUE_ID_PATTERN.test(value));
+}
+
+function validExecutionVersion(value: string): boolean {
+  return value.length <= 128 &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/u.test(value) &&
+    EXECUTION_VERSION_PATTERN.test(value);
 }
 
 function hasZstdMagic(bytes: Uint8Array): boolean {
@@ -876,7 +1603,7 @@ function inlinePackageContract(entry: PlainJson):
     } {
   if (!plainObject(entry)) {
     return {
-      error: error("POLICY_REJECTED", ["manifest"], "Expected catalog artifact manifest object."),
+      error: error("POLICY_REJECTED", ["entry"], "Expected catalog install entry object."),
       ok: false,
     };
   }
@@ -885,14 +1612,14 @@ function inlinePackageContract(entry: PlainJson):
   const result = validateCatalogEntry(candidate);
   if (!result.ok) {
     return {
-      error: error("POLICY_REJECTED", ["manifest"], "Catalog artifact manifest validation failed after artifact resolution."),
+      error: error("POLICY_REJECTED", ["entry"], "Catalog install entry validation failed."),
       ok: false,
     };
   }
 
   if (typeof result.entry.package === "string" || "ref" in result.entry.package) {
     return {
-      error: error("POLICY_REJECTED", ["manifest", "package"], "Expected embedded package contract."),
+      error: error("POLICY_REJECTED", ["entry", "package"], "Expected embedded package contract."),
       ok: false,
     };
   }
@@ -919,8 +1646,8 @@ function verifySelectedContract(
     return {
       error: error(
         "POLICY_REJECTED",
-        ["manifest", "package", "identity", "id"],
-        "Resolved package artifact id does not match the selected catalog app.",
+        ["entry", "package", "identity", "id"],
+        "Catalog install entry package id does not match the selected catalog app.",
       ),
       ok: false,
     };
@@ -930,8 +1657,8 @@ function verifySelectedContract(
     return {
       error: error(
         "POLICY_REJECTED",
-        ["manifest", "package", "version"],
-        "Resolved package artifact version does not match the selected catalog version.",
+        ["entry", "package", "version"],
+        "Catalog install entry package version does not match the selected catalog version.",
       ),
       ok: false,
     };
