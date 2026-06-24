@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	exportcap "github.com/vita/agent/capabilities/export"
 	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
@@ -38,6 +40,7 @@ import (
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
+	"github.com/vita/agent/internal/storagehealth"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -83,6 +86,7 @@ type Config struct {
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
 	CapsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	StorageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
 type ErrorResponse struct {
@@ -166,6 +170,7 @@ type handler struct {
 	files            *filecap.Handler
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
 type applyRequest struct {
@@ -470,6 +475,13 @@ func NewHandler(config Config) (http.Handler, error) {
 		}
 	}
 
+	storageHealthSnapshot := config.StorageHealth
+	if storageHealthSnapshot == nil {
+		storageHealthSnapshot = func(ctx context.Context) (storagehealth.Report, error) {
+			return storagehealth.Collect(ctx, storagehealth.Roots{Discoverer: discoverer})
+		}
+	}
+
 	filesHandler, err := filecap.NewHandler(filecap.Options{
 		StateRoot: config.FilesStateRoot,
 		Grants:    config.FilesGrants,
@@ -495,6 +507,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		files:            filesHandler,
 		auditStore:       config.AuditStore,
 		capsuleWorkloads: capsuleWorkloads,
+		storageHealth:    storageHealthSnapshot,
 	}, nil
 }
 
@@ -576,6 +589,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleApply(w, r)
 	case "/files":
 		h.handleFiles(w, r)
+	case "/export":
+		h.handleExport(w, r)
 	case "/audit":
 		h.handleAudit(w, r)
 	case "/read":
@@ -655,6 +670,57 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *handler) handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var request exportcap.VerifyRequest
+	if err := decodeBody(w, r, &request, exportcap.MaxManifestBytes); err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	if err := request.Validate(); err != nil {
+		writeExportError(w, err)
+		return
+	}
+
+	manifestBytes, err := h.readExportFile(r.Context(), request.Grant, request.ManifestPath)
+	if err != nil {
+		writeFilesError(w, err)
+		return
+	}
+
+	result, err := exportcap.VerifyBundle(manifestBytes, func(path string) ([]byte, error) {
+		return h.readExportFile(r.Context(), request.Grant, path)
+	})
+	if err != nil {
+		writeExportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) readExportFile(ctx context.Context, grant string, path string) ([]byte, error) {
+	response, err := h.files.Handle(ctx, filecap.Request{
+		Op:    filecap.OperationRead,
+		Grant: grant,
+		Path:  path,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.Data == nil {
+		return nil, &exportcap.BundleError{Code: "integrity_mismatch", Message: "export content read returned no data"}
+	}
+	content, err := base64.StdEncoding.Strict().DecodeString(*response.Data)
+	if err != nil {
+		return nil, &exportcap.BundleError{Code: "integrity_mismatch", Message: "export content read returned malformed data"}
+	}
+	return content, nil
 }
 
 func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {
@@ -742,6 +808,39 @@ func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Write(workloads)
+	report, storageErr := h.storageHealthSnapshot(r.Context())
+	body.WriteString(",\"storageHealth\":")
+	if storageErr != nil {
+		raw, err := encodeJSONValue(stateCapabilityError{Error: "storage_health_unavailable"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	} else {
+		raw, err := encodeJSONValue(report.StorageHealth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	}
+	body.WriteString(",\"hardwareInventory\":")
+	if storageErr != nil {
+		raw, err := encodeJSONValue(stateCapabilityError{Error: "storage_health_unavailable"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	} else {
+		raw, err := encodeJSONValue(report.HardwareInventory)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	}
 	body.WriteString("}\n")
 
 	writeRawJSON(w, http.StatusOK, body.Bytes())
@@ -752,6 +851,13 @@ func (h *handler) capsuleWorkloadSnapshot() []capsuleruntime.WorkloadStatus {
 		return []capsuleruntime.WorkloadStatus{}
 	}
 	return normalizeCapsuleWorkloads(h.capsuleWorkloads())
+}
+
+func (h *handler) storageHealthSnapshot(ctx context.Context) (storagehealth.Report, error) {
+	if h.storageHealth == nil {
+		return storagehealth.Report{}, errors.New("storage health snapshot unavailable")
+	}
+	return h.storageHealth(ctx)
 }
 
 func (h *handler) readCapabilityJSON(ctx context.Context, name string) ([]byte, *requestError) {
@@ -1181,6 +1287,15 @@ func writeFilesError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "files_failed", "files request failed")
+}
+
+func writeExportError(w http.ResponseWriter, err error) {
+	var bundleErr *exportcap.BundleError
+	if errors.As(err, &bundleErr) {
+		writeError(w, bundleErr.HTTPStatus(), bundleErr.Code, bundleErr.Message)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "export_failed", "export request failed")
 }
 
 func badRequest(code string, message string) *requestError {

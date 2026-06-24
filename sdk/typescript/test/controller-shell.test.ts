@@ -238,6 +238,73 @@ test("POST /api/preview diffs pds.repo-like current state without payload-key al
   assert.deepEqual(removed["removed"], ["pds.repo"]);
 });
 
+test("preview and apply tolerate unfamiliar grants, read-error capabilities, and new node-state fields", async () => {
+  // Regression (P1-082): a node whose /state carries P1-078 storage-health
+  // envelope fields, a runtime-only capability that reports a read error
+  // (files), and a files capability whose current config includes an
+  // unfamiliar `export` grant (P1-080) must still PREVIEW + APPLY without
+  // failing closed. None of these are malformed input; the projection must be
+  // shape-agnostic and never reject the whole current plan over them.
+  const applyCalls: ApplyCall[] = [];
+  const ports = mockPorts({
+    applyCalls,
+    hostname: "vita-node-7",
+    operations: ["hostname.set"],
+    states: {
+      // A capability present in /state with no readable config (read-error
+      // envelope) — exactly how agentd surfaces the runtime `files` capability.
+      "files.runtime": {
+        error: "unsupported_read_request",
+      },
+      // A capability whose current config carries a grant the TS side does not
+      // model by name (`export`, added by P1-080). Valid-but-unfamiliar.
+      "files": {
+        current: {
+          grants: [
+            { access: "rw", name: "runtime-files", root: "owner" },
+            { access: "ro", name: "runtime-files-ro", root: "owner-ro" },
+            { access: "rw", name: "export", root: "export" },
+          ],
+        },
+      },
+    },
+    extraNodeStateFields: {
+      hardwareInventory: { disks: [{ name: "vda", sizeBytes: 0 }] },
+      storageHealth: { degraded: false, devices: [{ name: "vda", state: "ok" }] },
+    },
+  });
+
+  const preview = parseJsonObject(await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-8",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  }));
+  assert.equal(preview["ok"], true);
+  assert.equal(Object.hasOwn(preview, "error"), false);
+  assert.deepEqual(preview["added"], []);
+  assert.deepEqual(preview["changed"], ["hostname.set"]);
+  // The read-error `files.runtime` capability is skipped (not in removed); the
+  // files capability with the export grant projects and shows as removed.
+  assert.deepEqual(preview["removed"], ["files"]);
+
+  const apply = parseJsonObject(await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/apply",
+  }));
+  assert.equal(apply["ok"], true);
+  assert.equal(apply["outcome"], "committed");
+  assert.equal(applyCalls.length, 1);
+});
+
 test("POST /api/preview fails closed on duplicate-key, accessor, and cyclic bodies", async () => {
   const ports = mockPorts();
   const duplicate = await handleControllerShellRequest(ports, {
@@ -424,6 +491,7 @@ interface MockPortsOptions {
   readonly transportError?: boolean;
   readonly states?: Readonly<Record<string, PlainJson>>;
   readonly failOperationsRead?: boolean;
+  readonly extraNodeStateFields?: Readonly<Record<string, PlainJson>>;
 }
 
 interface ApplyCall {
@@ -529,10 +597,38 @@ function nodeState(
     }
   }
 
-  return {
-    capabilities,
-    capsuleWorkloads: [],
-  };
+  const envelope: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
+  Object.defineProperty(envelope, "capabilities", {
+    configurable: true,
+    enumerable: true,
+    value: capabilities,
+    writable: true,
+  });
+  Object.defineProperty(envelope, "capsuleWorkloads", {
+    configurable: true,
+    enumerable: true,
+    value: [],
+    writable: true,
+  });
+
+  if (options.extraNodeStateFields !== undefined) {
+    const extraNames = Object.keys(options.extraNodeStateFields).sort(compareStrings);
+
+    for (let index = 0; index < extraNames.length; index += 1) {
+      const name = extraNames[index];
+
+      if (name !== undefined && !Object.hasOwn(envelope, name)) {
+        Object.defineProperty(envelope, name, {
+          configurable: true,
+          enumerable: true,
+          value: options.extraNodeStateFields[name] ?? null,
+          writable: true,
+        });
+      }
+    }
+  }
+
+  return envelope;
 }
 
 function defineCapabilityState(

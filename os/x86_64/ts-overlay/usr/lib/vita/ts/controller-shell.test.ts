@@ -146,6 +146,79 @@ test("VITA-UI preview measures removed pds.repo-like current state", async () =>
   assert.deepEqual(preview["removed"], ["pds.repo"]);
 });
 
+test("VITA-UI succeeds with an export grant and storage-health node-state fields", async () => {
+  // Regression (P1-082): on int/wave2b, P1-080 adds an `export` grant to the
+  // files capability and P1-078 adds storageHealth/hardwareInventory to the
+  // agentd /state envelope. The controller-UI shell read this current state,
+  // hit a closed field allow-list (storageHealth) + a fatal read-error
+  // capability, and emitted `VITA-UI-ERROR: status=FAILSAFE`. The projection
+  // must be shape-agnostic: an unfamiliar grant/state-field is NOT malformed.
+  const calls: ApplyCall[] = [];
+  const ports = shellPorts({
+    applyCalls: calls,
+    hostname: "vita-node-7",
+    operations: ["hostname.set"],
+    states: {
+      // Runtime-only capability that agentd surfaces with a read-error envelope
+      // (no registered read request) — must be skipped, not fatal.
+      "files.runtime": {
+        error: "unsupported_read_request",
+      },
+      // Files capability current config carrying the unfamiliar `export` grant.
+      "files": {
+        current: {
+          grants: [
+            { access: "rw", name: "runtime-files", root: "owner" },
+            { access: "ro", name: "runtime-files-ro", root: "owner-ro" },
+            { access: "rw", name: "export", root: "export" },
+          ],
+        },
+      },
+    },
+    extraNodeStateFields: {
+      hardwareInventory: { disks: [{ name: "vda", sizeBytes: 0 }] },
+      storageHealth: { degraded: false, devices: [{ name: "vda", state: "ok" }] },
+    },
+  });
+
+  const status = parseJsonObject(await handleVendored(ports, {
+    method: "GET",
+    path: "/api/status",
+  }));
+  const preview = parseJsonObject(await handleVendored(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-8",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  }));
+  const apply = parseJsonObject(await handleVendored(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/apply",
+  }));
+
+  assert.equal(preview["ok"], true);
+  assert.equal(Object.hasOwn(preview, "error"), false);
+  assert.equal(apply["ok"], true);
+  assert.equal(apply["outcome"], "committed");
+
+  const marker = formatControllerShellStatusMarker(
+    assertStatus(status),
+    assertPreview(preview),
+    assertApply(apply),
+  );
+  assert.notEqual(marker, formatControllerShellErrorMarker());
+  assert.match(marker, /^VITA-UI: status=OK /u);
+  assert.match(marker, /apply=committed status=OK$/u);
+});
+
 test("forced invalid apply surfaces VITA-UI-REJECT and transport failure surfaces FAILSAFE", async () => {
   const rejected = parseJsonObject(await handleVendored(
     {
@@ -270,6 +343,7 @@ interface ShellPortsOptions {
   readonly applyCalls?: ApplyCall[];
   readonly transportError?: boolean;
   readonly states?: Readonly<Record<string, PlainJson>>;
+  readonly extraNodeStateFields?: Readonly<Record<string, PlainJson>>;
 }
 
 interface ApplyCall {
@@ -375,10 +449,23 @@ function nodeState(
     }
   }
 
-  return {
-    capabilities,
-    capsuleWorkloads: [],
-  };
+  const envelope: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
+  defineCapabilityState(envelope, "capabilities", capabilities);
+  defineCapabilityState(envelope, "capsuleWorkloads", []);
+
+  if (options.extraNodeStateFields !== undefined) {
+    const extraNames = Object.keys(options.extraNodeStateFields).sort(compareStrings);
+
+    for (let index = 0; index < extraNames.length; index += 1) {
+      const name = extraNames[index];
+
+      if (name !== undefined && !Object.hasOwn(envelope, name)) {
+        defineCapabilityState(envelope, name, options.extraNodeStateFields[name] ?? null);
+      }
+    }
+  }
+
+  return envelope;
 }
 
 function defineCapabilityState(

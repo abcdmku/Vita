@@ -84,6 +84,27 @@ export function createDenoUnixSocketFilesAgentTransport(
   };
 }
 
+export function createDenoUnixSocketExportAgentTransport(
+  options: DenoUnixSocketTransportOptions,
+): AgentTransport {
+  const host = options.host ?? DEFAULT_HOST;
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+
+  return async (url, init) => {
+    if (init.method !== "GET" && !isExportPost(url, init)) {
+      throw new Error("on-device agent transport only allows GET plus POST /export");
+    }
+
+    return requestOverUnixSocket(
+      options.socketPath,
+      host,
+      maxResponseBytes,
+      url,
+      init,
+    );
+  };
+}
+
 function isApplyPost(urlText: string, init: AgentTransportInit): boolean {
   if (init.method !== "POST") {
     return false;
@@ -100,6 +121,15 @@ function isFilesPost(urlText: string, init: AgentTransportInit): boolean {
 
   const url = new URL(urlText);
   return url.pathname === "/files" && url.search === "";
+}
+
+function isExportPost(urlText: string, init: AgentTransportInit): boolean {
+  if (init.method !== "POST") {
+    return false;
+  }
+
+  const url = new URL(urlText);
+  return url.pathname === "/export" && url.search === "";
 }
 
 async function requestOverUnixSocket(

@@ -336,6 +336,10 @@ func readSysfsBool(path string) bool {
 	return readTrimmed(path) == "1"
 }
 
+func ReadSysfsBool(path string) bool {
+	return readSysfsBool(path)
+}
+
 func readTrimmedLower(path string) string {
 	return strings.ToLower(readTrimmed(path))
 }
