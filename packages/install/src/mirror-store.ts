@@ -501,8 +501,21 @@ async function fetchWithTimeout(
       };
     }
 
+    // Defense in depth: reject a fetched view backed by a SharedArrayBuffer.
+    // Such a view can be mutated by another thread/agent concurrently, which is
+    // exactly the substrate for a TOCTOU attack against the verify/publish path.
+    // The mirror fetcher must return owned, non-shared bytes.
+    if (isSharedBufferBacked(value)) {
+      return {
+        error: error("FETCH_FAILED", ["mirrorUrl"], "Mirror fetcher returned shared-buffer-backed bytes."),
+        ok: false,
+      };
+    }
+
+    // Copy into a private (non-shared) buffer immediately so every downstream
+    // consumer operates on bytes the attacker can no longer mutate.
     return {
-      bytes: value,
+      bytes: new Uint8Array(value),
       ok: true,
     };
   } catch {
@@ -556,7 +569,17 @@ async function storeVerifiedArtifact(
       };
     }
 
-    if (!verifyBytes(bytes, spec.integrity)) {
+    // TOCTOU defense: COPY the fetched view into a PRIVATE (non-shared) buffer
+    // FIRST, then VERIFY that exact copy, then WRITE that SAME copy. The
+    // caller's `bytes` view may be backed by a SharedArrayBuffer that a hostile
+    // fetcher mutates concurrently; if we hashed `bytes` and only later
+    // snapshotted it, the bytes verified could differ from the bytes published.
+    // `new Uint8Array(bytes)` allocates a fresh (non-shared) ArrayBuffer and
+    // eagerly copies, so the bytes hashed are byte-identical to the bytes
+    // written, with no window for concurrent mutation between check and use.
+    const stableBytes = new Uint8Array(bytes);
+
+    if (!verifyBytes(stableBytes, spec.integrity)) {
       return {
         error: error(
           "INTEGRITY_MISMATCH",
@@ -566,8 +589,6 @@ async function storeVerifiedArtifact(
         ok: false,
       };
     }
-
-    const stableBytes = new Uint8Array(bytes);
 
     await mkdir(dirname(blobPath), { recursive: true });
 
@@ -762,6 +783,12 @@ function digestHex(integrity: ParsedSriIntegrity): string | undefined {
 
   const hex = digest.toString("hex");
   return HEX_PATTERN.test(hex) ? hex : undefined;
+}
+
+function isSharedBufferBacked(view: Uint8Array): boolean {
+  // `SharedArrayBuffer` may be absent (disabled) in some runtimes; guard the
+  // global reference so the check never throws.
+  return typeof SharedArrayBuffer !== "undefined" && view.buffer instanceof SharedArrayBuffer;
 }
 
 function verifyBytes(bytes: Uint8Array, integrity: ParsedSriIntegrity): boolean {

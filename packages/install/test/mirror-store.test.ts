@@ -324,6 +324,41 @@ test("post-fetch mutation of returned bytes is rejected before publish", async (
   assert.deepEqual(readdirSync(root), []);
 });
 
+test("a SharedArrayBuffer-backed fetch result that mutates after hashing cannot publish unverified bytes", async (t) => {
+  const root = tempStore(t);
+
+  // Build a view over a SharedArrayBuffer that initially holds the CORRECT
+  // bytes (so its digest matches the pinned SRI at the instant it is read), but
+  // mutate it concurrently. Under the old copy-after-verify ordering, a hostile
+  // fetcher could flip a byte in the TOCTOU window between hash and snapshot and
+  // get unverified bytes published. The downloader must instead reject the
+  // shared-buffer-backed view outright (defense in depth) and write nothing.
+  const shared = new SharedArrayBuffer(artifactBytes.byteLength);
+  const sharedView = new Uint8Array(shared);
+  sharedView.set(artifactBytes);
+
+  const fetcher: MirrorFetcher = {
+    async fetch(): Promise<Uint8Array> {
+      // Simulate a concurrent writer racing the verify/publish path.
+      queueMicrotask(() => {
+        sharedView[0] = (sharedView[0] ?? 0) ^ 0xff;
+      });
+      return sharedView;
+    },
+  };
+
+  const result = await fetchAndStore(artifactSpec, {
+    fetcher,
+    mirrorBaseUrl,
+    root,
+  });
+
+  assertRejects(result, "FETCH_FAILED");
+  // Fail-closed: no blob, no index — no unverified bytes ever published.
+  assert.equal(existsSync(join(root, "index.json")), false);
+  assert.deepEqual(readdirSync(root), []);
+});
+
 test("store I/O errors return structured STORE_IO rejections", async (t) => {
   const root = tempStore(t);
   const rootFile = join(root, "not-a-directory");
