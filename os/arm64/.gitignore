@@ -1,0 +1,11 @@
+# os-local ignore for arm64 build artifacts. Kept under os/arm64 so the rule
+# lives next to the generated files it governs.
+#
+# The privileged agentd and Deno runtime are build artifacts, not source. The
+# arm64 configs plan where they are staged, but this slice commits only plans
+# and structural tests.
+agent-overlay/usr/lib/vita/
+ts-overlay/usr/lib/vita/deno
+
+# Vita LUKS TEST keystore. THROWAWAY, per-host, and never part of a shipped image.
+.luks/
