@@ -193,6 +193,49 @@ test("capsule apply transport errors fail closed into VITA-CAPSULE-ERROR", async
   assert.equal(formatCapsuleMarker(TEST_CAPSULE_ENTRY, result), "VITA-CAPSULE-ERROR: status=FAILSAFE");
 });
 
+test("main.ts wiring: NET-NS marker requires netns, loopback, and enforced isolation", () => {
+  assert.equal(
+    formatCapsuleNetnsMarker({
+      id: TEST_CAPSULE_ENTRY.id,
+      network: {
+        egress: 1,
+        ingress: 1,
+        isolation: "enforced",
+        loopback: "OK",
+        netns: "vita-capsule-local.test",
+      },
+    }),
+    "VITA-CAPSULE-NET-NS: id=local.test.capsule netns=vita-capsule-local.test loopback=OK isolation=enforced status=OK",
+  );
+
+  for (const status of [
+    { id: TEST_CAPSULE_ENTRY.id },
+    {
+      id: TEST_CAPSULE_ENTRY.id,
+      network: {
+        egress: 1,
+        ingress: 1,
+        isolation: "enforced",
+        netns: "vita-capsule-local.test",
+      },
+    },
+    {
+      id: TEST_CAPSULE_ENTRY.id,
+      network: {
+        egress: 1,
+        ingress: 1,
+        loopback: "OK",
+        netns: "vita-capsule-local.test",
+      },
+    },
+  ] satisfies readonly CapsuleNetnsMarkerStatus[]) {
+    assert.equal(
+      formatCapsuleNetnsMarker(status),
+      "VITA-CAPSULE-NET-NS-ERROR: reason=netns_unverified status=FAILSAFE",
+    );
+  }
+});
+
 test("vendored capsule registry model matches upstream source and behavior", () => {
   const vendored = normalizeLineEndings(
     readFileSync(fileURLToPath(new URL("./vita/capsule-registry-model.ts", import.meta.url)), "utf8"),
@@ -286,6 +329,38 @@ function formatCapsuleMarker(
   }
 
   return "VITA-CAPSULE-ERROR: status=FAILSAFE";
+}
+
+interface CapsuleNetnsMarkerStatus {
+  readonly id: string;
+  readonly network?: {
+    readonly egress: number;
+    readonly ingress: number;
+    readonly isolation?: "enforced";
+    readonly loopback?: "OK";
+    readonly netns?: string;
+  };
+}
+
+function formatCapsuleNetnsMarker(status: CapsuleNetnsMarkerStatus): string {
+  const network = status.network;
+  if (
+    network === undefined ||
+    network.netns === undefined ||
+    network.loopback !== "OK" ||
+    network.isolation !== "enforced"
+  ) {
+    return "VITA-CAPSULE-NET-NS-ERROR: reason=netns_unverified status=FAILSAFE";
+  }
+
+  return (
+    "VITA-CAPSULE-NET-NS: " +
+    `id=${status.id} ` +
+    `netns=${markerToken(network.netns)} ` +
+    `loopback=${network.loopback} ` +
+    `isolation=${network.isolation} ` +
+    "status=OK"
+  );
 }
 
 function rejectedPaths(

@@ -159,8 +159,12 @@ type ExecuteStatus struct {
 }
 
 type ExecuteNetworkStatus struct {
-	Ingress int `json:"ingress"`
-	Egress  int `json:"egress"`
+	Ingress   int    `json:"ingress"`
+	Egress    int    `json:"egress"`
+	NetNS     string `json:"netns,omitempty"`
+	Loopback  string `json:"loopback,omitempty"`
+	Isolation string `json:"isolation,omitempty"`
+	ProofPath string `json:"-"`
 }
 
 type ExecuteVolumeStatus struct {
@@ -176,6 +180,7 @@ type ExecuteCapability struct {
 	registryFS registryFileSystem
 	manifests  executionManifestStore
 	launcher   transientUnitLauncher
+	netns      capsuleNetnsManager
 	supervisor *capsuleruntime.Supervisor
 
 	mu   sync.Mutex
@@ -262,10 +267,15 @@ func newExecuteCapability(registryFS registryFileSystem, manifests executionMani
 }
 
 func newExecuteCapabilityWithSupervisor(registryFS registryFileSystem, manifests executionManifestStore, launcher transientUnitLauncher, supervisor *capsuleruntime.Supervisor) *ExecuteCapability {
+	return newExecuteCapabilityWithNetns(registryFS, manifests, launcher, newDefaultCapsuleNetnsManager(), supervisor)
+}
+
+func newExecuteCapabilityWithNetns(registryFS registryFileSystem, manifests executionManifestStore, launcher transientUnitLauncher, netns capsuleNetnsManager, supervisor *capsuleruntime.Supervisor) *ExecuteCapability {
 	return &ExecuteCapability{
 		registryFS: registryFS,
 		manifests:  manifests,
 		launcher:   launcher,
+		netns:      netns,
 		supervisor: supervisor,
 	}
 }
@@ -305,6 +315,7 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 			}
 		}
 	}
+	c.refreshNetworkProof(ctx, &last)
 	return ExecuteReadResponse{Last: &last}, nil
 }
 
@@ -347,14 +358,69 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		return nil, &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 
+	var createdNetns *capsuleNetns
+	if unit.NetNS != nil {
+		if c.netns == nil {
+			return nil, &ExecuteInvalidRequestError{Reason: "missing capsule netns manager"}
+		}
+		netns, err := c.netns.Create(ctx, *unit.NetNS)
+		if err != nil {
+			reason := capsuleNetnsFailureReason(err)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: err}
+		}
+		unit.NetNS = &netns
+		createdNetns = &netns
+	}
+
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
 		code := executeStartFailureCode(manifest, unit, err)
-		if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
+		if createdNetns != nil {
+			code = capsuleNetnsFailureReason(capsuleNetnsStepError("join_unit", err))
+		} else if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
 			code = "capsule_volume_start_failed"
 			log.Printf("VITA-CAPSULE-VOLUME-ERROR: reason=%s status=FAILSAFE", code)
 		}
+		if createdNetns != nil {
+			if cleanupErr := c.netns.Teardown(ctx, *createdNetns); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", code)
+		}
 		return nil, &ExecuteStartError{Code: code, Err: err}
+	}
+	if unit.NetNS != nil {
+		if status.NetworkNamespacePath == "" {
+			limitErr := capsuleNetnsStepError("join_unit", errors.New("systemd did not report a capsule network namespace path"))
+			cleanupErr := errors.Join(
+				stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name),
+				c.netns.Teardown(ctx, *unit.NetNS),
+			)
+			reason := capsuleNetnsFailureReason(limitErr)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
+		}
+		unit.NetNS.Path = status.NetworkNamespacePath
+	}
+
+	var netnsCheck *capsuleNetnsCheck
+	if unit.NetNS != nil {
+		checked, checkErr := c.netns.Check(ctx, *unit.NetNS)
+		netnsCheck = &checked
+		if checkErr != nil || checked.Status != capsuleNetnsMeasuredStatusOK || checked.Isolation != capsuleNetnsIsolationEnforced {
+			limitErr := checkErr
+			if limitErr == nil {
+				limitErr = capsuleNetnsStepError("check_lo", fmt.Errorf("capsule network namespace isolation not enforced"))
+			}
+			cleanupErr := errors.Join(
+				stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name),
+				c.netns.Teardown(ctx, *unit.NetNS),
+			)
+			reason := capsuleNetnsFailureReason(limitErr)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
+		}
 	}
 
 	var ociLimits *OCILimitsStatus
@@ -371,6 +437,12 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			if cleanupErr := stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name); cleanupErr != nil {
 				limitErr = errors.Join(limitErr, cleanupErr)
 			}
+			if createdNetns != nil {
+				if cleanupErr := c.netns.Teardown(ctx, *createdNetns); cleanupErr != nil {
+					limitErr = errors.Join(limitErr, cleanupErr)
+				}
+				log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=oci_limits_failed status=FAILSAFE")
+			}
 			return nil, &ExecuteStartError{Code: "oci_limits_failed", Err: limitErr}
 		}
 	}
@@ -383,7 +455,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Status:     "OK",
 		Volumes:    volumeStatuses(unit.Volumes),
 		OCILimits:  ociLimits,
-		Network:    executeNetworkStatus(manifest.Network),
+		Network:    executeNetworkStatus(manifest.Network, unit.NetNS, netnsCheck),
 	}
 	c.setLast(executeStatus)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
@@ -394,7 +466,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	return executeUndo{
 		capability: c,
 		launcher:   c.launcher,
+		netns:      c.netns,
 		unit:       unit.Name,
+		unitNetns:  createdNetns,
 	}, nil
 }
 
@@ -456,6 +530,17 @@ func (c *ExecuteCapability) clearLast(unit string) {
 	}
 }
 
+func (c *ExecuteCapability) refreshNetworkProof(ctx context.Context, status *ExecuteStatus) {
+	if status == nil || status.Network == nil || status.Network.ProofPath == "" {
+		return
+	}
+	proof, ok := readCapsuleNetnsProof(ctx, status.Network.ProofPath)
+	if !ok || !measuredCapsuleNetnsProof(proof, status.ID) {
+		return
+	}
+	status.Network.Loopback = capsuleNetnsLoopbackOK
+}
+
 func (c *ExecuteCapability) startWorkload(id string, unit string, checks []capsuleruntime.Check) {
 	if c.supervisor == nil {
 		return
@@ -511,7 +596,9 @@ func cloneExecuteVolumeStatuses(volumes []ExecuteVolumeStatus) []ExecuteVolumeSt
 type executeUndo struct {
 	capability *ExecuteCapability
 	launcher   transientUnitLauncher
+	netns      capsuleNetnsManager
 	unit       string
+	unitNetns  *capsuleNetns
 }
 
 func (u executeUndo) Undo(ctx context.Context) error {
@@ -520,6 +607,14 @@ func (u executeUndo) Undo(ctx context.Context) error {
 	}
 	if err := stopAndUnlinkTransientUnit(ctx, u.launcher, u.unit); err != nil {
 		return err
+	}
+	if u.unitNetns != nil {
+		if u.netns == nil {
+			return &ExecuteInvalidRequestError{Reason: "missing capsule netns manager"}
+		}
+		if err := u.netns.Teardown(ctx, *u.unitNetns); err != nil {
+			return err
+		}
 	}
 	if u.capability != nil {
 		u.capability.stopWorkload(u.unit)
@@ -1270,10 +1365,12 @@ type transientUnit struct {
 	Argv       []string
 	Properties []systemdProperty
 	Volumes    []capsulestorage.VolumeMount
+	NetNS      *capsuleNetns
 }
 
 type transientUnitStatus struct {
-	DynamicUID string
+	DynamicUID           string
+	NetworkNamespacePath string
 }
 
 type transientUnitDiagnostics struct {
@@ -1364,7 +1461,17 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 		return transientUnitStatus{}, errors.Join(err, cleanupErr)
 	}
 
-	return transientUnitStatus{DynamicUID: uid}, nil
+	netnsPath := ""
+	if unit.NetNS != nil {
+		pid, err := l.mainPID(ctx, unit.Name)
+		if err != nil {
+			cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
+			return transientUnitStatus{}, errors.Join(err, cleanupErr)
+		}
+		netnsPath = path.Join("/proc", pid, "ns/net")
+	}
+
+	return transientUnitStatus{DynamicUID: uid, NetworkNamespacePath: netnsPath}, nil
 }
 
 func (l systemdRunLauncher) startError(ctx context.Context, unit string, cause error) *transientUnitStartError {
@@ -1673,21 +1780,33 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 
 	unitName := capsuleUnitName(manifest.ID)
 	runtimeDir := capsuleRuntimeDirectory(manifest.ID)
+	networkProofPath := ""
+	var netns *capsuleNetns
+	if manifest.Network != nil {
+		networkProofPath = "/run/" + runtimeDir + "/netns-proof.json"
+		unitNetns := capsuleNetnsForUnit(unitName, networkProofPath)
+		netns = &unitNetns
+	}
 	limits := manifest.ResourceLimits
 	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
 	if err != nil {
 		return transientUnit{}, &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
-	argv := denoArgv(entrypoint, volumes)
+	argv := denoArgv(entrypoint, volumes, networkProofPath)
 	properties := hardenedTransientUnitProperties(manifest, true)
+	environment := "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"
+	if networkProofPath != "" {
+		environment += " VITA_CAPSULE_NETNS_PROOF=" + networkProofPath
+	}
 	properties = append(properties,
-		systemdProperty{Name: "Environment", Value: "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"},
+		systemdProperty{Name: "Environment", Value: environment},
 		systemdProperty{Name: "RuntimeDirectory", Value: runtimeDir},
 		systemdProperty{Name: "RuntimeDirectoryMode", Value: "0700"},
 		systemdProperty{Name: "MemoryMax", Value: strconv.FormatInt(limits.RamMiB*1024*1024, 10)},
 		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
 		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	)
+	properties = appendCapsuleNetnsProperties(properties, netns)
 	if len(volumes) > 0 {
 		properties = append(properties,
 			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
@@ -1700,6 +1819,7 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 		Argv:       argv,
 		Properties: properties,
 		Volumes:    volumes,
+		NetNS:      netns,
 	}, nil
 }
 
@@ -1725,7 +1845,7 @@ func hardenedTransientUnitProperties(manifest ExecutionManifest, includeDenoPkey
 		{Name: "RestrictSUIDSGID", Value: "yes"},
 		{Name: "RestrictNamespaces", Value: "yes"},
 		{Name: "RestrictRealtime", Value: "yes"},
-		{Name: "RestrictAddressFamilies", Value: "AF_UNIX"},
+		{Name: "RestrictAddressFamilies", Value: restrictAddressFamilies(manifest.Network)},
 		{Name: "LockPersonality", Value: "yes"},
 		{Name: "MemoryDenyWriteExecute", Value: "no"},
 		{Name: "SystemCallArchitectures", Value: "native"},
@@ -1738,7 +1858,24 @@ func hardenedTransientUnitProperties(manifest ExecutionManifest, includeDenoPkey
 	return append(properties, systemdProperty{Name: "UMask", Value: "0077"})
 }
 
-func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount) []string {
+func restrictAddressFamilies(networkPolicy *ExecutionNetwork) string {
+	if networkPolicy == nil {
+		return "AF_UNIX"
+	}
+	return "AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+}
+
+func appendCapsuleNetnsProperties(properties []systemdProperty, netns *capsuleNetns) []systemdProperty {
+	if netns == nil {
+		return properties
+	}
+	if netns.Private {
+		return append(properties, systemdProperty{Name: "PrivateNetwork", Value: "yes"})
+	}
+	return append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
+}
+
+func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount, networkProofPath string) []string {
 	argv := []string{
 		defaultDenoPath,
 		"run",
@@ -1747,7 +1884,16 @@ func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount) []string 
 		"--no-config",
 		"--quiet",
 	}
+	if networkProofPath != "" {
+		argv = append(argv,
+			"--allow-net",
+			"--allow-env=VITA_CAPSULE_NETNS_PROOF",
+		)
+	}
 	readPaths, writePaths := volumePermissionPaths(volumes)
+	if networkProofPath != "" {
+		writePaths = append(writePaths, networkProofPath)
+	}
 	if len(readPaths) > 0 {
 		argv = append(argv, "--allow-read="+strings.Join(readPaths, ","))
 	}
@@ -2246,14 +2392,22 @@ func safeExecutionNetworkString(value string) bool {
 		!hasInlineReferenceScheme(value)
 }
 
-func executeNetworkStatus(networkPolicy *ExecutionNetwork) *ExecuteNetworkStatus {
+func executeNetworkStatus(networkPolicy *ExecutionNetwork, netns *capsuleNetns, check *capsuleNetnsCheck) *ExecuteNetworkStatus {
 	if networkPolicy == nil {
 		return nil
 	}
-	return &ExecuteNetworkStatus{
+	status := &ExecuteNetworkStatus{
 		Ingress: len(networkPolicy.Ingress),
 		Egress:  len(networkPolicy.Egress),
 	}
+	if netns != nil {
+		status.NetNS = netns.Name
+		status.ProofPath = netns.ProofPath
+	}
+	if check != nil && check.Status == capsuleNetnsMeasuredStatusOK && check.Isolation == capsuleNetnsIsolationEnforced {
+		status.Isolation = capsuleNetnsIsolationEnforced
+	}
+	return status
 }
 
 func cloneExecuteNetworkStatus(status *ExecuteNetworkStatus) *ExecuteNetworkStatus {

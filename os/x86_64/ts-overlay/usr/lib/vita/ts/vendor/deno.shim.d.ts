@@ -33,14 +33,41 @@ declare namespace Deno {
     readonly path: string;
   }
 
+  interface TcpConnectOptions {
+    readonly transport: "tcp";
+    readonly hostname: string;
+    readonly port: number;
+  }
+
   interface Conn {
     read(p: Uint8Array): Promise<number | null>;
     write(p: Uint8Array): Promise<number>;
     close(): void;
   }
 
+  interface Listener {
+    accept(): Promise<Conn>;
+    close(): void;
+  }
+
+  interface TcpListenOptions {
+    readonly transport: "tcp";
+    readonly hostname: string;
+    readonly port: number;
+  }
+
+  const env: {
+    get(key: string): string | undefined;
+  };
+
   /** Open a Unix domain socket connection. */
   function connect(options: UnixConnectOptions): Promise<Conn>;
+
+  /** Open a TCP connection. */
+  function connect(options: TcpConnectOptions): Promise<Conn>;
+
+  /** Open a TCP listener. */
+  function listen(options: TcpListenOptions): Listener;
 
   /** Synchronously write text to a file, optionally appending. Subset of Deno's WriteFileOptions. */
   function writeTextFileSync(
