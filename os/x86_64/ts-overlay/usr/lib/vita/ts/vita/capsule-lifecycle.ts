@@ -397,8 +397,51 @@ function failed(reason: string): Extract<CapsuleLifecycleProofResult, { readonly
   };
 }
 
+// agentApplyResultReason builds the serial-marker reason from a rejected apply.
+// The agent surfaces TWO fields on a failed operation: a stable `code` (e.g.
+// capsule_lifecycle_stop_failed) AND a free-form `message` that carries the
+// UNDERLYING cause (the systemd `stop`/`reset-failed` stderr, the netns teardown
+// step + errno, "unit not found", etc.). Prior revisions dropped the message, so
+// the boot marker only ever showed the WRAPPED code — which is why two blind
+// fixes could not be confirmed against a real cause. Thread a bounded, safe token
+// of the underlying detail through so the marker becomes
+//   ...reason=<code>:<underlying-cause>
+// revealing the true teardown/stop failure on the next boot. No secrets/PII: the
+// detail is the operation error text (systemd unit names, errno, netns step
+// labels), passed through markerToken (which strips everything outside
+// [A-Za-z0-9_.:-]) and length-bounded.
 function agentApplyResultReason(result: AgentApplyResult): string {
-  return markerToken(result.error?.code ?? "transaction_rejected");
+  const error = result.error;
+  if (error === undefined) {
+    return markerToken("transaction_rejected");
+  }
+  const code = markerToken(error.code.length > 0 ? error.code : "transaction_rejected");
+  const detail = underlyingErrorDetail(error.message);
+  if (detail === undefined) {
+    return code;
+  }
+  return `${code}:${detail}`;
+}
+
+// underlyingErrorDetail extracts the meaningful underlying cause from the agent's
+// operation error message, dropping the redundant transaction framing
+// (`apply operation <n> capability "<cap>": `) that only repeats what the code
+// already conveys. Returns a bounded, marker-safe token, or undefined when there
+// is no detail beyond the framing.
+const APPLY_OP_PREFIX = /^apply operation \d+ capability "[^"]*":\s*/u;
+const MAX_UNDERLYING_DETAIL = 160;
+
+function underlyingErrorDetail(message: string | undefined): string | undefined {
+  if (message === undefined) {
+    return undefined;
+  }
+  const stripped = message.replace(APPLY_OP_PREFIX, "").trim();
+  if (stripped.length === 0) {
+    return undefined;
+  }
+  const bounded = stripped.length > MAX_UNDERLYING_DETAIL ? stripped.slice(0, MAX_UNDERLYING_DETAIL) : stripped;
+  const token = markerToken(bounded);
+  return token === "unknown" ? undefined : token;
 }
 
 function agentClientErrorReason(cause: unknown): string {
