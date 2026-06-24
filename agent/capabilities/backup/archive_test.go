@@ -6,12 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/vita/agent/transaction"
 )
@@ -102,6 +105,71 @@ func TestArchiveCreateAllowsAbsentSourceRootAsEmptyRoot(t *testing.T) {
 	}
 	if !verify.OK || verify.Failure != nil {
 		t.Fatalf("Verify = %#v, want ok", verify)
+	}
+}
+
+func TestArchiveCreateSkipsSpecialEntriesAndDanglingSymlinks(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+
+	if err := os.Symlink(filepath.Join(source, "missing"), filepath.Join(source, "dangling")); err != nil {
+		t.Fatalf("create dangling symlink: %v", err)
+	}
+	if err := unix.Mkfifo(filepath.Join(source, "events.fifo"), 0o600); err != nil {
+		t.Fatalf("create fifo: %v", err)
+	}
+	socket, err := net.Listen("unix", filepath.Join(source, "agent.sock"))
+	if err != nil {
+		t.Fatalf("create unix socket: %v", err)
+	}
+	defer socket.Close()
+
+	capability := NewArchiveCapability()
+	result, _, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("Files = %d, want only the regular file", result.Files)
+	}
+
+	entries := manifestEntriesByID(mustLoadManifest(t, target, result.BackupID))
+	if _, ok := entries["agent/state.json"]; !ok {
+		t.Fatalf("manifest entries = %#v, want regular file", entries)
+	}
+	for _, skipped := range []string{"agent/dangling", "agent/events.fifo", "agent/agent.sock"} {
+		if _, ok := entries[skipped]; ok {
+			t.Fatalf("manifest included skipped special entry %q", skipped)
+		}
+	}
+}
+
+func TestArchiveBuildManifestExcludesTargetSubtree(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := filepath.Join(source, "vita-backups")
+	objectsDir := filepath.Join(target, ".backup-archive-stage", archiveObjectsDirName)
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, filepath.Join(objectsDir, "preexisting-object"), []byte("must not be walked"), 0o600)
+
+	manifest, files, err := buildArchiveManifest(ctx, []ArchiveSourceRoot{{Name: "agent", Path: source}}, objectsDir, target)
+	if err != nil {
+		t.Fatalf("buildArchiveManifest returned error: %v", err)
+	}
+	if files != 1 {
+		t.Fatalf("files = %d, want only source state file", files)
+	}
+
+	entries := manifestEntriesByID(manifest)
+	if _, ok := entries["agent/state.json"]; !ok {
+		t.Fatalf("manifest entries = %#v, want source state file", entries)
+	}
+	for id := range entries {
+		if strings.Contains(id, "vita-backups") {
+			t.Fatalf("manifest included backup target entry %q", id)
+		}
 	}
 }
 
@@ -351,6 +419,17 @@ func TestArchiveApplyReportsSpecificFilesystemDiagnosticCode(t *testing.T) {
 	}
 	if code := opErr.ApplyErrorCode(); code != "create_target_mkdir_ENOTDIR" {
 		t.Fatalf("ApplyErrorCode = %q, want create_target_mkdir_ENOTDIR", code)
+	}
+}
+
+func TestArchiveSourceWalkDiagnosticCodeIncludesErrnoAndPath(t *testing.T) {
+	err := archiveStepPathError("create_source_walk", "/var/lib/vita/runtime/volumes/capsule.sock", os.ErrPermission)
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("archiveStepPathError = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_source_walk:EACCES:var_lib_vita_runtime_volumes_capsule_sock" {
+		t.Fatalf("ApplyErrorCode = %q, want source walk errno and path", code)
 	}
 }
 

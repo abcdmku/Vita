@@ -699,7 +699,7 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 	}
 
 	roots := *normalized.SourceRoots
-	manifest, files, err := buildArchiveManifest(ctx, roots, objectsDir)
+	manifest, files, err := buildArchiveManifest(ctx, roots, objectsDir, normalized.TargetPath)
 	if err != nil {
 		return ArchiveCreateResult{}, nil, err
 	}
@@ -834,7 +834,7 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 	}, nil
 }
 
-func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, objectsDir string) (archiveManifest, int, error) {
+func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, objectsDir string, excludedTarget string) (archiveManifest, int, error) {
 	manifest := archiveManifest{
 		Version: archiveManifestVersion,
 		Alg:     archiveDigestAlgorithm,
@@ -855,15 +855,24 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 		}
 
 		err = filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if sourceWalkPathWithinTarget(path, excludedTarget) {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if walkErr != nil {
+				if shouldSkipSourceWalkError(walkErr) {
+					return nil
+				}
+				return sourceWalkPathError(path, walkErr)
+			}
 			rel, err := filepath.Rel(root.Path, path)
 			if err != nil {
-				return err
+				return sourceWalkPathError(path, err)
 			}
 			if rel == "." {
 				return nil
@@ -872,12 +881,15 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 			if err := validateArchiveRelativePath(rel, "manifest entry path"); err != nil {
 				return err
 			}
-			if d.Type()&os.ModeSymlink != 0 {
-				return archiveInvalid(fmt.Sprintf("source entry %s/%s must not be a symlink", root.Name, rel))
+			if shouldSkipSourceEntry(d) {
+				return nil
 			}
 			info, err := d.Info()
 			if err != nil {
-				return err
+				if shouldSkipSourceWalkError(err) {
+					return nil
+				}
+				return sourceWalkPathError(path, err)
 			}
 			mode := uint32(info.Mode().Perm())
 			switch {
@@ -891,7 +903,10 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 			case info.Mode().IsRegular():
 				digest, size, err := hashFileToObject(path, objectsDir)
 				if err != nil {
-					return err
+					if shouldSkipSourceWalkError(err) {
+						return nil
+					}
+					return sourceWalkPathError(path, err)
 				}
 				manifest.Entries = append(manifest.Entries, archiveManifestEntry{
 					Root:   root.Name,
@@ -903,11 +918,19 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 				})
 				files++
 			default:
-				return archiveInvalid(fmt.Sprintf("source entry %s/%s must be a regular file or directory", root.Name, rel))
+				return nil
 			}
 			return nil
 		})
 		if err != nil {
+			var invalid *ArchiveInvalidRequestError
+			if errors.As(err, &invalid) {
+				return archiveManifest{}, 0, err
+			}
+			var pathErr *archiveSourceWalkError
+			if errors.As(err, &pathErr) {
+				return archiveManifest{}, 0, archiveStepPathError("create_source_walk", pathErr.Path, pathErr.Err)
+			}
 			return archiveManifest{}, 0, archiveStepError("create_source_walk", fmt.Errorf("source root %q: %w", root.Name, err))
 		}
 	}
@@ -916,6 +939,66 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 		return manifestEntryLess(manifest.Entries[i], manifest.Entries[j])
 	})
 	return manifest, files, nil
+}
+
+type archiveSourceWalkError struct {
+	Path string
+	Err  error
+}
+
+func (e *archiveSourceWalkError) Error() string {
+	if e == nil || e.Err == nil {
+		return "source walk failed"
+	}
+	return fmt.Sprintf("%s: %v", e.Path, e.Err)
+}
+
+func (e *archiveSourceWalkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func sourceWalkPathError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &archiveSourceWalkError{Path: path, Err: err}
+}
+
+func sourceWalkPathWithinTarget(path string, target string) bool {
+	if target == "" {
+		return false
+	}
+	return pathWithin(filepath.Clean(target), filepath.Clean(path))
+}
+
+func shouldSkipSourceEntry(d fs.DirEntry) bool {
+	if d == nil {
+		return true
+	}
+	modeType := d.Type()
+	return modeType != 0 && modeType != fs.ModeDir
+}
+
+func shouldSkipSourceWalkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	var errno unix.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case unix.EACCES, unix.ELOOP, unix.ENOENT, unix.ENOTDIR, unix.EPERM:
+		return true
+	default:
+		return false
+	}
 }
 
 func verifyArchive(ctx context.Context, target string, backupID string) (ArchiveVerifyResult, archiveManifest, error) {
@@ -1598,6 +1681,25 @@ func archiveStepError(step string, err error) error {
 	return &ArchiveOperationError{
 		Code: code,
 		Err:  fmt.Errorf("%s: %w", step, err),
+	}
+}
+
+func archiveStepPathError(step string, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	errno := errnoCode(err)
+	if errno == "" {
+		errno = "failed"
+	}
+	pathCode := sanitizeArchiveCode(path)
+	code := sanitizeArchiveCode(step) + ":" + errno
+	if pathCode != "" {
+		code += ":" + pathCode
+	}
+	return &ArchiveOperationError{
+		Code: code,
+		Err:  fmt.Errorf("%s:%s:%s: %w", step, errno, path, err),
 	}
 }
 

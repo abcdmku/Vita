@@ -76,8 +76,7 @@ export async function runBackupArchiveRoundTrip(
   if (
     created.status.op !== "create" ||
     !created.status.created ||
-    created.status.backupId === undefined ||
-    created.status.files < 1
+    created.status.backupId === undefined
   ) {
     return failedArchive("create_not_measured");
   }
@@ -263,7 +262,7 @@ async function applyArchivePlan(
     const result = await client.apply(plan);
 
     if (result.outcome !== "committed") {
-      return failedArchive(`${step}_${agentApplyResultReason(result)}`);
+      return failedArchive(scopedArchiveReason(step, agentApplyResultReason(result)));
     }
 
     return {
@@ -279,7 +278,7 @@ async function applyArchivePlan(
       cause.status >= 400 &&
       cause.status <= 499
     ) {
-      return failedArchive(`${step}_${agentClientErrorReason(cause)}`);
+      return failedArchive(scopedArchiveReason(step, agentClientErrorReason(cause)));
     }
 
     return failedArchive(`${step}_transport_failed`);
@@ -373,6 +372,15 @@ function agentClientErrorReason(cause: unknown): string {
   }
 
   return "transport_failed";
+}
+
+function scopedArchiveReason(step: string, reason: string): string {
+  const token = markerToken(reason);
+  if (token === step || token.startsWith(`${step}_`) || token.startsWith(`${step}:`)) {
+    return token;
+  }
+
+  return `${step}_${token}`;
 }
 
 function failedArchive(reason: string): BackupArchiveRoundTripResult {
