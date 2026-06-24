@@ -60,6 +60,12 @@ import {
   runCapsuleLifecycleProof,
 } from "./vita/capsule-lifecycle.ts";
 import {
+  formatFullRestoreMarker,
+  formatFullRestoreRejectMarker,
+  rejectTamperedFullRestore,
+  runFullRestoreRoundTrip,
+} from "./vita/full-restore.ts";
+import {
   applyAndReadPdsRepoCreate,
   formatPdsRepoMarker,
   rejectInvalidPdsRepoCreate,
@@ -735,6 +741,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatProtectionDashboardErrorMarker("agentd_connect_failed"));
+    emit(formatFullRestoreMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsRepoMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -808,6 +815,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   await emitFilesMarkers(filesTransport);
   await emitBackupArchiveMarkers(agentTransport);
   await emitProtectionDashboardMarkers(client);
+  await emitFullRestoreMarkers(agentTransport);
 }
 
 async function emitApplyMarkers(
@@ -1431,6 +1439,22 @@ async function emitProtectionDashboardMarkers(
       emit(marker);
     }
   }
+}
+
+async function emitFullRestoreMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  const result = await runFullRestoreRoundTrip(client);
+  emit(formatFullRestoreMarker(result));
+
+  if (!result.ok) {
+    return;
+  }
+
+  emit(formatFullRestoreRejectMarker(await rejectTamperedFullRestore(client)));
 }
 
 async function emitPdsRepoMarkers(

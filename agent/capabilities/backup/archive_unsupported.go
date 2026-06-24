@@ -16,9 +16,11 @@ const ArchiveName = "backup.archive"
 type ArchiveOperation string
 
 const (
-	ArchiveOperationCreate  ArchiveOperation = "create"
-	ArchiveOperationVerify  ArchiveOperation = "verify"
-	ArchiveOperationRestore ArchiveOperation = "restore"
+	ArchiveOperationCreate         ArchiveOperation = "create"
+	ArchiveOperationVerify         ArchiveOperation = "verify"
+	ArchiveOperationRestore        ArchiveOperation = "restore"
+	ArchiveOperationRestoreAll     ArchiveOperation = "restore-all"
+	ArchiveOperationVerifyRestored ArchiveOperation = "verify-restored"
 )
 
 type ArchiveReadRequest struct{}
@@ -28,10 +30,12 @@ func (ArchiveReadRequest) CapabilityRequest() {}
 func (ArchiveReadRequest) Validate() error { return nil }
 
 type ArchiveApplyRequest struct {
-	Op      ArchiveOperation       `json:"op"`
-	Create  *ArchiveCreateRequest  `json:"create,omitempty"`
-	Verify  *ArchiveVerifyRequest  `json:"verify,omitempty"`
-	Restore *ArchiveRestoreRequest `json:"restore,omitempty"`
+	Op             ArchiveOperation              `json:"op"`
+	Create         *ArchiveCreateRequest         `json:"create,omitempty"`
+	Verify         *ArchiveVerifyRequest         `json:"verify,omitempty"`
+	Restore        *ArchiveRestoreRequest        `json:"restore,omitempty"`
+	RestoreAll     *ArchiveRestoreAllRequest     `json:"restoreAll,omitempty"`
+	VerifyRestored *ArchiveVerifyRestoredRequest `json:"verifyRestored,omitempty"`
 }
 
 func (ArchiveApplyRequest) CapabilityRequest() {}
@@ -47,7 +51,7 @@ func (r *ArchiveApplyRequest) UnmarshalJSON(raw []byte) error {
 }
 
 func (r ArchiveApplyRequest) Validate() error {
-	if r.Op != ArchiveOperationCreate && r.Op != ArchiveOperationVerify && r.Op != ArchiveOperationRestore {
+	if r.Op != ArchiveOperationCreate && r.Op != ArchiveOperationVerify && r.Op != ArchiveOperationRestore && r.Op != ArchiveOperationRestoreAll && r.Op != ArchiveOperationVerifyRestored {
 		return archiveUnsupported()
 	}
 	return archiveUnsupported()
@@ -75,6 +79,23 @@ type ArchiveRestoreRequest struct {
 	CompareSourceRoots *[]ArchiveSourceRoot `json:"compareSourceRoots,omitempty"`
 }
 
+type RootMapping struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type ArchiveRestoreAllRequest struct {
+	TargetPath   string         `json:"targetPath"`
+	BackupID     string         `json:"backupId"`
+	RootMappings *[]RootMapping `json:"rootMappings,omitempty"`
+}
+
+type ArchiveVerifyRestoredRequest struct {
+	TargetPath   string         `json:"targetPath"`
+	BackupID     string         `json:"backupId"`
+	RootMappings *[]RootMapping `json:"rootMappings,omitempty"`
+}
+
 type ArchiveReadResponse struct {
 	Last *ArchiveStatus `json:"last,omitempty"`
 }
@@ -85,6 +106,7 @@ type ArchiveStatus struct {
 	Op       ArchiveOperation            `json:"op"`
 	BackupID string                      `json:"backupId,omitempty"`
 	Files    int                         `json:"files"`
+	Volumes  int                         `json:"volumes,omitempty"`
 	Created  bool                        `json:"created"`
 	Verified bool                        `json:"verified"`
 	Restored bool                        `json:"restored"`
@@ -107,6 +129,13 @@ type ArchiveVerifyResult struct {
 type ArchiveRestoreResult struct {
 	BackupID string `json:"backupId"`
 	Files    int    `json:"files"`
+	Restored bool   `json:"restored"`
+}
+
+type ArchiveRestoreAllResult struct {
+	BackupID string `json:"backupId"`
+	Files    int    `json:"files"`
+	Volumes  int    `json:"volumes"`
 	Restored bool   `json:"restored"`
 }
 
