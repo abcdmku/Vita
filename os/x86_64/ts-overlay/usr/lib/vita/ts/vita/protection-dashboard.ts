@@ -1,5 +1,5 @@
 import { summarizeDashboard } from "./protection-dashboard-model.ts";
-import { ON_DEVICE_CAPSULE_ENTRY } from "./capsule-preview.ts";
+import { safeNormalize } from "./safe-normalize.ts";
 import type { AgentCapabilityState, AgentClient } from "./agent-client.ts";
 import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
 import type {
@@ -66,66 +66,38 @@ interface CapsuleNetworkGrantSummary {
   readonly ingressGrants: number;
 }
 
-interface CapsuleNetworkGrantSource {
-  readonly id: string;
-  readonly version: string;
-  readonly integrity: string;
-  readonly egressGrants: number;
-  readonly ingressGrants: number;
-}
+type CapsuleGrantBuildResult =
+  | {
+      readonly ok: true;
+      readonly grants: readonly PlainJsonObject[];
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    };
 
-// Counts mirror the staged capsule manifests under /usr/lib/vita/capsules.
-const CAPSULE_NETWORK_GRANT_SOURCES = Object.freeze([
-  Object.freeze({
-    egressGrants: 1,
-    id: ON_DEVICE_CAPSULE_ENTRY.id,
-    integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
-    ingressGrants: 1,
-    version: ON_DEVICE_CAPSULE_ENTRY.version,
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.oci.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.missing-oci.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.hostile-oci.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.wasm.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.missing-wasm.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-  Object.freeze({
-    egressGrants: 0,
-    id: "local.invalid-net.capsule",
-    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-    ingressGrants: 0,
-    version: "1.0.0",
-  }),
-]) satisfies readonly CapsuleNetworkGrantSource[];
+const CAPSULE_MANIFEST_BASE_URL = "file:///usr/lib/vita/capsules/";
+const MANIFEST_NETWORK_FIELDS = Object.freeze(["egress", "ingress"]);
+const MANIFEST_INGRESS_FIELDS = Object.freeze([
+  "direction",
+  "interface",
+  "name",
+  "port",
+  "protocol",
+  "public",
+  "sourceCidr",
+  "unsafeWideOpen",
+]);
+const MANIFEST_EGRESS_FIELDS = Object.freeze([
+  "destinations",
+  "direction",
+  "interface",
+  "name",
+  "ports",
+  "protocol",
+  "unsafeWideOpen",
+]);
+const PROTOCOLS = Object.freeze(["tcp", "udp"]);
 
 export async function readProtectionDashboard(
   client: Pick<AgentClient, "getState">,
@@ -145,7 +117,7 @@ export async function readProtectionDashboard(
   const registryState = await readState(client, CAPSULE_REGISTRY_CAPABILITY, "read_capsule_registry_failed");
   if (!registryState.ok) return registryState;
 
-  const dashboardInput = buildDashboardInput(
+  const dashboardInput = await buildDashboardInput(
     storageState.state,
     backupPolicyState.state,
     backupArchiveState.state,
@@ -218,13 +190,13 @@ export function formatProtectionDashboardErrorMarker(reason: string): string {
   return `VITA-PROTECT-DASH-ERROR: reason=${markerToken(reason)} status=FAILSAFE`;
 }
 
-function buildDashboardInput(
+async function buildDashboardInput(
   storageState: AgentCapabilityState,
   backupPolicyState: AgentCapabilityState,
   backupArchiveState: AgentCapabilityState,
   networkState: AgentCapabilityState,
   registryState: AgentCapabilityState,
-):
+): Promise<
   | {
       readonly ok: true;
       readonly input: DashboardInput;
@@ -232,7 +204,8 @@ function buildDashboardInput(
   | {
       readonly ok: false;
       readonly reason: string;
-    } {
+    }
+> {
   const storage = unwrapObjectReadState(storageState, "layout", "storage_layout_state_invalid");
   if (!storage.ok) return storage;
 
@@ -245,9 +218,17 @@ function buildDashboardInput(
   const registry = unwrapRegistryReadState(registryState);
   if (!registry.ok) return registry;
 
+  const capsuleNetworkGrants = await buildCapsuleNetworkGrants(registry.value);
+  if (!capsuleNetworkGrants.ok) {
+    return {
+      ok: false,
+      reason: capsuleNetworkGrants.reason,
+    };
+  }
+
   const input: DashboardInput = {
     backupArchive: backupArchiveState,
-    capsuleNetworkGrants: buildCapsuleNetworkGrants(registry.value),
+    capsuleNetworkGrants: capsuleNetworkGrants.grants,
     capsuleRegistry: registry.value ?? Object.freeze([]),
   };
 
@@ -386,11 +367,14 @@ function unwrapRegistryReadState(state: AgentCapabilityState): UnwrapRegistryRes
   };
 }
 
-function buildCapsuleNetworkGrants(
+async function buildCapsuleNetworkGrants(
   registry: readonly PlainJson[] | undefined,
-): readonly PlainJsonObject[] {
+): Promise<CapsuleGrantBuildResult> {
   if (registry === undefined) {
-    return Object.freeze([]);
+    return {
+      grants: Object.freeze([]),
+      ok: true,
+    };
   }
 
   const grants: PlainJsonObject[] = [];
@@ -402,20 +386,27 @@ function buildCapsuleNetworkGrants(
       continue;
     }
 
-    const grant = readCapsuleNetworkGrant(entry);
+    const grant = await readCapsuleNetworkGrant(entry);
 
-    if (grant === undefined || (grant.egressGrants === 0 && grant.ingressGrants === 0)) {
+    if (!grant.ok) {
+      return grant;
+    }
+
+    if (grant.grant.egressGrants === 0 && grant.grant.ingressGrants === 0) {
       continue;
     }
 
     grants.push(Object.freeze({
       capsuleId: entry.id,
-      egressGrants: grant.egressGrants,
-      ingressGrants: grant.ingressGrants,
+      egressGrants: grant.grant.egressGrants,
+      ingressGrants: grant.grant.ingressGrants,
     }));
   }
 
-  return Object.freeze(grants);
+  return {
+    grants: Object.freeze(grants),
+    ok: true,
+  };
 }
 
 function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistryEntryForDashboard | undefined {
@@ -445,27 +436,222 @@ function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistry
   };
 }
 
-function readCapsuleNetworkGrant(
+async function readCapsuleNetworkGrant(
   entry: CapsuleRegistryEntryForDashboard,
-): CapsuleNetworkGrantSummary | undefined {
-  for (let index = 0; index < CAPSULE_NETWORK_GRANT_SOURCES.length; index += 1) {
-    const manifest = CAPSULE_NETWORK_GRANT_SOURCES[index];
+): Promise<
+  | {
+      readonly ok: true;
+      readonly grant: CapsuleNetworkGrantSummary;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    }
+> {
+  const manifest = await importCapsuleManifest(entry.id);
 
-    if (
-      manifest !== undefined &&
-      manifest.id === entry.id &&
-      manifest.version === entry.version &&
-      manifest.integrity === entry.integrity
-    ) {
-      return {
+  if (!manifest.ok) {
+    return manifest;
+  }
+
+  return readManifestNetworkGrant(entry, manifest.manifest);
+}
+
+async function importCapsuleManifest(id: string): Promise<
+  | {
+      readonly ok: true;
+      readonly manifest: PlainJsonObject;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    }
+> {
+  if (!isSafeCapsulePathSegment(id)) {
+    return {
+      ok: false,
+      reason: "capsule_manifest_id_invalid",
+    };
+  }
+
+  const manifestUrl = new URL(`${encodeURIComponent(id)}/manifest.json`, CAPSULE_MANIFEST_BASE_URL);
+  let loaded: unknown;
+
+  try {
+    loaded = await import(manifestUrl.href, { with: { type: "json" } });
+  } catch {
+    return {
+      ok: false,
+      reason: "capsule_manifest_unreadable",
+    };
+  }
+
+  const manifestValue = moduleDefault(loaded);
+  const normalized = safeNormalize(manifestValue);
+
+  if (!normalized.ok || !isPlainObject(normalized.value)) {
+    return {
+      ok: false,
+      reason: "capsule_manifest_invalid",
+    };
+  }
+
+  return {
+    manifest: normalized.value,
+    ok: true,
+  };
+}
+
+function readManifestNetworkGrant(
+  entry: CapsuleRegistryEntryForDashboard,
+  manifest: PlainJsonObject,
+):
+  | {
+      readonly ok: true;
+      readonly grant: CapsuleNetworkGrantSummary;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    } {
+  if (
+    field(manifest, "id") !== entry.id ||
+    field(manifest, "version") !== entry.version ||
+    field(manifest, "integrity") !== entry.integrity
+  ) {
+    return {
+      ok: false,
+      reason: "capsule_manifest_mismatch",
+    };
+  }
+
+  const network = field(manifest, "network");
+  if (network === undefined) {
+    return {
+      grant: {
         capsuleId: entry.id,
-        egressGrants: manifest.egressGrants,
-        ingressGrants: manifest.ingressGrants,
+        egressGrants: 0,
+        ingressGrants: 0,
+      },
+      ok: true,
+    };
+  }
+
+  if (!isPlainObject(network)) {
+    return {
+      ok: false,
+      reason: "capsule_manifest_network_invalid",
+    };
+  }
+
+  const networkFields = expectOnlyFields(network, MANIFEST_NETWORK_FIELDS);
+  if (!networkFields.ok) return networkFields;
+
+  const ingress = validateNetworkGrantArray(
+    field(network, "ingress"),
+    "ingress",
+    validateIngressGrant,
+  );
+  if (!ingress.ok) return ingress;
+
+  const egress = validateNetworkGrantArray(
+    field(network, "egress"),
+    "egress",
+    validateEgressGrant,
+  );
+  if (!egress.ok) return egress;
+
+  return {
+    grant: {
+      capsuleId: entry.id,
+      egressGrants: egress.count,
+      ingressGrants: ingress.count,
+    },
+    ok: true,
+  };
+}
+
+function validateNetworkGrantArray(
+  value: PlainJson | undefined,
+  label: "egress" | "ingress",
+  validate: (grant: PlainJsonObject) => boolean,
+):
+  | {
+      readonly ok: true;
+      readonly count: number;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    } {
+  if (!Array.isArray(value)) {
+    return {
+      ok: false,
+      reason: `capsule_manifest_${label}_invalid`,
+    };
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const grant = value[index];
+    if (!isPlainObject(grant) || !validate(grant)) {
+      return {
+        ok: false,
+        reason: `capsule_manifest_${label}_invalid`,
       };
     }
   }
 
-  return undefined;
+  return {
+    count: value.length,
+    ok: true,
+  };
+}
+
+function validateIngressGrant(grant: PlainJsonObject): boolean {
+  if (!expectOnlyFields(grant, MANIFEST_INGRESS_FIELDS).ok) return false;
+
+  const direction = field(grant, "direction");
+  const name = field(grant, "name");
+  const protocol = field(grant, "protocol");
+  const port = field(grant, "port");
+  const sourceCidr = field(grant, "sourceCidr");
+  const iface = field(grant, "interface");
+  const publicValue = field(grant, "public");
+  const unsafeWideOpen = field(grant, "unsafeWideOpen");
+
+  return (
+    (direction === undefined || direction === "ingress") &&
+    (name === undefined || isNonEmptyString(name)) &&
+    isProtocol(protocol) &&
+    isPort(port) &&
+    typeof sourceCidr === "string" &&
+    isValidCidr(sourceCidr) &&
+    isNonEmptyString(iface) &&
+    typeof publicValue === "boolean" &&
+    (unsafeWideOpen === undefined || typeof unsafeWideOpen === "boolean")
+  );
+}
+
+function validateEgressGrant(grant: PlainJsonObject): boolean {
+  if (!expectOnlyFields(grant, MANIFEST_EGRESS_FIELDS).ok) return false;
+
+  const direction = field(grant, "direction");
+  const name = field(grant, "name");
+  const protocol = field(grant, "protocol");
+  const destinations = field(grant, "destinations");
+  const ports = field(grant, "ports");
+  const iface = field(grant, "interface");
+  const unsafeWideOpen = field(grant, "unsafeWideOpen");
+
+  return (
+    (direction === undefined || direction === "egress") &&
+    (name === undefined || isNonEmptyString(name)) &&
+    isProtocol(protocol) &&
+    isDestinationArray(destinations) &&
+    isPortArray(ports) &&
+    isNonEmptyString(iface) &&
+    (unsafeWideOpen === undefined || typeof unsafeWideOpen === "boolean")
+  );
 }
 
 function formatProtectionDashboardForcedRejectMarker(): string {
@@ -506,6 +692,202 @@ function field(value: PlainJsonObject, key: string): PlainJson | undefined {
 
 function isPlainObject(value: PlainJson | undefined): value is PlainJsonObject {
   return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function moduleDefault(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return undefined;
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(value, "default");
+  if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) {
+    return undefined;
+  }
+
+  return descriptor.value;
+}
+
+function expectOnlyFields(
+  value: PlainJsonObject,
+  allowed: readonly string[],
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    } {
+  const keys = Object.keys(value);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined || !contains(allowed, key)) {
+      return {
+        ok: false,
+        reason: "capsule_manifest_network_invalid",
+      };
+    }
+  }
+
+  return {
+    ok: true,
+  };
+}
+
+function contains(values: readonly string[], value: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === value) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isSafeCapsulePathSegment(value: string): boolean {
+  return value.length > 0 &&
+    value.length <= 255 &&
+    value === value.trim() &&
+    !value.includes("/") &&
+    !value.includes("\\") &&
+    !value.includes("\0") &&
+    value !== "." &&
+    value !== "..";
+}
+
+function isProtocol(value: PlainJson | undefined): boolean {
+  return typeof value === "string" && contains(PROTOCOLS, value);
+}
+
+function isNonEmptyString(value: PlainJson | undefined): value is string {
+  return typeof value === "string" && value.length > 0 && value === value.trim();
+}
+
+function isPort(value: PlainJson | undefined): boolean {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    (value === -1 || (value >= 1 && value <= 65535));
+}
+
+function isPortArray(value: PlainJson | undefined): boolean {
+  if (!Array.isArray(value) || value.length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isPort(value[index])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isDestinationArray(value: PlainJson | undefined): boolean {
+  if (!Array.isArray(value) || value.length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const destination = value[index];
+
+    if (typeof destination !== "string" || !isValidDestination(destination)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isValidDestination(value: string): boolean {
+  if (value.includes("/")) {
+    return isValidCidr(value);
+  }
+
+  if (value.includes(":")) {
+    return isIpv6(value);
+  }
+
+  return isIpv4(value);
+}
+
+function isValidCidr(value: string): boolean {
+  if (value !== value.trim()) {
+    return false;
+  }
+
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) {
+    return false;
+  }
+
+  const address = value.slice(0, slash);
+  const prefixText = value.slice(slash + 1);
+  if (!/^[0-9]{1,3}$/u.test(prefixText)) {
+    return false;
+  }
+
+  const prefix = Number(prefixText);
+
+  if (address.includes(":")) {
+    return Number.isInteger(prefix) && prefix >= 0 && prefix <= 128 && isIpv6(address);
+  }
+
+  return Number.isInteger(prefix) && prefix >= 0 && prefix <= 32 && isIpv4(address);
+}
+
+function isIpv4(value: string): boolean {
+  const octets = value.split(".");
+  if (octets.length !== 4) {
+    return false;
+  }
+
+  for (let index = 0; index < octets.length; index += 1) {
+    const octet = octets[index];
+
+    if (octet === undefined || !/^[0-9]{1,3}$/u.test(octet)) {
+      return false;
+    }
+
+    const parsed = Number(octet);
+    if (parsed < 0 || parsed > 255) {
+      return false;
+    }
+
+    if (octet.length > 1 && octet.startsWith("0")) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isIpv6(value: string): boolean {
+  if (value.length === 0 || /[^0-9A-Fa-f:]/u.test(value)) {
+    return false;
+  }
+
+  const doubleColon = value.split("::");
+  if (doubleColon.length > 2) {
+    return false;
+  }
+
+  const groups = value.replace("::", ":").split(":").filter((group) => group.length > 0);
+  if (groups.length > 8) {
+    return false;
+  }
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+
+    if (group === undefined || group.length > 4) {
+      return false;
+    }
+  }
+
+  return doubleColon.length === 2 || groups.length === 8;
 }
 
 function markerToken(value: string): string {

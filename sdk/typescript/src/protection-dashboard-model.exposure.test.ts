@@ -115,6 +115,29 @@ test("host ingress flags unsafe and all-source rules as wide-open and sorts port
     },
   });
   assert.equal(scoped.host.wideOpen, false);
+
+  const actualReadState = mustExposure({
+    networkPolicy: {
+      exists: true,
+      policy: {
+        allow: [
+          {
+            interface: "eth0",
+            port: 443,
+            proto: "tcp",
+            sourceCidr: "10.0.0.0/8",
+          },
+        ],
+      },
+      raw: "eyJhbGxvdyI6W119Cg==",
+    },
+  });
+  assert.deepEqual(actualReadState.host.openIngressPorts, [
+    {
+      port: 443,
+      proto: "tcp",
+    },
+  ]);
 });
 
 test("network config shape is accepted and converted without leaking interface details", () => {
@@ -239,6 +262,25 @@ test("absent network policy gives an empty host surface and deterministic mute c
     networkMute: 1,
   });
   assert.equal(JSON.stringify(first.value), JSON.stringify(second.value));
+
+  const registryReadState = mustExposure({
+    capsuleRegistry: {
+      exists: true,
+      raw: "eyJjYXBzdWxlcyI6W119Cg==",
+      registry: {
+        capsules: [
+          capsule("capsule.readstate"),
+        ],
+      },
+    },
+    networkPolicy: {
+      exists: false,
+      policy: {},
+      raw: null,
+    },
+  });
+  assert.equal(registryReadState.host.wideOpen, false);
+  assert.equal(registryReadState.counts.networkMute, 1);
 });
 
 function mustExposure(input: unknown): ExposureSummary {

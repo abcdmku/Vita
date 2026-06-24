@@ -49,6 +49,25 @@ test("snapshots distinguish active, configured-inactive, and absent from declare
     }).snapshots.status,
     "absent",
   );
+
+  const currentReadShape = mustProtection({
+    storageLayout: storageLayoutReadState({
+      snapshotsArea: true,
+    }),
+  });
+  assert.equal(currentReadShape.snapshots.status, "configured-inactive");
+  assert.deepEqual(currentReadShape.snapshots.evidence, {
+    snapshotAreaPresent: true,
+  });
+
+  assert.equal(
+    mustProtection({
+      storageLayout: storageLayoutReadState({
+        snapshotsArea: false,
+      }),
+    }).snapshots.status,
+    "absent",
+  );
 });
 
 test("mirror is absent for a single data volume and active only with explicit mirror device evidence", () => {
@@ -111,6 +130,14 @@ test("local backup distinguishes verified, configured, and absent without exposi
     }).localBackup.status,
     "absent",
   );
+
+  const actualReadPolicy = mustProtection({
+    backupArchive: verifiedArchive(),
+    backupPolicy: backupPolicyReadState(),
+  });
+  assert.equal(actualReadPolicy.localBackup.status, "verified");
+  assert.deepEqual(actualReadPolicy.localBackup.evidence.targetKinds, ["local-snapshot"]);
+  assert.equal(JSON.stringify(actualReadPolicy).includes("target:system-state"), false);
 });
 
 test("off-site backup is independent from local backup and is never verified", () => {
@@ -156,6 +183,21 @@ test("overall counts non-absent tiers and a bare node has no protected tiers", (
     }),
   });
   assert.equal(mixed.overall.protectedTiers, 3);
+
+  const absentReadStates = mustProtection({
+    backupPolicy: {
+      exists: false,
+      policy: {},
+      raw: null,
+    },
+    storageLayout: {
+      exists: false,
+      layout: {},
+      raw: null,
+    },
+  });
+  assert.equal(absentReadStates.localBackup.status, "absent");
+  assert.equal(absentReadStates.snapshots.status, "absent");
 });
 
 test("protection model rejects malformed, cyclic, proxy, unknown, wrong-type, and unknown-enum input", () => {
@@ -350,6 +392,45 @@ function storageLayout(options: {
   };
 }
 
+function storageLayoutReadState(options: {
+  readonly snapshotsArea: boolean;
+}): unknown {
+  const subvolumes = [
+    {
+      path: "/data/system-state",
+      role: "system-state",
+    },
+    {
+      path: "/data/user-data",
+      role: "user-data",
+    },
+    {
+      appId: "local-search",
+      path: "/data/app-state/local-search",
+      role: "app-state",
+    },
+    {
+      path: "/data/local-backup-cache",
+      role: "local-backup-cache",
+    },
+  ];
+
+  if (options.snapshotsArea) {
+    subvolumes.push({
+      path: "/data/snapshots",
+      role: "snapshots",
+    });
+  }
+
+  return {
+    exists: true,
+    layout: {
+      subvolumes,
+    },
+    raw: "eyJzdWJ2b2x1bWVzIjpbXX0K",
+  };
+}
+
 function storageLayoutWithOnlySnapshotsArea(): unknown {
   return {
     dataVolume: {
@@ -396,6 +477,35 @@ function backupPolicy(target: Readonly<Record<string, unknown>>): unknown {
       startAt: "2026-06-20T11:00:00Z",
     },
     target,
+  };
+}
+
+function backupPolicyReadState(): unknown {
+  return {
+    exists: true,
+    policy: {
+      recoveryKeyRef: {
+        handle: "rk_handle_owner_primary",
+        id: "rk:owner-primary",
+        keyStoreRef: "keystore:local-tpm",
+      },
+      retention: {
+        count: 7,
+        maxAgeDays: 30,
+      },
+      schedule: {
+        cron: "0 2 * * *",
+      },
+      targets: [
+        {
+          id: "target:system-state",
+        },
+        {
+          id: "target:user-data",
+        },
+      ],
+    },
+    raw: "eyJzY2hlZHVsZSI6eyJjcm9uIjoiMCAyICogKiAqIn19Cg==",
   };
 }
 

@@ -178,14 +178,14 @@ interface ExposureInput {
 
 interface StorageLayoutProjection {
   readonly snapshotAreaPresent: boolean;
-  readonly cadence: SnapshotCadence;
-  readonly retentionCount: number;
-  readonly readOnlySnapshots: boolean;
-  readonly diskHealthStatus: DiskHealthStatus;
+  readonly cadence?: SnapshotCadence;
+  readonly retentionCount?: number;
+  readonly readOnlySnapshots?: boolean;
+  readonly diskHealthStatus?: DiskHealthStatus;
 }
 
 interface BackupPolicyProjection {
-  readonly targetKind: BackupTargetKind;
+  readonly targetKinds: readonly BackupTargetKind[];
 }
 
 interface BackupArchiveProjection {
@@ -225,6 +225,10 @@ const DASHBOARD_INPUT_FIELDS = new Set([
   ...EXPOSURE_INPUT_FIELDS,
 ]);
 
+const STORAGE_READ_STATE_FIELDS = new Set(["exists", "layout", "raw"]);
+const POLICY_READ_STATE_FIELDS = new Set(["exists", "policy", "raw"]);
+const REGISTRY_READ_STATE_FIELDS = new Set(["exists", "registry", "raw"]);
+const AGENT_STORAGE_LAYOUT_FIELDS = new Set(["subvolumes"]);
 const STORAGE_LAYOUT_FIELDS = new Set([
   "dataVolume",
   "diskHealth",
@@ -275,6 +279,15 @@ const BACKUP_POLICY_FIELDS = new Set([
   "schedule",
   "target",
 ]);
+const AGENT_BACKUP_POLICY_FIELDS = new Set([
+  "recoveryKeyRef",
+  "retention",
+  "schedule",
+  "targets",
+]);
+const AGENT_BACKUP_SCHEDULE_FIELDS = new Set(["cron", "intervalSeconds"]);
+const AGENT_BACKUP_TARGET_FIELDS = new Set(["id"]);
+const AGENT_BACKUP_RETENTION_FIELDS = new Set(["count", "maxAgeDays"]);
 const BACKUP_SCHEDULE_FIELDS = new Set(["cadence", "interval", "startAt"]);
 const RECOVERY_KEY_REF_FIELDS = new Set(["handle", "id", "keyStoreRef"]);
 const BACKUP_ARCHIVE_FIELDS = new Set(["last"]);
@@ -556,7 +569,7 @@ function parseExposureInput(
 function buildProtectionSummary(input: ProtectionInput): ProtectionSummary {
   const targetKinds = input.backupPolicy === undefined
     ? Object.freeze([]) satisfies readonly BackupTargetKind[]
-    : Object.freeze([input.backupPolicy.targetKind]) satisfies readonly BackupTargetKind[];
+    : input.backupPolicy.targetKinds;
   const localTargetKinds = filterTargetKinds(targetKinds, LOCAL_BACKUP_TARGET_KINDS);
   const offSiteTargetKinds = filterTargetKinds(targetKinds, OFF_SITE_BACKUP_TARGET_KINDS);
   const archiveVerified = input.backupArchive?.verified === true;
@@ -619,24 +632,33 @@ function buildSnapshotTier(input: ProtectionInput): SnapshotTierSummary {
 
   const evidence: {
     snapshotAreaPresent: boolean;
-    cadence: SnapshotCadence;
-    retentionCount: number;
-    readOnlySnapshots: boolean;
+    cadence?: SnapshotCadence;
+    retentionCount?: number;
+    readOnlySnapshots?: boolean;
     measuredSnapshotCount?: number;
   } = {
-    cadence: storage.cadence,
-    readOnlySnapshots: storage.readOnlySnapshots,
-    retentionCount: storage.retentionCount,
     snapshotAreaPresent: true,
   };
 
+  if (storage.cadence !== undefined) {
+    evidence.cadence = storage.cadence;
+  }
+  if (storage.retentionCount !== undefined) {
+    evidence.retentionCount = storage.retentionCount;
+  }
+  if (storage.readOnlySnapshots !== undefined) {
+    evidence.readOnlySnapshots = storage.readOnlySnapshots;
+  }
   if (input.measuredSnapshotCount !== undefined) {
     evidence.measuredSnapshotCount = input.measuredSnapshotCount;
   }
 
   return Object.freeze({
     evidence: Object.freeze(evidence),
-    status: storage.cadence !== "disabled" && storage.retentionCount >= 1
+    status: storage.cadence !== undefined &&
+      storage.retentionCount !== undefined &&
+      storage.cadence !== "disabled" &&
+      storage.retentionCount >= 1
       ? "active"
       : "configured-inactive",
   });
@@ -651,7 +673,7 @@ function buildMirrorTier(input: ProtectionInput): MirrorTierSummary {
   if (input.mirrorDevices !== undefined) {
     evidence.mirrorDevices = input.mirrorDevices;
   }
-  if (input.storageLayout !== undefined) {
+  if (input.storageLayout?.diskHealthStatus !== undefined) {
     evidence.diskHealthStatus = input.storageLayout.diskHealthStatus;
   }
 
@@ -801,34 +823,97 @@ function parseStorageLayout(
     return undefined;
   }
 
+  if (hasOwn(value, "exists")) {
+    return parseStorageLayoutReadState(value, path, errors);
+  }
+
+  return parseStorageLayoutValue(value, path, errors);
+}
+
+function parseStorageLayoutReadState(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): StorageLayoutProjection | undefined {
   const errorStart = errors.length;
-  rejectUnknownFields(value, STORAGE_LAYOUT_FIELDS, path, errors);
-  readRequiredLiteral(value, "version", 1, [...path, "version"], errors);
-  parseDataVolume(value["dataVolume"], [...path, "dataVolume"], errors);
+  rejectUnknownFields(value, STORAGE_READ_STATE_FIELDS, path, errors);
+  const exists = readRequiredBoolean(value, "exists", [...path, "exists"], errors);
+  validateOptionalRawField(value, [...path, "raw"], errors);
+
+  if (errors.length > errorStart || exists === undefined) {
+    return undefined;
+  }
+
+  if (!exists) {
+    return undefined;
+  }
+
+  const layout = value["layout"];
+  if (!isRecord(layout)) {
+    addError(errors, [...path, "layout"], "Expected storage layout object.");
+    return undefined;
+  }
+
+  return parseStorageLayoutValue(layout, [...path, "layout"], errors);
+}
+
+function parseStorageLayoutValue(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): StorageLayoutProjection | undefined {
+  const errorStart = errors.length;
+  const hasLegacyShape =
+    hasOwn(value, "version") ||
+    hasOwn(value, "dataVolume") ||
+    hasOwn(value, "snapshotPolicy") ||
+    hasOwn(value, "diskHealth");
+
+  rejectUnknownFields(value, hasLegacyShape ? STORAGE_LAYOUT_FIELDS : AGENT_STORAGE_LAYOUT_FIELDS, path, errors);
+  if (hasLegacyShape) {
+    readRequiredLiteral(value, "version", 1, [...path, "version"], errors);
+    parseDataVolume(value["dataVolume"], [...path, "dataVolume"], errors);
+  }
   const subvolumes = parseSubvolumes(value["subvolumes"], [...path, "subvolumes"], errors);
-  const snapshotPolicy = parseSnapshotPolicy(
-    value["snapshotPolicy"],
-    [...path, "snapshotPolicy"],
-    errors,
-  );
-  const diskHealthStatus = parseDiskHealth(value["diskHealth"], [...path, "diskHealth"], errors);
+  const snapshotPolicy = hasLegacyShape
+    ? parseSnapshotPolicy(
+        value["snapshotPolicy"],
+        [...path, "snapshotPolicy"],
+        errors,
+      )
+    : undefined;
+  const diskHealthStatus = hasLegacyShape
+    ? parseDiskHealth(value["diskHealth"], [...path, "diskHealth"], errors)
+    : undefined;
 
   if (
     errors.length > errorStart ||
     subvolumes === undefined ||
-    snapshotPolicy === undefined ||
-    diskHealthStatus === undefined
+    (hasLegacyShape && (snapshotPolicy === undefined || diskHealthStatus === undefined))
   ) {
     return undefined;
   }
 
-  return Object.freeze({
-    cadence: snapshotPolicy.cadence,
-    diskHealthStatus,
-    readOnlySnapshots: snapshotPolicy.readOnlySnapshots,
-    retentionCount: snapshotPolicy.retentionCount,
+  const projection: {
+    snapshotAreaPresent: boolean;
+    cadence?: SnapshotCadence;
+    retentionCount?: number;
+    readOnlySnapshots?: boolean;
+    diskHealthStatus?: DiskHealthStatus;
+  } = {
     snapshotAreaPresent: subvolumes.snapshotAreaPresent,
-  });
+  };
+
+  if (snapshotPolicy !== undefined) {
+    projection.cadence = snapshotPolicy.cadence;
+    projection.readOnlySnapshots = snapshotPolicy.readOnlySnapshots;
+    projection.retentionCount = snapshotPolicy.retentionCount;
+  }
+  if (diskHealthStatus !== undefined) {
+    projection.diskHealthStatus = diskHealthStatus;
+  }
+
+  return Object.freeze(projection);
 }
 
 function parseDataVolume(
@@ -882,10 +967,12 @@ function parseSubvolumes(
       continue;
     }
 
-    if (seenIds.has(subvolume.id)) {
-      addError(errors, [...path, String(index), "id"], "Duplicate subvolume id.");
-    } else {
-      seenIds.add(subvolume.id);
+    if (subvolume.id !== undefined) {
+      if (seenIds.has(subvolume.id)) {
+        addError(errors, [...path, String(index), "id"], "Duplicate subvolume id.");
+      } else {
+        seenIds.add(subvolume.id);
+      }
     }
 
     const previousRoleIndex = seenRoles.get(subvolume.role);
@@ -939,7 +1026,7 @@ function parseSubvolume(
   value: PlainJson | undefined,
   path: Path,
   errors: DashboardValidationError[],
-): { readonly id: string; readonly role: StorageAreaRole; readonly appId?: string } | undefined {
+): { readonly id?: string; readonly role: StorageAreaRole; readonly appId?: string } | undefined {
   if (!isRecord(value)) {
     addError(errors, path, "Expected subvolume object.");
     return undefined;
@@ -947,7 +1034,7 @@ function parseSubvolume(
 
   const errorStart = errors.length;
   rejectUnknownFields(value, SUBVOLUME_FIELDS, path, errors);
-  const id = readRequiredNonEmptyString(value, "id", [...path, "id"], errors);
+  const id = readOptionalNonEmptyString(value, "id", [...path, "id"], errors);
   const role = readRequiredEnum(value, "role", STORAGE_AREA_ROLES, [...path, "role"], errors);
   const subvolumePath = readRequiredNonEmptyString(value, "path", [...path, "path"], errors);
   if (subvolumePath !== undefined && !isCanonicalAbsolutePath(subvolumePath)) {
@@ -963,22 +1050,26 @@ function parseSubvolume(
     addError(errors, [...path, "appId"], "appId is only allowed for app-state subvolumes.");
   }
 
-  if (errors.length > errorStart || id === undefined || role === undefined) {
+  if (errors.length > errorStart || role === undefined) {
     return undefined;
   }
 
+  const subvolume: {
+    id?: string;
+    role: StorageAreaRole;
+    appId?: string;
+  } = {
+    role,
+  };
+
+  if (id !== undefined) {
+    subvolume.id = id;
+  }
   if (appId !== undefined) {
-    return Object.freeze({
-      appId,
-      id,
-      role,
-    });
+    subvolume.appId = appId;
   }
 
-  return Object.freeze({
-    id,
-    role,
-  });
+  return Object.freeze(subvolume);
 }
 
 function parseSnapshotPolicy(
@@ -1148,6 +1239,49 @@ function parseBackupPolicy(
     return undefined;
   }
 
+  if (hasOwn(value, "exists")) {
+    return parseBackupPolicyReadState(value, path, errors);
+  }
+
+  if (hasOwn(value, "targets")) {
+    return parseAgentBackupPolicy(value, path, errors);
+  }
+
+  return parseKindedBackupPolicy(value, path, errors);
+}
+
+function parseBackupPolicyReadState(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): BackupPolicyProjection | undefined {
+  const errorStart = errors.length;
+  rejectUnknownFields(value, POLICY_READ_STATE_FIELDS, path, errors);
+  const exists = readRequiredBoolean(value, "exists", [...path, "exists"], errors);
+  validateOptionalRawField(value, [...path, "raw"], errors);
+
+  if (errors.length > errorStart || exists === undefined) {
+    return undefined;
+  }
+
+  if (!exists) {
+    return undefined;
+  }
+
+  const policy = value["policy"];
+  if (!isRecord(policy)) {
+    addError(errors, [...path, "policy"], "Expected backup policy object.");
+    return undefined;
+  }
+
+  return parseBackupPolicy(policy, [...path, "policy"], errors);
+}
+
+function parseKindedBackupPolicy(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): BackupPolicyProjection | undefined {
   const errorStart = errors.length;
   rejectUnknownFields(value, BACKUP_POLICY_FIELDS, path, errors);
   readRequiredOpaqueRef(value, "id", [...path, "id"], errors);
@@ -1165,8 +1299,133 @@ function parseBackupPolicy(
   }
 
   return Object.freeze({
-    targetKind,
+    targetKinds: Object.freeze([targetKind]),
   });
+}
+
+function parseAgentBackupPolicy(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): BackupPolicyProjection | undefined {
+  const errorStart = errors.length;
+  rejectUnknownFields(value, AGENT_BACKUP_POLICY_FIELDS, path, errors);
+  parseAgentBackupSchedule(value["schedule"], [...path, "schedule"], errors);
+  const targetCount = parseAgentBackupTargets(value["targets"], [...path, "targets"], errors);
+  parseAgentBackupRetention(value["retention"], [...path, "retention"], errors);
+  parseRecoveryKeyRef(value["recoveryKeyRef"], [...path, "recoveryKeyRef"], errors);
+
+  if (errors.length > errorStart || targetCount === undefined) {
+    return undefined;
+  }
+
+  const targetKinds: readonly BackupTargetKind[] = targetCount > 0
+    ? Object.freeze(["local-snapshot"] satisfies readonly BackupTargetKind[])
+    : Object.freeze([]) satisfies readonly BackupTargetKind[];
+
+  return Object.freeze({
+    targetKinds,
+  });
+}
+
+function parseAgentBackupSchedule(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: DashboardValidationError[],
+): void {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected backup schedule object.");
+    return;
+  }
+
+  const errorStart = errors.length;
+  rejectUnknownFields(value, AGENT_BACKUP_SCHEDULE_FIELDS, path, errors);
+  const hasCron = hasOwn(value, "cron");
+  const hasInterval = hasOwn(value, "intervalSeconds");
+
+  if (hasCron === hasInterval) {
+    addError(errors, path, "Expected exactly one schedule field.");
+  }
+  if (hasCron) {
+    const cron = readRequiredNonEmptyString(value, "cron", [...path, "cron"], errors);
+    if (cron !== undefined && cron !== cron.trim()) {
+      addError(errors, [...path, "cron"], "Expected trimmed cron schedule.");
+    }
+  }
+  if (hasInterval) {
+    readRequiredInteger(
+      value,
+      "intervalSeconds",
+      1,
+      31_536_000,
+      [...path, "intervalSeconds"],
+      errors,
+    );
+  }
+
+  if (errors.length > errorStart) {
+    return;
+  }
+}
+
+function parseAgentBackupTargets(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: DashboardValidationError[],
+): number | undefined {
+  if (!Array.isArray(value)) {
+    addError(errors, path, "Expected backup targets array.");
+    return undefined;
+  }
+
+  if (value.length === 0) {
+    addError(errors, path, "Expected at least one backup target.");
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const errorStart = errors.length;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const target = value[index];
+
+    if (!isRecord(target)) {
+      addError(errors, [...path, String(index)], "Expected backup target object.");
+      continue;
+    }
+
+    rejectUnknownFields(target, AGENT_BACKUP_TARGET_FIELDS, [...path, String(index)], errors);
+    const id = readRequiredOpaqueRef(target, "id", [...path, String(index), "id"], errors);
+
+    if (id !== undefined) {
+      if (seen.has(id)) {
+        addError(errors, [...path, String(index), "id"], "Duplicate backup target id.");
+      } else {
+        seen.add(id);
+      }
+    }
+  }
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return value.length;
+}
+
+function parseAgentBackupRetention(
+  value: PlainJson | undefined,
+  path: Path,
+  errors: DashboardValidationError[],
+): void {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected backup retention object.");
+    return;
+  }
+
+  rejectUnknownFields(value, AGENT_BACKUP_RETENTION_FIELDS, path, errors);
+  readRequiredInteger(value, "count", 1, 1000, [...path, "count"], errors);
+  readRequiredInteger(value, "maxAgeDays", 1, MAX_RETENTION_DAYS, [...path, "maxAgeDays"], errors);
 }
 
 function parseBackupTarget(
@@ -1334,11 +1593,42 @@ function parseNetworkPolicy(
     return undefined;
   }
 
+  if (hasOwn(value, "exists")) {
+    return parseNetworkPolicyReadState(value, path, errors);
+  }
+
   if (hasOwn(value, "allow")) {
     return parseAgentNetworkPolicy(value, path, errors);
   }
 
   return parseNetworkConfig(value, path, errors);
+}
+
+function parseNetworkPolicyReadState(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): NetworkPolicyProjection | undefined {
+  const errorStart = errors.length;
+  rejectUnknownFields(value, POLICY_READ_STATE_FIELDS, path, errors);
+  const exists = readRequiredBoolean(value, "exists", [...path, "exists"], errors);
+  validateOptionalRawField(value, [...path, "raw"], errors);
+
+  if (errors.length > errorStart || exists === undefined) {
+    return undefined;
+  }
+
+  if (!exists) {
+    return undefined;
+  }
+
+  const policy = value["policy"];
+  if (!isRecord(policy)) {
+    addError(errors, [...path, "policy"], "Expected network policy object.");
+    return undefined;
+  }
+
+  return parseNetworkPolicy(policy, [...path, "policy"], errors);
 }
 
 function parseAgentNetworkPolicy(
@@ -1537,6 +1827,16 @@ function parseCapsuleRegistry(
   path: Path,
   errors: DashboardValidationError[],
 ): readonly CapsuleRegistryEntry[] | undefined {
+  if (isRecord(value)) {
+    if (hasOwn(value, "exists")) {
+      return parseCapsuleRegistryReadState(value, path, errors);
+    }
+
+    if (hasOwn(value, "capsules")) {
+      return parseCapsuleRegistry(value["capsules"], [...path, "capsules"], errors);
+    }
+  }
+
   if (!Array.isArray(value)) {
     addError(errors, path, "Expected capsule registry array.");
     return undefined;
@@ -1567,6 +1867,34 @@ function parseCapsuleRegistry(
   }
 
   return Object.freeze(entries.sort((left, right) => compareStrings(left.id, right.id)));
+}
+
+function parseCapsuleRegistryReadState(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): readonly CapsuleRegistryEntry[] | undefined {
+  const errorStart = errors.length;
+  rejectUnknownFields(value, REGISTRY_READ_STATE_FIELDS, path, errors);
+  const exists = readRequiredBoolean(value, "exists", [...path, "exists"], errors);
+  validateOptionalRawField(value, [...path, "raw"], errors);
+
+  if (errors.length > errorStart || exists === undefined) {
+    return undefined;
+  }
+
+  if (!exists) {
+    return Object.freeze([]);
+  }
+
+  const registry = value["registry"];
+  if (!isRecord(registry)) {
+    addError(errors, [...path, "registry"], "Expected capsule registry object.");
+    return undefined;
+  }
+
+  rejectUnknownFields(registry, new Set(["capsules"]), [...path, "registry"], errors);
+  return parseCapsuleRegistry(registry["capsules"], [...path, "registry", "capsules"], errors);
 }
 
 function parseCapsuleEntry(
@@ -2012,6 +2340,21 @@ function readOptionalOpaqueRef(
   }
 
   return ref;
+}
+
+function validateOptionalRawField(
+  value: JsonRecord,
+  path: Path,
+  errors: DashboardValidationError[],
+): void {
+  if (!hasOwn(value, "raw")) {
+    return;
+  }
+
+  const raw = value["raw"];
+  if (raw !== null && typeof raw !== "string") {
+    addError(errors, path, "Expected raw state string or null.");
+  }
 }
 
 function readRequiredArray(
