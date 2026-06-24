@@ -637,18 +637,20 @@ func pathWithin(base string, candidate string) bool {
 }
 
 type archiveManifest struct {
-	Version int                    `json:"version"`
-	Alg     string                 `json:"alg"`
-	Digest  string                 `json:"digest"`
-	Roots   []archiveManifestRoot  `json:"roots"`
-	Entries []archiveManifestEntry `json:"entries"`
+	Version int                           `json:"version"`
+	Alg     string                        `json:"alg"`
+	Digest  string                        `json:"digest"`
+	Roots   []archiveManifestRoot         `json:"roots"`
+	Entries []archiveManifestEntry        `json:"entries"`
+	Skipped []archiveManifestSkippedEntry `json:"skipped,omitempty"`
 }
 
 type archiveManifestBody struct {
-	Version int                    `json:"version"`
-	Alg     string                 `json:"alg"`
-	Roots   []archiveManifestRoot  `json:"roots"`
-	Entries []archiveManifestEntry `json:"entries"`
+	Version int                           `json:"version"`
+	Alg     string                        `json:"alg"`
+	Roots   []archiveManifestRoot         `json:"roots"`
+	Entries []archiveManifestEntry        `json:"entries"`
+	Skipped []archiveManifestSkippedEntry `json:"skipped,omitempty"`
 }
 
 type archiveManifestRoot struct {
@@ -662,6 +664,12 @@ type archiveManifestEntry struct {
 	Mode   uint32 `json:"mode"`
 	Size   int64  `json:"size"`
 	Digest string `json:"digest,omitempty"`
+}
+
+type archiveManifestSkippedEntry struct {
+	Root   string `json:"root"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreateResult, transaction.Undo, error) {
@@ -865,9 +873,6 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 				return nil
 			}
 			if walkErr != nil {
-				if shouldSkipSourceWalkError(walkErr) {
-					return nil
-				}
 				return sourceWalkPathError(path, walkErr)
 			}
 			rel, err := filepath.Rel(root.Path, path)
@@ -881,14 +886,16 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 			if err := validateArchiveRelativePath(rel, "manifest entry path"); err != nil {
 				return err
 			}
-			if shouldSkipSourceEntry(d) {
+			if reason, ok := sourceEntrySkipReason(d); ok {
+				manifest.Skipped = append(manifest.Skipped, archiveManifestSkippedEntry{
+					Root:   root.Name,
+					Path:   rel,
+					Reason: reason,
+				})
 				return nil
 			}
 			info, err := d.Info()
 			if err != nil {
-				if shouldSkipSourceWalkError(err) {
-					return nil
-				}
 				return sourceWalkPathError(path, err)
 			}
 			mode := uint32(info.Mode().Perm())
@@ -903,9 +910,6 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 			case info.Mode().IsRegular():
 				digest, size, err := hashFileToObject(path, objectsDir)
 				if err != nil {
-					if shouldSkipSourceWalkError(err) {
-						return nil
-					}
 					return sourceWalkPathError(path, err)
 				}
 				manifest.Entries = append(manifest.Entries, archiveManifestEntry{
@@ -937,6 +941,9 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 
 	sort.Slice(manifest.Entries, func(i, j int) bool {
 		return manifestEntryLess(manifest.Entries[i], manifest.Entries[j])
+	})
+	sort.Slice(manifest.Skipped, func(i, j int) bool {
+		return manifestSkippedLess(manifest.Skipped[i], manifest.Skipped[j])
 	})
 	return manifest, files, nil
 }
@@ -974,31 +981,26 @@ func sourceWalkPathWithinTarget(path string, target string) bool {
 	return pathWithin(filepath.Clean(target), filepath.Clean(path))
 }
 
-func shouldSkipSourceEntry(d fs.DirEntry) bool {
+func sourceEntrySkipReason(d fs.DirEntry) (string, bool) {
 	if d == nil {
-		return true
+		return "unknown", true
 	}
 	modeType := d.Type()
-	return modeType != 0 && modeType != fs.ModeDir
-}
-
-func shouldSkipSourceWalkError(err error) bool {
-	if err == nil {
-		return false
+	switch {
+	case modeType&fs.ModeSymlink != 0:
+		return "symlink", true
+	case modeType&fs.ModeNamedPipe != 0:
+		return "fifo", true
+	case modeType&fs.ModeSocket != 0:
+		return "socket", true
+	case modeType&fs.ModeDevice != 0:
+		return "device", true
+	case modeType&fs.ModeIrregular != 0:
+		return "irregular", true
+	case modeType != 0 && modeType != fs.ModeDir:
+		return "special", true
 	}
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-		return true
-	}
-	var errno unix.Errno
-	if !errors.As(err, &errno) {
-		return false
-	}
-	switch errno {
-	case unix.EACCES, unix.ELOOP, unix.ENOENT, unix.ENOTDIR, unix.EPERM:
-		return true
-	default:
-		return false
-	}
+	return "", false
 }
 
 func verifyArchive(ctx context.Context, target string, backupID string) (ArchiveVerifyResult, archiveManifest, error) {
@@ -1153,10 +1155,29 @@ func validateArchiveManifest(manifest archiveManifest) error {
 			return archiveInvalid(fmt.Sprintf("manifest.entries[%d].type must be file or dir", i))
 		}
 	}
+	for i, skipped := range manifest.Skipped {
+		if _, ok := roots[skipped.Root]; !ok {
+			return archiveInvalid(fmt.Sprintf("manifest.skipped[%d].root is unknown", i))
+		}
+		if err := normalizeManifestString(skipped.Root, fmt.Sprintf("manifest.skipped[%d].root", i)); err != nil {
+			return err
+		}
+		if err := validateArchiveRelativePath(skipped.Path, fmt.Sprintf("manifest.skipped[%d].path", i)); err != nil {
+			return err
+		}
+		if err := validateManifestSkipReason(skipped.Reason, fmt.Sprintf("manifest.skipped[%d].reason", i)); err != nil {
+			return err
+		}
+	}
 	if !sort.SliceIsSorted(manifest.Entries, func(i, j int) bool {
 		return manifestEntryLess(manifest.Entries[i], manifest.Entries[j])
 	}) {
 		return archiveInvalid("manifest.entries must be canonical sorted")
+	}
+	if !sort.SliceIsSorted(manifest.Skipped, func(i, j int) bool {
+		return manifestSkippedLess(manifest.Skipped[i], manifest.Skipped[j])
+	}) {
+		return archiveInvalid("manifest.skipped must be canonical sorted")
 	}
 	return nil
 }
@@ -1191,6 +1212,18 @@ func normalizeManifestString(value string, field string) error {
 		return archiveInvalid(field + " must not contain inline key material")
 	}
 	return nil
+}
+
+func validateManifestSkipReason(value string, field string) error {
+	if err := normalizeManifestString(value, field); err != nil {
+		return err
+	}
+	switch value {
+	case "device", "fifo", "irregular", "socket", "special", "symlink", "unknown":
+		return nil
+	default:
+		return archiveInvalid(field + " is not a known skipped-entry reason")
+	}
 }
 
 func materializeArchive(ctx context.Context, backupDir string, manifest archiveManifest, destination string) error {
@@ -1256,7 +1289,15 @@ func compareStageToSourceRoots(ctx context.Context, stage string, roots []Archiv
 	for _, root := range roots {
 		sourceRoot := root.Path
 		restoredRoot := filepath.Join(stage, root.Name)
-		if err := compareTrees(ctx, sourceRoot, restoredRoot); err != nil {
+		sourceEntries, err := digestSourceTree(ctx, sourceRoot)
+		if err != nil {
+			return fmt.Errorf("source root %q cannot be measured: %w", root.Name, err)
+		}
+		restoredEntries, err := digestTree(ctx, restoredRoot)
+		if err != nil {
+			return fmt.Errorf("restored tree for source root %q cannot be measured: %w", root.Name, err)
+		}
+		if err := compareDigestEntries(sourceEntries, restoredEntries); err != nil {
 			return fmt.Errorf("restored tree differs from source root %q: %w", root.Name, err)
 		}
 	}
@@ -1272,6 +1313,10 @@ func compareTrees(ctx context.Context, left string, right string) error {
 	if err != nil {
 		return err
 	}
+	return compareDigestEntries(leftEntries, rightEntries)
+}
+
+func compareDigestEntries(leftEntries map[string]treeDigestEntry, rightEntries map[string]treeDigestEntry) error {
 	if len(leftEntries) != len(rightEntries) {
 		return fmt.Errorf("entry count %d != %d", len(leftEntries), len(rightEntries))
 	}
@@ -1295,9 +1340,28 @@ type treeDigestEntry struct {
 }
 
 func digestTree(ctx context.Context, root string) (map[string]treeDigestEntry, error) {
+	return digestTreeWithOptions(ctx, root, treeDigestOptions{})
+}
+
+func digestSourceTree(ctx context.Context, root string) (map[string]treeDigestEntry, error) {
+	return digestTreeWithOptions(ctx, root, treeDigestOptions{
+		allowAbsentRoot: true,
+		skipSpecial:     true,
+	})
+}
+
+type treeDigestOptions struct {
+	allowAbsentRoot bool
+	skipSpecial     bool
+}
+
+func digestTreeWithOptions(ctx context.Context, root string, options treeDigestOptions) (map[string]treeDigestEntry, error) {
 	entries := map[string]treeDigestEntry{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if options.allowAbsentRoot && path == root && errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
 			return walkErr
 		}
 		if err := ctx.Err(); err != nil {
@@ -1321,6 +1385,9 @@ func digestTree(ctx context.Context, root string) (map[string]treeDigestEntry, e
 			return nil
 		}
 		if !info.Mode().IsRegular() {
+			if options.skipSpecial {
+				return nil
+			}
 			return archiveInvalid("tree contains non-regular entry")
 		}
 		digest, size, err := digestFile(path)
@@ -1590,6 +1657,7 @@ func manifestBody(manifest archiveManifest) archiveManifestBody {
 		Alg:     manifest.Alg,
 		Roots:   cloneManifestRoots(manifest.Roots),
 		Entries: cloneManifestEntries(manifest.Entries),
+		Skipped: cloneManifestSkippedEntries(manifest.Skipped),
 	}
 }
 
@@ -1601,6 +1669,16 @@ func manifestEntryLess(a archiveManifestEntry, b archiveManifestEntry) bool {
 		return a.Path < b.Path
 	}
 	return a.Type < b.Type
+}
+
+func manifestSkippedLess(a archiveManifestSkippedEntry, b archiveManifestSkippedEntry) bool {
+	if a.Root != b.Root {
+		return a.Root < b.Root
+	}
+	if a.Path != b.Path {
+		return a.Path < b.Path
+	}
+	return a.Reason < b.Reason
 }
 
 func manifestEntryID(entry archiveManifestEntry) string {
@@ -1824,6 +1902,12 @@ func cloneManifestRoots(in []archiveManifestRoot) []archiveManifestRoot {
 
 func cloneManifestEntries(in []archiveManifestEntry) []archiveManifestEntry {
 	out := make([]archiveManifestEntry, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneManifestSkippedEntries(in []archiveManifestSkippedEntry) []archiveManifestSkippedEntry {
+	out := make([]archiveManifestSkippedEntry, len(in))
 	copy(out, in)
 	return out
 }

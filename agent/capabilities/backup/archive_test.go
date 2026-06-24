@@ -135,7 +135,8 @@ func TestArchiveCreateSkipsSpecialEntriesAndDanglingSymlinks(t *testing.T) {
 		t.Fatalf("Files = %d, want only the regular file", result.Files)
 	}
 
-	entries := manifestEntriesByID(mustLoadManifest(t, target, result.BackupID))
+	manifest := mustLoadManifest(t, target, result.BackupID)
+	entries := manifestEntriesByID(manifest)
 	if _, ok := entries["agent/state.json"]; !ok {
 		t.Fatalf("manifest entries = %#v, want regular file", entries)
 	}
@@ -143,6 +144,16 @@ func TestArchiveCreateSkipsSpecialEntriesAndDanglingSymlinks(t *testing.T) {
 		if _, ok := entries[skipped]; ok {
 			t.Fatalf("manifest included skipped special entry %q", skipped)
 		}
+	}
+	skipped := manifestSkippedByID(manifest)
+	if got := skipped["agent/dangling"]; got != "symlink" {
+		t.Fatalf("skipped dangling symlink reason = %q, want symlink", got)
+	}
+	if got := skipped["agent/events.fifo"]; got != "fifo" {
+		t.Fatalf("skipped fifo reason = %q, want fifo", got)
+	}
+	if got := skipped["agent/agent.sock"]; got != "socket" {
+		t.Fatalf("skipped socket reason = %q, want socket", got)
 	}
 }
 
@@ -170,6 +181,28 @@ func TestArchiveBuildManifestExcludesTargetSubtree(t *testing.T) {
 		if strings.Contains(id, "vita-backups") {
 			t.Fatalf("manifest included backup target entry %q", id)
 		}
+	}
+}
+
+func TestArchiveBuildManifestFailsOnHashFailureInsteadOfDroppingFile(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	objectsDir := filepath.Join(t.TempDir(), "objects-as-file")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, objectsDir, []byte("not a directory"), 0o600)
+
+	_, _, err := buildArchiveManifest(ctx, []ArchiveSourceRoot{{Name: "agent", Path: source}}, objectsDir, target)
+	if err == nil {
+		t.Fatal("buildArchiveManifest returned nil, want source-walk failure")
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("buildArchiveManifest error = %T %v, want ArchiveOperationError", err, err)
+	}
+	code := opErr.ApplyErrorCode()
+	if !strings.HasPrefix(code, "create_source_walk:ENOTDIR:") || !strings.Contains(code, "state.json") {
+		t.Fatalf("ApplyErrorCode = %q, want ENOTDIR source path failure", code)
 	}
 }
 
@@ -314,6 +347,51 @@ func TestArchiveRestoreTamperRefusesWithoutMutationOrLeaks(t *testing.T) {
 	afterTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
 	if !reflect.DeepEqual(afterTemps, beforeTemps) {
 		t.Fatalf("restore temp dirs after refused restore = %v, want unchanged %v", afterTemps, beforeTemps)
+	}
+}
+
+func TestArchiveRestoreCompareSourceRootsRejectsSourceMismatchWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "restore-root")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, filepath.Join(destination, "prior.txt"), []byte("prior"), 0o600)
+	prior := mustDigestTree(t, destination)
+
+	capability := NewArchiveCapability()
+	created, _, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":false}`), 0o600)
+
+	beforeTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
+	restored, undo, err := capability.Restore(ctx, ArchiveRestoreRequest{
+		TargetPath:         target,
+		BackupID:           created.BackupID,
+		DestinationRoot:    destination,
+		CompareSourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+	})
+	if undo != nil {
+		t.Fatalf("Restore returned undo %v, want nil", undo)
+	}
+	if err == nil {
+		t.Fatalf("Restore result = %#v, want compare failure", restored)
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Restore error = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "restore_compare" {
+		t.Fatalf("ApplyErrorCode = %q, want restore_compare failure", code)
+	}
+	if got := mustDigestTree(t, destination); !reflect.DeepEqual(got, prior) {
+		t.Fatalf("destination after refused compare restore = %#v, want unchanged %#v", got, prior)
+	}
+	afterTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
+	if !reflect.DeepEqual(afterTemps, beforeTemps) {
+		t.Fatalf("restore temp dirs after compare failure = %v, want unchanged %v", afterTemps, beforeTemps)
 	}
 }
 
@@ -499,6 +577,14 @@ func manifestEntriesByID(manifest archiveManifest) map[string]archiveManifestEnt
 		entries[manifestEntryID(entry)] = entry
 	}
 	return entries
+}
+
+func manifestSkippedByID(manifest archiveManifest) map[string]string {
+	skipped := make(map[string]string, len(manifest.Skipped))
+	for _, entry := range manifest.Skipped {
+		skipped[entry.Root+"/"+entry.Path] = entry.Reason
+	}
+	return skipped
 }
 
 func firstFileEntry(t *testing.T, manifest archiveManifest) archiveManifestEntry {
