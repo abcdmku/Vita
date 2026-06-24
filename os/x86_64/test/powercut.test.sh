@@ -122,11 +122,14 @@ done
 
 STATE="$(state_root)"
 cp "$STATE/powercut-marker.json" "$TMP/good-marker.json"
+cp "$STATE/audit-log.json" "$TMP/good-audit.json"
+cp "$STATE/pds-repo.json" "$TMP/good-pds-repo.json"
 printf '[' >"$STATE/audit-log.json"
 if VITA_POWERCUT_STATE_ROOT="$STATE" "$AGENTD" powercut-marker >"$TMP/corrupt-audit.out" 2>&1; then
   cat "$TMP/corrupt-audit.out" >&2
   fail "$CYCLES" "corrupt_audit_accepted"
 fi
+cp "$TMP/good-audit.json" "$STATE/audit-log.json"
 cp "$TMP/good-marker.json" "$STATE/powercut-marker.json"
 printf 'partial temp\n' >"$STATE/.powercut-marker-planted.tmp"
 : >"$STATE/powercut-marker.json"
@@ -134,6 +137,17 @@ if VITA_POWERCUT_STATE_ROOT="$STATE" "$AGENTD" powercut-marker >"$TMP/corrupt-ma
   cat "$TMP/corrupt-marker.out" >&2
   fail "$CYCLES" "corrupt_marker_accepted"
 fi
+# NEGATIVE: a torn/partial pds-repo.json (the SECOND authoritative writer) must
+# be rejected fail-closed on reload, never silently accepted as committed state.
+cp "$TMP/good-marker.json" "$STATE/powercut-marker.json"
+cp "$TMP/good-audit.json" "$STATE/audit-log.json"
+printf 'partial temp\n' >"$STATE/.pds-repo-planted.tmp"
+printf '{"repo":"did:plc:aaaaaaaaaaaaaaaaaaaaaaaa","records":[{"collection":"vita.power' >"$STATE/pds-repo.json"
+if VITA_POWERCUT_STATE_ROOT="$STATE" "$AGENTD" powercut-marker >"$TMP/corrupt-pds.out" 2>&1; then
+  cat "$TMP/corrupt-pds.out" >&2
+  fail "$CYCLES" "corrupt_pds_repo_accepted"
+fi
+cp "$TMP/good-pds-repo.json" "$STATE/pds-repo.json"
 
 if [ "$intact" -ne "$CYCLES" ]; then
   fail "$CYCLES" "intact_count_${intact}_of_${CYCLES}"

@@ -373,6 +373,19 @@ func NewCapability() *Capability {
 	return newCapability(newDefaultFileSystem())
 }
 
+// NewCapabilityAt builds a PDS repo capability whose authoritative state file
+// lives under the supplied state root instead of the fixed default. It is used
+// by the power-cut proof (agentd powercut-marker) to drive the SAME durable
+// AtomicWrite path against a test-controlled /var-like mount; the on-disk
+// format, filename, and modes are identical to NewCapability. The root is a
+// fixed, code-controlled path supplied by agentd — never raw runtime text.
+func NewCapabilityAt(stateRoot string) *Capability {
+	return newCapability(defaultFileSystem{
+		stateRoot: stateRoot,
+		path:      filepath.Join(stateRoot, defaultRepoStateFilename),
+	})
+}
+
 func newCapability(fs repoFileSystem) *Capability {
 	return &Capability{fs: fs}
 }
