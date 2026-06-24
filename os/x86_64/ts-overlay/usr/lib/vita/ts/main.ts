@@ -125,6 +125,15 @@ const OCI_IMAGE_TAMPERED_REF = "file:///usr/lib/vita/capsule-bundles/local.test.
 const OCI_IMAGE_INTEGRITY = "sha256-+sXvwUEoLRyQ8XaGpTAZr7ZeRM+3/18dd2zb5liruNs=";
 const OCI_IMAGE_TAMPERED_INTEGRITY = "sha256-kjEqlr0zeEJfbwhGjsnm8X8xna7YfXquFo4KTq8AeLY=";
 const OCI_IMAGE_DIGEST = "sha256:740bb2d1795bcf0764f483cde41fd7927b14f67ea6e6923cdda02a893315306b";
+const OCI_ARCH_FETCH_CAPSULE_ID = "local.test.oci-arch";
+const OCI_ARCH_UNSUPPORTED_FETCH_CAPSULE_ID = "local.test.oci-arch-unsupported";
+const OCI_ARCH_IMAGE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.oci-arch-image.tar";
+const OCI_ARCH_IMAGE_ARM64_ONLY_REF = "file:///usr/lib/vita/capsule-bundles/local.test.oci-arch-arm64-only.tar";
+const OCI_ARCH_IMAGE_INTEGRITY = "sha256-LKddEbtCi27GF62Cbn7VyGJZaZmJXEWV1HgPOflcw7c=";
+const OCI_ARCH_IMAGE_ARM64_ONLY_INTEGRITY = "sha256-sh16PUBqRDSQJ30jkOmi1GnKgNRAUkfcNxg2qU3RMUA=";
+const OCI_ARCH_IMAGE_INDEX_DIGEST = "sha256:1bf8b548988924bb96b7baeeb48d7c3d20e764e085a67cd05a833ac85f4e494d";
+const OCI_ARCH_IMAGE_ARM64_ONLY_INDEX_DIGEST = "sha256:a110b0d1411eac4982de77c6eab195832012b81290a6886d67a23de59ac11906";
+const OCI_ARCH_IMAGE_AMD64_DIGEST = "sha256:ec47aaf781206f04a70ecfc5a46f97612c4670eea8e0da7b8596aa9b264ab248";
 const CAPSULE_VOLUME_NAME = "state";
 const CAPSULE_VOLUME_PATH = "/var/lib/vita/runtime/volumes/local.test.capsule/state";
 const OCI_CAPSULE_ENTRY = Object.freeze({
@@ -304,6 +313,40 @@ const FORCED_TAMPERED_CAPSULE_OCI_FETCH_PLAN = Object.freeze({
           imageDigest: OCI_IMAGE_DIGEST,
           integrity: OCI_IMAGE_TAMPERED_INTEGRITY,
           ref: OCI_IMAGE_TAMPERED_REF,
+          version: OCI_FETCH_CAPSULE_VERSION,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const CAPSULE_OCI_ARCH_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: OCI_ARCH_FETCH_CAPSULE_ID,
+          imageDigest: OCI_ARCH_IMAGE_INDEX_DIGEST,
+          integrity: OCI_ARCH_IMAGE_INTEGRITY,
+          ref: OCI_ARCH_IMAGE_REF,
+          version: OCI_FETCH_CAPSULE_VERSION,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
+const FORCED_ARM64_ONLY_CAPSULE_OCI_ARCH_FETCH_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_FETCH_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: OCI_ARCH_UNSUPPORTED_FETCH_CAPSULE_ID,
+          imageDigest: OCI_ARCH_IMAGE_ARM64_ONLY_INDEX_DIGEST,
+          integrity: OCI_ARCH_IMAGE_ARM64_ONLY_INTEGRITY,
+          ref: OCI_ARCH_IMAGE_ARM64_ONLY_REF,
           version: OCI_FETCH_CAPSULE_VERSION,
         }),
       }),
@@ -1119,6 +1162,8 @@ async function emitCapsuleOCIFetchMarkers(agentTransport: AgentTransport): Promi
   }
 
   await emitForcedCapsuleOCIFetchRejectMarker(client);
+  await emitCapsuleOCIArchFetchMarker(client);
+  await emitForcedCapsuleOCIArchUnsupportedRejectMarker(client);
 }
 
 async function emitForcedCapsuleOCIFetchRejectMarker(
@@ -1139,7 +1184,50 @@ async function emitForcedCapsuleOCIFetchRejectMarker(
       cause.status >= 400 &&
       cause.status <= 499
     ) {
-      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${capsuleOCIErrorDetailReason(cause.agentError)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitCapsuleOCIArchFetchMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(CAPSULE_OCI_ARCH_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    emit(formatCapsuleOCIArchFetchedMarker());
+  } catch {
+    emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
+  }
+}
+
+async function emitForcedCapsuleOCIArchUnsupportedRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(FORCED_ARM64_ONLY_CAPSULE_OCI_ARCH_FETCH_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${capsuleOCIFetchRejectReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${CAPSULE_OCI_FETCH_REJECT_MARKER}: reason=${capsuleOCIErrorDetailReason(cause.agentError)} status=OK`);
       return;
     }
   }
@@ -1926,6 +2014,19 @@ function formatCapsuleOCIFetchedMarker(): string {
     `${CAPSULE_OCI_FETCH_MARKER}: ` +
     `id=${OCI_FETCH_CAPSULE_ID} ` +
     `image-digest=${shortOCIDigest(OCI_IMAGE_DIGEST)} ` +
+    "arch=linux/amd64 " +
+    "layers=1 " +
+    "verified=OK " +
+    "status=OK"
+  );
+}
+
+function formatCapsuleOCIArchFetchedMarker(): string {
+  return (
+    `${CAPSULE_OCI_FETCH_MARKER}: ` +
+    `id=${OCI_ARCH_FETCH_CAPSULE_ID} ` +
+    `image-digest=${shortOCIDigest(OCI_ARCH_IMAGE_AMD64_DIGEST)} ` +
+    "arch=linux/amd64 " +
     "layers=1 " +
     "verified=OK " +
     "status=OK"
@@ -1943,13 +2044,24 @@ function capsuleFetchRejectReason(result: AgentApplyResult): string {
 }
 
 function capsuleOCIFetchRejectReason(result: AgentApplyResult): string {
-  const message = result.error?.message.toLowerCase() ?? "";
+  return capsuleOCIMessageReason(result.error?.message ?? "", agentApplyResultReason(result));
+}
+
+function capsuleOCIErrorDetailReason(error: { readonly code: string; readonly message: string }): string {
+  return capsuleOCIMessageReason(error.message, markerToken(error.code));
+}
+
+function capsuleOCIMessageReason(messageText: string, fallback: string): string {
+  const message = messageText.toLowerCase();
 
   if (message.includes("sri mismatch")) {
     return "sri_mismatch";
   }
   if (message.includes("digest mismatch")) {
     return "digest_mismatch";
+  }
+  if (message.includes("arch unsupported") || message.includes("no compatible")) {
+    return "arch_unsupported";
   }
   if (message.includes("whiteout")) {
     return "whiteout";
@@ -1961,7 +2073,7 @@ function capsuleOCIFetchRejectReason(result: AgentApplyResult): string {
     return "traversal";
   }
 
-  return agentApplyResultReason(result);
+  return fallback;
 }
 
 async function readCapsuleHealthState(

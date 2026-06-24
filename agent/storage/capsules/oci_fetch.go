@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -30,13 +31,19 @@ const (
 	ociBlobDir         = "blobs"
 	ociSHA256BlobDir   = "sha256"
 	ociDigestAlgorithm = "sha256"
+
+	ociMediaTypeImageManifest        = "application/vnd.oci.image.manifest.v1+json"
+	dockerMediaTypeImageManifest     = "application/vnd.docker.distribution.manifest.v2+json"
+	ociMediaTypeImageIndex           = "application/vnd.oci.image.index.v1+json"
+	dockerMediaTypeImageManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
 )
 
 var (
-	ErrOCIDigestMismatch = errors.New("capsule oci fetch: digest mismatch")
-	ErrOCIWhiteout       = errors.New("capsule oci fetch: whiteout")
-	ErrOCIBomb           = errors.New("capsule oci fetch: bomb")
-	ErrOCITraversal      = errors.New("capsule oci fetch: traversal")
+	ErrOCIDigestMismatch  = errors.New("capsule oci fetch: digest mismatch")
+	ErrOCIWhiteout        = errors.New("capsule oci fetch: whiteout")
+	ErrOCIBomb            = errors.New("capsule oci fetch: bomb")
+	ErrOCITraversal       = errors.New("capsule oci fetch: traversal")
+	ErrOCIArchUnsupported = errors.New("capsule oci fetch: arch unsupported")
 
 	ociDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	zstdFrameMagic   = []byte{0x28, 0xb5, 0x2f, 0xfd}
@@ -97,7 +104,9 @@ type ociImageManifest struct {
 }
 
 type ociImageConfig struct {
-	Config ociRuntimeConfig `json:"config"`
+	Architecture string           `json:"architecture,omitempty"`
+	OS           string           `json:"os,omitempty"`
+	Config       ociRuntimeConfig `json:"config"`
 }
 
 type ociRuntimeConfig struct {
@@ -111,6 +120,12 @@ type ociLayerCaps struct {
 	entries                  int
 	payloadBytes             int64
 	decodedTarBytesRemaining int64
+}
+
+type nodePlatform struct {
+	OS           string
+	Architecture string
+	Variant      string
 }
 
 func FetchOCIImageFor(ctx context.Context, ref string, integrity string, id string, version string, imageDigest string) (OCIFetchResult, error) {
@@ -229,7 +244,7 @@ func fetchOCIImage(ctx context.Context, ref string, integrity string, expected M
 		return OCIFetchResult{}, err
 	} else if complete {
 		result := ociResultFromMetadata(target, metadata)
-		log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), len(verified.Manifest.Layers))
+		log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s arch=%s/%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), verified.Platform.OS, verified.Platform.Architecture, len(verified.Manifest.Layers))
 		return result, nil
 	}
 
@@ -284,7 +299,7 @@ func fetchOCIImage(ctx context.Context, ref string, integrity string, expected M
 	if err := os.Rename(tmpDir, target); err != nil {
 		if complete, completeErr := existingOCIComplete(target, metadata); completeErr == nil && complete {
 			result := ociResultFromMetadata(target, metadata)
-			log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), len(verified.Manifest.Layers))
+			log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s arch=%s/%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), verified.Platform.OS, verified.Platform.Architecture, len(verified.Manifest.Layers))
 			return result, nil
 		}
 		log.Printf("VITA-CAPSULE-OCI-FETCH-ERROR: status=FAILSAFE")
@@ -293,12 +308,13 @@ func fetchOCIImage(ctx context.Context, ref string, integrity string, expected M
 	committed = true
 
 	result := ociResultFromMetadata(target, metadata)
-	log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), len(verified.Manifest.Layers))
+	log.Printf("VITA-CAPSULE-OCI-FETCH: id=%s image-digest=%s arch=%s/%s layers=%d verified=OK status=OK", expected.ID, ShortOCIDigest(verified.ImageDigest), verified.Platform.OS, verified.Platform.Architecture, len(verified.Manifest.Layers))
 	return result, nil
 }
 
 type verifiedOCIImage struct {
 	ImageDigest string
+	Platform    nodePlatform
 	Manifest    ociImageManifest
 	Entrypoint  []string
 	Env         []string
@@ -321,9 +337,46 @@ func verifyOCILayout(ctx context.Context, layoutDir string, expectedImageDigest 
 		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI index has no image manifests")
 	}
 
-	manifestDescriptor, ok := findManifestDescriptor(index.Manifests, expectedImageDigest)
+	pinnedDescriptor, ok := findDescriptor(index.Manifests, expectedImageDigest)
 	if !ok {
-		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI index does not contain pinned image manifest %s", expectedImageDigest)
+		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI index does not contain pinned descriptor %s", expectedImageDigest)
+	}
+	if !isRunnableDescriptor(pinnedDescriptor) {
+		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI pinned descriptor %s is incomplete", expectedImageDigest)
+	}
+
+	switch {
+	case isImageManifestMediaType(pinnedDescriptor.MediaType):
+		return verifyOCIImageManifest(ctx, layoutDir, pinnedDescriptor, expectedImageDigest)
+	case isImageIndexMediaType(pinnedDescriptor.MediaType):
+		node, err := nodeOCIPlatform()
+		if err != nil {
+			return verifiedOCIImage{}, err
+		}
+		indexRaw, err := readVerifiedBlob(ctx, layoutDir, pinnedDescriptor)
+		if err != nil {
+			return verifiedOCIImage{}, err
+		}
+		var imageIndex ociIndex
+		if err := decodeOCIJSON(indexRaw, &imageIndex); err != nil {
+			return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "parse OCI image index: %v", err)
+		}
+		if imageIndex.SchemaVersion != 2 || !isImageIndexMediaType(imageIndex.MediaType) || len(imageIndex.Manifests) == 0 {
+			return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI image index is malformed")
+		}
+		manifestDescriptor, err := selectOCIPlatformManifest(imageIndex, node)
+		if err != nil {
+			return verifiedOCIImage{}, err
+		}
+		return verifyOCIImageManifest(ctx, layoutDir, manifestDescriptor, manifestDescriptor.Digest)
+	default:
+		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI pinned descriptor media type %q is unsupported", pinnedDescriptor.MediaType)
+	}
+}
+
+func verifyOCIImageManifest(ctx context.Context, layoutDir string, manifestDescriptor ociDescriptor, imageDigest string) (verifiedOCIImage, error) {
+	if !isRunnableDescriptor(manifestDescriptor) || !isImageManifestMediaType(manifestDescriptor.MediaType) {
+		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "OCI image manifest descriptor is incomplete")
 	}
 	manifestRaw, err := readVerifiedBlob(ctx, layoutDir, manifestDescriptor)
 	if err != nil {
@@ -348,6 +401,10 @@ func verifyOCILayout(ctx context.Context, layoutDir string, expectedImageDigest 
 	if err := decodeOCIConfig(configRaw, &config); err != nil {
 		return verifiedOCIImage{}, rejectOCI(ErrOCIDigestMismatch, "parse OCI image config: %v", err)
 	}
+	platform, err := resolvedOCIPlatform(manifestDescriptor, config)
+	if err != nil {
+		return verifiedOCIImage{}, err
+	}
 	entrypoint, err := resolveOCIEntrypoint(config.Config.Entrypoint, config.Config.Cmd)
 	if err != nil {
 		return verifiedOCIImage{}, err
@@ -367,7 +424,8 @@ func verifyOCILayout(ctx context.Context, layoutDir string, expectedImageDigest 
 	}
 
 	return verifiedOCIImage{
-		ImageDigest: expectedImageDigest,
+		ImageDigest: imageDigest,
+		Platform:    platform,
 		Manifest:    manifest,
 		Entrypoint:  entrypoint,
 		Env:         env,
@@ -999,13 +1057,81 @@ func decodeOCIConfig(raw []byte, target *ociImageConfig) error {
 	return nil
 }
 
-func findManifestDescriptor(manifests []ociDescriptor, expectedDigest string) (ociDescriptor, bool) {
+func findDescriptor(manifests []ociDescriptor, expectedDigest string) (ociDescriptor, bool) {
 	for _, descriptor := range manifests {
 		if descriptor.Digest == expectedDigest {
 			return descriptor, true
 		}
 	}
 	return ociDescriptor{}, false
+}
+
+func nodeOCIPlatform() (nodePlatform, error) {
+	switch runtime.GOARCH {
+	case "amd64", "arm64":
+		return nodePlatform{OS: "linux", Architecture: runtime.GOARCH}, nil
+	default:
+		return nodePlatform{}, rejectOCI(ErrOCIArchUnsupported, "node GOARCH %q has no compatible OCI platform", runtime.GOARCH)
+	}
+}
+
+func selectOCIPlatformManifest(index ociIndex, node nodePlatform) (ociDescriptor, error) {
+	if node.OS == "" || node.Architecture == "" {
+		return ociDescriptor{}, rejectOCI(ErrOCIArchUnsupported, "node OCI platform is incomplete")
+	}
+	for _, descriptor := range index.Manifests {
+		if !isImageManifestMediaType(descriptor.MediaType) {
+			continue
+		}
+		if err := validateOCIPlatformManifestDescriptor(descriptor); err != nil {
+			return ociDescriptor{}, err
+		}
+		platform := descriptor.Platform
+		if platform.OS != node.OS || platform.Architecture != node.Architecture {
+			continue
+		}
+		if platform.Variant != "" && node.Variant != "" && platform.Variant != node.Variant {
+			continue
+		}
+		return descriptor, nil
+	}
+	return ociDescriptor{}, rejectOCI(ErrOCIArchUnsupported, "OCI image index has no compatible %s/%s manifest", node.OS, node.Architecture)
+}
+
+func validateOCIPlatformManifestDescriptor(descriptor ociDescriptor) error {
+	if !isRunnableDescriptor(descriptor) {
+		return rejectOCI(ErrOCIDigestMismatch, "OCI platform image manifest descriptor is incomplete")
+	}
+	if descriptor.Platform == nil || descriptor.Platform.OS == "" || descriptor.Platform.Architecture == "" {
+		return rejectOCI(ErrOCIDigestMismatch, "OCI platform image manifest descriptor is missing platform")
+	}
+	return nil
+}
+
+func resolvedOCIPlatform(descriptor ociDescriptor, config ociImageConfig) (nodePlatform, error) {
+	if descriptor.Platform != nil && descriptor.Platform.OS != "" && descriptor.Platform.Architecture != "" {
+		return nodePlatform{
+			OS:           descriptor.Platform.OS,
+			Architecture: descriptor.Platform.Architecture,
+			Variant:      descriptor.Platform.Variant,
+		}, nil
+	}
+	if config.OS != "" && config.Architecture != "" {
+		return nodePlatform{OS: config.OS, Architecture: config.Architecture}, nil
+	}
+	return nodePlatform{}, rejectOCI(ErrOCIDigestMismatch, "OCI image platform is incomplete")
+}
+
+func isImageManifestMediaType(mediaType string) bool {
+	return mediaType == ociMediaTypeImageManifest || mediaType == dockerMediaTypeImageManifest
+}
+
+func isImageIndexMediaType(mediaType string) bool {
+	return mediaType == ociMediaTypeImageIndex || mediaType == dockerMediaTypeImageManifestList
+}
+
+func isRunnableDescriptor(descriptor ociDescriptor) bool {
+	return IsValidOCIDigest(descriptor.Digest) && descriptor.Size >= 0
 }
 
 func isLayerConfigDescriptor(descriptor ociDescriptor) bool {
@@ -1039,6 +1165,8 @@ func logOCIReject(err error) {
 		log.Printf("VITA-CAPSULE-OCI-FETCH-REJECT: reason=bomb status=OK")
 	case errors.Is(err, ErrOCITraversal):
 		log.Printf("VITA-CAPSULE-OCI-FETCH-REJECT: reason=traversal status=OK")
+	case errors.Is(err, ErrOCIArchUnsupported):
+		log.Printf("VITA-CAPSULE-OCI-FETCH-REJECT: reason=arch_unsupported status=OK")
 	default:
 		log.Printf("VITA-CAPSULE-OCI-FETCH-ERROR: status=FAILSAFE")
 	}
