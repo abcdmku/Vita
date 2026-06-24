@@ -680,11 +680,8 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 	if err := ctx.Err(); err != nil {
 		return ArchiveCreateResult{}, nil, err
 	}
-	if err := os.MkdirAll(normalized.TargetPath, archiveDirMode); err != nil {
-		return ArchiveCreateResult{}, nil, archiveStepError("create_target_mkdir", err)
-	}
-	if err := os.Chmod(normalized.TargetPath, archiveDirMode); err != nil {
-		return ArchiveCreateResult{}, nil, archiveStepError("create_target_chmod", err)
+	if err := prepareArchiveTargetDir(normalized.TargetPath); err != nil {
+		return ArchiveCreateResult{}, nil, err
 	}
 
 	stage, err := os.MkdirTemp(normalized.TargetPath, ".backup-archive-*.tmp")
@@ -752,6 +749,52 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 	cleanupStage = false
 
 	return ArchiveCreateResult{BackupID: digest, Files: files}, archiveRemoveUndo{path: finalPath}, nil
+}
+
+func prepareArchiveTargetDir(target string) error {
+	info, err := os.Lstat(target)
+	if err == nil {
+		return validateExistingArchiveTargetDir(target, info)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return archiveStepError("create_target_stat", err)
+	}
+
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, archiveDirMode); err != nil {
+		return archiveStepError("create_target_mkdir", err)
+	}
+	if err := os.Mkdir(target, archiveDirMode); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			info, statErr := os.Lstat(target)
+			if statErr != nil {
+				return archiveStepError("create_target_stat", statErr)
+			}
+			return validateExistingArchiveTargetDir(target, info)
+		}
+		return archiveStepError("create_target_mkdir", err)
+	}
+	if err := os.Chmod(target, archiveDirMode); err != nil {
+		return archiveStepError("create_target_chmod", err)
+	}
+	return nil
+}
+
+func validateExistingArchiveTargetDir(target string, info os.FileInfo) error {
+	if !info.IsDir() {
+		return archiveStepError("create_target_mkdir", &os.PathError{Op: "mkdir", Path: target, Err: unix.ENOTDIR})
+	}
+	if info.Mode().Perm() != archiveDirMode || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return archiveStepError("create_target_unsafe", fmt.Errorf("%s exists but is not a private backup directory", target))
+	}
+	var stat unix.Stat_t
+	if err := unix.Lstat(target, &stat); err != nil {
+		return archiveStepError("create_target_stat", err)
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		return archiveStepError("create_target_unsafe", fmt.Errorf("%s exists but is not owned by the agent user", target))
+	}
+	return nil
 }
 
 func verifyArchiveRequest(ctx context.Context, req ArchiveVerifyRequest) (ArchiveVerifyResult, error) {

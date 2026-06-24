@@ -74,6 +74,55 @@ func TestArchiveCreateProducesContentAddressedManifestAndObjects(t *testing.T) {
 	}
 }
 
+func TestArchiveCreateRejectsUnsafeExistingTargetWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	parent := t.TempDir()
+	target := filepath.Join(parent, "unsafe-target")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("create unsafe target: %v", err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatalf("chmod unsafe target: %v", err)
+	}
+	beforeInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat unsafe target before create: %v", err)
+	}
+
+	capability := NewArchiveCapability()
+	result, undo, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err == nil {
+		t.Fatalf("Create result = %#v, undo = %v, want unsafe target rejection", result, undo)
+	}
+	if undo != nil {
+		t.Fatalf("Create returned undo %v, want nil", undo)
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Create error = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_target_unsafe" {
+		t.Fatalf("ApplyErrorCode = %q, want create_target_unsafe", code)
+	}
+
+	afterInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat unsafe target after create: %v", err)
+	}
+	if afterInfo.Mode().Perm() != beforeInfo.Mode().Perm() {
+		t.Fatalf("target mode after rejection = %#o, want unchanged %#o", afterInfo.Mode().Perm(), beforeInfo.Mode().Perm())
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read unsafe target after rejection: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsafe target entries after rejection = %v, want none", entries)
+	}
+}
+
 func TestArchiveCreateAllowsAbsentSourceRootAsEmptyRoot(t *testing.T) {
 	ctx := context.Background()
 	target := t.TempDir()
