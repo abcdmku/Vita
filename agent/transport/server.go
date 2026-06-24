@@ -486,6 +486,7 @@ func NewHandler(config Config) (http.Handler, error) {
 func DefaultRequestDecoders() map[string]RequestDecoder {
 	return map[string]RequestDecoder{
 		accounts.Name:       DecodeJSONRequest[accounts.ApplyRequest],
+		backup.ArchiveName:  DecodeJSONRequest[backup.ArchiveApplyRequest],
 		backup.Name:         DecodeJSONRequest[backup.ApplyRequest],
 		capsule.ExecuteName: DecodeJSONRequest[capsule.ExecuteApplyRequest],
 		capsule.FetchName:   DecodeJSONRequest[capsule.FetchApplyRequest],
@@ -506,6 +507,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 func DefaultReadRequests() map[string]ReadRequestFactory {
 	return map[string]ReadRequestFactory{
 		accounts.Name:       func() capabilities.TypedRequest { return accounts.ReadRequest{} },
+		backup.ArchiveName:  func() capabilities.TypedRequest { return backup.ArchiveReadRequest{} },
 		backup.Name:         func() capabilities.TypedRequest { return backup.ReadRequest{} },
 		capsule.ExecuteName: func() capabilities.TypedRequest { return capsule.ExecuteReadRequest{} },
 		capsule.FetchName:   func() capabilities.TypedRequest { return capsule.FetchReadRequest{} },

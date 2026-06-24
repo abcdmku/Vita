@@ -31,6 +31,12 @@ import {
   rejectInvalidPdsSyncStateWrite,
 } from "./vita/pds-write.ts";
 import {
+  formatBackupArchiveMarker,
+  formatBackupArchiveRejectMarker,
+  rejectTamperedBackupArchive,
+  runBackupArchiveRoundTrip,
+} from "./vita/backup.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
 } from "./vita/unix-socket-transport.ts";
@@ -612,6 +618,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -667,6 +674,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   if (await emitPdsWriteMarkers(agentTransport)) {
     await emitPdsReadMarker(client);
   }
+  await emitBackupArchiveMarkers(agentTransport);
 }
 
 async function emitApplyMarkers(
@@ -873,6 +881,22 @@ async function emitPdsWriteMarkers(agentTransport: AgentTransport): Promise<bool
   const rejected = await rejectInvalidPdsSyncStateWrite(client);
   emit(formatPdsSyncStateWriteMarker(rejected));
   return true;
+}
+
+async function emitBackupArchiveMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  const result = await runBackupArchiveRoundTrip(client);
+  emit(formatBackupArchiveMarker(result));
+
+  if (!result.ok) {
+    return;
+  }
+
+  emit(formatBackupArchiveRejectMarker(await rejectTamperedBackupArchive(client)));
 }
 
 async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {

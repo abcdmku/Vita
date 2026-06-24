@@ -51,6 +51,7 @@ func main() {
 	registry, err := capabilities.NewRegistry(
 		accounts.NewCapability(),
 		backup.NewCapability(),
+		backup.NewArchiveCapability(),
 		capsule.NewExecuteCapability(),
 		capsule.NewFetchCapability(),
 		capsule.NewCapability(),
