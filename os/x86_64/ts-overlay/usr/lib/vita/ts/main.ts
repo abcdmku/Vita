@@ -31,8 +31,13 @@ import {
   rejectInvalidPdsSyncStateWrite,
 } from "./vita/pds-write.ts";
 import {
+  createFilesClient,
+  isFilesClientError,
+} from "./vita/files-client.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
+  createDenoUnixSocketFilesAgentTransport,
 } from "./vita/unix-socket-transport.ts";
 import type { AgentApplyPlan, AgentApplyResult, AgentClient, AgentTransport } from "./vita/agent-client.ts";
 import type {
@@ -89,8 +94,14 @@ const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
+const FILES_MARKER = "VITA-FILES";
+const FILES_REJECT_MARKER = "VITA-FILES-REJECT";
+const FILES_ERROR_MARKER = "VITA-FILES-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
+const FILES_RW_GRANT = "runtime-files";
+const FILES_RO_GRANT = "runtime-files-ro";
+const FILES_ROUNDTRIP_PATH = "roundtrip.txt";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
@@ -623,10 +634,14 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   const agentTransport = createDenoUnixSocketApplyAgentTransport({
+    socketPath: AGENTD_SOCKET_PATH,
+  });
+  const filesTransport = createDenoUnixSocketFilesAgentTransport({
     socketPath: AGENTD_SOCKET_PATH,
   });
   const state = await readAgentStateSummary(client);
@@ -667,6 +682,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   if (await emitPdsWriteMarkers(agentTransport)) {
     await emitPdsReadMarker(client);
   }
+  await emitFilesMarkers(filesTransport);
 }
 
 async function emitApplyMarkers(
@@ -873,6 +889,79 @@ async function emitPdsWriteMarkers(agentTransport: AgentTransport): Promise<bool
   const rejected = await rejectInvalidPdsSyncStateWrite(client);
   emit(formatPdsSyncStateWriteMarker(rejected));
   return true;
+}
+
+async function emitFilesMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createFilesClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+  const data = new TextEncoder().encode("vita files mediated roundtrip\n");
+
+  try {
+    const write = await client.write(FILES_RW_GRANT, FILES_ROUNDTRIP_PATH, data);
+    const entries = await client.list(FILES_RW_GRANT, FILES_ROUNDTRIP_PATH);
+    const read = await client.read(FILES_RW_GRANT, FILES_ROUNDTRIP_PATH);
+    const stat = await client.stat(FILES_RW_GRANT, FILES_ROUNDTRIP_PATH);
+    const listed = entries.length === 1 &&
+      entries[0]?.name === FILES_ROUNDTRIP_PATH &&
+      entries[0]?.kind === "file";
+
+    if (
+      write.size !== data.byteLength ||
+      read.size !== data.byteLength ||
+      stat.kind !== "file" ||
+      stat.size !== data.byteLength ||
+      !listed ||
+      !bytesEqual(read.data, data)
+    ) {
+      emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+      await emitFilesRejectMarkers(client);
+      return;
+    }
+
+    emit(
+      `${FILES_MARKER}: ` +
+        `grant=${FILES_RW_GRANT} ` +
+        "op=write+read+list+stat " +
+        `bytes=${read.data.byteLength} ` +
+        "roundtrip=OK " +
+        "status=OK",
+    );
+  } catch {
+    emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+    await emitFilesRejectMarkers(client);
+    return;
+  }
+
+  await emitFilesRejectMarkers(client);
+}
+
+async function emitFilesRejectMarkers(client: ReturnType<typeof createFilesClient>): Promise<void> {
+  await emitFilesRejectMarker("path_traversal", async () => {
+    await client.read(FILES_RW_GRANT, "../escape");
+  });
+  await emitFilesRejectMarker("read_only_grant", async () => {
+    await client.write(FILES_RO_GRANT, "reject.txt", new TextEncoder().encode("blocked"));
+  });
+}
+
+async function emitFilesRejectMarker(reason: string, attempt: () => Promise<void>): Promise<void> {
+  try {
+    await attempt();
+  } catch (cause) {
+    if (isFilesClientError(cause)) {
+      const got = markerToken(cause.reason);
+      if (got === reason) {
+        emit(`${FILES_REJECT_MARKER}: reason=${reason} status=OK`);
+      } else {
+        emit(`${FILES_REJECT_MARKER}: reason=${got} status=FAILSAFE`);
+      }
+      return;
+    }
+  }
+
+  emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {
@@ -2017,6 +2106,20 @@ function readOptionalNonNegativeIntegerField(
   }
 
   return child;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
+  }
+
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function applyResultReason(result: ApplyNodeApplyResult, fallback: string): string {

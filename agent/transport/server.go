@@ -22,6 +22,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
@@ -35,6 +36,7 @@ import (
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
+	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -74,6 +76,8 @@ type Config struct {
 	HealthCheck     transaction.HealthCheck
 	MaxBodyBytes    int64
 	Now             func() time.Time
+	FilesStateRoot  string
+	FilesGrants     []filecap.Grant
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
@@ -158,6 +162,7 @@ type handler struct {
 	healthCheck      transaction.HealthCheck
 	maxBodyBytes     int64
 	now              func() time.Time
+	files            *filecap.Handler
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
@@ -464,6 +469,14 @@ func NewHandler(config Config) (http.Handler, error) {
 		}
 	}
 
+	filesHandler, err := filecap.NewHandler(filecap.Options{
+		StateRoot: config.FilesStateRoot,
+		Grants:    config.FilesGrants,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build files handler: %w", err)
+	}
+
 	names := registry.Names()
 	sort.Strings(names)
 
@@ -478,6 +491,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		healthCheck:      config.HealthCheck,
 		maxBodyBytes:     maxBodyBytes,
 		now:              now,
+		files:            filesHandler,
 		auditStore:       config.AuditStore,
 		capsuleWorkloads: capsuleWorkloads,
 	}, nil
@@ -553,6 +567,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleState(w, r)
 	case "/apply":
 		h.handleApply(w, r)
+	case "/files":
+		h.handleFiles(w, r)
 	case "/audit":
 		h.handleAudit(w, r)
 	case "/read":
@@ -612,6 +628,26 @@ func (h *handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	names := h.registry.Names()
 	sort.Strings(names)
 	writeJSON(w, http.StatusOK, OperationsResponse{Operations: names})
+}
+
+func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var request filecap.Request
+	if err := decodeBody(w, r, &request, filecap.MaxRequestBodyBytes); err != nil {
+		writeRequestError(w, err)
+		return
+	}
+
+	response, err := h.files.Handle(r.Context(), request)
+	if err != nil {
+		writeFilesError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {
@@ -986,22 +1022,11 @@ func decodeBody(w http.ResponseWriter, r *http.Request, target interface{}, maxB
 }
 
 func decodeStrictJSON(reader io.Reader, target interface{}) error {
-	decoder := json.NewDecoder(reader)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(target); err != nil {
+	raw, err := io.ReadAll(reader)
+	if err != nil {
 		return err
 	}
-
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errTrailingJSON
-		}
-		return err
-	}
-
-	return nil
+	return jsonsafe.DecodeStrict(raw, target)
 }
 
 var errTrailingJSON = errors.New("body must contain exactly one JSON value")
@@ -1140,6 +1165,15 @@ func resultError(err error) ResultError {
 
 func writeRequestError(w http.ResponseWriter, err *requestError) {
 	writeError(w, err.status, err.code, err.message)
+}
+
+func writeFilesError(w http.ResponseWriter, err error) {
+	var requestErr *filecap.RequestError
+	if errors.As(err, &requestErr) {
+		writeError(w, requestErr.Status, requestErr.Code, requestErr.Message)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "files_failed", "files request failed")
 }
 
 func badRequest(code string, message string) *requestError {
