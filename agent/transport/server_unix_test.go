@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,11 +157,15 @@ func TestAuthenticatedUnixSocketListenerRejectsUnauthorizedAndServesAuthorizedPe
 	defer listener.Close()
 
 	var served atomic.Int32
+	principalKeys := make(chan []string, 1)
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			served.Add(1)
+			keys, _ := unixPeerPrincipalKeysFromContext(r.Context())
+			principalKeys <- keys
 			writeJSON(w, http.StatusOK, status.Status{Version: "test-version", Healthy: true})
 		}),
+		ConnContext:       UnixPeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)
@@ -235,6 +240,19 @@ func TestAuthenticatedUnixSocketListenerRejectsUnauthorizedAndServesAuthorizedPe
 	client.CloseIdleConnections()
 	if got := served.Load(); got != 1 {
 		t.Fatalf("served requests after authorized peer = %d, want 1", got)
+	}
+	select {
+	case keys := <-principalKeys:
+		// The authorized peer (uid=1001, authorized through gid=4242) must be
+		// attributed to ITS OWN credentials, most specific first: the peer uid
+		// key, then the authorizing-group key. It must NOT collapse to a single
+		// listener-wide key.
+		want := []string{UnixPeerUserPrincipalKey(1001), unixPeerGroupIDPrincipalKey(targetGID)}
+		if !reflect.DeepEqual(keys, want) {
+			t.Fatalf("authorized principal keys = %q, want %q", keys, want)
+		}
+	default:
+		t.Fatal("authorized request did not report a principal key")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

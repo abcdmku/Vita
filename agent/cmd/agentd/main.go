@@ -103,12 +103,13 @@ func main() {
 	}
 
 	handler, err := transport.NewHandler(transport.Config{
-		Version:     agentVersion,
-		StartedAt:   startedAt,
-		Registry:    registry,
-		Discoverer:  hardware.NewDiscoverer(),
-		FilesGrants: files.DefaultGrants(),
-		AuditStore:  auditStore,
+		Version:         agentVersion,
+		StartedAt:       startedAt,
+		Registry:        registry,
+		Discoverer:      hardware.NewDiscoverer(),
+		FilesGrants:     runtimeFilesGrants(),
+		FilesPrincipals: runtimeFilesPrincipals(),
+		AuditStore:      auditStore,
 	})
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)
@@ -131,6 +132,7 @@ func main() {
 	}()
 	unixServer := &http.Server{
 		Handler:           handler,
+		ConnContext:       transport.UnixPeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -138,6 +140,65 @@ func main() {
 
 	if err := serveUntilStopped(tcpServer, unixServer, unixListener); err != nil {
 		log.Fatalf("serve agent: %v", err)
+	}
+}
+
+// householdMemberPrincipalUID is the authenticated uid agentd binds to the
+// household-member role. It is a fixed TEST principal (no such OS account is
+// provisioned this slice) that makes the household-member role gate a REAL,
+// configured binding rather than an unreachable code path: a peer authenticating
+// with this uid resolves to household-member and is genuinely role-forbidden on
+// the member-forbidden grant below. agentd derives this identity only from the
+// peer's SO_PEERCRED uid, never from request content.
+const householdMemberPrincipalUID uint32 = 65540
+
+func runtimeFilesGrants() []files.Grant {
+	shared := true
+	grants := files.DefaultGrants()
+	return append(grants,
+		// Owner-writable shared folder: the owner-role runtime peer proves a real
+		// write -> list -> read-back -> stat round-trip; a household-member peer is
+		// limited to read-only (read/list/stat succeed, write -> role_forbidden).
+		files.Grant{
+			Name:   "runtime-files-shared-rw",
+			Root:   "shared-owner",
+			Shared: &shared,
+			Roles: files.RoleAccessMap{
+				files.RoleOwner:           files.AccessReadWrite,
+				files.RoleHouseholdMember: files.AccessReadOnly,
+			},
+		},
+		// Owner-only shared folder: the household-member role is GENUINELY
+		// forbidden (no access at all, denied even read) — a true role_forbidden
+		// distinct from a read-only denial. The owner role retains read-write.
+		files.Grant{
+			Name:   "runtime-files-shared-member-forbidden",
+			Root:   "shared-owner-only",
+			Shared: &shared,
+			Roles: files.RoleAccessMap{
+				files.RoleOwner:           files.AccessReadWrite,
+				files.RoleHouseholdMember: files.AccessForbidden,
+			},
+		},
+	)
+}
+
+func runtimeFilesPrincipals() []files.Principal {
+	return []files.Principal{
+		// The runtime authenticates through the stable vita-agent supplementary
+		// group (its DynamicUser uid is transient and unbindable); agentd binds
+		// that authenticated group identity to the owner role.
+		{
+			PrincipalKey: transport.UnixPeerGroupPrincipalKey(transport.DefaultUnixPeerGroupName),
+			Role:         files.RoleOwner,
+		},
+		// A real household-member principal keyed off an authenticated uid, so the
+		// household-member role gate (and its role_forbidden denial) is a
+		// configured, exercisable binding rather than an unreachable default.
+		{
+			PrincipalKey: transport.UnixPeerUserPrincipalKey(householdMemberPrincipalUID),
+			Role:         files.RoleHouseholdMember,
+		},
 	}
 }
 

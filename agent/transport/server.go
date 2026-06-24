@@ -82,6 +82,7 @@ type Config struct {
 	Now             func() time.Time
 	FilesStateRoot  string
 	FilesGrants     []filecap.Grant
+	FilesPrincipals []filecap.Principal
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
@@ -214,10 +215,15 @@ type UnixPeerAuthConfig struct {
 
 type authenticatedUnixListener struct {
 	net.Listener
-	groupID      uint32
-	auditStore   AuditStore
-	now          func() time.Time
-	readPeerInfo func(net.Conn) (unixPeerInfo, error)
+	groupID uint32
+	// groupPrincipalKey is the stable key for the group a peer is authorized
+	// through. It is the LEAST-specific per-connection candidate (used after the
+	// peer's own uid key) so a deployment that cannot pin a transient/DynamicUser
+	// uid can still bind a role to the authorizing group.
+	groupPrincipalKey string
+	auditStore        AuditStore
+	now               func() time.Time
+	readPeerInfo      func(net.Conn) (unixPeerInfo, error)
 }
 
 type peerCredentials struct {
@@ -231,6 +237,23 @@ type unixPeerInfo struct {
 	Groups      []uint32
 	GroupSource string
 }
+
+type unixPeerPrincipalConn struct {
+	net.Conn
+	principalKeys []string
+}
+
+type unixPeerPrincipalProvider interface {
+	// UnixPeerPrincipalKeys returns the ordered principal-key candidates derived
+	// from THIS connection's authenticated peer credentials (most specific
+	// first: the peer's own uid, then the group it was authorized through).
+	// agentd resolves the effective role from the first bound key, so each
+	// authorized peer is attributed to its actual calling identity rather than a
+	// single listener-wide role.
+	UnixPeerPrincipalKeys() []string
+}
+
+type unixPeerPrincipalContextKey struct{}
 
 func ListenUnixSocket(path string) (net.Listener, error) {
 	return ListenUnixSocketMode(path, DefaultUnixSocketMode)
@@ -301,11 +324,12 @@ func AuthenticateUnixSocketListener(listener net.Listener, config UnixPeerAuthCo
 	}
 
 	return &authenticatedUnixListener{
-		Listener:     listener,
-		groupID:      groupID,
-		auditStore:   config.AuditStore,
-		now:          now,
-		readPeerInfo: readPeerInfo,
+		Listener:          listener,
+		groupID:           groupID,
+		groupPrincipalKey: unixPeerAuthPrincipalKey(config, groupID),
+		auditStore:        config.AuditStore,
+		now:               now,
+		readPeerInfo:      readPeerInfo,
 	}, nil
 }
 
@@ -331,12 +355,40 @@ func (l *authenticatedUnixListener) Accept() (net.Conn, error) {
 
 		peer, authErr := l.readPeerInfo(conn)
 		if authErr == nil && peerAuthorizedForGroup(peer, l.groupID) {
-			return conn, nil
+			return &unixPeerPrincipalConn{Conn: conn, principalKeys: l.peerPrincipalKeys(peer)}, nil
 		}
 
 		l.recordPeerUnauthorized(peer)
 		_ = conn.Close()
 	}
+}
+
+// peerPrincipalKeys derives the ordered principal-key candidates for an
+// authorized connection from the peer's OWN authenticated credentials, never
+// from the listener-wide configuration alone. The peer's uid (the most specific
+// identity proven over SO_PEERCRED) comes first so distinct calling principals
+// are not collapsed into one role; the authorizing group key follows as the
+// least-specific fallback. The keys derive solely from kernel-supplied creds, so
+// they are not spoofable by request content.
+func (l *authenticatedUnixListener) peerPrincipalKeys(peer unixPeerInfo) []string {
+	keys := make([]string, 0, 2)
+	keys = append(keys, UnixPeerUserPrincipalKey(peer.Credentials.UID))
+	if l.groupPrincipalKey != "" {
+		keys = append(keys, l.groupPrincipalKey)
+	}
+	return keys
+}
+
+func (c *unixPeerPrincipalConn) UnixPeerPrincipalKeys() []string {
+	return c.principalKeys
+}
+
+func UnixPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
+	provider, ok := conn.(unixPeerPrincipalProvider)
+	if !ok {
+		return ctx
+	}
+	return contextWithUnixPeerPrincipalKeys(ctx, provider.UnixPeerPrincipalKeys())
 }
 
 func (l *authenticatedUnixListener) recordPeerUnauthorized(peer unixPeerInfo) {
@@ -377,6 +429,53 @@ func unixPeerAuthGroupID(config UnixPeerAuthConfig) (uint32, error) {
 		return 0, fmt.Errorf("parse unix peer auth group %q gid %q: %w", groupName, group.Gid, err)
 	}
 	return uint32(gid), nil
+}
+
+func UnixPeerGroupPrincipalKey(groupName string) string {
+	if groupName == "" {
+		groupName = DefaultUnixPeerGroupName
+	}
+	return "unix:group:" + groupName
+}
+
+// UnixPeerUserPrincipalKey is the per-connection principal key for a peer's
+// authenticated uid. It is the most specific identity derived from SO_PEERCRED
+// and is preferred over the authorizing-group key, so a deployment that can pin
+// a peer's uid binds that exact principal rather than a whole group.
+func UnixPeerUserPrincipalKey(uid uint32) string {
+	return fmt.Sprintf("unix:uid:%d", uid)
+}
+
+func unixPeerGroupIDPrincipalKey(groupID uint32) string {
+	return fmt.Sprintf("unix:gid:%d", groupID)
+}
+
+func unixPeerAuthPrincipalKey(config UnixPeerAuthConfig, groupID uint32) string {
+	if config.GroupID != nil && config.GroupName == "" {
+		return unixPeerGroupIDPrincipalKey(groupID)
+	}
+	return UnixPeerGroupPrincipalKey(config.GroupName)
+}
+
+func contextWithUnixPeerPrincipalKeys(ctx context.Context, principalKeys []string) context.Context {
+	cleaned := make([]string, 0, len(principalKeys))
+	for _, key := range principalKeys {
+		if key != "" {
+			cleaned = append(cleaned, key)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, unixPeerPrincipalContextKey{}, cleaned)
+}
+
+func unixPeerPrincipalKeysFromContext(ctx context.Context) ([]string, bool) {
+	principalKeys, ok := ctx.Value(unixPeerPrincipalContextKey{}).([]string)
+	if !ok || len(principalKeys) == 0 {
+		return nil, false
+	}
+	return principalKeys, true
 }
 
 func peerAuthorizedForGroup(peer unixPeerInfo, groupID uint32) bool {
@@ -483,8 +582,9 @@ func NewHandler(config Config) (http.Handler, error) {
 	}
 
 	filesHandler, err := filecap.NewHandler(filecap.Options{
-		StateRoot: config.FilesStateRoot,
-		Grants:    config.FilesGrants,
+		StateRoot:  config.FilesStateRoot,
+		Grants:     config.FilesGrants,
+		Principals: config.FilesPrincipals,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build files handler: %w", err)
@@ -664,7 +764,12 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := h.files.Handle(r.Context(), request)
+	ctx := r.Context()
+	if principalKeys, ok := unixPeerPrincipalKeysFromContext(ctx); ok {
+		ctx = filecap.ContextWithPrincipalKeys(ctx, principalKeys)
+	}
+
+	response, err := h.files.Handle(ctx, request)
 	if err != nil {
 		writeFilesError(w, err)
 		return

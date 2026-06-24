@@ -1,10 +1,30 @@
 export type FilesGrantAccess = "read-only" | "read-write";
+export type FilesRole = "owner" | "household-member";
 
-export interface FilesGrant {
+// A per-role grant entry may additionally be "forbidden": the role has NO access
+// at all (denied even read), distinct from a read-only role. Forbidden is valid
+// only inside a shared grant's roles map, never as a flat grant access.
+export type FilesRoleAccess = FilesGrantAccess | "forbidden";
+
+export type FilesGrantRoles = Readonly<Record<FilesRole, FilesRoleAccess>>;
+
+export interface FilesFlatGrant {
   readonly name: string;
   readonly root: string;
   readonly access: FilesGrantAccess;
+  readonly shared?: never;
+  readonly roles?: never;
 }
+
+export interface FilesSharedGrant {
+  readonly name: string;
+  readonly root: string;
+  readonly access?: never;
+  readonly shared?: true;
+  readonly roles: FilesGrantRoles;
+}
+
+export type FilesGrant = FilesFlatGrant | FilesSharedGrant;
 
 export type FilesOperation = "list" | "read" | "write" | "stat";
 
