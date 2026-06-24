@@ -17,7 +17,11 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 substantially COMPLETE + boot-verified (20 features on main @ 54cd7f0).
+## Status: RUNNING — Phases 2–5 substantially COMPLETE + boot-verified (21 features on main @ 4cc61a0).
+**P1-087 (household six-role model, R2) MERGED + BOOT-VERIFIED 2026-06-24** — `VITA-ROLES roles=6` measured from
+agentd's GET /roles + `VITA-ROLES-REJECT role_forbidden` measured by omission. Held-slices tail RESOLVED: P1-087 in;
+P1-071/P1-083 (catalog install-resolve/exec) + P1-090 (replacement-restore) DEFERRED with documented design follow-ups
+(integrity-semantic circularity; multi-root single-commit redesign). **NEXT = Phase 6 desktop** (separable package).
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** +
 **"use opus in the meantime then back to codex after reset"** — run continuously; only stop on "stop" / §24.
 Owner (this session): **"finish 2–5"** then **Phase 6 desktop** (separable first-class package; see
@@ -31,9 +35,13 @@ Owner (this session): **"finish 2–5"** then **Phase 6 desktop** (separable fir
   `manifest.integrity == catalog artifact integrity` is a **circular design question** (the artifact integrity IS
   sri(the bundle), and the manifest lives inside that bundle), not a bug. Code preserved on origin/task/P1-071.
   Catalog SIGNING core (P1-063) is merged — this is a documented follow-up once the integrity semantic is settled.
-  **IN FLIGHT: P1-087 (household-roles) + P1-090 (replacement-restore)** building via the **Opus bridge** —
-  the **Codex dispatch tool stalls on fresh-from-main dispatches** (0 output); it works only on existing
-  task-branch bases (re-dispatch revs), so fresh slices now go to Opus `isolation:worktree` builders.
+  **RESOLVED: P1-087 (household six-role model) MERGED + boot-verified** (21st feature; `VITA-ROLES`/`VITA-ROLES-REJECT`
+  measured). **P1-090 (replacement-restore) DEFERRED** — 2 revs showed it's a redesign (multi-root single-commit atomic
+  replace + real measured node-identity origin + real measured tamper-reject), not a rev fix; core durability (P1-066
+  backup + P1-085 full-restore) is merged. Infra notes: the **Codex dispatch tool stalls on fresh-from-main** (works on
+  existing task-branch bases); **Opus subagents are Anthropic-quota-limited** (reset 4:50pm Chicago) — fresh builds went
+  to Opus `isolation:worktree`, revs to Codex task-branch. `npm run review` diffs WRONG when a branch is behind main
+  (cherry-pick the slice commit onto main for a clean review diff); `git rebase` here dropped commits — use cherry-pick.
 - **93+ contracts merged** (pre-this-session log below).
 - **2026-06-22 — OS INSTALL WAVE (parallel Codex + Opus builders, codex↔opus cross-review, host-verified on
   Borg51):** the bootable node gained the pieces to be a usable TypeScript OS. MERGED + HOST-VERIFIED:
