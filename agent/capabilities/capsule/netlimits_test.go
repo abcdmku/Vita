@@ -79,6 +79,20 @@ func TestCapsuleNetLimitsConfirmRequiresStrictAgentEvidence(t *testing.T) {
 			},
 		},
 		{
+			name: "superstring non-granted host dnat",
+			mutate: func(unit transientUnit, check capsuleNetnsCheck) (transientUnit, capsuleNetnsCheck) {
+				ingress := unit.NetNS.Egress.Ingress
+				port := strconv.Itoa(ingress.ProbePort)
+				check.Egress.HostTable = strings.Replace(
+					check.Egress.HostTable,
+					"  }\n}\n",
+					"    ip daddr "+ingress.HostAddr+" tcp dport "+port+"0 dnat to "+ingress.CapsuleAddr+":"+port+"0\n  }\n}\n",
+					1,
+				)
+				return unit, check
+			},
+		},
+		{
 			name: "host interface visible",
 			mutate: func(unit transientUnit, check capsuleNetnsCheck) (transientUnit, capsuleNetnsCheck) {
 				check.Interfaces = append(check.Interfaces, "eth0")
@@ -120,6 +134,55 @@ func TestCapsuleNetLimitsConfirmRequiresStrictAgentEvidence(t *testing.T) {
 				t.Fatalf("status = %#v, want FAIL", status)
 			}
 		})
+	}
+}
+
+func TestCapsuleNetLimitsIngressHostTableAllowsNftListedBasePolicyAccept(t *testing.T) {
+	manifest := hostileNetManifest()
+	unit, err := composeTypeScriptTransientUnit(manifest)
+	if err != nil {
+		t.Fatalf("composeTypeScriptTransientUnit returned error: %v", err)
+	}
+	check := capsuleNetLimitsCheckForUnit(t, unit)
+	check.Egress.HostTable = strings.Replace(
+		check.Egress.HostTable,
+		"type nat hook output priority dstnat;",
+		"type nat hook output priority dstnat; policy accept;",
+		1,
+	)
+
+	status, err := confirmCapsuleNetLimits(context.Background(), manifest, unit, &check)
+	if err != nil {
+		t.Fatalf("confirmCapsuleNetLimits returned error: %v", err)
+	}
+	if status != enforcedCapsuleNetLimitsStatus() {
+		t.Fatalf("status = %#v, want enforced OK", status)
+	}
+}
+
+func TestCapsuleNetLimitsIngressHostTableFailureReasonIncludesParseReason(t *testing.T) {
+	manifest := hostileNetManifest()
+	unit, err := composeTypeScriptTransientUnit(manifest)
+	if err != nil {
+		t.Fatalf("composeTypeScriptTransientUnit returned error: %v", err)
+	}
+	check := capsuleNetLimitsCheckForUnit(t, unit)
+	check.Egress.HostTable = strings.Replace(
+		check.Egress.HostTable,
+		"  }\n}\n",
+		"    counter accept\n  }\n}\n",
+		1,
+	)
+
+	status, err := confirmCapsuleNetLimits(context.Background(), manifest, unit, &check)
+	if err == nil {
+		t.Fatal("confirmCapsuleNetLimits accepted a host ingress accept rule")
+	}
+	if status.Ingress != capsuleNetLimitValueNotEnforced || status.Status != capsuleNetLimitStatusFail {
+		t.Fatalf("status = %#v, want ingress not_enforced FAIL", status)
+	}
+	if reason := capsuleNetLimitsFailureReason(err); reason != "capsule_net_limits_failed:ingress_confirm:host_table_invalid:unexpected_accept_rule" {
+		t.Fatalf("reason = %q, want ingress host_table_invalid unexpected_accept_rule", reason)
 	}
 }
 

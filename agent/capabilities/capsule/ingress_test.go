@@ -64,6 +64,18 @@ func TestCapsuleIngressHostRulesetIsHostLocalDNATOnly(t *testing.T) {
 	if err := verifyCapsuleIngressHostTable(*config, ruleset); err != nil {
 		t.Fatalf("verifyCapsuleIngressHostTable rejected generated ruleset: %v", err)
 	}
+	listed := strings.Replace(ruleset, "type nat hook output priority dstnat;", "type nat hook output priority dstnat; policy accept;", 1)
+	if err := verifyCapsuleIngressHostTable(*config, listed); err != nil {
+		t.Fatalf("verifyCapsuleIngressHostTable rejected nft-listed policy accept base chain: %v", err)
+	}
+	familyQualifiedDNAT := strings.Replace(listed, "dnat to "+config.CapsuleAddr+":8787", "dnat ip to "+config.CapsuleAddr+":8787", 1)
+	if err := verifyCapsuleIngressHostTable(*config, familyQualifiedDNAT); err != nil {
+		t.Fatalf("verifyCapsuleIngressHostTable rejected nft-listed family-qualified DNAT: %v", err)
+	}
+	superstringPort := strings.Replace(ruleset, "tcp dport 8787 dnat to "+config.CapsuleAddr+":8787", "tcp dport 87870 dnat to "+config.CapsuleAddr+":87870", 1)
+	if err := verifyCapsuleIngressHostTable(*config, superstringPort); err == nil {
+		t.Fatal("verifyCapsuleIngressHostTable accepted superstring host DNAT port")
+	}
 
 	openAll := strings.Replace(ruleset, "ip daddr "+config.HostAddr, "ip daddr 0.0.0.0/0", 1)
 	if err := verifyCapsuleIngressHostTable(*config, openAll); err == nil {

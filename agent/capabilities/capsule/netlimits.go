@@ -35,6 +35,11 @@ type capsuleNetLimitsStepFailure struct {
 	Err  error
 }
 
+type capsuleNetLimitsReasonedFailure struct {
+	Reason string
+	Err    error
+}
+
 func (e *capsuleNetLimitsStepFailure) Error() string {
 	if e == nil {
 		return "capsule net limits step failed"
@@ -52,11 +57,35 @@ func (e *capsuleNetLimitsStepFailure) Unwrap() error {
 	return e.Err
 }
 
+func (e *capsuleNetLimitsReasonedFailure) Error() string {
+	if e == nil {
+		return "capsule net limits validation failed"
+	}
+	if e.Err == nil {
+		return e.Reason
+	}
+	return e.Reason + ": " + e.Err.Error()
+}
+
+func (e *capsuleNetLimitsReasonedFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 func capsuleNetLimitsStepError(step string, err error) error {
 	if err == nil {
 		return nil
 	}
 	return &capsuleNetLimitsStepFailure{Step: step, Err: err}
+}
+
+func capsuleNetLimitsReasonedError(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &capsuleNetLimitsReasonedFailure{Reason: reason, Err: err}
 }
 
 func shouldConfirmCapsuleNetLimitEnforcement(manifest ExecutionManifest) bool {
@@ -178,7 +207,11 @@ func confirmCapsuleNetLimitsIngress(ctx context.Context, config capsuleEgressCon
 		return capsuleNetLimitsSubstepError(axis, "netns_table_invalid", err)
 	}
 	if err := verifyCapsuleNetLimitsIngressHostTable(*config.Ingress, check.Egress.HostTable); err != nil {
-		return capsuleNetLimitsSubstepError(axis, "host_table_invalid", err)
+		substep := "host_table_invalid"
+		if reason := capsuleNetLimitsReasonedFailureReason(err); reason != "" {
+			substep += ":" + reason
+		}
+		return capsuleNetLimitsSubstepError(axis, substep, err)
 	}
 	if reached := probeCapsuleIngressTCP(ctx, check.Ingress.HostAddr, check.Ingress.DeniedPort); reached == capsuleIngressReachOK {
 		return capsuleNetLimitsSubstepError(axis, "nonGranted_reachable", fmt.Errorf("non-granted ingress %s:%d was reachable", check.Ingress.HostAddr, check.Ingress.DeniedPort))
@@ -326,34 +359,93 @@ func capsuleNetLimitsAllowedIngressAccept(config *capsuleIngressConfig, line str
 
 func verifyCapsuleNetLimitsIngressHostTable(config capsuleIngressConfig, table string) error {
 	if err := verifyCapsuleIngressHostTable(config, table); err != nil {
-		return err
+		return capsuleNetLimitsReasonedError(capsuleNetLimitsIngressHostTableReason(err), err)
 	}
 	for _, line := range strings.Split(table, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, " accept") {
-			return fmt.Errorf("nft host ingress table contains unexpected accept: %s", trimmed)
+		if capsuleNetLimitsHostAcceptRule(trimmed) {
+			return capsuleNetLimitsReasonedError("unexpected_accept_rule", fmt.Errorf("nft host ingress table contains unexpected accept: %s", trimmed))
 		}
-		if !strings.Contains(trimmed, "dnat to") {
+		if !capsuleNetLimitsHostDNATLine(trimmed) {
 			continue
 		}
 		if capsuleNetLimitsAllowedHostDNAT(config, trimmed) {
 			continue
 		}
-		return fmt.Errorf("nft host ingress table contains non-granted dnat: %s", trimmed)
+		return capsuleNetLimitsReasonedError("non_granted_dnat", fmt.Errorf("nft host ingress table contains non-granted dnat: %s", trimmed))
 	}
 	return nil
 }
 
 func capsuleNetLimitsAllowedHostDNAT(config capsuleIngressConfig, line string) bool {
 	for _, grant := range config.Grants {
-		port := strconv.Itoa(grant.Port)
-		if strings.Contains(line, "ip daddr "+config.HostAddr) &&
-			strings.Contains(line, string(grant.Protocol)+" dport "+port) &&
-			strings.Contains(line, "dnat to "+config.CapsuleAddr+":"+port) {
+		if capsuleIngressHostDNATLineMatches(config, grant, line) {
 			return true
 		}
 	}
 	return false
+}
+
+func capsuleNetLimitsHostAcceptRule(line string) bool {
+	if line == "" {
+		return false
+	}
+	fields := nftLineFields(line)
+	if nftFieldsContainSequence(fields, "type", "nat", "hook", "output") &&
+		nftFieldsContainSequence(fields, "policy", "accept") {
+		acceptTokens := 0
+		for _, field := range fields {
+			if field == "accept" {
+				acceptTokens++
+			}
+		}
+		return acceptTokens > 1
+	}
+	return nftFieldsContainToken(fields, "accept")
+}
+
+func capsuleNetLimitsHostDNATLine(line string) bool {
+	fields := nftLineFields(line)
+	return nftFieldsContainToken(fields, "dnat") && nftFieldsContainToken(fields, "to")
+}
+
+func capsuleNetLimitsReasonedFailureReason(err error) string {
+	var reasoned *capsuleNetLimitsReasonedFailure
+	if errors.As(err, &reasoned) && reasoned != nil {
+		return reasoned.Reason
+	}
+	return ""
+}
+
+func capsuleNetLimitsIngressHostTableReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "missing table"):
+		return "missing_table"
+	case strings.Contains(message, "missing output chain"):
+		return "missing_output_chain"
+	case strings.Contains(message, "not scoped to host output"):
+		return "missing_output_hook"
+	case strings.Contains(message, "exposes prerouting"):
+		return "prerouting_hook"
+	case strings.Contains(message, "must not match public interfaces"):
+		return "public_interface_match"
+	case strings.Contains(message, "public all-sources"):
+		return "public_all_sources"
+	case strings.Contains(message, "non-granted port"):
+		return "non_granted_port"
+	case strings.Contains(message, "missing host-veth address"):
+		return "missing_host_addr"
+	case strings.Contains(message, "missing") && strings.Contains(message, "dport"):
+		return "missing_granted_dport"
+	case strings.Contains(message, "missing dnat"):
+		return "missing_granted_dnat"
+	default:
+		return "parse_error"
+	}
 }
 
 func hasSystemdProperty(properties []systemdProperty, name string, value string) bool {

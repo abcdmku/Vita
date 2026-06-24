@@ -236,34 +236,129 @@ func verifyCapsuleIngressHostTable(config capsuleIngressConfig, table string) er
 	if err := validateCapsuleIngressConfig(config); err != nil {
 		return err
 	}
-	if !strings.Contains(table, "hook output") {
+	if !nftTableContainsSequence(table, "table", capsuleIngressNftFamily, config.HostNatTable) {
+		return fmt.Errorf("nft host ingress table missing table %s %s", capsuleIngressNftFamily, config.HostNatTable)
+	}
+	if !nftTableContainsSequence(table, "chain", "output") {
+		return errors.New("nft host ingress table missing output chain")
+	}
+	if !nftTableContainsSequence(table, "hook", "output") {
 		return errors.New("nft host ingress table is not scoped to host output")
 	}
-	if strings.Contains(table, "hook prerouting") {
+	if nftTableContainsSequence(table, "hook", "prerouting") {
 		return errors.New("nft host ingress table exposes prerouting")
 	}
-	if strings.Contains(table, "iifname") || strings.Contains(table, "oifname") {
+	if nftTableContainsToken(table, "iifname") || nftTableContainsToken(table, "oifname") {
 		return errors.New("nft host ingress table must not match public interfaces")
 	}
-	if strings.Contains(table, "0.0.0.0/0") {
+	if containsNetworkToken(table, "0.0.0.0/0") {
 		return errors.New("nft host ingress table contains public all-sources match")
 	}
-	if config.ProbeDeniedPort != 0 && (strings.Contains(table, "dport "+strconv.Itoa(config.ProbeDeniedPort)) || strings.Contains(table, ":"+strconv.Itoa(config.ProbeDeniedPort))) {
-		return fmt.Errorf("nft host ingress table contains non-granted port %d", config.ProbeDeniedPort)
+	if config.ProbeDeniedPort != 0 {
+		deniedPort := strconv.Itoa(config.ProbeDeniedPort)
+		for _, line := range strings.Split(table, "\n") {
+			fields := nftLineFields(line)
+			if nftFieldsContainSequence(fields, "dport", deniedPort) ||
+				nftFieldsContainToken(fields, config.CapsuleAddr+":"+deniedPort) {
+				return fmt.Errorf("nft host ingress table contains non-granted port %d", config.ProbeDeniedPort)
+			}
+		}
 	}
 	for _, grant := range config.Grants {
 		port := strconv.Itoa(grant.Port)
-		if !strings.Contains(table, "ip daddr "+config.HostAddr) {
+		if !nftTableContainsSequence(table, "ip", "daddr", config.HostAddr) {
 			return fmt.Errorf("nft host ingress table missing host-veth address %s", config.HostAddr)
 		}
-		if !strings.Contains(table, string(grant.Protocol)+" dport "+port) {
+		if !nftTableContainsSequence(table, string(grant.Protocol), "dport", port) {
 			return fmt.Errorf("nft host ingress table missing %s dport %d", grant.Protocol, grant.Port)
 		}
-		if !strings.Contains(table, "dnat to "+config.CapsuleAddr+":"+port) {
+		if !capsuleIngressHostDNATGrantPresent(config, table, grant) {
 			return fmt.Errorf("nft host ingress table missing dnat to capsule port %d", grant.Port)
 		}
 	}
 	return nil
+}
+
+func capsuleIngressHostDNATGrantPresent(config capsuleIngressConfig, table string, grant capsuleIngressGrant) bool {
+	for _, line := range strings.Split(table, "\n") {
+		if capsuleIngressHostDNATLineMatches(config, grant, line) {
+			return true
+		}
+	}
+	return false
+}
+
+func capsuleIngressHostDNATLineMatches(config capsuleIngressConfig, grant capsuleIngressGrant, line string) bool {
+	fields := nftLineFields(line)
+	port := strconv.Itoa(grant.Port)
+	return nftFieldsContainSequence(fields, "ip", "daddr", config.HostAddr) &&
+		nftFieldsContainSequence(fields, string(grant.Protocol), "dport", port) &&
+		(nftFieldsContainSequence(fields, "dnat", "to", config.CapsuleAddr+":"+port) ||
+			nftFieldsContainSequence(fields, "dnat", "ip", "to", config.CapsuleAddr+":"+port))
+}
+
+func nftTableContainsSequence(table string, want ...string) bool {
+	for _, line := range strings.Split(table, "\n") {
+		if nftFieldsContainSequence(nftLineFields(line), want...) {
+			return true
+		}
+	}
+	return false
+}
+
+func nftTableContainsToken(table string, want string) bool {
+	for _, line := range strings.Split(table, "\n") {
+		if nftFieldsContainToken(nftLineFields(line), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func nftLineFields(line string) []string {
+	raw := strings.Fields(line)
+	fields := make([]string, 0, len(raw))
+	for _, field := range raw {
+		if strings.HasPrefix(field, "#") {
+			break
+		}
+		field = strings.Trim(field, "{};,")
+		if field != "" {
+			fields = append(fields, field)
+		}
+	}
+	return fields
+}
+
+func nftFieldsContainSequence(fields []string, want ...string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	if len(fields) < len(want) {
+		return false
+	}
+	for start := 0; start <= len(fields)-len(want); start++ {
+		matched := true
+		for offset, token := range want {
+			if fields[start+offset] != token {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func nftFieldsContainToken(fields []string, want string) bool {
+	for _, field := range fields {
+		if field == want {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshCapsuleIngressProof(ctx context.Context, status *ExecuteNetworkStatus, proof capsuleIngressProof) {
