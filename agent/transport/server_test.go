@@ -34,6 +34,7 @@ import (
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
+	identityroles "github.com/vita/agent/identity/roles"
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/storagehealth"
@@ -639,6 +640,29 @@ func TestOperationsEmptyRegistryReturnsEmptyArray(t *testing.T) {
 	}
 	if len(got.Operations) != 0 {
 		t.Fatalf("operations = %v, want empty", got.Operations)
+	}
+}
+
+func TestRolesRouteReturnsClosedSixRoleVocabulary(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t)})
+
+	response := perform(handler, http.MethodGet, "/roles", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	var got RolesResponse
+	decodeResponse(t, response, &got)
+	want := []identityroles.Role{
+		identityroles.RoleOwner,
+		identityroles.RoleAdministrator,
+		identityroles.RoleMember,
+		identityroles.RoleRestrictedMember,
+		identityroles.RoleGuest,
+		identityroles.RoleService,
+	}
+	if !reflect.DeepEqual(got.Roles, want) {
+		t.Fatalf("roles = %v, want %v", got.Roles, want)
 	}
 }
 
@@ -1474,8 +1498,8 @@ func TestFilesRouteUsesPeerPrincipalFromContext(t *testing.T) {
 				Root:   "scope",
 				Shared: &shared,
 				Roles: filecap.RoleAccessMap{
-					filecap.RoleOwner:           filecap.AccessReadWrite,
-					filecap.RoleHouseholdMember: filecap.AccessReadOnly,
+					filecap.RoleOwner:  filecap.AccessReadWrite,
+					filecap.RoleMember: filecap.AccessReadOnly,
 				},
 			},
 		},
@@ -1490,6 +1514,8 @@ func TestFilesRouteUsesPeerPrincipalFromContext(t *testing.T) {
 		base64.StdEncoding.EncodeToString(data),
 	)
 
+	// No peer principal in context -> least-privileged guest default -> no entry
+	// on this grant -> role_forbidden (never owner-by-absence).
 	defaultResponse := perform(handler, http.MethodPost, "/files", body)
 	if defaultResponse.Code != http.StatusForbidden {
 		t.Fatalf("default status code = %d, want %d; body=%s", defaultResponse.Code, http.StatusForbidden, defaultResponse.Body.String())
@@ -1521,6 +1547,65 @@ func TestFilesRouteUsesPeerPrincipalFromContext(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatalf("read data = %q, want %q", got, data)
+	}
+}
+
+// TestFilesRouteRoleTracksPerConnectionPeer proves the /files route resolves the
+// principal from THIS connection's authenticated peer keys (not a listener-global
+// value and not the body): two different peers bound to two different roles get
+// two different effective accesses on the same grant. Guards the P1-073
+// REVISION-2 per-connection binding.
+func TestFilesRouteRoleTracksPerConnectionPeer(t *testing.T) {
+	stateRoot := t.TempDir()
+	shared := true
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: stateRoot,
+		filesGrants: []filecap.Grant{
+			{
+				Name:   "shared",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: filecap.RoleAccessMap{
+					filecap.RoleOwner:  filecap.AccessReadWrite,
+					filecap.RoleMember: filecap.AccessReadOnly,
+				},
+			},
+		},
+		filesPrincipals: []filecap.Principal{
+			{PrincipalKey: "unix:uid:1000", Role: filecap.RoleOwner},
+			{PrincipalKey: "unix:uid:1001", Role: filecap.RoleMember},
+		},
+	})
+
+	data := []byte("per-connection data")
+	writeBody := fmt.Sprintf(
+		`{"op":"write","grant":"shared","path":"note.txt","data":%q}`,
+		base64.StdEncoding.EncodeToString(data),
+	)
+
+	// Peer A (uid 1000 -> owner) writes.
+	ownerCtx := contextWithUnixPeerPrincipalKeys(context.Background(), []string{"unix:uid:1000"})
+	ownerWrite := performWithContext(handler, ownerCtx, http.MethodPost, "/files", writeBody)
+	if ownerWrite.Code != http.StatusOK {
+		t.Fatalf("owner write status code = %d, want %d; body=%s", ownerWrite.Code, http.StatusOK, ownerWrite.Body.String())
+	}
+
+	// Peer B (uid 1001 -> member) reads OK but write is role_forbidden — a
+	// different effective access on the identical grant + path.
+	memberCtx := contextWithUnixPeerPrincipalKeys(context.Background(), []string{"unix:uid:1001"})
+	memberRead := performWithContext(handler, memberCtx, http.MethodPost, "/files", `{"op":"read","grant":"shared","path":"note.txt"}`)
+	if memberRead.Code != http.StatusOK {
+		t.Fatalf("member read status code = %d, want %d; body=%s", memberRead.Code, http.StatusOK, memberRead.Body.String())
+	}
+	memberWrite := performWithContext(handler, memberCtx, http.MethodPost, "/files", writeBody)
+	if memberWrite.Code != http.StatusForbidden {
+		t.Fatalf("member write status code = %d, want %d; body=%s", memberWrite.Code, http.StatusForbidden, memberWrite.Body.String())
+	}
+	var memberErr ErrorResponse
+	decodeResponse(t, memberWrite, &memberErr)
+	if memberErr.Error.Code != "role_forbidden" {
+		t.Fatalf("member write error code = %q, want role_forbidden", memberErr.Error.Code)
 	}
 }
 
@@ -1687,6 +1772,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "health rejects non GET", method: http.MethodPost, path: "/healthz", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "capabilities rejects non GET", method: http.MethodPost, path: "/capabilities", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
+		{name: "roles rejects non GET", method: http.MethodPost, path: "/roles", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "state rejects non GET", method: http.MethodPost, path: "/state", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "files rejects non POST", method: http.MethodGet, path: "/files", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},

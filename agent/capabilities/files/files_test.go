@@ -235,8 +235,8 @@ func TestHandlerSharedGrantRoleGate(t *testing.T) {
 				Root:   "scope",
 				Shared: &shared,
 				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
-					RoleHouseholdMember: AccessReadOnly,
+					RoleOwner:  AccessReadWrite,
+					RoleMember: AccessReadOnly,
 				},
 			},
 			{
@@ -244,15 +244,15 @@ func TestHandlerSharedGrantRoleGate(t *testing.T) {
 				Root:   "scope",
 				Shared: &shared,
 				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadOnly,
-					RoleHouseholdMember: AccessReadOnly,
+					RoleOwner:  AccessReadOnly,
+					RoleMember: AccessReadOnly,
 				},
 			},
 			{Name: "flat-ro", Root: "scope", Access: AccessReadOnly},
 		},
 		Principals: []Principal{
 			{PrincipalKey: "peer-owner", Role: RoleOwner},
-			{PrincipalKey: "peer-member", Role: RoleHouseholdMember},
+			{PrincipalKey: "peer-member", Role: RoleMember},
 		},
 	})
 	if err != nil {
@@ -349,15 +349,12 @@ func TestHandlerMemberForbiddenGrantDeniesEveryMemberOpButAllowsOwner(t *testing
 				Name:   "owner-only",
 				Root:   "scope",
 				Shared: &shared,
-				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
-					RoleHouseholdMember: AccessForbidden,
-				},
+				Roles:  RoleAccessMap{RoleOwner: AccessReadWrite},
 			},
 		},
 		Principals: []Principal{
 			{PrincipalKey: "peer-owner", Role: RoleOwner},
-			{PrincipalKey: "peer-member", Role: RoleHouseholdMember},
+			{PrincipalKey: "peer-member", Role: RoleMember},
 		},
 	})
 	if err != nil {
@@ -375,8 +372,8 @@ func TestHandlerMemberForbiddenGrantDeniesEveryMemberOpButAllowsOwner(t *testing
 		t.Fatalf("owner write to member-forbidden grant returned error: %v", err)
 	}
 
-	// A genuinely forbidden household-member is denied EVERY op (denied even
-	// read), with role_forbidden — distinct from a read-only denial.
+	// A genuinely forbidden member is denied EVERY op (denied even read), with
+	// role_forbidden — distinct from a read-only denial.
 	memberCtx := ContextWithPrincipalKey(ctx, "peer-member")
 	for _, req := range []Request{
 		{Op: OperationList, Grant: "owner-only", Path: "note.txt"},
@@ -402,10 +399,7 @@ func TestHandlerResolvesRoleFromFirstBoundPrincipalKeyCandidate(t *testing.T) {
 				Name:   "owner-only",
 				Root:   "scope",
 				Shared: &shared,
-				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
-					RoleHouseholdMember: AccessForbidden,
-				},
+				Roles:  RoleAccessMap{RoleOwner: AccessReadWrite},
 			},
 		},
 		Principals: []Principal{
@@ -430,8 +424,8 @@ func TestHandlerResolvesRoleFromFirstBoundPrincipalKeyCandidate(t *testing.T) {
 		t.Fatalf("owner-via-group write returned error: %v", err)
 	}
 
-	// No candidate is bound -> least-privileged default (household-member), which
-	// is forbidden on this grant. Never owner-by-absence.
+	// No candidate is bound -> least-privileged default (guest), which has no
+	// entry on this grant and is forbidden every op. Never owner-by-absence.
 	defaultCtx := ContextWithPrincipalKeys(ctx, []string{"unix:uid:99999", "unix:gid:1"})
 	_, err = handler.Handle(defaultCtx, Request{
 		Op:    OperationWrite,
@@ -453,7 +447,7 @@ func TestHandlerRejectsEveryOperationWhenSharedRoleHasNoEntry(t *testing.T) {
 				roles: RoleAccessMap{RoleOwner: AccessReadWrite},
 			},
 		},
-		principals: map[string]Role{"peer-member": RoleHouseholdMember},
+		principals: map[string]Role{"peer-member": RoleMember},
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte("data"))
 
@@ -468,6 +462,136 @@ func TestHandlerRejectsEveryOperationWhenSharedRoleHasNoEntry(t *testing.T) {
 			assertFilesErrorCode(t, err, "role_forbidden")
 		})
 	}
+}
+
+// TestHandlerDefaultsUnboundPeerToGuest proves the six-role least-privilege
+// default: a peer with NO configured binding resolves to guest (NOT owner, NOT
+// member), and where guest has no grant entry every op is role_forbidden. The
+// same grant lists owner=read-write, so the failure is the default role, not a
+// broken grant.
+func TestHandlerDefaultsUnboundPeerToGuest(t *testing.T) {
+	if DefaultRole != RoleGuest {
+		t.Fatalf("DefaultRole = %q, want guest (the unbound-peer default must be the least-privileged role)", DefaultRole)
+	}
+
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	shared := true
+	handler, err := NewHandler(Options{
+		StateRoot: stateRoot,
+		Grants: []Grant{
+			{
+				Name:   "owner-only",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner: AccessReadWrite,
+				},
+			},
+		},
+		// Bind an owner peer only; the test peer below is UNBOUND.
+		Principals: []Principal{
+			{PrincipalKey: "peer-owner", Role: RoleOwner},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("data"))
+
+	// An unbound peer (and a peer with no principal context at all) -> guest ->
+	// no entry on owner-only -> every op role_forbidden.
+	for _, label := range []string{"unbound-peer", ""} {
+		opCtx := ctx
+		if label != "" {
+			opCtx = ContextWithPrincipalKey(ctx, label)
+		}
+		for _, req := range []Request{
+			{Op: OperationList, Grant: "owner-only", Path: "note.txt"},
+			{Op: OperationRead, Grant: "owner-only", Path: "note.txt"},
+			{Op: OperationStat, Grant: "owner-only", Path: "note.txt"},
+			{Op: OperationWrite, Grant: "owner-only", Path: "note.txt", Data: &encoded},
+		} {
+			_, err := handler.Handle(opCtx, req)
+			assertFilesErrorCode(t, err, "role_forbidden")
+		}
+	}
+
+	// Positive control: the bound owner peer CAN write the same grant, so the
+	// denials above are the guest default, not a misconfigured grant.
+	if _, err := handler.Handle(ContextWithPrincipalKey(ctx, "peer-owner"), Request{
+		Op:    OperationWrite,
+		Grant: "owner-only",
+		Path:  "note.txt",
+		Data:  &encoded,
+	}); err != nil {
+		t.Fatalf("owner write to owner-only grant returned error: %v", err)
+	}
+}
+
+// TestRoleTracksPerConnectionPeerNotListenerGlobal proves the role binds to THIS
+// connection's authenticated peer: two different peers bound (in the same
+// Options.Principals) to two different roles get two DIFFERENT effective accesses
+// on the SAME shared grant. This guards the P1-073 REVISION-2 regression where a
+// once-computed listener-global principal would collapse distinct callers into
+// one role.
+func TestRoleTracksPerConnectionPeerNotListenerGlobal(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	shared := true
+	handler, err := NewHandler(Options{
+		StateRoot: stateRoot,
+		Grants: []Grant{
+			{
+				Name:   "shared",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner:  AccessReadWrite,
+					RoleMember: AccessReadOnly,
+				},
+			},
+		},
+		Principals: []Principal{
+			{PrincipalKey: "unix:uid:1000", Role: RoleOwner},
+			{PrincipalKey: "unix:uid:1001", Role: RoleMember},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("per-peer data"))
+
+	// Peer A (uid 1000 -> owner) writes successfully.
+	ownerCtx := ContextWithPrincipalKey(ctx, "unix:uid:1000")
+	if _, err := handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "shared",
+		Path:  "note.txt",
+		Data:  &encoded,
+	}); err != nil {
+		t.Fatalf("owner-peer write returned error: %v", err)
+	}
+
+	// Peer B (uid 1001 -> member) can READ the same grant but is role_forbidden
+	// to WRITE — a strictly different effective access on the identical grant.
+	memberCtx := ContextWithPrincipalKey(ctx, "unix:uid:1001")
+	if _, err := handler.Handle(memberCtx, Request{
+		Op:    OperationRead,
+		Grant: "shared",
+		Path:  "note.txt",
+	}); err != nil {
+		t.Fatalf("member-peer read returned error: %v", err)
+	}
+	_, err = handler.Handle(memberCtx, Request{
+		Op:    OperationWrite,
+		Grant: "shared",
+		Path:  "member-denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "role_forbidden")
 }
 
 func TestDecodeRequestRejectsDuplicateKeysAndMalformedShapes(t *testing.T) {

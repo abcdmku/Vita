@@ -8,16 +8,29 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/vita/agent/identity/roles"
 	"github.com/vita/agent/internal/jsonsafe"
 )
 
-type Role string
+// Role is the household role a principal is bound to. The closed six-role set
+// (spec §11) lives in the identity/roles package — the single source of truth —
+// and the files capability simply re-uses it; there is no files-local role enum.
+// member is the spec §11 name for the role P1-073 shipped as "household-member".
+type Role = roles.Role
 
 const (
-	RoleOwner           Role = "owner"
-	RoleHouseholdMember Role = "household-member"
+	RoleOwner            = roles.RoleOwner
+	RoleAdministrator    = roles.RoleAdministrator
+	RoleMember           = roles.RoleMember
+	RoleRestrictedMember = roles.RoleRestrictedMember
+	RoleGuest            = roles.RoleGuest
+	RoleService          = roles.RoleService
 
-	DefaultRole = RoleHouseholdMember
+	// DefaultRole is the role agentd assigns a principal with NO configured
+	// binding: the strictly least-privileged guest (a stranger, no household
+	// access) — never owner, never a household role by absence. This is the
+	// deliberate six-role tightening vs P1-073 (which defaulted household-member).
+	DefaultRole = roles.DefaultRole
 )
 
 type Principal struct {
@@ -122,10 +135,11 @@ func EffectiveAccess(grant resolvedGrant, role Role) (Access, bool) {
 		return grant.access, true
 	}
 	access, ok := grant.roles[role]
-	if !ok || access == AccessForbidden {
-		// No entry, or an explicit forbidden entry: the role has NO access at
-		// all. Fail closed for every op (role_forbidden), distinct from a
-		// read-only role (which may read) and from a flat read-only grant.
+	if !ok || !validAccess(access) {
+		// No entry means this role has NO access at all. Invalid resolved access
+		// values are also fail-closed so a malformed in-memory grant cannot become
+		// read permission. Both cases produce role_forbidden, distinct from a
+		// read-only role and from a flat read-only grant.
 		return "", false
 	}
 	return access, ok
@@ -182,16 +196,28 @@ func validatePrincipal(principal Principal) error {
 		return errors.New("principalKey must be non-empty and contain no NUL")
 	}
 	if !validRole(principal.Role) {
-		return errors.New("role must be owner or household-member")
+		return errors.New("role must be one of the six household roles")
 	}
 	return nil
 }
 
-func validateRoleAccessMap(roles RoleAccessMap) (RoleAccessMap, error) {
-	if roles == nil {
-		return nil, errors.New("roles must include owner and household-member")
+// validateRoleAccessMap validates a shared grant's roles map over the CLOSED
+// six-role set (spec §11). It is fail-closed and least-privilege:
+//   - an empty/nil roles map is rejected (a shared grant must admit at least one
+//     role; an empty map could otherwise be read as "open to all" — it is not);
+//   - an UNKNOWN role key (anything outside the six, e.g. "household-member",
+//     "root", a 7th value) is rejected;
+//   - a role VALUE that is not read-only/read-write is rejected.
+//
+// There is NO "must include owner and member" requirement: a role simply ABSENT
+// from the map has NO access (role_forbidden for every op) — exclusion by
+// omission is the least-privilege default, not a misconfiguration. There is NO
+// implicit hierarchy — each role's access is exactly what the map lists for it.
+func validateRoleAccessMap(grantRoles RoleAccessMap) (RoleAccessMap, error) {
+	if len(grantRoles) == 0 {
+		return nil, errors.New("shared grant roles must not be empty")
 	}
-	for role, access := range roles {
+	for role, access := range grantRoles {
 		if !validRole(role) {
 			return nil, fmt.Errorf("unknown role %q", role)
 		}
@@ -199,14 +225,9 @@ func validateRoleAccessMap(roles RoleAccessMap) (RoleAccessMap, error) {
 			return nil, fmt.Errorf("role %q access must be read-only or read-write", role)
 		}
 	}
-	for _, role := range []Role{RoleOwner, RoleHouseholdMember} {
-		if _, ok := roles[role]; !ok {
-			return nil, fmt.Errorf("roles must include %s", role)
-		}
-	}
 
-	copied := make(RoleAccessMap, len(roles))
-	for role, access := range roles {
+	copied := make(RoleAccessMap, len(grantRoles))
+	for role, access := range grantRoles {
 		copied[role] = access
 	}
 	return copied, nil
@@ -224,13 +245,11 @@ func grantHasRoles(grant Grant) bool {
 	return grant.rolesSet || grant.Roles != nil
 }
 
+// validRole reports whether role is one of the closed six spec §11 roles. It is
+// the single membership gate for both principal bindings and shared-grant role
+// keys, delegating to the identity/roles source of truth.
 func validRole(role Role) bool {
-	switch role {
-	case RoleOwner, RoleHouseholdMember:
-		return true
-	default:
-		return false
-	}
+	return roles.Valid(role)
 }
 
 func validAccess(access Access) bool {
@@ -242,12 +261,11 @@ func validAccess(access Access) bool {
 	}
 }
 
-// validRoleAccess accepts the values a per-role grant entry may hold: read-only,
-// read-write, or forbidden (no access). Forbidden is valid ONLY inside a shared
-// grant's roles map, never as a flat grant access (validateGrantAccess keeps the
-// flat access restricted to read-only/read-write).
+// validRoleAccess accepts the values a per-role grant entry may hold: read-only
+// or read-write. Denial is expressed by omitting the role from the map, not by a
+// third grant value.
 func validRoleAccess(access Access) bool {
-	return access == AccessForbidden || validAccess(access)
+	return validAccess(access)
 }
 
 func isJSONNull(raw json.RawMessage) bool {

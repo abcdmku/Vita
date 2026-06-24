@@ -30,13 +30,6 @@ type Access string
 const (
 	AccessReadOnly  Access = "read-only"
 	AccessReadWrite Access = "read-write"
-	// AccessForbidden lets a shared grant declare that a role has NO access at
-	// all (denied even read). It is distinct from a read-only role (which may
-	// read/list/stat) and from a flat read-only grant (which rejects writes with
-	// read_only_grant): a forbidden role is rejected role_forbidden for EVERY op.
-	// A grant still lists every role explicitly, so exclusion is intentional and
-	// fail-closed, never an accidental omission.
-	AccessForbidden Access = "forbidden"
 )
 
 type Operation string

@@ -168,6 +168,9 @@ const FILES_SHARED_MARKER = "VITA-FILES-SHARED";
 const FILES_SHARED_REJECT_MARKER = "VITA-FILES-SHARED-REJECT";
 const FILES_SHARED_ERROR_MARKER = "VITA-FILES-SHARED-ERROR";
 const FILES_SHARED_DEFERRED_MARKER = "VITA-FILES-SHARED-DEFERRED";
+const ROLES_MARKER = "VITA-ROLES";
+const ROLES_REJECT_MARKER = "VITA-ROLES-REJECT";
+const ROLES_ERROR_MARKER = "VITA-ROLES-ERROR";
 const OWNER_MARKER = "VITA-OWNER";
 const OWNER_REJECT_MARKER = "VITA-OWNER-REJECT";
 const OWNER_ERROR_MARKER = "VITA-OWNER-ERROR";
@@ -186,13 +189,31 @@ const EXPORT_GRANT = "export";
 //     read-write. The runtime authenticates through the vita-agent group, which
 //     agentd binds to the owner role, so an owner write -> list -> read-back ->
 //     stat round-trip succeeds and is MEASURED below (never synthesized).
-//   - FILES_SHARED_MEMBER_FORBIDDEN_GRANT: a shared folder whose roles map binds
-//     household-member -> forbidden (no access at all). agentd binds that role to
+//   - FILES_SHARED_MEMBER_FORBIDDEN_GRANT: a shared folder whose roles map omits
+//     member (no access at all). agentd binds that role to
 //     the AUTHENTICATED uid below, so the role_forbidden denial comes from a real
 //     per-peer decision — it cannot be reached by the owner-role runtime peer.
 const FILES_SHARED_RW_GRANT = "runtime-files-shared-rw";
 const FILES_SHARED_MEMBER_FORBIDDEN_GRANT = "runtime-files-shared-member-forbidden";
 const FILES_SHARED_ROUNDTRIP_PATH = "shared-roundtrip.txt";
+// Six-role (P1-087) grants from agentd's OWN config (agent/cmd/agentd/main.go).
+// The runtime peer is bound (via the vita-agent group) to the owner role.
+//   - ROLES_RW_GRANT == FILES_SHARED_RW_GRANT: owner -> read-write, so the bound
+//     runtime role proves a real write -> list -> read-back -> stat round-trip
+//     (the VITA-ROLES success, MEASURED on the read-back byte match).
+//   - ROLES_OWNER_FORBIDDEN_GRANT: a shared folder whose roles map lists ONLY
+//     member (owner ABSENT). The runtime's own owner role therefore has NO entry
+//     and is GENUINELY role_forbidden on every op — a REAL per-principal denial
+//     from the runtime's own authenticated peer (no second uid needed), which is
+//     what VITA-ROLES-REJECT measures.
+const ROLES_RW_GRANT = FILES_SHARED_RW_GRANT;
+const ROLES_BOUND_ROLE = "owner";
+const ROLES_OWNER_FORBIDDEN_GRANT = "runtime-files-shared-owner-forbidden";
+const ROLES_ROUNDTRIP_PATH = "roles-roundtrip.txt";
+const ROLES_REJECT_PATH = "roles-owner-denied.txt";
+// VITA-ROLES measures the closed six-role set from agentd's GET /roles response.
+// roles=N is emitted from that response length, never from a local tuple.
+const ROLES_EXPECTED_COUNT = 6;
 // The authenticated uid agentd binds to the household-member role. To exercise the
 // member-forbidden REJECT against a REAL agentd per-peer decision, a peer must
 // connect to agentd.sock authenticating with THIS uid (so SO_PEERCRED reports it)
@@ -810,6 +831,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${EXPORT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${FILES_SHARED_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -876,6 +898,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   await emitFilesMarkers(filesTransport);
   await emitExportMarkers(client, filesTransport, exportTransport);
   await emitFilesSharedMarkers(filesTransport);
+  await emitFilesRolesMarkers(filesTransport);
   await emitBackupArchiveMarkers(agentTransport);
   await emitProtectionDashboardMarkers(client);
   await emitFullRestoreMarkers(agentTransport);
@@ -2131,6 +2154,184 @@ async function presentHouseholdMemberPeer(): Promise<PresentedPeerResult> {
     // Expected on the locked-down single-node image: no --allow-run / no authority
     // to run a unit as uid 65540. Treat as "peer not presentable".
     return { ok: false, reason: "uid_helper_unavailable_single_node" };
+  }
+}
+
+type AgentRolesReadResult =
+  | { readonly ok: true; readonly roles: readonly string[] }
+  | { readonly ok: false };
+
+async function readAgentRoles(agentTransport: AgentTransport): Promise<AgentRolesReadResult> {
+  try {
+    const response = await agentTransport(new URL("/roles", AGENTD_BASE_URL).toString(), {
+      headers: STATE_JSON_HEADERS,
+      method: "GET",
+    });
+
+    if (!response.ok) {
+      return { ok: false };
+    }
+
+    return parseAgentRoles(parseJsonOrText(await response.text()));
+  } catch {
+    return { ok: false };
+  }
+}
+
+function parseAgentRoles(value: unknown): AgentRolesReadResult {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const roles = value["roles"];
+  if (!Array.isArray(roles)) {
+    return { ok: false };
+  }
+
+  const parsed: string[] = [];
+  for (let index = 0; index < roles.length; index += 1) {
+    const role = roles[index];
+    if (typeof role !== "string") {
+      return { ok: false };
+    }
+    parsed[index] = role;
+  }
+
+  return { ok: true, roles: Object.freeze(parsed) };
+}
+
+function agentRolesAreExactlySix(roles: readonly string[]): boolean {
+  if (roles.length !== ROLES_EXPECTED_COUNT) {
+    return false;
+  }
+
+  for (let index = 0; index < roles.length; index += 1) {
+    if (roles[index] !== expectedAgentRoleAt(index)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function expectedAgentRoleAt(index: number): string | undefined {
+  switch (index) {
+    case 0:
+      return "owner";
+    case 1:
+      return "administrator";
+    case 2:
+      return "member";
+    case 3:
+      return "restricted-member";
+    case 4:
+      return "guest";
+    case 5:
+      return "service";
+    default:
+      return undefined;
+  }
+}
+
+// Six-role household model proof (P1-087). Both halves are MEASURED from a REAL
+// agentd per-principal decision on the runtime's OWN authenticated peer — never
+// synthesized:
+//
+//   1) SUCCESS. The runtime authenticates through the vita-agent group, which
+//      agentd binds to the owner role (one of the six). On ROLES_RW_GRANT
+//      (owner -> read-write) a write -> list -> read-back -> stat round-trip
+//      succeeds, gated on the read-back bytes matching exactly what was written
+//      AND on agentd's /roles response being exactly the six. This is
+//      the bound-role write the contract requires, distinct from a flat grant.
+//
+//   2) REJECT. ROLES_OWNER_FORBIDDEN_GRANT lists ONLY member (owner ABSENT), so
+//      the runtime's own owner role has NO entry and is GENUINELY role_forbidden
+//      on every op. The reject is the runtime's OWN per-peer agentd decision — no
+//      second OS uid is needed (unlike the P1-073 member-forbidden half), so this
+//      is a real measured denial, never fabricated. Proves least-privilege
+//      fail-closed for a role with no grant entry.
+async function emitFilesRolesMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createFilesClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+  const data = new TextEncoder().encode("vita six-role owner roundtrip\n");
+
+  // The closed set must be exactly six as exposed by agentd. roles=N is emitted
+  // from the agentd response length; enforcement is proven by the probes below.
+  const agentRoles = await readAgentRoles(agentTransport);
+  if (!agentRoles.ok || !agentRolesAreExactlySix(agentRoles.roles)) {
+    emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  let rolesOK = false;
+  try {
+    const write = await client.write(ROLES_RW_GRANT, ROLES_ROUNDTRIP_PATH, data);
+    const entries = await client.list(ROLES_RW_GRANT, ROLES_ROUNDTRIP_PATH);
+    const read = await client.read(ROLES_RW_GRANT, ROLES_ROUNDTRIP_PATH);
+    const stat = await client.stat(ROLES_RW_GRANT, ROLES_ROUNDTRIP_PATH);
+    const listed = entries.length === 1 &&
+      entries[0]?.name === ROLES_ROUNDTRIP_PATH &&
+      entries[0]?.kind === "file";
+
+    if (
+      write.size !== data.byteLength ||
+      read.size !== data.byteLength ||
+      stat.kind !== "file" ||
+      stat.size !== data.byteLength ||
+      !listed ||
+      !bytesEqual(read.data, data)
+    ) {
+      emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
+    } else {
+      rolesOK = true;
+      emit(
+        `${ROLES_MARKER}: ` +
+          `roles=${agentRoles.roles.length} ` +
+          "enforced=OK " +
+          `role=${ROLES_BOUND_ROLE} ` +
+          `grant=${ROLES_RW_GRANT} ` +
+          "op=write+read+list+stat " +
+          `bytes=${read.data.byteLength} ` +
+          "roundtrip=OK " +
+          "status=OK",
+      );
+    }
+  } catch {
+    emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
+  }
+
+  // The reject: the runtime's own owner role is forbidden on the owner-absent
+  // grant. A REAL role_forbidden from agentd's per-peer decision is required; any
+  // other outcome (success, or a different error code) is an inconsistency.
+  await emitFilesRolesRejectMarker(client, rolesOK);
+}
+
+async function emitFilesRolesRejectMarker(
+  client: ReturnType<typeof createFilesClient>,
+  rolesOK: boolean,
+): Promise<void> {
+  const data = new TextEncoder().encode("six-role owner-forbidden probe\n");
+  try {
+    await client.write(ROLES_OWNER_FORBIDDEN_GRANT, ROLES_REJECT_PATH, data);
+    // A write that SUCCEEDS where the owner role has no entry means the role gate
+    // is not enforcing — fail safe, never claim a reject that did not happen.
+    emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
+  } catch (cause) {
+    if (isFilesClientError(cause) && cause.reason === "role_forbidden") {
+      // A real, measured per-principal denial from agentd.
+      if (rolesOK) {
+        emit(`${ROLES_REJECT_MARKER}: reason=role_forbidden status=OK`);
+      } else {
+        // The success half already failed; surface the reject but mark the run
+        // failsafe so the marker chain reflects the inconsistency.
+        emit(`${ROLES_REJECT_MARKER}: reason=role_forbidden status=FAILSAFE`);
+      }
+      return;
+    }
+    const reason = isFilesClientError(cause) ? markerToken(cause.reason) : "transport_error";
+    emit(`${ROLES_REJECT_MARKER}: reason=${reason} status=FAILSAFE`);
   }
 }
 
