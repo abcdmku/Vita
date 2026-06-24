@@ -23,6 +23,29 @@ export interface SyncState {
   readonly repoHead: RepoCommit;
 }
 
+export interface PdsRepoRecord {
+  readonly collection: string;
+  readonly rkey: RecordKey;
+  readonly valueDigest: string;
+}
+
+export type PdsRepoCommitLogOp = "create-record" | "delete-record";
+
+export interface PdsRepoCommitLogEntry {
+  readonly cursor: SyncCursor;
+  readonly op: PdsRepoCommitLogOp;
+  readonly collection: string;
+  readonly rkey: RecordKey;
+}
+
+export interface PdsQueryResponse {
+  readonly exists: boolean;
+  readonly collection: string;
+  readonly records: readonly PdsRepoRecord[];
+  readonly total: SyncCursor;
+  readonly nextCursor: SyncCursor | null;
+}
+
 export interface PdsModelValidationError {
   readonly path: string;
   readonly message: string;
@@ -57,12 +80,37 @@ export type SyncStateValidationResult =
     }
   | ValidationFailure;
 
+export type PdsQueryResponseValidationResult =
+  | {
+      readonly ok: true;
+      readonly response: PdsQueryResponse;
+      readonly value: PdsQueryResponse;
+    }
+  | ValidationFailure;
+
+export type PdsCommitLogEntryValidationResult =
+  | {
+      readonly ok: true;
+      readonly entry: PdsRepoCommitLogEntry;
+      readonly value: PdsRepoCommitLogEntry;
+    }
+  | ValidationFailure;
+
 type JsonRecord = PlainJsonObject;
 type Path = readonly string[];
 
 const RECORD_REF_FIELDS = new Set(["cid", "collection", "rkey"]);
 const REPO_COMMIT_FIELDS = new Set(["cid", "prev", "rev"]);
 const SYNC_STATE_FIELDS = new Set(["cursor", "repo", "repoHead"]);
+const PDS_REPO_RECORD_FIELDS = new Set(["collection", "rkey", "valueDigest"]);
+const PDS_COMMIT_LOG_ENTRY_FIELDS = new Set(["collection", "cursor", "op", "rkey"]);
+const PDS_QUERY_RESPONSE_FIELDS = new Set([
+  "collection",
+  "exists",
+  "nextCursor",
+  "records",
+  "total",
+]);
 
 const MAX_NSID_LENGTH = 317;
 const MAX_RECORD_KEY_LENGTH = 512;
@@ -79,6 +127,7 @@ const DID_WEB_HOST_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const NSID_LABEL_PATTERN = /^[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 const RECORD_KEY_PATTERN = /^[A-Za-z0-9_~.:-]+$/u;
 const TID_PATTERN = /^[2-7a-z]{13}$/u;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 const BASE32_LOWER_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -101,6 +150,8 @@ const SECRET_FIELD_NAME_TOKENS = new Set([
   "secret",
   "signingkey",
 ]);
+
+const PDS_COMMIT_LOG_OPS = new Set(["create-record", "delete-record"]);
 
 export function validateRecordRef(input: unknown): RecordRefValidationResult {
   try {
@@ -189,6 +240,66 @@ export function validateSyncState(input: unknown): SyncStateValidationResult {
     };
   } catch {
     return reject([{ path: "", message: "Sync state validation failed." }]);
+  }
+}
+
+export function validatePdsQueryResponse(input: unknown): PdsQueryResponseValidationResult {
+  try {
+    const normalized = safeNormalize(input);
+
+    if (!normalized.ok) {
+      return reject([
+        {
+          path: "",
+          message: `Invalid untrusted input: ${normalized.reason}`,
+        },
+      ]);
+    }
+
+    const errors: PdsModelValidationError[] = [];
+    const response = parsePdsQueryResponse(normalized.value, [], errors);
+
+    if (response === undefined || errors.length > 0) {
+      return reject(errors);
+    }
+
+    return {
+      ok: true,
+      response,
+      value: response,
+    };
+  } catch {
+    return reject([{ path: "", message: "PDS query response validation failed." }]);
+  }
+}
+
+export function validatePdsCommitLogEntry(input: unknown): PdsCommitLogEntryValidationResult {
+  try {
+    const normalized = safeNormalize(input);
+
+    if (!normalized.ok) {
+      return reject([
+        {
+          path: "",
+          message: `Invalid untrusted input: ${normalized.reason}`,
+        },
+      ]);
+    }
+
+    const errors: PdsModelValidationError[] = [];
+    const entry = parsePdsCommitLogEntry(normalized.value, [], errors);
+
+    if (entry === undefined || errors.length > 0) {
+      return reject(errors);
+    }
+
+    return {
+      entry,
+      ok: true,
+      value: entry,
+    };
+  } catch {
+    return reject([{ path: "", message: "PDS commit log entry validation failed." }]);
   }
 }
 
@@ -305,6 +416,135 @@ function parseSyncState(
   });
 }
 
+function parsePdsQueryResponse(
+  value: PlainJson,
+  path: Path,
+  errors: PdsModelValidationError[],
+): PdsQueryResponse | undefined {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected PDS query response object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+
+  rejectUnknownFields(value, PDS_QUERY_RESPONSE_FIELDS, path, errors);
+  rejectSecretFieldNames(value, path, errors);
+
+  const exists = validateRequiredBoolean(value, "exists", [...path, "exists"], errors);
+  const collection = validateRequiredNsid(value, "collection", [...path, "collection"], errors);
+  const records = parseRequiredPdsRepoRecords(value, "records", [...path, "records"], errors);
+  const total = validateRequiredCursor(value, "total", [...path, "total"], errors);
+  const nextCursor = validateRequiredNullableCursor(
+    value,
+    "nextCursor",
+    [...path, "nextCursor"],
+    errors,
+  );
+
+  if (
+    errors.length > errorStart ||
+    exists === undefined ||
+    collection === undefined ||
+    records === undefined ||
+    total === undefined ||
+    nextCursor === undefined
+  ) {
+    return undefined;
+  }
+
+  if (records.length > total) {
+    addError(errors, [...path, "records"], "Record page length cannot exceed total.");
+    return undefined;
+  }
+
+  return Object.freeze({
+    collection,
+    exists,
+    nextCursor,
+    records,
+    total,
+  });
+}
+
+function parsePdsRepoRecord(
+  value: PlainJson,
+  path: Path,
+  errors: PdsModelValidationError[],
+): PdsRepoRecord | undefined {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected PDS repo record object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+
+  rejectUnknownFields(value, PDS_REPO_RECORD_FIELDS, path, errors);
+  rejectSecretFieldNames(value, path, errors);
+
+  const collection = validateRequiredNsid(value, "collection", [...path, "collection"], errors);
+  const rkey = validateRequiredRecordKey(value, "rkey", [...path, "rkey"], errors);
+  const valueDigest = validateRequiredSha256Digest(
+    value,
+    "valueDigest",
+    [...path, "valueDigest"],
+    errors,
+  );
+
+  if (
+    errors.length > errorStart ||
+    collection === undefined ||
+    rkey === undefined ||
+    valueDigest === undefined
+  ) {
+    return undefined;
+  }
+
+  return Object.freeze({
+    collection,
+    rkey,
+    valueDigest,
+  });
+}
+
+function parsePdsCommitLogEntry(
+  value: PlainJson,
+  path: Path,
+  errors: PdsModelValidationError[],
+): PdsRepoCommitLogEntry | undefined {
+  if (!isRecord(value)) {
+    addError(errors, path, "Expected PDS commit log entry object.");
+    return undefined;
+  }
+
+  const errorStart = errors.length;
+
+  rejectUnknownFields(value, PDS_COMMIT_LOG_ENTRY_FIELDS, path, errors);
+  rejectSecretFieldNames(value, path, errors);
+
+  const cursor = validateRequiredCursor(value, "cursor", [...path, "cursor"], errors);
+  const op = validateRequiredCommitLogOp(value, "op", [...path, "op"], errors);
+  const collection = validateRequiredNsid(value, "collection", [...path, "collection"], errors);
+  const rkey = validateRequiredRecordKey(value, "rkey", [...path, "rkey"], errors);
+
+  if (
+    errors.length > errorStart ||
+    cursor === undefined ||
+    op === undefined ||
+    collection === undefined ||
+    rkey === undefined
+  ) {
+    return undefined;
+  }
+
+  return Object.freeze({
+    collection,
+    cursor,
+    op,
+    rkey,
+  });
+}
+
 function parseRequiredRepoCommit(
   value: JsonRecord,
   key: string,
@@ -323,6 +563,67 @@ function parseRequiredRepoCommit(
   }
 
   return parseRepoCommitRecord(child, path, errors);
+}
+
+function parseRequiredPdsRepoRecords(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: PdsModelValidationError[],
+): readonly PdsRepoRecord[] | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(child)) {
+    addError(errors, path, "Expected PDS repo records array.");
+    return undefined;
+  }
+
+  const records: PdsRepoRecord[] = [];
+  const errorStart = errors.length;
+
+  for (let index = 0; index < child.length; index += 1) {
+    const item = child[index];
+
+    if (item === undefined) {
+      addError(errors, [...path, String(index)], "Expected PDS repo record object.");
+      continue;
+    }
+
+    const record = parsePdsRepoRecord(item, [...path, String(index)], errors);
+    if (record !== undefined) {
+      records[index] = record;
+    }
+  }
+
+  if (errors.length > errorStart) {
+    return undefined;
+  }
+
+  return Object.freeze(records);
+}
+
+function validateRequiredBoolean(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: PdsModelValidationError[],
+): boolean | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  if (typeof child !== "boolean") {
+    addError(errors, path, "Expected boolean.");
+    return undefined;
+  }
+
+  return child;
 }
 
 function validateRequiredNsid(
@@ -359,6 +660,26 @@ function validateRequiredRecordKey(
 
   if (typeof child !== "string" || !isRecordKey(child)) {
     addError(errors, path, "Expected AT Protocol record key.");
+    return undefined;
+  }
+
+  return child;
+}
+
+function validateRequiredCommitLogOp(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: PdsModelValidationError[],
+): PdsRepoCommitLogOp | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  if (typeof child !== "string" || !isPdsCommitLogOp(child)) {
+    addError(errors, path, "Expected create-record or delete-record commit log op.");
     return undefined;
   }
 
@@ -410,6 +731,50 @@ function validateCidValue(
   }
 
   return value;
+}
+
+function validateRequiredNullableCursor(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: PdsModelValidationError[],
+): SyncCursor | null | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  if (child === null) {
+    return null;
+  }
+
+  if (!isMonotonicCursor(child)) {
+    addError(errors, path, `Expected monotonic cursor integer from 0 through ${MAX_CURSOR}, or null.`);
+    return undefined;
+  }
+
+  return child;
+}
+
+function validateRequiredSha256Digest(
+  value: JsonRecord,
+  key: string,
+  path: Path,
+  errors: PdsModelValidationError[],
+): string | undefined {
+  const child = readRequiredProperty(value, key, path, errors);
+
+  if (child === undefined) {
+    return undefined;
+  }
+
+  if (typeof child !== "string" || !SHA256_HEX_PATTERN.test(child)) {
+    addError(errors, path, "Expected lowercase SHA-256 hex digest.");
+    return undefined;
+  }
+
+  return child;
 }
 
 function validateRequiredRepoRev(
@@ -588,6 +953,10 @@ function isMonotonicCursor(value: PlainJson): value is SyncCursor {
     value >= 0 &&
     value <= MAX_CURSOR
   );
+}
+
+function isPdsCommitLogOp(value: string): value is PdsRepoCommitLogOp {
+  return PDS_COMMIT_LOG_OPS.has(value);
 }
 
 function isCidV1(value: string): boolean {

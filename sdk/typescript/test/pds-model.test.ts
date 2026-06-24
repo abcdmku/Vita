@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  validatePdsCommitLogEntry,
+  validatePdsQueryResponse,
   validateRecordRef,
   validateRepoCommit,
   validateSyncState,
 } from "../src/pds-model.ts";
 import type {
+  PdsCommitLogEntryValidationResult,
   PdsModelValidationError,
+  PdsQueryResponse,
+  PdsQueryResponseValidationResult,
   RecordRef,
   RecordRefValidationResult,
   RepoCommit,
@@ -21,6 +26,8 @@ const CID_A = "bafkreigh2akiscaildcvwcuzjdfu7kdc32gndn2r2hkoqefj7yppz364gu";
 const CID_B = "bafybeigdyrzt5sfp7udm7hu76ekfya5f45mcm6qzdv6woc4f3gj3sidfwy";
 const REV_A = "3jui7kd54zh2y";
 const REV_B = "3jui7kabcde2y";
+const DIGEST_A = "1111111111111111111111111111111111111111111111111111111111111111";
+const DIGEST_B = "2222222222222222222222222222222222222222222222222222222222222222";
 
 test("valid record refs, repo commits, and sync states validate", () => {
   const recordRef = validRecordRef();
@@ -52,6 +59,105 @@ test("valid record refs, repo commits, and sync states validate", () => {
 
   assert.deepEqual(stateResult.state, state);
   assert.equal(stateResult.value, stateResult.state);
+});
+
+test("valid PDS query responses and delete commit log entries validate", () => {
+  const response = validQueryResponse();
+  const responseResult = validatePdsQueryResponse(response);
+
+  if (!responseResult.ok) {
+    assert.fail(`expected query response to validate: ${JSON.stringify(responseResult.errors)}`);
+  }
+
+  assert.deepEqual(responseResult.response, response);
+  assert.equal(responseResult.value, responseResult.response);
+
+  const deleteEntry = {
+    collection: "app.bsky.feed.post",
+    cursor: 43,
+    op: "delete-record",
+    rkey: "p1-067-post",
+  };
+  const entryResult = validatePdsCommitLogEntry(deleteEntry);
+
+  if (!entryResult.ok) {
+    assert.fail(`expected delete commit log entry to validate: ${JSON.stringify(entryResult.errors)}`);
+  }
+
+  assert.deepEqual(entryResult.entry, deleteEntry);
+  assert.equal(entryResult.value, entryResult.entry);
+});
+
+test("PDS query response rejects malformed page shapes fail-closed", () => {
+  assert.deepEqual(
+    rejectedPaths(
+      validatePdsQueryResponse({
+        ...validQueryResponse(),
+        privateKey: "ref-only",
+        unexpected: true,
+      }),
+    ),
+    ["privateKey", "unexpected"],
+  );
+
+  assert.deepEqual(
+    rejectedPaths(
+      validatePdsQueryResponse({
+        ...validQueryResponse(),
+        collection: "app..bsky/feed.post",
+      }),
+    ),
+    ["collection"],
+  );
+
+  assert.deepEqual(
+    rejectedPaths(
+      validatePdsQueryResponse({
+        ...validQueryResponse(),
+        nextCursor: Number.MAX_SAFE_INTEGER + 1,
+        total: -1,
+      }),
+    ),
+    ["nextCursor", "total"],
+  );
+
+  const malformedRecord = mutableQueryResponse();
+  malformedRecord.records[0] = {
+    collection: "app.bsky.feed.post",
+    rkey: "bad/key",
+    valueDigest: "not-a-digest",
+  };
+
+  assert.deepEqual(
+    rejectedPaths(validatePdsQueryResponse(malformedRecord)),
+    ["records/0/rkey", "records/0/valueDigest"],
+  );
+});
+
+test("PDS commit log entries reject unknown operations and malformed records", () => {
+  assert.deepEqual(
+    rejectedPaths(
+      validatePdsCommitLogEntry({
+        collection: "app.bsky.feed.post",
+        cursor: 43,
+        op: "update-record",
+        rkey: "p1-067-post",
+      }),
+    ),
+    ["op"],
+  );
+
+  assert.deepEqual(
+    rejectedPaths(
+      validatePdsCommitLogEntry({
+        collection: "app..bsky/feed.post",
+        cursor: Number.MAX_SAFE_INTEGER + 1,
+        op: "delete-record",
+        rkey: "bad/key",
+      }),
+    ),
+    ["collection", "cursor", "rkey"],
+  );
 });
 
 test("malformed record collection, rkey, and CID reject with precise paths", () => {
@@ -174,6 +280,8 @@ test("hostile untrusted input is rejected through safeNormalize without throwing
     [validateRecordRef, new Date()],
     [validateRepoCommit, new Map()],
     [validateSyncState, new Proxy({}, {})],
+    [validatePdsQueryResponse, cyclic],
+    [validatePdsCommitLogEntry, accessor],
     [validateRecordRef, methodShadowed],
     [validateSyncState, hostileIterator],
   ];
@@ -217,6 +325,27 @@ function validSyncState(): SyncState {
   };
 }
 
+function validQueryResponse(): PdsQueryResponse {
+  return {
+    collection: "app.bsky.feed.post",
+    exists: true,
+    nextCursor: 2,
+    records: [
+      {
+        collection: "app.bsky.feed.post",
+        rkey: "p1-067-post",
+        valueDigest: DIGEST_A,
+      },
+      {
+        collection: "app.bsky.feed.post",
+        rkey: "p1-081-post",
+        valueDigest: DIGEST_B,
+      },
+    ],
+    total: 3,
+  };
+}
+
 function mutableRecordRef(): MutableRecordRefInput {
   return { ...validRecordRef() };
 }
@@ -236,6 +365,18 @@ function mutableSyncState(): MutableSyncStateInput {
       prev: state.repoHead.prev,
       rev: state.repoHead.rev,
     },
+  };
+}
+
+function mutableQueryResponse(): MutableQueryResponseInput {
+  const response = validQueryResponse();
+
+  return {
+    collection: response.collection,
+    exists: response.exists,
+    nextCursor: response.nextCursor,
+    records: response.records.map((record) => ({ ...record })),
+    total: response.total,
   };
 }
 
@@ -267,6 +408,8 @@ function assertRejected(
 }
 
 type PdsValidationResult =
+  | PdsCommitLogEntryValidationResult
+  | PdsQueryResponseValidationResult
   | RecordRefValidationResult
   | RepoCommitValidationResult
   | SyncStateValidationResult;
@@ -287,4 +430,18 @@ interface MutableSyncStateInput extends Record<string, unknown> {
   cursor?: unknown;
   repo?: unknown;
   repoHead: MutableRepoCommitInput;
+}
+
+interface MutablePdsRepoRecordInput extends Record<string, unknown> {
+  collection?: unknown;
+  rkey?: unknown;
+  valueDigest?: unknown;
+}
+
+interface MutableQueryResponseInput extends Record<string, unknown> {
+  collection?: unknown;
+  exists?: unknown;
+  nextCursor?: unknown;
+  records: MutablePdsRepoRecordInput[];
+  total?: unknown;
 }

@@ -75,7 +75,13 @@ import {
 } from "./vita/export-client.ts";
 import {
   applyAndReadPdsRepoCreate,
+  createPdsRepoReadTransport,
+  deleteAndReadBackPdsRepoRecord,
   formatPdsRepoMarker,
+  formatPdsRepoDeleteMarker,
+  formatPdsRepoQueryMarkers,
+  queryPdsRepoCollection,
+  rejectInvalidPdsRepoDelete,
   rejectInvalidPdsRepoCreate,
 } from "./vita/pds-repo.ts";
 import {
@@ -2187,8 +2193,21 @@ async function emitPdsRepoMarkers(
   emit(formatPdsRepoMarker(result));
 
   if (!result.ok || result.outcome !== "committed") {
+    emit("VITA-PDS-QUERY-ERROR: status=FAILSAFE");
+    emit("VITA-PDS-DELETE-ERROR: status=FAILSAFE");
     return;
   }
+
+  const query = await queryPdsRepoCollection(createPdsRepoReadTransport(agentTransport, AGENTD_BASE_URL));
+  for (const marker of formatPdsRepoQueryMarkers(query)) {
+    emit(marker);
+  }
+
+  const deleted = await deleteAndReadBackPdsRepoRecord(client);
+  emit(formatPdsRepoDeleteMarker(deleted));
+
+  const rejectedDelete = await rejectInvalidPdsRepoDelete(client);
+  emit(formatPdsRepoDeleteMarker(rejectedDelete));
 
   const rejected = await rejectInvalidPdsRepoCreate(client);
   emit(formatPdsRepoMarker(rejected));
