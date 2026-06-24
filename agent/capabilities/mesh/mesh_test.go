@@ -51,6 +51,7 @@ func TestApplyComposesWireGuardAndDefaultDenyNftFromValidatedConfig(t *testing.T
 
 	wantOps := []string{
 		"delete-nft:inet:vita_mesh",
+		"delete-link:vita-mesh0",
 		"create-wg:vita-mesh0",
 		"set-key:vita-mesh0:51820",
 		"replace-peers:vita-mesh0:1",
@@ -59,6 +60,8 @@ func TestApplyComposesWireGuardAndDefaultDenyNftFromValidatedConfig(t *testing.T
 		"link-up:vita-mesh0",
 		"wg-device:vita-mesh0",
 		"list-nft:inet:vita_mesh",
+		"list-nft:inet:vita_mesh",
+		"wg-device:vita-mesh0",
 	}
 	if !reflect.DeepEqual(system.ops, wantOps) {
 		t.Fatalf("ops = %#v, want %#v", system.ops, wantOps)
@@ -285,6 +288,155 @@ func TestSetupFailureCleansUpAndReportsSpecificErrno(t *testing.T) {
 	}
 }
 
+func TestReadStatusReportsMeasuredHandshakeReachAndDenied(t *testing.T) {
+	ctx := context.Background()
+	keyRoot := filepath.ToSlash(filepath.Join(t.TempDir(), "keys"))
+	privateKeyRef := writeTestPrivateKey(t, keyRoot, "node.key", testKeyText(0x46))
+	system := newRecordingMeshSystem()
+	capability := newCapability(system, keyRoot)
+
+	if _, err := capability.Apply(ctx, ApplyRequest{Desired: ptrMeshConfig(validMeshConfig(privateKeyRef))}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+
+	// No peer has handshaked yet: the marker fields must stay unset (fail-closed)
+	// and the single enrolled peer must be counted denied — never synthesized OK.
+	response := readMeshStatus(t, capability, ctx)
+	if response.Status.Handshake != "" || response.Status.Reach != "" {
+		t.Fatalf("pre-handshake status leaked handshake=%q reach=%q", response.Status.Handshake, response.Status.Reach)
+	}
+	if response.Status.Denied != "peers:1" {
+		t.Fatalf("pre-handshake denied = %q, want peers:1", response.Status.Denied)
+	}
+	if response.Status.Drop != meshDropEnforced {
+		t.Fatalf("drop = %q, want enforced", response.Status.Drop)
+	}
+
+	// A real kernel handshake on the enrolled peer flips the measured fields to
+	// OK at read time (Handle re-measures live state, not the Apply snapshot).
+	system.handshakeUnix = 1_700_000_000
+	response = readMeshStatus(t, capability, ctx)
+	if response.Status.Handshake != meshHandshakeOK {
+		t.Fatalf("handshake = %q, want OK once a peer handshakes", response.Status.Handshake)
+	}
+	if response.Status.Reach != meshReachOK {
+		t.Fatalf("reach = %q, want OK once a peer handshakes under an enforced drop chain", response.Status.Reach)
+	}
+	if response.Status.Denied != "peers:0" {
+		t.Fatalf("denied = %q, want peers:0 once the only peer handshakes", response.Status.Denied)
+	}
+
+	// A live read error degrades fail-closed: no handshake/reach, every peer denied.
+	system.wgDeviceErr = errors.New("netlink read failed")
+	response = readMeshStatus(t, capability, ctx)
+	if response.Status.Handshake != "" || response.Status.Reach != "" {
+		t.Fatalf("unreadable device leaked handshake=%q reach=%q", response.Status.Handshake, response.Status.Reach)
+	}
+	if response.Status.Status != meshStatusFail || response.Status.Denied != "peers:1" {
+		t.Fatalf("unreadable device status = %#v, want fail-closed", response.Status)
+	}
+}
+
+func TestSetupFailureSurfacesTeardownLeakError(t *testing.T) {
+	ctx := context.Background()
+	keyRoot := filepath.ToSlash(filepath.Join(t.TempDir(), "keys"))
+	privateKeyRef := writeTestPrivateKey(t, keyRoot, "node.key", testKeyText(0x47))
+	system := newRecordingMeshSystem()
+	// nft apply fails after the link is up; the cleanup DeleteLink also fails,
+	// so the original error MUST NOT hide the leaked-link teardown failure.
+	system.failApplyNft = syscall.EPERM
+	system.failDeleteLink = syscall.EBUSY
+	capability := newCapability(system, keyRoot)
+
+	undo, err := capability.Apply(ctx, ApplyRequest{Desired: ptrMeshConfig(validMeshConfig(privateKeyRef))})
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	if err == nil {
+		t.Fatal("Apply returned nil error, want joined setup + teardown failure")
+	}
+	if !strings.Contains(err.Error(), "nft_apply") {
+		t.Fatalf("error %q does not surface the original nft_apply failure", err)
+	}
+	if !strings.Contains(err.Error(), "link_delete") {
+		t.Fatalf("error %q hides the leaked-link teardown failure", err)
+	}
+	// A failed setup must never leave a usable cached status behind.
+	response, herr := capability.Handle(ctx, ReadRequest{})
+	if herr != nil {
+		t.Fatalf("Handle returned error: %v", herr)
+	}
+	if readResponse, _ := response.(ReadResponse); readResponse.Applied {
+		t.Fatalf("failed setup left stale applied status: %#v", readResponse)
+	}
+}
+
+func TestReapplyOverExistingMeshIsTransactional(t *testing.T) {
+	ctx := context.Background()
+	keyRoot := filepath.ToSlash(filepath.Join(t.TempDir(), "keys"))
+	privateKeyRef := writeTestPrivateKey(t, keyRoot, "node.key", testKeyText(0x48))
+	system := newRecordingMeshSystem()
+	capability := newCapability(system, keyRoot)
+
+	if _, err := capability.Apply(ctx, ApplyRequest{Desired: ptrMeshConfig(validMeshConfig(privateKeyRef))}); err != nil {
+		t.Fatalf("first Apply returned error: %v", err)
+	}
+
+	// Re-apply over the existing mesh: the existing link is torn down BEFORE the
+	// create, so create never hits EEXIST. The delete-link must precede create-wg.
+	system.ops = nil
+	if _, err := capability.Apply(ctx, ApplyRequest{Desired: ptrMeshConfig(validMeshConfig(privateKeyRef))}); err != nil {
+		t.Fatalf("re-apply returned error: %v", err)
+	}
+	deleteIdx, createIdx := -1, -1
+	for i, op := range system.ops {
+		if op == "delete-link:vita-mesh0" && deleteIdx == -1 {
+			deleteIdx = i
+		}
+		if op == "create-wg:vita-mesh0" && createIdx == -1 {
+			createIdx = i
+		}
+	}
+	if deleteIdx == -1 || createIdx == -1 || deleteIdx > createIdx {
+		t.Fatalf("re-apply ops = %#v, want delete-link before create-wg (no destructive-then-fail)", system.ops)
+	}
+
+	// Now force create to fail EEXIST on a re-apply: the prior mesh has been torn
+	// down, the partial new mesh is cleaned up, and lastStatus must not be stale.
+	system.ops = nil
+	system.failCreateLink = syscall.EEXIST
+	undo, err := capability.Apply(ctx, ApplyRequest{Desired: ptrMeshConfig(validMeshConfig(privateKeyRef))})
+	if undo != nil || err == nil {
+		t.Fatalf("re-apply create failure should return nil undo + error, got undo=%v err=%v", undo, err)
+	}
+	if meshFailureReason(err) != "mesh_link_create_EEXIST" {
+		t.Fatalf("meshFailureReason = %q, want mesh_link_create_EEXIST", meshFailureReason(err))
+	}
+	response, herr := capability.Handle(ctx, ReadRequest{})
+	if herr != nil {
+		t.Fatalf("Handle returned error: %v", herr)
+	}
+	if readResponse, _ := response.(ReadResponse); readResponse.Applied {
+		t.Fatalf("failed re-apply left stale applied status: %#v", readResponse)
+	}
+}
+
+func readMeshStatus(t *testing.T, capability *Capability, ctx context.Context) ReadResponse {
+	t.Helper()
+	response, err := capability.Handle(ctx, ReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	readResponse, ok := response.(ReadResponse)
+	if !ok {
+		t.Fatalf("Handle returned %T, want ReadResponse", response)
+	}
+	if !readResponse.Applied || readResponse.Status == nil {
+		t.Fatalf("read response = %#v, want applied status", readResponse)
+	}
+	return readResponse
+}
+
 func TestVerifyMeshNftTableRejectsOpenOrIncompleteRulesets(t *testing.T) {
 	keyRoot := filepath.ToSlash(filepath.Join(t.TempDir(), "keys"))
 	privateKeyRef := filepath.ToSlash(filepath.Join(keyRoot, "node.key"))
@@ -376,14 +528,19 @@ func containsOp(ops []string, want string) bool {
 }
 
 type recordingMeshSystem struct {
-	ops          []string
-	privateKey   []byte
-	listenPort   int
-	peers        []*sysdeps.WireGuardPeer
-	ruleset      []byte
-	linkCreated  bool
-	nftApplied   bool
-	failApplyNft error
+	ops            []string
+	privateKey     []byte
+	listenPort     int
+	peers          []*sysdeps.WireGuardPeer
+	ruleset        []byte
+	linkCreated    bool
+	nftApplied     bool
+	failApplyNft   error
+	failCreateLink error
+	failDeleteLink error
+	failDeleteNft  error
+	handshakeUnix  int64
+	wgDeviceErr    error
 }
 
 func newRecordingMeshSystem() *recordingMeshSystem {
@@ -392,6 +549,9 @@ func newRecordingMeshSystem() *recordingMeshSystem {
 
 func (s *recordingMeshSystem) CreateWireGuardLink(name string) error {
 	s.ops = append(s.ops, "create-wg:"+name)
+	if s.failCreateLink != nil {
+		return s.failCreateLink
+	}
 	s.linkCreated = true
 	return nil
 }
@@ -428,6 +588,12 @@ func (s *recordingMeshSystem) SetLinkUp(name string) error {
 
 func (s *recordingMeshSystem) DeleteLink(name string) error {
 	s.ops = append(s.ops, "delete-link:"+name)
+	// Only fail when there is actually a link to delete, so the idempotent
+	// pre-clean of a not-yet-present link still succeeds while the cleanup of a
+	// real (created) link can be made to fail — modelling a genuine leak.
+	if s.failDeleteLink != nil && s.linkCreated {
+		return s.failDeleteLink
+	}
 	s.linkCreated = false
 	return nil
 }
@@ -449,12 +615,18 @@ func (s *recordingMeshSystem) ListNftTable(family string, table string) ([]byte,
 
 func (s *recordingMeshSystem) DeleteNftTable(family string, table string) error {
 	s.ops = append(s.ops, "delete-nft:"+family+":"+table)
+	if s.failDeleteNft != nil {
+		return s.failDeleteNft
+	}
 	s.nftApplied = false
 	return nil
 }
 
 func (s *recordingMeshSystem) WireGuardDevice(name string) (sysdeps.WireGuardDeviceStatus, error) {
 	s.ops = append(s.ops, "wg-device:"+name)
+	if s.wgDeviceErr != nil {
+		return sysdeps.WireGuardDeviceStatus{}, s.wgDeviceErr
+	}
 	status := sysdeps.WireGuardDeviceStatus{
 		Name:       name,
 		ListenPort: s.listenPort,
@@ -465,8 +637,9 @@ func (s *recordingMeshSystem) WireGuardDevice(name string) (sysdeps.WireGuardDev
 			continue
 		}
 		status.Peers[i] = sysdeps.WireGuardPeerStatus{
-			PublicKey:  cloneBytes(peer.PublicKey),
-			AllowedIPs: cloneStrings(peer.AllowedIPs),
+			PublicKey:         cloneBytes(peer.PublicKey),
+			AllowedIPs:        cloneStrings(peer.AllowedIPs),
+			LastHandshakeUnix: s.handshakeUnix,
 		}
 	}
 	return status, nil

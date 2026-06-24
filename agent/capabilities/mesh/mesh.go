@@ -118,9 +118,10 @@ type Capability struct {
 	system  meshSystem
 	keyRoot string
 
-	mu         sync.Mutex
-	lastConfig *MeshConfig
-	lastStatus *MeshStatus
+	mu             sync.Mutex
+	lastConfig     *MeshConfig
+	lastNormalized *normalizedMeshConfig
+	lastStatus     *MeshStatus
 }
 
 type meshSystem interface {
@@ -231,13 +232,29 @@ func (c *Capability) Handle(ctx context.Context, req capabilities.TypedRequest) 
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	config := cloneMeshConfig(c.lastConfig)
+	normalized := c.lastNormalized
+	applied := c.lastStatus != nil
+	c.mu.Unlock()
 
-	if c.lastStatus == nil {
+	if !applied || normalized == nil {
 		return ReadResponse{Applied: false}, nil
 	}
-	config := cloneMeshConfig(c.lastConfig)
-	status := *c.lastStatus
+
+	// Re-measure live mesh state at read time so the marker reflects the
+	// CURRENT measured handshake/reach/denied (a peer typically completes its
+	// handshake after Apply, so a cached Apply-time snapshot would never show a
+	// real handshake). measureStatus reads only live kernel + nft state; it
+	// never synthesizes the verification fields.
+	status := c.measureStatus(*normalized)
+
+	c.mu.Lock()
+	if c.lastStatus != nil && c.lastNormalized != nil && c.lastNormalized.InterfaceName == normalized.InterfaceName {
+		stored := status
+		c.lastStatus = &stored
+	}
+	c.mu.Unlock()
+
 	return ReadResponse{
 		Applied: true,
 		Config:  config,
@@ -267,16 +284,20 @@ func (c *Capability) Apply(ctx context.Context, req capabilities.TypedRequest) (
 	}
 
 	if err := c.compose(ctx, normalized, privateKey); err != nil {
-		_ = c.teardown(context.Background(), normalized)
-		return nil, err
+		// Fail-closed / no-leak: a setup error must never leave a half-changed
+		// live system. Tear down whatever the partial compose created and
+		// surface any teardown failure joined with the original cause so a
+		// leaked link/rule can never hide behind the first error. A re-apply
+		// also tears down any prior good mesh up front (see compose), so on
+		// failure the only safe states are "fully torn down" or "prior intact";
+		// either way the cached status no longer describes a live mesh, so it
+		// is cleared to avoid reporting a stale config.
+		teardownErr := c.teardown(context.Background(), normalized)
+		c.clearLast(normalized.InterfaceName)
+		return nil, errors.Join(err, teardownErr)
 	}
 
-	c.setLast(*applyReq.Desired, MeshStatus{
-		Interface: normalized.InterfaceName,
-		Peers:     len(normalized.Peers),
-		Drop:      meshDropEnforced,
-		Status:    meshStatusOK,
-	})
+	c.setLast(*applyReq.Desired, normalized, c.measureStatus(normalized))
 
 	return undoMesh{capability: c, config: normalized}, nil
 }
@@ -285,8 +306,19 @@ func (c *Capability) compose(ctx context.Context, config normalizedMeshConfig, p
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Transactional re-apply: a mesh always uses the same fixed interface name
+	// and nft table, so applying over an existing mesh is a full replace. Tear
+	// down BOTH the existing link and the existing nft table up front so the
+	// rebuild starts from a clean slate. This removes the previous
+	// destructive-then-fail sequence where the nft table was deleted first and
+	// CreateWireGuardLink then failed EEXIST against the still-present old link
+	// (an error outcome with the live system already half-changed). Missing
+	// objects are not an error (first apply, or already gone).
 	if err := c.system.DeleteNftTable(config.NftFamily, config.NftTable); err != nil && !isMissingNetworkObject(err) {
 		return stepError("nft_delete", err)
+	}
+	if err := c.system.DeleteLink(config.InterfaceName); err != nil && !isMissingNetworkObject(err) {
+		return stepError("link_reset", err)
 	}
 	if err := c.system.CreateWireGuardLink(config.InterfaceName); err != nil {
 		return stepError("link_create", err)
@@ -327,6 +359,87 @@ func (c *Capability) verify(config normalizedMeshConfig) error {
 	return verifyMeshNftTable(config, string(table))
 }
 
+// measureStatus reports the mesh status from REAL measured state only. The
+// verification fields are never synthesized:
+//   - Handshake: derived from the kernel WireGuard device — set to OK only when
+//     at least one enrolled peer has a non-zero latest handshake (a real
+//     WireGuard handshake actually completed, i.e. an enrolled peer connected).
+//   - Reach: a reachability determination gated on a measured handshake AND the
+//     live nft table actually carrying the per-peer declared-service ACCEPT
+//     path (verifyMeshNftTable against the table read back from the kernel), so
+//     a handshaked peer really can reach a declared service through the
+//     default-deny chain.
+//   - Denied: the measured count of enrolled peers that have NOT completed a
+//     handshake (the denied / not-yet-reachable peer count) under an enforced
+//     default-drop chain. Always present (never undefined) when a mesh is up.
+//   - Drop: enforced only when the live nft chain is policy-drop with the
+//     declared per-peer accepts and nothing wide-open.
+//
+// Any read error or a failed verification degrades the corresponding field
+// fail-closed (left empty / FAIL) rather than reporting a value that was not
+// measured.
+func (c *Capability) measureStatus(config normalizedMeshConfig) MeshStatus {
+	status := MeshStatus{
+		Interface: config.InterfaceName,
+		Peers:     len(config.Peers),
+		Status:    meshStatusOK,
+	}
+
+	dropEnforced := false
+	if table, err := c.system.ListNftTable(config.NftFamily, config.NftTable); err == nil {
+		if verifyMeshNftTable(config, string(table)) == nil {
+			dropEnforced = true
+			status.Drop = meshDropEnforced
+		}
+	}
+
+	device, err := c.system.WireGuardDevice(config.InterfaceName)
+	if err != nil {
+		// Cannot read the live device: report fail-closed (no handshake/reach,
+		// every enrolled peer counted denied) rather than synthesizing OK.
+		status.Denied = formatDeniedPeers(len(config.Peers))
+		status.Status = meshStatusFail
+		return status
+	}
+
+	enrolled := make(map[string]struct{}, len(config.Peers))
+	for _, peer := range config.Peers {
+		enrolled[peer.PublicKey] = struct{}{}
+	}
+	handshaked := 0
+	for _, peer := range device.Peers {
+		if len(peer.PublicKey) != meshPublicKeyBytes {
+			continue
+		}
+		key := base64.StdEncoding.EncodeToString(peer.PublicKey)
+		if _, ok := enrolled[key]; !ok {
+			continue
+		}
+		if peer.LastHandshakeUnix > 0 {
+			handshaked++
+		}
+	}
+
+	denied := len(config.Peers) - handshaked
+	if denied < 0 {
+		denied = 0
+	}
+	status.Denied = formatDeniedPeers(denied)
+
+	if handshaked > 0 {
+		status.Handshake = meshHandshakeOK
+		if dropEnforced {
+			status.Reach = meshReachOK
+		}
+	}
+
+	return status
+}
+
+func formatDeniedPeers(count int) string {
+	return "peers:" + strconv.Itoa(count)
+}
+
 func (c *Capability) teardown(ctx context.Context, config normalizedMeshConfig) error {
 	var teardownErr error
 	if err := ctx.Err(); err != nil {
@@ -341,18 +454,21 @@ func (c *Capability) teardown(ctx context.Context, config normalizedMeshConfig) 
 	return teardownErr
 }
 
-func (c *Capability) setLast(config MeshConfig, status MeshStatus) {
+func (c *Capability) setLast(config MeshConfig, normalized normalizedMeshConfig, status MeshStatus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.lastConfig = cloneMeshConfig(&config)
+	normalizedCopy := normalized
+	c.lastNormalized = &normalizedCopy
 	c.lastStatus = &status
 }
 
 func (c *Capability) clearLast(interfaceName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.lastStatus != nil && c.lastStatus.Interface == interfaceName {
+	if c.lastNormalized != nil && c.lastNormalized.InterfaceName == interfaceName {
 		c.lastConfig = nil
+		c.lastNormalized = nil
 		c.lastStatus = nil
 	}
 }
