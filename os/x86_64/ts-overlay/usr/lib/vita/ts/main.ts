@@ -25,6 +25,7 @@ import {
   readCapsuleRegistryPreview,
 } from "./vita/capsule-preview.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
+import { validateStorageHealthState } from "./vita/storage-health-model.ts";
 import { formatPdsSyncStateReadMarker, readPdsSyncStateSummary } from "./vita/pds-read.ts";
 import {
   applyPdsSyncStateWrite,
@@ -100,6 +101,7 @@ import type {
   ControllerShellStatus,
 } from "./vita/controller-shell.ts";
 import type { TransactionPlan } from "./vita/transaction-plan-diff.ts";
+import type { StorageHealthState, StorageMountHealth } from "./vita/storage-health-model.ts";
 
 const TS_MARKER = "VITA-TS";
 const EVAL_MARKER = "VITA-EVAL";
@@ -150,6 +152,8 @@ const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
+const STORAGE_HEALTH_MARKER = "VITA-STORAGE-HEALTH";
+const STORAGE_HEALTH_ERROR_MARKER = "VITA-STORAGE-HEALTH-ERROR";
 const FILES_MARKER = "VITA-FILES";
 const FILES_REJECT_MARKER = "VITA-FILES-REJECT";
 const FILES_ERROR_MARKER = "VITA-FILES-ERROR";
@@ -765,6 +769,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatCapsuleLifecycleErrorMarker("agentd_connect_failed"));
+    emit(`${STORAGE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${EXPORT_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -783,6 +788,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
     await emitDriftMarkers(client);
+    emit(formatStorageHealthMarker(await readStorageHealthState(agentTransport)));
     await emitApplyMarkers(state.state.hostname, agentTransport);
     await emitControllerShellMarkers(state.state.hostname, client, agentTransport);
     if (await emitCapsulePreviewMarker(client)) {
@@ -817,6 +823,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatCapsuleLifecycleErrorMarker("state_unreadable"));
+    emit(`${STORAGE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
 
   await emitPdsReadMarker(client);
@@ -2095,6 +2102,21 @@ interface CapsuleOCILimitsStatus {
   readonly status: "OK" | "FAIL";
 }
 
+type StorageHealthReadResult =
+  | {
+      readonly ok: true;
+      readonly state: {
+        readonly mounts: number;
+        readonly arch: string;
+        readonly cores: number;
+        readonly memBytes: number;
+        readonly rootUsedPct: number;
+      };
+    }
+  | {
+      readonly ok: false;
+    };
+
 type CapsuleHealthReadResult =
   | {
       readonly ok: true;
@@ -2563,6 +2585,88 @@ function capsuleOCIMessageReason(messageText: string, fallback: string): string 
   }
 
   return fallback;
+}
+
+async function readStorageHealthState(
+  agentTransport: AgentTransport,
+): Promise<StorageHealthReadResult> {
+  try {
+    const response = await agentTransport(new URL("/state", AGENTD_BASE_URL).toString(), {
+      headers: STATE_JSON_HEADERS,
+      method: "GET",
+    });
+
+    if (!response.ok) {
+      return { ok: false };
+    }
+
+    const result = validateStorageHealthState(parseJsonOrText(await response.text()));
+    if (!result.ok) {
+      return { ok: false };
+    }
+
+    return summarizeStorageHealthState(result.state);
+  } catch {
+    return { ok: false };
+  }
+}
+
+function summarizeStorageHealthState(state: StorageHealthState): StorageHealthReadResult {
+  const root = rootMount(state.storageHealth);
+
+  if (
+    root === undefined ||
+    state.storageHealth.length === 0 ||
+    state.hardwareInventory.arch.length === 0 ||
+    state.hardwareInventory.cpuCores < 1 ||
+    state.hardwareInventory.memTotalBytes <= 0 ||
+    root.totalBytes <= 0 ||
+    root.device.length === 0 ||
+    root.fsType.length === 0 ||
+    root.usedPercent < 0 ||
+    root.usedPercent > 100
+  ) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    state: {
+      arch: state.hardwareInventory.arch,
+      cores: state.hardwareInventory.cpuCores,
+      memBytes: state.hardwareInventory.memTotalBytes,
+      mounts: state.storageHealth.length,
+      rootUsedPct: root.usedPercent,
+    },
+  };
+}
+
+function rootMount(mounts: readonly StorageMountHealth[]): StorageMountHealth | undefined {
+  for (let index = 0; index < mounts.length; index += 1) {
+    const mount = mounts[index];
+
+    if (mount !== undefined && mount.mountPoint === "/") {
+      return mount;
+    }
+  }
+
+  return undefined;
+}
+
+function formatStorageHealthMarker(result: StorageHealthReadResult): string {
+  if (!result.ok) {
+    return `${STORAGE_HEALTH_ERROR_MARKER}: status=FAILSAFE`;
+  }
+
+  return (
+    `${STORAGE_HEALTH_MARKER}: ` +
+    `mounts=${result.state.mounts} ` +
+    `arch=${result.state.arch} ` +
+    `cores=${result.state.cores} ` +
+    `memBytes=${result.state.memBytes} ` +
+    `rootUsedPct=${result.state.rootUsedPct} ` +
+    "status=OK"
+  );
 }
 
 async function readCapsuleHealthState(

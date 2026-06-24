@@ -36,6 +36,7 @@ import (
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
+	"github.com/vita/agent/internal/storagehealth"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -456,6 +457,96 @@ func TestStateCapsuleWorkloadsEmptyWhenNoSource(t *testing.T) {
 	}
 	if len(got.CapsuleWorkloads) != 0 {
 		t.Fatalf("capsuleWorkloads = %#v, want empty", got.CapsuleWorkloads)
+	}
+}
+
+func TestStateIncludesStorageHealthAndHardwareInventory(t *testing.T) {
+	report := storagehealth.Report{
+		StorageHealth: []storagehealth.MountHealth{
+			{
+				Device:         "/dev/nvme0n1p2",
+				MountPoint:     "/",
+				FSType:         "ext4",
+				TotalBytes:     4096000,
+				UsedBytes:      1228800,
+				AvailableBytes: 2662400,
+				UsedPercent:    30,
+				NVMe:           true,
+				Status:         storagehealth.StatusOK,
+			},
+		},
+		HardwareInventory: storagehealth.HardwareInventory{
+			Arch:          "x86_64",
+			CPUCores:      8,
+			CPUModel:      "fixture cpu",
+			MemTotalBytes: 34359738368,
+			Disks: []storagehealth.DiskInventory{
+				{Name: "nvme0n1", SizeBytes: 4294967296, NVMe: true},
+			},
+		},
+	}
+	handler := mustHandler(t, handlerConfig{
+		registry: mustRegistry(t),
+		storageHealth: func(context.Context) (storagehealth.Report, error) {
+			return report, nil
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got stateResponse
+	decodeResponse(t, response, &got)
+	if !reflect.DeepEqual(got.StorageHealth, report.StorageHealth) {
+		t.Fatalf("storageHealth = %#v, want %#v; body=%s", got.StorageHealth, report.StorageHealth, response.Body.String())
+	}
+	if !reflect.DeepEqual(got.HardwareInventory, report.HardwareInventory) {
+		t.Fatalf("hardwareInventory = %#v, want %#v; body=%s", got.HardwareInventory, report.HardwareInventory, response.Body.String())
+	}
+}
+
+func TestStateStorageHealthErrorIsInlineAndFailSoft(t *testing.T) {
+	registry := mustRegistry(t, &stateReadCapability{
+		name:     "test.good",
+		response: stateReadResponse{Name: "test.good", Ordinal: 1},
+	})
+	handler := mustHandler(t, handlerConfig{
+		registry: registry,
+		readRequests: map[string]ReadRequestFactory{
+			"test.good": func() capabilities.TypedRequest { return mockReadRequest{} },
+		},
+		storageHealth: func(context.Context) (storagehealth.Report, error) {
+			return storagehealth.Report{}, errors.New("open /secret/private.json: token denied")
+		},
+	})
+
+	response := perform(handler, http.MethodGet, "/state", "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var got struct {
+		Capabilities      map[string]json.RawMessage `json:"capabilities"`
+		CapsuleWorkloads  json.RawMessage            `json:"capsuleWorkloads"`
+		StorageHealth     stateCapabilityError       `json:"storageHealth"`
+		HardwareInventory stateCapabilityError       `json:"hardwareInventory"`
+	}
+	decodeResponse(t, response, &got)
+	if _, ok := got.Capabilities["test.good"]; !ok {
+		t.Fatalf("state missing good capability; body=%s", response.Body.String())
+	}
+	if got.StorageHealth.Error != "storage_health_unavailable" {
+		t.Fatalf("storageHealth error = %q, want storage_health_unavailable", got.StorageHealth.Error)
+	}
+	if got.HardwareInventory.Error != "storage_health_unavailable" {
+		t.Fatalf("hardwareInventory error = %q, want storage_health_unavailable", got.HardwareInventory.Error)
+	}
+	for _, disallowed := range []string{"secret", "token", "private"} {
+		if strings.Contains(strings.ToLower(response.Body.String()), disallowed) {
+			t.Fatalf("state response leaked %q: %s", disallowed, response.Body.String())
+		}
 	}
 }
 
@@ -1614,6 +1705,7 @@ type handlerConfig struct {
 	filesGrants      []filecap.Grant
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
 func mustHandler(t *testing.T, config handlerConfig) http.Handler {
@@ -1628,6 +1720,17 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 			},
 		}}
 	}
+	storageHealthSnapshot := config.storageHealth
+	if storageHealthSnapshot == nil {
+		storageHealthSnapshot = func(context.Context) (storagehealth.Report, error) {
+			return storagehealth.Report{
+				StorageHealth: []storagehealth.MountHealth{},
+				HardwareInventory: storagehealth.HardwareInventory{
+					Disks: []storagehealth.DiskInventory{},
+				},
+			}, nil
+		}
+	}
 
 	handler, err := NewHandler(Config{
 		Version:          "test-version",
@@ -1641,6 +1744,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		FilesGrants:      config.filesGrants,
 		AuditStore:       config.auditStore,
 		CapsuleWorkloads: config.capsuleWorkloads,
+		StorageHealth:    storageHealthSnapshot,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
 		},
@@ -1722,8 +1826,10 @@ type mockReadRequest struct{}
 func (mockReadRequest) CapabilityRequest() {}
 
 type stateResponse struct {
-	Capabilities     map[string]json.RawMessage      `json:"capabilities"`
-	CapsuleWorkloads []capsuleruntime.WorkloadStatus `json:"capsuleWorkloads"`
+	Capabilities      map[string]json.RawMessage      `json:"capabilities"`
+	CapsuleWorkloads  []capsuleruntime.WorkloadStatus `json:"capsuleWorkloads"`
+	StorageHealth     []storagehealth.MountHealth     `json:"storageHealth"`
+	HardwareInventory storagehealth.HardwareInventory `json:"hardwareInventory"`
 }
 
 type stateReadResponse struct {
