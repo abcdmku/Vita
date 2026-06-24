@@ -920,3 +920,183 @@ func (u archiveCallUndo) Undo(context.Context) error {
 	}
 	return nil
 }
+
+// TestLifecycleRollbackRestoreFailureLeavesCapsuleStopped proves DEFECT 1's
+// fail-closed discipline: when the backup Restore FAILS during a rollback, the
+// controller must NOT restart the prior version against unrestored (new) state.
+// It leaves the capsule STOPPED, returns a capsule_lifecycle_rollback_failed
+// error, and records a failed status — never a mixed old-binary/new-state
+// running capsule.
+func TestLifecycleRollbackRestoreFailureLeavesCapsuleStopped(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	next := lifecycleEntry("2.0.0")
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+	archive := &recordingLifecycleArchive{
+		calls:      &calls,
+		backupID:   lifecycleBackupID,
+		restoreErr: errors.New("restore failed"),
+	}
+	// Keep the NEW version measured-unhealthy so the controller takes the
+	// rollback path, where the injected restore failure must fail closed.
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     next.ID,
+			Unit:   capsuleUnitName(next.ID),
+			Status: capsuleruntime.StatusDown,
+			Health: capsuleruntime.StatusUnhealthy,
+		}}
+	})
+	calls = nil
+	launcher.calls = &calls
+	archive.calls = &calls
+
+	undo, err := lifecycle.Apply(ctx, lifecycleUpdateRequest(next, lifecycleManifest(t, next, lifecyclePolicyFail)))
+	if err == nil {
+		t.Fatal("Apply returned nil error, want rollback failure")
+	}
+	if undo != nil {
+		t.Fatalf("Apply returned undo %#v, want nil on rejected rollback", undo)
+	}
+	var opErr *LifecycleOperationError
+	if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_rollback_failed" {
+		t.Fatalf("Apply error = %T %v code=%q, want capsule_lifecycle_rollback_failed", err, err, opErr.ApplyErrorCode())
+	}
+
+	// The new unit was stopped, the restore was attempted and FAILED, and the
+	// prior version was NOT restarted: no trailing start: after backup.restore.
+	wantOrder := []string{
+		"backup.create",
+		"backup.verify",
+		"stop:" + capsuleUnitName(entry.ID),
+		"reset:" + capsuleUnitName(entry.ID),
+		"start:" + capsuleUnitName(entry.ID),
+		"stop:" + capsuleUnitName(entry.ID),
+		"reset:" + capsuleUnitName(entry.ID),
+		"backup.restore",
+	}
+	if !reflect.DeepEqual(calls, wantOrder) {
+		t.Fatalf("call order = %#v, want stopped with no prior restart %#v", calls, wantOrder)
+	}
+	// startManifest is invoked once for the seeded prior, once for the new
+	// version, and MUST NOT be invoked again to restart the prior on unrestored
+	// state. The seed start happens before calls is reset, so we count launcher
+	// starts directly: one new-version start, and no rollback restart.
+	if got := len(launcher.starts); got != 2 {
+		t.Fatalf("launcher starts = %d, want exactly 2 (seed + new version, no mixed-state prior restart)", got)
+	}
+	last := lifecycle.cloneLast()
+	if last == nil || last.RollbackOnUnhealthyOK || last.Status != lifecycleStatusFailed {
+		t.Fatalf("last lifecycle status = %#v, want rollback-failed fail-closed status", last)
+	}
+}
+
+// TestLifecycleUpdateBackupIDFromCreateResultNotSharedLast proves DEFECT 2: the
+// backup id used for verify/restore comes from the Create RESULT, not from any
+// mutable shared last-state. The fake mutates a shared `last` id on every call
+// (modeling a concurrent agentd request changing backup.archive's `.last`
+// between create and a later read); the lifecycle must still verify and restore
+// the SAME id the create result produced.
+func TestLifecycleUpdateBackupIDFromCreateResultNotSharedLast(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	next := lifecycleEntry("2.0.0")
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+	const createID = "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	const racingID = "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+	archive := &racingLifecycleArchive{
+		calls:    &calls,
+		createID: createID,
+		// Each call flips the shared last id to the racing value, as a
+		// concurrent request would. A racy implementation reading `.last`
+		// after create would pick this up instead of the create-result id.
+		racingID: racingID,
+	}
+	// Force the unhealthy rollback path so Verify AND Restore both run and we
+	// can assert both used the create-result id.
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     next.ID,
+			Unit:   capsuleUnitName(next.ID),
+			Status: capsuleruntime.StatusDown,
+			Health: capsuleruntime.StatusUnhealthy,
+		}}
+	})
+	calls = nil
+	launcher.calls = &calls
+	archive.calls = &calls
+
+	_, err := lifecycle.Apply(ctx, lifecycleUpdateRequest(next, lifecycleManifest(t, next, lifecyclePolicyFail)))
+	if err == nil {
+		t.Fatal("Apply returned nil error, want unhealthy rejection")
+	}
+	var opErr *LifecycleOperationError
+	if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_unhealthy" {
+		t.Fatalf("Apply error = %T %v, want capsule_lifecycle_unhealthy", err, err)
+	}
+
+	if len(archive.verifyIDs) != 1 || archive.verifyIDs[0] != createID {
+		t.Fatalf("verify backup ids = %#v, want [%s] from create result (not racy last %s)", archive.verifyIDs, createID, racingID)
+	}
+	if len(archive.restoreIDs) != 1 || archive.restoreIDs[0] != createID {
+		t.Fatalf("restore backup ids = %#v, want [%s] from create result (not racy last %s)", archive.restoreIDs, createID, racingID)
+	}
+	last := lifecycle.cloneLast()
+	if last == nil || last.BackupID != createID || last.RestoredBackupID != createID {
+		t.Fatalf("last lifecycle status = %#v, want backup id %s from create result", last, createID)
+	}
+}
+
+// racingLifecycleArchive is a lifecycleArchive whose every method mutates a
+// shared last id, modeling concurrent agentd requests changing backup.archive's
+// `.last`. Its Create returns createID via the RESULT channel; Verify/Restore
+// record the request id they were called with so the test can assert the
+// create-result id (not the racing shared last id) was threaded forward.
+type racingLifecycleArchive struct {
+	calls      *[]string
+	createID   string
+	racingID   string
+	lastID     string
+	verifyIDs  []string
+	restoreIDs []string
+}
+
+func (a *racingLifecycleArchive) Create(ctx context.Context, req backup.ArchiveCreateRequest) (backup.ArchiveCreateResult, transaction.Undo, error) {
+	if err := ctx.Err(); err != nil {
+		return backup.ArchiveCreateResult{}, nil, err
+	}
+	if a.calls != nil {
+		*a.calls = append(*a.calls, "backup.create")
+	}
+	// A concurrent request mutates the shared last id right after create.
+	a.lastID = a.racingID
+	return backup.ArchiveCreateResult{BackupID: a.createID, Files: 1}, archiveCallUndo{calls: a.calls}, nil
+}
+
+func (a *racingLifecycleArchive) Verify(ctx context.Context, req backup.ArchiveVerifyRequest) (backup.ArchiveVerifyResult, error) {
+	if err := ctx.Err(); err != nil {
+		return backup.ArchiveVerifyResult{}, err
+	}
+	if a.calls != nil {
+		*a.calls = append(*a.calls, "backup.verify")
+	}
+	a.verifyIDs = append(a.verifyIDs, req.BackupID)
+	a.lastID = a.racingID
+	return backup.ArchiveVerifyResult{OK: true, BackupID: req.BackupID, Files: 1}, nil
+}
+
+func (a *racingLifecycleArchive) Restore(ctx context.Context, req backup.ArchiveRestoreRequest) (backup.ArchiveRestoreResult, transaction.Undo, error) {
+	if err := ctx.Err(); err != nil {
+		return backup.ArchiveRestoreResult{}, nil, err
+	}
+	if a.calls != nil {
+		*a.calls = append(*a.calls, "backup.restore")
+	}
+	a.restoreIDs = append(a.restoreIDs, req.BackupID)
+	a.lastID = a.racingID
+	return backup.ArchiveRestoreResult{BackupID: req.BackupID, Files: 1, Restored: true}, archiveCallUndo{calls: a.calls}, nil
+}

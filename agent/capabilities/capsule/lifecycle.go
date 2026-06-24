@@ -223,11 +223,6 @@ type lifecycleArchive interface {
 	Restore(context.Context, backup.ArchiveRestoreRequest) (backup.ArchiveRestoreResult, transaction.Undo, error)
 }
 
-type archiveApplyHandle interface {
-	Apply(context.Context, capabilities.TypedRequest) (transaction.Undo, error)
-	Handle(context.Context, capabilities.TypedRequest) (capabilities.TypedResponse, error)
-}
-
 type LifecycleInvalidRequestError struct {
 	Reason string
 	Code   string
@@ -270,8 +265,15 @@ func (e *LifecycleOperationError) ApplyErrorCode() string {
 	return e.Code
 }
 
-func NewLifecycleCapability(execute *ExecuteCapability, archive archiveApplyHandle) *LifecycleCapability {
-	return newLifecycleCapability(execute, archiveCapabilityController{capability: archive}, nil)
+// NewLifecycleCapability wires the lifecycle controller to the backup archive.
+// It takes the archive's typed Create/Verify/Restore surface directly so the
+// backup id is recovered from the Create RESULT (a non-racy result channel) and
+// never via the archive's mutable shared `.last` status — concurrent agentd
+// requests can change `.last` between create and read, which would let lifecycle
+// verify/restore the WRONG backup. *backup.ArchiveCapability already satisfies
+// lifecycleArchive, so callers pass it directly.
+func NewLifecycleCapability(execute *ExecuteCapability, archive lifecycleArchive) *LifecycleCapability {
+	return newLifecycleCapability(execute, archive, nil)
 }
 
 func newLifecycleCapability(execute *ExecuteCapability, archive lifecycleArchive, healthSnapshot func() []capsuleruntime.WorkloadStatus) *LifecycleCapability {
@@ -404,10 +406,22 @@ func (c *LifecycleCapability) applyUpdate(ctx context.Context, desired Lifecycle
 	newUndo, newStatus, err := c.startManifest(ctx, targetEntry, targetManifest)
 	if err != nil {
 		restoreErr := c.restoreAndRestart(ctx, backupPlan, createResult.BackupID, current)
-		return nil, lifecycleOpError("capsule_lifecycle_start_failed", errors.Join(err, restoreErr))
+		// If the rollback itself failed, surface rollback_failed loudly: the
+		// capsule was left stopped (fail-closed), never a mixed old-binary/new-state
+		// running capsule.
+		code := lifecycleRollbackCode("capsule_lifecycle_start_failed", restoreErr)
+		return nil, lifecycleOpError(code, errors.Join(err, restoreErr))
 	}
 	if err := c.waitHealthy(ctx, targetManifest.ID, newStatus.Unit, newChecks); err != nil {
 		rollbackErr := errors.Join(newUndo.Undo(ctx), c.restoreAndRestart(ctx, backupPlan, createResult.BackupID, current))
+		rollbackOK := rollbackErr == nil
+		// Fail closed: if the rollback itself failed the capsule was left stopped
+		// (never a mixed old-binary/new-state running capsule); record a failed
+		// status rather than a misleading rollback-OK summary.
+		status := lifecycleStatusOK
+		if !rollbackOK {
+			status = lifecycleStatusFailed
+		}
 		c.setLast(LifecycleStatus{
 			Op:                    lifecycleOpUpdate,
 			ID:                    desired.ID,
@@ -416,11 +430,12 @@ func (c *LifecycleCapability) applyUpdate(ctx context.Context, desired Lifecycle
 			BackupID:              createResult.BackupID,
 			RestoredBackupID:      createResult.BackupID,
 			Health:                string(capsuleruntime.StatusOK),
-			RollbackOnUnhealthyOK: rollbackErr == nil,
-			Status:                lifecycleStatusOK,
+			RollbackOnUnhealthyOK: rollbackOK,
+			Status:                status,
 			Reason:                "unhealthy",
 		})
-		return nil, lifecycleOpError("capsule_lifecycle_unhealthy", errors.Join(err, rollbackErr))
+		code := lifecycleRollbackCode("capsule_lifecycle_unhealthy", rollbackErr)
+		return nil, lifecycleOpError(code, errors.Join(err, rollbackErr))
 	}
 
 	c.setLast(LifecycleStatus{
@@ -667,16 +682,31 @@ func (c *LifecycleCapability) startManifest(ctx context.Context, entry CapsuleEn
 	return c.execute.startValidatedManifest(ctx, desired, entry, manifest)
 }
 
+// restoreAndRestart reaches the prior GOOD state atomically: it RESTORES the
+// captured backup first and only RESTARTS the previous version once the state
+// has been restored. If the restore FAILS it must NOT restart the prior unit
+// against unrestored (new) state — that would leave a mixed old-binary/new-state
+// running capsule. Instead it fails CLOSED: the capsule is left STOPPED and a
+// stable capsule_lifecycle_rollback_failed error is returned. The previous
+// version is restarted (the only on-success state change) only after a verified
+// restore.
 func (c *LifecycleCapability) restoreAndRestart(ctx context.Context, plan lifecycleBackupPlan, backupID string, prior lifecycleCurrent) error {
 	restoreRoots := append([]backup.ArchiveSourceRoot(nil), plan.sourceRoots...)
-	_, _, restoreErr := c.archive.Restore(ctx, backup.ArchiveRestoreRequest{
+	if _, _, restoreErr := c.archive.Restore(ctx, backup.ArchiveRestoreRequest{
 		TargetPath:         plan.targetPath,
 		BackupID:           backupID,
 		DestinationRoot:    plan.restoreRoot,
 		CompareSourceRoots: &restoreRoots,
-	})
-	_, _, startErr := c.startManifest(ctx, prior.entry, prior.manifest)
-	return errors.Join(restoreErr, startErr)
+	}); restoreErr != nil {
+		// Fail closed: do NOT restart the prior version against unrestored state.
+		// Leaving the capsule stopped is safer than running the old binary on new
+		// state; the operator/transaction engine sees a clear rollback_failed.
+		return lifecycleOpError("capsule_lifecycle_rollback_failed", restoreErr)
+	}
+	if _, _, startErr := c.startManifest(ctx, prior.entry, prior.manifest); startErr != nil {
+		return lifecycleOpError("capsule_lifecycle_rollback_failed", startErr)
+	}
+	return nil
 }
 
 func (c *LifecycleCapability) restartPrior(ctx context.Context, prior lifecycleCurrent) error {
@@ -887,91 +917,6 @@ func (u lifecycleStartUndo) Undo(ctx context.Context) error {
 	return err
 }
 
-type archiveCapabilityController struct {
-	capability archiveApplyHandle
-}
-
-func (c archiveCapabilityController) Create(ctx context.Context, req backup.ArchiveCreateRequest) (backup.ArchiveCreateResult, transaction.Undo, error) {
-	if c.capability == nil {
-		return backup.ArchiveCreateResult{}, nil, errors.New("missing backup archive capability")
-	}
-	undo, err := c.capability.Apply(ctx, backup.ArchiveApplyRequest{
-		Op:     backup.ArchiveOperationCreate,
-		Create: &req,
-	})
-	if err != nil {
-		return backup.ArchiveCreateResult{}, nil, err
-	}
-	status, err := c.readLast(ctx)
-	if err != nil {
-		return backup.ArchiveCreateResult{}, nil, err
-	}
-	if status.Op != backup.ArchiveOperationCreate || !status.Created || status.BackupID == "" {
-		return backup.ArchiveCreateResult{}, nil, errors.New("backup archive create did not record a created backup")
-	}
-	return backup.ArchiveCreateResult{BackupID: status.BackupID, Files: status.Files}, undo, nil
-}
-
-func (c archiveCapabilityController) Verify(ctx context.Context, req backup.ArchiveVerifyRequest) (backup.ArchiveVerifyResult, error) {
-	if c.capability == nil {
-		return backup.ArchiveVerifyResult{}, errors.New("missing backup archive capability")
-	}
-	if _, err := c.capability.Apply(ctx, backup.ArchiveApplyRequest{
-		Op:     backup.ArchiveOperationVerify,
-		Verify: &req,
-	}); err != nil {
-		return backup.ArchiveVerifyResult{}, err
-	}
-	status, err := c.readLast(ctx)
-	if err != nil {
-		return backup.ArchiveVerifyResult{}, err
-	}
-	return backup.ArchiveVerifyResult{
-		OK:       status.Op == backup.ArchiveOperationVerify && status.Verified && status.BackupID == req.BackupID,
-		BackupID: status.BackupID,
-		Files:    status.Files,
-		Failure:  status.Failure,
-	}, nil
-}
-
-func (c archiveCapabilityController) Restore(ctx context.Context, req backup.ArchiveRestoreRequest) (backup.ArchiveRestoreResult, transaction.Undo, error) {
-	if c.capability == nil {
-		return backup.ArchiveRestoreResult{}, nil, errors.New("missing backup archive capability")
-	}
-	undo, err := c.capability.Apply(ctx, backup.ArchiveApplyRequest{
-		Op:      backup.ArchiveOperationRestore,
-		Restore: &req,
-	})
-	if err != nil {
-		return backup.ArchiveRestoreResult{}, nil, err
-	}
-	status, err := c.readLast(ctx)
-	if err != nil {
-		return backup.ArchiveRestoreResult{}, nil, err
-	}
-	if status.Op != backup.ArchiveOperationRestore || !status.Restored || status.BackupID != req.BackupID {
-		return backup.ArchiveRestoreResult{}, nil, errors.New("backup archive restore did not record a restored backup")
-	}
-	return backup.ArchiveRestoreResult{BackupID: status.BackupID, Files: status.Files, Restored: status.Restored}, undo, nil
-}
-
-func (c archiveCapabilityController) readLast(ctx context.Context) (*backup.ArchiveStatus, error) {
-	response, err := c.capability.Handle(ctx, backup.ArchiveReadRequest{})
-	if err != nil {
-		return nil, err
-	}
-	read, ok := response.(backup.ArchiveReadResponse)
-	if !ok || read.Last == nil {
-		return nil, errors.New("backup archive status is missing")
-	}
-	status := *read.Last
-	if read.Last.Failure != nil {
-		failure := *read.Last.Failure
-		status.Failure = &failure
-	}
-	return &status, nil
-}
-
 func sleepContext(ctx context.Context, delay time.Duration) error {
 	if delay <= 0 {
 		return ctx.Err()
@@ -992,6 +937,21 @@ func lifecycleInvalid(reason string) *LifecycleInvalidRequestError {
 
 func lifecycleOpError(code string, err error) *LifecycleOperationError {
 	return &LifecycleOperationError{Code: code, Err: err}
+}
+
+// lifecycleRollbackCode surfaces capsule_lifecycle_rollback_failed when the
+// rollback (restore + restart-prior) itself failed, so a fail-closed mixed-state
+// prevention is reported loudly instead of being masked by the original
+// start/unhealthy code. On a successful rollback the original code is kept.
+func lifecycleRollbackCode(defaultCode string, rollbackErr error) string {
+	if rollbackErr == nil {
+		return defaultCode
+	}
+	var opErr *LifecycleOperationError
+	if errors.As(rollbackErr, &opErr) && opErr.Code == "capsule_lifecycle_rollback_failed" {
+		return "capsule_lifecycle_rollback_failed"
+	}
+	return defaultCode
 }
 
 var (
