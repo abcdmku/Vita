@@ -35,6 +35,12 @@ import {
   isFilesClientError,
 } from "./vita/files-client.ts";
 import {
+  formatBackupArchiveMarker,
+  formatBackupArchiveRejectMarker,
+  rejectTamperedBackupArchive,
+  runBackupArchiveRoundTrip,
+} from "./vita/backup.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
   createDenoUnixSocketFilesAgentTransport,
@@ -623,6 +629,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -683,6 +690,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     await emitPdsReadMarker(client);
   }
   await emitFilesMarkers(filesTransport);
+  await emitBackupArchiveMarkers(agentTransport);
 }
 
 async function emitApplyMarkers(
@@ -962,6 +970,22 @@ async function emitFilesRejectMarker(reason: string, attempt: () => Promise<void
   }
 
   emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitBackupArchiveMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  const result = await runBackupArchiveRoundTrip(client);
+  emit(formatBackupArchiveMarker(result));
+
+  if (!result.ok) {
+    return;
+  }
+
+  emit(formatBackupArchiveRejectMarker(await rejectTamperedBackupArchive(client)));
 }
 
 async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {
