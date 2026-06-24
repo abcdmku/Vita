@@ -831,6 +831,21 @@ func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if snapshotErr := h.snapshotBeforeApply(r.Context(), plan); snapshotErr != nil {
+		result := transaction.Result{
+			Outcome: transaction.OutcomeRolledBack,
+			Err: &transaction.ApplyError{
+				Index:      0,
+				Capability: storagesnap.Name,
+				Err:        snapshotErr,
+			},
+		}
+		response := applyResultFromTransaction(result)
+		response.AuditUnrecorded = !h.recordApply(plan, result)
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
 	result := transaction.Apply(r.Context(), h.registry, plan, h.healthCheck)
 	if result.Rejected() {
 		writeTransactionRejection(w, result.Err)
@@ -846,6 +861,42 @@ func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
 	response.AuditUnrecorded = !h.recordApply(plan, result)
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+type snapshotBeforeApplyCapability interface {
+	SnapshotBeforeApply(context.Context, string) (storagesnap.SnapshotInfo, error)
+}
+
+func (h *handler) snapshotBeforeApply(ctx context.Context, plan transaction.Plan) error {
+	if !requiresPreApplySnapshot(plan) {
+		return nil
+	}
+
+	capability, ok := h.registry.Lookup(storagesnap.Name)
+	if !ok {
+		return nil
+	}
+
+	snapshotter, ok := capability.(snapshotBeforeApplyCapability)
+	if !ok {
+		return fmt.Errorf("%s is registered without SnapshotBeforeApply", storagesnap.Name)
+	}
+
+	_, err := snapshotter.SnapshotBeforeApply(ctx, "apply")
+	return err
+}
+
+func requiresPreApplySnapshot(plan transaction.Plan) bool {
+	for _, op := range plan {
+		if op.Capability == storagesnap.Name {
+			req, ok := op.Request.(storagesnap.ApplyRequest)
+			if ok && req.Desired != nil && req.Desired.Op == storagesnap.OpList {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // recordApply appends one audit event describing the resolved transaction. It

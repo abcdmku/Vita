@@ -42,7 +42,10 @@ assert_file_line "$BUILD_AND_BOOT" 'VITA_BTRFS' "build must expose VITA_BTRFS ga
 assert_file_line "$BUILD_AND_BOOT" 'mkfs\.btrfs' "build must format Btrfs under the gate"
 assert_file_line "$BUILD_AND_BOOT" 'subvol=@data' "build must mount @data at /var"
 assert_file_line "$MARKER_SERVICE" 'ConditionPathExists=/usr/lib/vita/btrfs/enabled' "marker service must be gate-gated"
-assert_file_line "$MARKER_SCRIPT" 'VITA-BTRFS: subvol=@data snapshot=OK rollback=OK quota=enforced status=OK' "marker script must emit measured OK"
+assert_file_line "$MARKER_SERVICE" 'After=.*vita-agentd\.service.*vita-ts\.service' "marker service must run after agentd and the TS apply path"
+assert_file_line "$MARKER_SCRIPT" 'capability":"node\.config"' "marker script must trigger a representative agentd apply"
+assert_file_line "$MARKER_SCRIPT" 'capability":"storage\.snapshot"' "marker script must roll back through the storage.snapshot capability"
+assert_file_line "$MARKER_SCRIPT" 'VITA-BTRFS: subvol=@data snapshot=OK rollback=restored quota=enforced status=OK' "marker script must emit measured OK"
 assert_file_line "$MKOSI_CONF" '^[[:space:]]+btrfs-progs$' "mkosi package set must include btrfs-progs"
 assert_file_line "$BUILD_ROOT" '^[[:space:]]+"btrfs-progs",$' "planner package allowlist must include btrfs-progs"
 assert_file_line "$ROOT_DETERMINISM_TEST" '^[[:space:]]+"btrfs-progs",$' "determinism test package allowlist must include btrfs-progs"
@@ -112,4 +115,4 @@ if grep -Fxq 'B' "$MNT/@data/sentinel.txt" 2>/dev/null; then
   fail "rollback left B in @data"
 fi
 
-echo "PASS: Btrfs subvol=@data snapshot=OK rollback=OK quota=enforced"
+echo "PASS: Btrfs subvol=@data snapshot=OK rollback=restored quota=enforced"

@@ -2,8 +2,8 @@
 # checks: @data mount, read-only snapshot, quota enforcement, and rollback.
 [Unit]
 Description=Vita Btrfs data-volume measured marker
-After=var.mount
-Wants=var.mount
+After=var.mount vita-agentd.service vita-ts.service
+Wants=var.mount vita-agentd.service vita-ts.service
 ConditionPathExists=/usr/lib/vita/btrfs/enabled
 
 [Service]

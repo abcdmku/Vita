@@ -1,11 +1,14 @@
 #!/bin/bash
-# Measured VITA-BTRFS marker. Rollback is tested against the top-level @data
-# subvolume path; a live /var mount may need a reboot/remount to observe the
-# swapped subvolume, but the on-disk @data rollback target is measured here.
+# Measured VITA-BTRFS marker. Rollback is tested through agentd's
+# storage.snapshot apply path against the top-level @data subvolume path; a live
+# /var mount may need a reboot/remount to observe the swapped subvolume, but the
+# on-disk @data rollback target is measured here.
 set -euo pipefail
 
 TOP="${VITA_BTRFS_TOP:-/run/vita-btrfs-marker}"
 WORKDIR="/var/lib/vita/btrfs-marker"
+AGENTD_SOCKET="${VITA_AGENTD_SOCKET:-/run/vita-agent/agentd.sock}"
+NODE_CONFIG="/var/lib/vita-agent/node-config.env"
 
 fail_marker() {
   local step="$1"
@@ -18,6 +21,122 @@ run_step() {
   local step="$1"
   shift
   "$@" || fail_marker "$step" "$?"
+}
+
+write_agent_apply_helper() {
+  cat >"$WORKDIR/agent-apply.mjs" <<'DENO'
+const socketPath = Deno.args[0] ?? "";
+const body = Deno.args[1] ?? "";
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+async function writeAll(conn, data) {
+  let offset = 0;
+  while (offset < data.length) {
+    const written = await conn.write(data.subarray(offset));
+    if (written <= 0) throw new Error("socket write made no progress");
+    offset += written;
+  }
+}
+
+function concat(chunks, total) {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function decodeChunked(bodyText) {
+  let rest = bodyText;
+  let decoded = "";
+  while (true) {
+    const lineEnd = rest.indexOf("\r\n");
+    if (lineEnd < 0) throw new Error("chunked response missing chunk header");
+    const size = Number.parseInt(rest.slice(0, lineEnd).split(";", 1)[0] ?? "", 16);
+    if (!Number.isFinite(size) || size < 0) throw new Error("chunked response has invalid size");
+    if (size === 0) return decoded;
+    const start = lineEnd + 2;
+    const end = start + size;
+    if (rest.length < end + 2 || rest.slice(end, end + 2) !== "\r\n") {
+      throw new Error("chunked response has incomplete chunk");
+    }
+    decoded += rest.slice(start, end);
+    rest = rest.slice(end + 2);
+  }
+}
+
+function parseResponse(raw) {
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  if (headerEnd < 0) throw new Error("agentd response missing headers");
+  const headerLines = raw.slice(0, headerEnd).split("\r\n");
+  const statusMatch = /^HTTP\/1\.[01] ([0-9]{3})(?:\s|$)/.exec(headerLines[0] ?? "");
+  if (statusMatch === null) throw new Error("agentd response has invalid status");
+  const headers = new Map();
+  for (const line of headerLines.slice(1)) {
+    const sep = line.indexOf(":");
+    if (sep > 0) headers.set(line.slice(0, sep).trim().toLowerCase(), line.slice(sep + 1).trim().toLowerCase());
+  }
+  let responseBody = raw.slice(headerEnd + 4);
+  if ((headers.get("transfer-encoding") ?? "").split(",").map((v) => v.trim()).includes("chunked")) {
+    responseBody = decodeChunked(responseBody);
+  }
+  return { body: responseBody, status: Number.parseInt(statusMatch[1], 10) };
+}
+
+try {
+  if (socketPath === "") throw new Error("agentd socket path is required");
+  if (body === "") throw new Error("apply body is required");
+  const conn = await Deno.connect({ transport: "unix", path: socketPath });
+  try {
+    const bodyBytes = encoder.encode(body);
+    const header = encoder.encode([
+      "POST /apply HTTP/1.1",
+      "Host: agentd",
+      "Connection: close",
+      "Content-Type: application/json",
+      `Content-Length: ${bodyBytes.length}`,
+      "",
+      "",
+    ].join("\r\n"));
+    await writeAll(conn, header);
+    await writeAll(conn, bodyBytes);
+
+    const chunks = [];
+    const buffer = new Uint8Array(4096);
+    let total = 0;
+    while (true) {
+      const read = await conn.read(buffer);
+      if (read === null) break;
+      total += read;
+      if (total > 1048576) throw new Error("agentd response exceeded marker limit");
+      chunks.push(buffer.slice(0, read));
+    }
+    const parsed = parseResponse(decoder.decode(concat(chunks, total)));
+    if (parsed.status !== 200) {
+      console.error(parsed.body);
+      Deno.exit(2);
+    }
+    await Deno.stdout.write(encoder.encode(parsed.body));
+  } finally {
+    conn.close();
+  }
+} catch (cause) {
+  console.error(cause instanceof Error ? cause.message : String(cause));
+  Deno.exit(1);
+}
+DENO
+}
+
+agent_apply() {
+  local payload="$1"
+  local output="$2"
+  env DENO_DIR=/run/vita-btrfs-marker-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1 \
+    /usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
+    --allow-read="$AGENTD_SOCKET" --allow-write="$AGENTD_SOCKET" \
+    "$WORKDIR/agent-apply.mjs" "$AGENTD_SOCKET" "$payload" >"$output"
 }
 
 cleanup() {
@@ -46,11 +165,12 @@ fi
 [ -d "$TOP/@data" ] || fail_marker "data_subvolume_missing" 1
 [ -d "$TOP/@snapshots" ] || fail_marker "snapshots_subvolume_missing" 1
 run_step "workdir_mkdir" mkdir -p "$WORKDIR"
+run_step "deno_dir_mkdir" mkdir -p /run/vita-btrfs-marker-deno
+run_step "agent_apply_helper" write_agent_apply_helper
+run_step "agentd_socket" test -S "$AGENTD_SOCKET"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 snap="marker-$stamp"
-rollback_snap="rollback-$stamp"
-restore=".rollback-restore-$stamp"
 
 run_step "snapshot_create" btrfs subvolume snapshot -r "$TOP/@data" "$TOP/@snapshots/$snap"
 ro="$(btrfs property get -ts "$TOP/@snapshots/$snap" ro 2>/dev/null)" || fail_marker "snapshot_ro_probe" "$?"
@@ -63,23 +183,56 @@ if dd if=/dev/zero of="$WORKDIR/quota-over.bin" bs=1M count=64 conv=fsync status
 fi
 rm -f "$WORKDIR/quota-under.bin" "$WORKDIR/quota-over.bin"
 
-printf 'A\n' >"$WORKDIR/rollback-sentinel.txt" || fail_marker "rollback_write_A" "$?"
-sync
-run_step "rollback_snapshot_create" btrfs subvolume snapshot -r "$TOP/@data" "$TOP/@snapshots/$rollback_snap"
-printf 'B\n' >"$WORKDIR/rollback-sentinel.txt" || fail_marker "rollback_write_B" "$?"
-sync
-run_step "rollback_restore_clone" btrfs subvolume snapshot "$TOP/@snapshots/$rollback_snap" "$TOP/@snapshots/$restore"
-if mv --exchange "$TOP/@data" "$TOP/@snapshots/$restore" >/dev/null 2>&1; then
-  :
+prior_node="$WORKDIR/node-config.before"
+prior_exists=0
+if [ -f "$NODE_CONFIG" ]; then
+  run_step "node_config_prior_copy" cp "$NODE_CONFIG" "$prior_node"
+  prior_exists=1
+fi
+
+desired_mode="maintenance"
+desired_remote="enabled"
+if [ -f "$NODE_CONFIG" ] && grep -Fxq "mode=maintenance" "$NODE_CONFIG"; then
+  desired_mode="normal"
+  desired_remote="disabled"
+fi
+
+touch "$WORKDIR/preapply-start.stamp" || fail_marker "preapply_stamp" "$?"
+apply_payload='{"operations":[{"capability":"node.config","request":{"desired":{"mode":"'"$desired_mode"'","remoteAccess":"'"$desired_remote"'"}}}]}'
+apply_output="$WORKDIR/node-config-apply.response.json"
+set +e
+agent_apply "$apply_payload" "$apply_output"
+rc="$?"
+set -e
+[ "$rc" -eq 0 ] || fail_marker "agent_apply_node_config" "$rc"
+grep -Fq '"outcome":"committed"' "$apply_output" || fail_marker "agent_apply_not_committed" 1
+grep -Fxq "mode=$desired_mode" "$NODE_CONFIG" || fail_marker "node_config_mode_not_applied" 1
+grep -Fxq "remote_access=$desired_remote" "$NODE_CONFIG" || fail_marker "node_config_remote_not_applied" 1
+
+preapply_snap=""
+for candidate in "$TOP"/@snapshots/vita-*-apply; do
+  [ -d "$candidate" ] || continue
+  [ "$candidate" -nt "$WORKDIR/preapply-start.stamp" ] || continue
+  preapply_snap="$(basename -- "$candidate")"
+done
+[ -n "$preapply_snap" ] || fail_marker "preapply_snapshot_missing" 1
+ro="$(btrfs property get -ts "$TOP/@snapshots/$preapply_snap" ro 2>/dev/null)" || fail_marker "preapply_snapshot_ro_probe" "$?"
+printf '%s\n' "$ro" | grep -Fq "ro=true" || fail_marker "preapply_snapshot_not_readonly" 1
+
+rollback_payload='{"operations":[{"capability":"storage.snapshot","request":{"desired":{"op":"rollback","name":"'"$preapply_snap"'"}}}]}'
+rollback_output="$WORKDIR/rollback-apply.response.json"
+set +e
+agent_apply "$rollback_payload" "$rollback_output"
+rc="$?"
+set -e
+[ "$rc" -eq 0 ] || fail_marker "agent_apply_rollback" "$rc"
+grep -Fq '"outcome":"committed"' "$rollback_output" || fail_marker "agent_rollback_not_committed" 1
+
+restored_node="$TOP/@data/lib/vita-agent/node-config.env"
+if [ "$prior_exists" -eq 1 ]; then
+  cmp -s "$prior_node" "$restored_node" || fail_marker "rollback_mismatch" 1
 else
-  fail_marker "rollback_exchange" "$?"
+  [ ! -e "$restored_node" ] || fail_marker "rollback_left_node_config" 1
 fi
 
-restored="$TOP/@data/lib/vita/btrfs-marker/rollback-sentinel.txt"
-[ -f "$restored" ] || fail_marker "rollback_missing_A" 1
-grep -Fxq "A" "$restored" || fail_marker "rollback_mismatch" 1
-if grep -Fxq "B" "$restored" 2>/dev/null; then
-  fail_marker "rollback_left_B" 1
-fi
-
-echo "VITA-BTRFS: subvol=@data snapshot=OK rollback=OK quota=enforced status=OK"
+echo "VITA-BTRFS: subvol=@data snapshot=OK rollback=restored quota=enforced status=OK"
