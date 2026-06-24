@@ -377,6 +377,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		netns, err := c.netns.Create(ctx, *unit.NetNS)
 		if err != nil {
 			reason := capsuleNetnsFailureReason(err)
+			if shouldConfirmCapsuleNetLimitEnforcement(manifest) {
+				reason = capsuleNetLimitsFailureReason(err)
+			}
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
 			return nil, &ExecuteStartError{Code: reason, Err: err}
 		}
@@ -388,7 +391,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
 		code := executeStartFailureCode(manifest, unit, err)
-		if createdNetns != nil {
+		if shouldConfirmCapsuleNetLimitEnforcement(manifest) {
+			code = capsuleNetLimitsFailureReason(capsuleNetLimitsStepError("hostile_launch", err))
+		} else if createdNetns != nil {
 			code = capsuleNetnsFailureReason(capsuleNetnsStepError("join_unit", err))
 		} else if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
 			code = "capsule_volume_start_failed"
@@ -410,6 +415,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 				c.netns.Teardown(ctx, *unit.NetNS),
 			)
 			reason := capsuleNetnsFailureReason(limitErr)
+			if shouldConfirmCapsuleNetLimitEnforcement(manifest) {
+				reason = capsuleNetLimitsFailureReason(limitErr)
+			}
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
 			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
 		}
@@ -430,6 +438,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 				c.netns.Teardown(ctx, *unit.NetNS),
 			)
 			reason := capsuleNetnsFailureReason(limitErr)
+			if shouldConfirmCapsuleNetLimitEnforcement(manifest) {
+				reason = capsuleNetLimitsFailureReason(limitErr)
+			}
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
 			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
 		}
@@ -444,7 +455,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		if err != nil || confirmed.Status != capsuleNetLimitStatusOK {
 			limitErr := err
 			if limitErr == nil {
-				limitErr = fmt.Errorf("capsule net limits not enforced: egress=%s ingress=%s isolation=%s", confirmed.Egress, confirmed.Ingress, confirmed.Isolation)
+				limitErr = capsuleNetLimitsStepError("limits_status", fmt.Errorf("capsule net limits not enforced: egress=%s ingress=%s isolation=%s", confirmed.Egress, confirmed.Ingress, confirmed.Isolation))
 			}
 			if cleanupErr := stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name); cleanupErr != nil {
 				limitErr = errors.Join(limitErr, cleanupErr)
@@ -453,9 +464,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 				if cleanupErr := c.netns.Teardown(ctx, *createdNetns); cleanupErr != nil {
 					limitErr = errors.Join(limitErr, cleanupErr)
 				}
-				log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=capsule_net_limits_failed status=FAILSAFE")
+				log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", capsuleNetLimitsFailureReason(limitErr))
 			}
-			return nil, &ExecuteStartError{Code: "capsule_net_limits_failed", Err: limitErr}
+			return nil, &ExecuteStartError{Code: capsuleNetLimitsFailureReason(limitErr), Err: limitErr}
 		}
 	}
 

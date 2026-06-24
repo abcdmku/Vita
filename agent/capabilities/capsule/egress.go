@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/internal/sysdeps"
@@ -106,7 +107,7 @@ func capsuleEgressConfigForUnit(unitName string, policy *ExecutionNetwork) (*cap
 					Destination: prefix.String(),
 					Port:        portValue,
 				})
-				config.fillProbe(prefix, portValue)
+				config.fillProbe(rule.Protocol, prefix, portValue)
 			}
 		}
 	}
@@ -131,8 +132,8 @@ func capsuleBaseEgressConfigForUnit(unitName string) *capsuleEgressConfig {
 	}
 }
 
-func (c *capsuleEgressConfig) fillProbe(prefix netip.Prefix, portValue int) {
-	if c.ProbeAllowedAddr != "" || portValue == network.PortAll || !prefix.Addr().Is4() || prefix.Bits() != 32 {
+func (c *capsuleEgressConfig) fillProbe(protocol network.Protocol, prefix netip.Prefix, portValue int) {
+	if c.ProbeAllowedAddr != "" || protocol != network.ProtoTCP || portValue == network.PortAll || !prefix.Addr().Is4() || prefix.Bits() != 32 {
 		return
 	}
 	if !documentationIPv4(prefix.Addr()) {
@@ -298,6 +299,11 @@ func (c defaultCapsuleEgressConfigurator) Check(ctx context.Context, netns capsu
 	}
 	if err := verifyCapsuleEgressTable(config, string(table)); err != nil {
 		return capsuleEgressCheck{}, capsuleNetnsStepError("egress_nft_check", err)
+	}
+	if err := withCapsuleNetns(netns.Path, func() error {
+		return probeCapsuleEgressPolicy(ctx, config)
+	}); err != nil {
+		return capsuleEgressCheck{}, err
 	}
 
 	var ingressCheck *capsuleIngressCheck
@@ -484,14 +490,51 @@ func verifyCapsuleEgressTable(config capsuleEgressConfig, table string) error {
 }
 
 func tableContainsDestination(table string, destination string) bool {
-	if strings.Contains(table, destination) {
+	if containsNetworkToken(table, destination) {
 		return true
 	}
 	prefix := netip.MustParsePrefix(destination)
 	if (prefix.Addr().Is4() && prefix.Bits() == 32) || (prefix.Addr().Is6() && prefix.Bits() == 128) {
-		return strings.Contains(table, prefix.Addr().String())
+		return containsNetworkToken(table, prefix.Addr().String())
 	}
 	return false
+}
+
+func containsNetworkToken(value string, token string) bool {
+	if token == "" {
+		return false
+	}
+	offset := 0
+	for {
+		index := strings.Index(value[offset:], token)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(token)
+		if networkTokenBoundary(value, start-1) && networkTokenBoundary(value, end) {
+			return true
+		}
+		offset = end
+	}
+}
+
+func networkTokenBoundary(value string, index int) bool {
+	if index < 0 || index >= len(value) {
+		return true
+	}
+	switch b := value[index]; {
+	case b >= '0' && b <= '9':
+		return false
+	case b >= 'A' && b <= 'Z':
+		return false
+	case b >= 'a' && b <= 'z':
+		return false
+	case b == '.', b == ':', b == '/':
+		return false
+	default:
+		return true
+	}
 }
 
 func capsuleEgressInterfacesReady(interfaces []net.Interface, capsuleInterface string) error {
@@ -629,6 +672,34 @@ func (p *capsuleEgressProbe) Close() error {
 	err := p.listener.Close()
 	<-p.done
 	return err
+}
+
+func probeCapsuleEgressPolicy(ctx context.Context, config capsuleEgressConfig) error {
+	if config.ProbeAllowedAddr == "" || config.ProbeDeniedAddr == "" || config.ProbeAllowedPort <= 0 {
+		return nil
+	}
+	allowed := probeCapsuleEgressTCP(ctx, config.ProbeAllowedAddr, config.ProbeAllowedPort)
+	if allowed != capsuleEgressReachOK {
+		return capsuleNetnsStepError("egress_probe_allowed", fmt.Errorf("granted egress %s:%d was not reachable", config.ProbeAllowedAddr, config.ProbeAllowedPort))
+	}
+	denied := probeCapsuleEgressTCP(ctx, config.ProbeDeniedAddr, config.ProbeAllowedPort)
+	if denied == capsuleEgressReachOK {
+		return capsuleNetnsStepError("egress_probe_denied", fmt.Errorf("non-granted egress %s:%d was reachable", config.ProbeDeniedAddr, config.ProbeAllowedPort))
+	}
+	return nil
+}
+
+func probeCapsuleEgressTCP(ctx context.Context, host string, portValue int) string {
+	if host == "" || portValue <= 0 || portValue > 65535 {
+		return capsuleEgressStatusFail
+	}
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(host, strconv.Itoa(portValue)))
+	if err != nil {
+		return capsuleEgressStatusFail
+	}
+	_ = conn.Close()
+	return capsuleEgressReachOK
 }
 
 func measuredCapsuleEgressProof(proof capsuleEgressProof, check capsuleEgressCheck) bool {

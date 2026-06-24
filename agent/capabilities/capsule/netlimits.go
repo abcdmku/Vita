@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities/network"
+	"github.com/vita/agent/internal/sysdeps"
 )
 
 const (
@@ -29,22 +30,51 @@ type CapsuleNetLimitsStatus struct {
 	Status    string `json:"status"`
 }
 
+type capsuleNetLimitsStepFailure struct {
+	Step string
+	Err  error
+}
+
+func (e *capsuleNetLimitsStepFailure) Error() string {
+	if e == nil {
+		return "capsule net limits step failed"
+	}
+	if e.Err == nil {
+		return e.Step
+	}
+	return e.Step + ": " + e.Err.Error()
+}
+
+func (e *capsuleNetLimitsStepFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func capsuleNetLimitsStepError(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &capsuleNetLimitsStepFailure{Step: step, Err: err}
+}
+
 func shouldConfirmCapsuleNetLimitEnforcement(manifest ExecutionManifest) bool {
 	return manifest.ID == hostileNetCapsuleID && manifest.Network != nil
 }
 
 func confirmCapsuleNetLimits(ctx context.Context, manifest ExecutionManifest, unit transientUnit, check *capsuleNetnsCheck) (CapsuleNetLimitsStatus, error) {
 	if err := ctx.Err(); err != nil {
-		return unknownCapsuleNetLimitsStatus(), err
+		return unknownCapsuleNetLimitsStatus(), capsuleNetLimitsStepError("context", err)
 	}
 	if manifest.Network == nil {
-		return unknownCapsuleNetLimitsStatus(), errors.New("hostile capsule network manifest is absent")
+		return unknownCapsuleNetLimitsStatus(), capsuleNetLimitsStepError("hostile_manifest", errors.New("hostile capsule network manifest is absent"))
 	}
 	if unit.NetNS == nil || unit.NetNS.Egress == nil {
-		return unknownCapsuleNetLimitsStatus(), errors.New("hostile capsule network namespace is absent")
+		return unknownCapsuleNetLimitsStatus(), capsuleNetLimitsStepError("hostile_netns", errors.New("hostile capsule network namespace is absent"))
 	}
 	if check == nil {
-		return unknownCapsuleNetLimitsStatus(), errors.New("hostile capsule network namespace check is absent")
+		return unknownCapsuleNetLimitsStatus(), capsuleNetLimitsStepError("hostile_check", errors.New("hostile capsule network namespace check is absent"))
 	}
 
 	config := *unit.NetNS.Egress
@@ -59,17 +89,17 @@ func confirmCapsuleNetLimits(ctx context.Context, manifest ExecutionManifest, un
 	if err := confirmCapsuleNetLimitsEgress(config, check); err == nil {
 		status.Egress = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, fmt.Errorf("egress: %w", err))
+		errs = errors.Join(errs, capsuleNetLimitsStepError("egress_confirm", err))
 	}
 	if err := confirmCapsuleNetLimitsIngress(config, check); err == nil {
 		status.Ingress = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, fmt.Errorf("ingress: %w", err))
+		errs = errors.Join(errs, capsuleNetLimitsStepError("ingress_confirm", err))
 	}
 	if err := confirmCapsuleNetLimitsIsolation(config, unit.Properties, check); err == nil {
 		status.Isolation = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, fmt.Errorf("isolation: %w", err))
+		errs = errors.Join(errs, capsuleNetLimitsStepError("isolation_confirm", err))
 	}
 
 	if status.Egress == capsuleNetLimitValueEnforced &&
@@ -196,8 +226,7 @@ func capsuleNetLimitsHardening(properties []systemdProperty) error {
 	if !hasSystemdProperty(properties, "SystemCallFilter", "@system-service") {
 		return errors.New("SystemCallFilter @system-service is absent")
 	}
-	if !hasSystemdPropertyContaining(properties, "SystemCallFilter", "@privileged") ||
-		!hasSystemdPropertyContaining(properties, "SystemCallFilter", "@raw-io") {
+	if !hasDenyPrefixedSystemCallFilter(properties, "@privileged", "@raw-io") {
 		return errors.New("SystemCallFilter privileged/raw-io deny set is absent")
 	}
 	return nil
@@ -311,13 +340,48 @@ func hasSystemdProperty(properties []systemdProperty, name string, value string)
 	return false
 }
 
-func hasSystemdPropertyContaining(properties []systemdProperty, name string, token string) bool {
+func hasDenyPrefixedSystemCallFilter(properties []systemdProperty, tokens ...string) bool {
 	for _, property := range properties {
-		if property.Name == name && strings.Contains(property.Value, token) {
+		if property.Name != "SystemCallFilter" || !strings.HasPrefix(strings.TrimSpace(property.Value), "~") {
+			continue
+		}
+		hasAll := true
+		for _, token := range tokens {
+			if !strings.Contains(property.Value, token) {
+				hasAll = false
+				break
+			}
+		}
+		if hasAll {
 			return true
 		}
 	}
 	return false
+}
+
+func capsuleNetLimitsFailureReason(err error) string {
+	reason := "unknown"
+	var limitsErr *capsuleNetLimitsStepFailure
+	if errors.As(err, &limitsErr) && limitsErr != nil {
+		reason = capsuleNetLimitsStepReason(limitsErr.Step, limitsErr.Err)
+	} else {
+		var netnsErr *capsuleNetnsStepFailure
+		if errors.As(err, &netnsErr) && netnsErr != nil {
+			reason = capsuleNetLimitsStepReason(netnsErr.Step, netnsErr.Err)
+		}
+	}
+	return "capsule_net_limits_failed:" + reason
+}
+
+func capsuleNetLimitsStepReason(step string, err error) string {
+	reason := step
+	if reason == "" {
+		reason = "unknown"
+	}
+	if errno := sysdeps.ErrnoCode(err); errno != "" {
+		reason += "_" + errno
+	}
+	return reason
 }
 
 func logCapsuleNetLimitsStatus(id string, status CapsuleNetLimitsStatus) {

@@ -1279,7 +1279,7 @@ async function emitHostileNetLimitsMarker(agentTransport: AgentTransport): Promi
     const result = await client.apply(HOSTILE_NET_LIMITS_EXECUTE_PLAN);
 
     if (result.outcome !== "committed") {
-      emit(formatNetLimitsFailureMarker(agentApplyResultReason(result)));
+      emit(formatNetLimitsFailureMarker(netLimitsApplyResultReason(result)));
       return;
     }
 
@@ -1871,7 +1871,7 @@ function formatNetLimitsFailureMarker(reason: string): string {
     "ingress=NOT_enforced " +
     "isolation=NOT_enforced " +
     "status=FAILSAFE " +
-    `reason=${markerToken(reason)}`
+    `reason=${markerReasonToken(reason)}`
   );
 }
 
@@ -2208,6 +2208,10 @@ function agentApplyResultReason(result: AgentApplyResult): string {
   return markerToken(result.error?.code ?? "transaction_rejected");
 }
 
+function netLimitsApplyResultReason(result: AgentApplyResult): string {
+  return markerReasonToken(result.error?.code ?? "transaction_rejected");
+}
+
 function agentClientErrorReason(cause: unknown, fallback: string): string {
   if (isAgentClientError(cause) && cause.agentError !== undefined) {
     return markerToken(cause.agentError.code);
@@ -2218,6 +2222,11 @@ function agentClientErrorReason(cause: unknown, fallback: string): string {
 
 function markerToken(value: string): string {
   const token = value.replace(/[^A-Za-z0-9_.-]+/gu, "_");
+  return token.length === 0 ? "unknown" : token;
+}
+
+function markerReasonToken(value: string): string {
+  const token = value.replace(/[^A-Za-z0-9_.:-]+/gu, "_");
   return token.length === 0 ? "unknown" : token;
 }
 

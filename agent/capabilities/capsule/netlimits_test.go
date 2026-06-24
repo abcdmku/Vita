@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -53,6 +54,18 @@ func TestCapsuleNetLimitsConfirmRequiresStrictAgentEvidence(t *testing.T) {
 			},
 		},
 		{
+			name: "superstring non-granted egress accept",
+			mutate: func(unit transientUnit, check capsuleNetnsCheck) (transientUnit, capsuleNetnsCheck) {
+				check.Egress.Table = strings.Replace(
+					check.Egress.Table,
+					"  }\n}\n",
+					"    ip daddr 203.0.113.100/32 tcp dport 443 accept\n  }\n}\n",
+					1,
+				)
+				return unit, check
+			},
+		},
+		{
 			name: "extra host dnat",
 			mutate: func(unit transientUnit, check capsuleNetnsCheck) (transientUnit, capsuleNetnsCheck) {
 				ingress := unit.NetNS.Egress.Ingress
@@ -78,6 +91,17 @@ func TestCapsuleNetLimitsConfirmRequiresStrictAgentEvidence(t *testing.T) {
 				for i := range unit.Properties {
 					if unit.Properties[i].Name == "CapabilityBoundingSet" {
 						unit.Properties[i].Value = "CAP_NET_RAW"
+					}
+				}
+				return unit, check
+			},
+		},
+		{
+			name: "privileged raw syscall filter allow list",
+			mutate: func(unit transientUnit, check capsuleNetnsCheck) (transientUnit, capsuleNetnsCheck) {
+				for i := range unit.Properties {
+					if unit.Properties[i].Name == "SystemCallFilter" && strings.HasPrefix(unit.Properties[i].Value, "~") {
+						unit.Properties[i].Value = "@privileged @raw-io"
 					}
 				}
 				return unit, check
@@ -126,6 +150,12 @@ func TestExecuteConfirmsHostileNetLimitsAndExposesStatus(t *testing.T) {
 	if len(netns.created) != 1 || len(netns.checked) != 1 {
 		t.Fatalf("netns calls = create:%d check:%d, want one each", len(netns.created), len(netns.checked))
 	}
+	if netns.checked[0].Path != netns.created[0].Path {
+		t.Fatalf("checked netns path = %q, want managed path %q", netns.checked[0].Path, netns.created[0].Path)
+	}
+	if strings.HasPrefix(netns.checked[0].Path, "/proc/") {
+		t.Fatalf("checked netns path = %q, want managed grant-backed namespace path", netns.checked[0].Path)
+	}
 
 	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
@@ -172,8 +202,8 @@ func TestExecuteStopsHostileNetCapsuleWhenLimitsAreNotEnforced(t *testing.T) {
 	if !errors.As(err, &startErr) {
 		t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
 	}
-	if startErr.ApplyErrorCode() != "capsule_net_limits_failed" {
-		t.Fatalf("ApplyErrorCode = %q, want capsule_net_limits_failed", startErr.ApplyErrorCode())
+	if startErr.ApplyErrorCode() != "capsule_net_limits_failed:egress_confirm" {
+		t.Fatalf("ApplyErrorCode = %q, want capsule_net_limits_failed:egress_confirm", startErr.ApplyErrorCode())
 	}
 	wantUnit := capsuleUnitName(entry.ID)
 	if !reflect.DeepEqual(launcher.stops, []string{wantUnit}) {
@@ -184,6 +214,69 @@ func TestExecuteStopsHostileNetCapsuleWhenLimitsAreNotEnforced(t *testing.T) {
 	}
 	if len(netns.tornDown) != 1 {
 		t.Fatalf("tornDown = %#v, want created netns cleanup", netns.tornDown)
+	}
+}
+
+func TestExecuteReportsSpecificHostileNetCapsuleFailureReasons(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		launcher *recordingTransientLauncher
+		netns    *recordingNetnsManager
+		want     string
+	}{
+		{
+			name: "create errno",
+			launcher: &recordingTransientLauncher{
+				status: transientUnitStatus{DynamicUID: "61411"},
+			},
+			netns: &recordingNetnsManager{
+				createErr: capsuleNetnsStepError("egress_veth_create", syscall.EPERM),
+			},
+			want: "capsule_net_limits_failed:egress_veth_create_EPERM",
+		},
+		{
+			name: "hostile launch",
+			launcher: &recordingTransientLauncher{
+				err: errors.New("deno exited before proof"),
+			},
+			netns: &recordingNetnsManager{},
+			want:  "capsule_net_limits_failed:hostile_launch",
+		},
+		{
+			name: "check errno",
+			launcher: &recordingTransientLauncher{
+				status: transientUnitStatus{DynamicUID: "61411"},
+			},
+			netns: &recordingNetnsManager{
+				checkErr: capsuleNetnsStepError("egress_nft_check", syscall.EPERM),
+			},
+			want: "capsule_net_limits_failed:egress_nft_check_EPERM",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := hostileNetEntry()
+			manifest := hostileNetManifest()
+			fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+			capability := newExecuteCapabilityWithNetns(
+				fs,
+				memoryExecutionManifestStore{entry.ID: manifest},
+				tt.launcher,
+				tt.netns,
+				nil,
+			)
+
+			undo, err := capability.Apply(context.Background(), executeApply(entry))
+			if undo != nil {
+				t.Fatalf("Apply returned undo %v, want nil", undo)
+			}
+			var startErr *ExecuteStartError
+			if !errors.As(err, &startErr) {
+				t.Fatalf("Apply error = %T %v, want ExecuteStartError", err, err)
+			}
+			if startErr.ApplyErrorCode() != tt.want {
+				t.Fatalf("ApplyErrorCode = %q, want %q", startErr.ApplyErrorCode(), tt.want)
+			}
+		})
 	}
 }
 
