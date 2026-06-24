@@ -134,14 +134,15 @@ boot_ts() {
   we=$(grep -aE 'VITA-CAPSULE-WASM-EXECUTED:.*health=OK' "$log" | tail -1)
   nn=$(grep -aE 'VITA-CAPSULE-NET-NS:.*loopback=OK.*isolation=enforced' "$log" | tail -1)
   eg=$(grep -aE 'VITA-CAPSULE-NET-EGRESS:.*reach=OK.*drop=enforced' "$log" | tail -1)
-  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl" "$vo" "$of" "$oe" "$ol" "$np" "$we" "$nn" "$eg"; do echo "  $m"; done
+  ig=$(grep -aE 'VITA-CAPSULE-NET-INGRESS:.*reach=OK.*drop=enforced' "$log" | tail -1)
+  echo "----- markers -----"; for m in "$ts" "$ev" "$pv" "$ex" "$cn" "$st" "$ac" "$ar" "$cpv" "$cc" "$cr" "$pds" "$pw" "$cx" "$cxr" "$fe" "$hl" "$vo" "$of" "$oe" "$ol" "$np" "$we" "$nn" "$eg" "$ig"; do echo "  $m"; done
   # PASS = the FULL on-device control plane THROUGH RUNNING A CAPSULE: ...+ PDS read/write + capsule.execute (the node
   # spawns a hardened transient-unit workload, W4-S1) + its fail-closed reject + FETCH (SRI-verified, P1-045) + capsule
   # HEALTH supervised via /state (P1-047) + a per-capsule persistent VOLUME via StateDirectory (P1-046) + an OCI image
   # FETCHED+two-level-digest-verified+assembled (P1-053, W5) + capsule NETWORK grants parsed+validated (P1-057, W6-S1,
   # capsules still network-mute). Node proposes; agent validates+spawns.
-  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ] && [ -n "$vo" ] && [ -n "$of" ] && [ -n "$oe" ] && [ -n "$ol" ] && [ -n "$np" ] && [ -n "$we" ] && [ -n "$nn" ] && [ -n "$eg" ]; then
-    echo "RESULT: PASS (full control-plane: fetch+execute+health+volume+OCI(fetch/run/limits)+NET-PARSE+NET-NS+NET-EGRESS(default-deny: in-grant reach=OK + out-of-grant drop=enforced, MEASURED) — wave 5 OCI complete + wave 6 networking S1+S2+S3)"
+  if [ "$ok" = 1 ] && [ -n "$ts" ] && [ -n "$ev" ] && [ -n "$pv" ] && [ -n "$ex" ] && [ -n "$st" ] && [ -n "$ac" ] && [ -n "$ar" ] && [ -n "$cpv" ] && [ -n "$cc" ] && [ -n "$cr" ] && [ -n "$pds" ] && [ -n "$pw" ] && [ -n "$cx" ] && [ -n "$cxr" ] && [ -n "$fe" ] && [ -n "$hl" ] && [ -n "$vo" ] && [ -n "$of" ] && [ -n "$oe" ] && [ -n "$ol" ] && [ -n "$np" ] && [ -n "$we" ] && [ -n "$nn" ] && [ -n "$eg" ] && [ -n "$ig" ]; then
+    echo "RESULT: PASS (full control-plane: fetch+execute+health+volume+OCI(fetch/run/limits)+NET-PARSE+NET-NS+NET-EGRESS+NET-INGRESS(host-local DNAT: granted-port reach=OK + non-granted drop=enforced, MEASURED) — wave 5 OCI complete + wave 6 networking S1+S2+S3+S4)"
   else
     echo "RESULT: FAIL (missing a marker above; failures show *-ERROR)"
     sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -aiE 'vita-(ts|eval|preview|explain|connect|state|apply|capsule|pds)|agentd|deno' | tail -28
