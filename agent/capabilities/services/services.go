@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -335,49 +336,16 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure services state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".enabled-services-config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create services temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		configFileMode,
+		".enabled-services-config-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write services config: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(configFileMode); err != nil {
-		return fmt.Errorf("secure services temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write services temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write services temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync services temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close services temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace services config: %w", err)
-	}
-	cleanupTemp = false
 	return nil
 }
 

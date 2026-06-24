@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -360,49 +361,16 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure accounts state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".local-accounts-config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create accounts temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		configFileMode,
+		".local-accounts-config-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write accounts config: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(configFileMode); err != nil {
-		return fmt.Errorf("secure accounts temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write accounts temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write accounts temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync accounts temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close accounts temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace accounts config: %w", err)
-	}
-	cleanupTemp = false
 	return nil
 }
 

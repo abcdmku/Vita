@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -237,49 +237,16 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure storage layout state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".storage-layout-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create storage layout temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		layoutFileMode,
+		".storage-layout-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write storage layout: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(layoutFileMode); err != nil {
-		return fmt.Errorf("secure storage layout temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write storage layout temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write storage layout temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync storage layout temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close storage layout temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace storage layout: %w", err)
-	}
-	cleanupTemp = false
 	return nil
 }
 

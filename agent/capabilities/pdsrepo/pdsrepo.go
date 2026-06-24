@@ -17,6 +17,7 @@ import (
 
 	"github.com/vita/agent/capabilities"
 	"github.com/vita/agent/capabilities/pdssync"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -372,6 +373,19 @@ func NewCapability() *Capability {
 	return newCapability(newDefaultFileSystem())
 }
 
+// NewCapabilityAt builds a PDS repo capability whose authoritative state file
+// lives under the supplied state root instead of the fixed default. It is used
+// by the power-cut proof (agentd powercut-marker) to drive the SAME durable
+// AtomicWrite path against a test-controlled /var-like mount; the on-disk
+// format, filename, and modes are identical to NewCapability. The root is a
+// fixed, code-controlled path supplied by agentd — never raw runtime text.
+func NewCapabilityAt(stateRoot string) *Capability {
+	return newCapability(defaultFileSystem{
+		stateRoot: stateRoot,
+		path:      filepath.Join(stateRoot, defaultRepoStateFilename),
+	})
+}
+
 func newCapability(fs repoFileSystem) *Capability {
 	return &Capability{fs: fs}
 }
@@ -470,6 +484,7 @@ func (u undoRepoState) Undo(ctx context.Context) error {
 type defaultFileSystem struct {
 	stateRoot string
 	path      string
+	atomicFS  atomicfile.FileSystem
 }
 
 func newDefaultFileSystem() repoFileSystem {
@@ -509,50 +524,24 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure PDS repo state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".pds-repo-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create PDS repo temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		fs.atomicFileSystem(),
+		fs.path,
+		content,
+		repoStateFileMode,
+		".pds-repo-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write PDS repo state: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(repoStateFileMode); err != nil {
-		return fmt.Errorf("secure PDS repo temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write PDS repo temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write PDS repo temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync PDS repo temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close PDS repo temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace PDS repo state: %w", err)
-	}
-	cleanupTemp = false
 	return nil
+}
+
+func (fs defaultFileSystem) atomicFileSystem() atomicfile.FileSystem {
+	if fs.atomicFS != nil {
+		return fs.atomicFS
+	}
+	return atomicfile.OSFileSystem{}
 }
 
 func (fs defaultFileSystem) Replace(ctx context.Context, snapshot repoSnapshot) error {

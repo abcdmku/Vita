@@ -48,6 +48,26 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "powercut-marker":
+			if err := runPowercutMarker(os.Args[2:], os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "powercut-marker: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "powercut-writer":
+			if err := runPowercutWriter(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "powercut-writer: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown agentd subcommand %q\n", os.Args[1])
+			os.Exit(2)
+		}
+	}
+
 	startedAt := time.Now().UTC()
 	archiveCapability := backup.NewArchiveCapability()
 	executeCapability := capsule.NewExecuteCapability()
