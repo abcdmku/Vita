@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -437,8 +437,8 @@ function resolveMirrorFetchUrl(
 
     if (deps.mirrorBaseUrl === undefined) {
       return {
-        ok: true,
-        url: mirrorUrl,
+        error: error("REMOTE_REJECTED", ["mirrorUrl"], "Local mirror references require a configured mirror base URL."),
+        ok: false,
       };
     }
 
@@ -556,10 +556,23 @@ async function storeVerifiedArtifact(
       };
     }
 
+    if (!verifyBytes(bytes, spec.integrity)) {
+      return {
+        error: error(
+          "INTEGRITY_MISMATCH",
+          ["integrity"],
+          "Fetched mirror artifact does not match the pinned SRI integrity.",
+        ),
+        ok: false,
+      };
+    }
+
+    const stableBytes = new Uint8Array(bytes);
+
     await mkdir(dirname(blobPath), { recursive: true });
 
     if (!existingVerifiedBlob(blobPath, spec.integrity)) {
-      await atomicWriteFile(root, blobPath, bytes);
+      await atomicWriteFile(root, blobPath, stableBytes);
     }
 
     const key = packageKey(spec.name, spec.version);
@@ -828,8 +841,11 @@ function resolveAgainstMirrorBase(reference: string, baseUrl: string): string | 
     }
 
     const normalizedReference = stripLeadingSlashes(reference);
-    const resolved = new URL(normalizedReference, mirrorBaseHref(base));
-    return resolved.origin === base.origin ? resolved.href : undefined;
+    const baseHref = mirrorBaseHref(base);
+    const resolved = new URL(normalizedReference, baseHref);
+    return resolved.origin === base.origin && isUrlPathUnderBase(resolved, base)
+      ? resolved.href
+      : undefined;
   } catch {
     return undefined;
   }
@@ -841,6 +857,11 @@ function mirrorBaseHref(base: URL): string {
   }
 
   return base.href;
+}
+
+function isUrlPathUnderBase(resolved: URL, base: URL): boolean {
+  const basePath = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
+  return basePath === "/" || resolved.pathname.startsWith(basePath);
 }
 
 function parseHttpUrl(value: string): URL | undefined {
