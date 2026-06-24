@@ -85,6 +85,7 @@ const expectedPackageAllowlist = [
   "iproute2",
   "kmod",
   "linux-image-amd64",
+  "nftables",
   "systemd",
   "systemd-boot",
   "systemd-boot-efi",

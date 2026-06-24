@@ -587,13 +587,7 @@ func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 	launcher := &recordingTransientLauncher{
 		status: transientUnitStatus{DynamicUID: "61408"},
 	}
-	netns := &recordingNetnsManager{
-		check: &capsuleNetnsCheck{
-			Interfaces: []string{"lo"},
-			Isolation:  capsuleNetnsIsolationEnforced,
-			Status:     capsuleNetnsMeasuredStatusOK,
-		},
-	}
+	netns := &recordingNetnsManager{}
 	capability := newExecuteCapabilityWithNetns(
 		fs,
 		memoryExecutionManifestStore{
@@ -617,8 +611,8 @@ func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 
 	props := propertyValues(launcher.starts[0].Properties)
 	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6 AF_NETLINK")
-	assertProperty(t, props, "PrivateNetwork", "yes")
-	assertNoProperty(t, props, "NetworkNamespacePath")
+	assertNoProperty(t, props, "PrivateNetwork")
+	assertProperty(t, props, "NetworkNamespacePath", launcher.starts[0].NetNS.Path)
 
 	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
@@ -631,8 +625,10 @@ func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 	if readResponse.Last.Network.Ingress != 1 || readResponse.Last.Network.Egress != 1 {
 		t.Fatalf("Last.Network = %#v, want ingress=1 egress=1", readResponse.Last.Network)
 	}
-	if readResponse.Last.Network.NetNS != launcher.starts[0].NetNS.Name || readResponse.Last.Network.Isolation != capsuleNetnsIsolationEnforced {
-		t.Fatalf("Last.Network = %#v, want netns name and enforced isolation", readResponse.Last.Network)
+	if readResponse.Last.Network.NetNS != launcher.starts[0].NetNS.Name ||
+		readResponse.Last.Network.Isolation != capsuleNetnsIsolationEnforced ||
+		readResponse.Last.Network.EgressDrop != capsuleEgressDropEnforced {
+		t.Fatalf("Last.Network = %#v, want netns name, enforced isolation, and egress drop", readResponse.Last.Network)
 	}
 	if err := undo.Undo(ctx); err != nil {
 		t.Fatalf("Undo returned error: %v", err)
@@ -1310,6 +1306,22 @@ func validExecutionNetwork() *ExecutionNetwork {
 				Interface:    "eth0",
 			},
 		},
+	}
+}
+
+func validExecutionNetworkNoEgress() *ExecutionNetwork {
+	return &ExecutionNetwork{
+		Ingress: []ExecutionNetworkIngressRule{
+			{
+				Name:       "health",
+				Protocol:   network.ProtoTCP,
+				Port:       8787,
+				SourceCIDR: "127.0.0.1/32",
+				Interface:  "lo",
+				Public:     false,
+			},
+		},
+		Egress: []ExecutionNetworkEgressRule{},
 	}
 }
 

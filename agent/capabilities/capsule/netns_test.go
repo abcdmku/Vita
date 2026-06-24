@@ -409,7 +409,7 @@ func TestExecuteNetworkProofDoesNotSetLoopbackForIncompleteMeasurement(t *testin
 
 func TestComposeOCIWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
 	manifest := executeOCIManifest(executeOCIEntry())
-	manifest.Network = validExecutionNetwork()
+	manifest.Network = validExecutionNetworkNoEgress()
 
 	unit, err := composeOCITransientUnit(manifest)
 	if err != nil {
@@ -433,7 +433,7 @@ func TestComposeOCIWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testi
 
 func TestComposeWasmWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
 	manifest := executeWasmManifest(executeWasmEntry())
-	manifest.Network = validExecutionNetwork()
+	manifest.Network = validExecutionNetworkNoEgress()
 
 	unit, err := composeWasmTransientUnit(manifest)
 	if err != nil {
@@ -477,6 +477,9 @@ func (m *recordingNetnsManager) Create(ctx context.Context, netns capsuleNetns) 
 	if m.proofPath != "" {
 		netns.ProofPath = m.proofPath
 	}
+	if !netns.Private && netns.Path == "" {
+		setCapsuleNetnsPaths(defaultNetnsRoot, &netns)
+	}
 	m.created = append(m.created, netns)
 	return netns, nil
 }
@@ -490,6 +493,20 @@ func (m *recordingNetnsManager) Check(ctx context.Context, netns capsuleNetns) (
 		return capsuleNetnsCheck{}, m.checkErr
 	}
 	if m.check == nil {
+		if netns.Egress != nil {
+			egressCheck := capsuleEgressCheck{
+				AllowedCIDR: netns.Egress.ProbeAllowedCIDR,
+				DeniedCIDR:  netns.Egress.ProbeDeniedCIDR,
+				Drop:        capsuleEgressDropEnforced,
+				Status:      capsuleEgressStatusOK,
+			}
+			return capsuleNetnsCheck{
+				Interfaces: []string{"lo", netns.Egress.CapsuleInterface},
+				Isolation:  capsuleNetnsIsolationEnforced,
+				Status:     capsuleNetnsMeasuredStatusOK,
+				Egress:     &egressCheck,
+			}, nil
+		}
 		return capsuleNetnsCheck{
 			Interfaces: []string{"lo"},
 			Isolation:  capsuleNetnsIsolationEnforced,

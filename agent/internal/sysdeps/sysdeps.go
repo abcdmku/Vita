@@ -34,6 +34,8 @@ func ErrnoCode(err error) string {
 		return "EINVAL"
 	case syscall.ENOENT:
 		return "ENOENT"
+	case syscall.ENODEV:
+		return "ENODEV"
 	case syscall.ENOSYS:
 		return "ENOSYS"
 	case syscall.EPERM:

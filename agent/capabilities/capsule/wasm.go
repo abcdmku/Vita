@@ -63,7 +63,10 @@ func composeWasmTransientUnit(manifest ExecutionManifest) (transientUnit, error)
 	unitName := capsuleUnitName(manifest.ID)
 	var netns *capsuleNetns
 	if manifest.Network != nil {
-		unitNetns := capsuleNetnsForUnit(unitName, "")
+		unitNetns, err := capsuleNetnsForNetwork(unitName, "", manifest.Network)
+		if err != nil {
+			return transientUnit{}, err
+		}
 		netns = &unitNetns
 	}
 	limits := manifest.ResourceLimits

@@ -322,7 +322,7 @@ test("the systemd unit content is enabled and binds loopback through ambient cap
   assert.equal(service.execStart, "/usr/lib/vita/agentd");
   assert.equal(service.execStart, plan.install.binary.path);
   assert.equal(service.wantedBy, "multi-user.target");
-  assert.deepEqual(service.ambientCapabilities, ["CAP_SYS_ADMIN", "CAP_SYS_TIME"]);
+  assert.deepEqual(service.ambientCapabilities, ["CAP_NET_ADMIN", "CAP_SYS_ADMIN", "CAP_SYS_TIME"]);
   assert.equal(service.listenAddress, "127.0.0.1:8786");
   assert.equal(service.listenAddress, agentImage.DEFAULT_AGENT_IMAGE_LISTEN_ADDRESS);
 
@@ -343,7 +343,7 @@ test("the systemd unit content is enabled and binds loopback through ambient cap
   assert.doesNotMatch(unitText, /^(?:After|Wants)=network-online\.target$/mu);
   assert.match(unitText, /^Restart=on-failure$/mu);
   assert.match(unitText, /^RestartSec=5s$/mu);
-  assert.match(unitText, /^AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME$/mu);
+  assert.match(unitText, /^AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TIME$/mu);
   assert.match(unitText, /^StateDirectory=vita-agent$/mu);
   assert.match(unitText, /^WantedBy=multi-user\.target$/mu);
 
@@ -453,7 +453,7 @@ test("build, owner, and listen-address validation reject weakened or non-loopbac
       agentImage.planAgentImage(
         planInput(replaceConfigSetting(configText, "Service", "AmbientCapabilities", "CAP_SYS_ADMIN")),
       ),
-    /Service\.AmbientCapabilities expected 2 entries, found 1/u,
+    /Service\.AmbientCapabilities expected 3 entries, found 1/u,
   );
 
   // Unknown sections/settings are rejected.
