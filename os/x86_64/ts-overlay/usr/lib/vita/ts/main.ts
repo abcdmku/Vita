@@ -42,6 +42,10 @@ import {
   runBackupArchiveRoundTrip,
 } from "./vita/backup.ts";
 import {
+  formatProtectionDashboardErrorMarker,
+  readProtectionDashboardMarkers,
+} from "./vita/protection-dashboard.ts";
+import {
   applyAndReadPdsRepoCreate,
   formatPdsRepoMarker,
   rejectInvalidPdsRepoCreate,
@@ -685,6 +689,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatProtectionDashboardErrorMarker("agentd_connect_failed"));
     emit(formatPdsRepoMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -752,6 +757,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   }
   await emitFilesMarkers(filesTransport);
   await emitBackupArchiveMarkers(agentTransport);
+  await emitProtectionDashboardMarkers(client);
 }
 
 async function emitApplyMarkers(
@@ -1173,6 +1179,20 @@ async function emitBackupArchiveMarkers(agentTransport: AgentTransport): Promise
   }
 
   emit(formatBackupArchiveRejectMarker(await rejectTamperedBackupArchive(client)));
+}
+
+async function emitProtectionDashboardMarkers(
+  client: Pick<AgentClient, "getState">,
+): Promise<void> {
+  const markers = await readProtectionDashboardMarkers(client);
+
+  for (let index = 0; index < markers.length; index += 1) {
+    const marker = markers[index];
+
+    if (marker !== undefined) {
+      emit(marker);
+    }
+  }
 }
 
 async function emitPdsRepoMarkers(
