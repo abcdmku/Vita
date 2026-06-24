@@ -225,6 +225,28 @@ function stageBakedWasmCapsules() {
   }
 }
 
+// --check MUST be read-only and deterministic: validate the tracked baked WASM WITHOUT writing or
+// chmod-ing tracked overlay inputs. Rewriting/chmod-ing a tracked file during --check mutates the
+// working tree (a non-deterministic, dirtying side effect). Staged executable/file modes are applied
+// ONLY by the real build/pack path (stageBakedWasmCapsules), never by --check.
+function checkBakedWasmCapsules() {
+  for (const capsule of BAKED_WASM_CAPSULES) {
+    const capsuleDir = join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", capsule.id);
+    const modulePath = join(capsuleDir, capsule.module);
+    const sourcePath = join(capsuleDir, "component.wat");
+    if (!existsSync(capsuleDir)) fail(`baked WASM capsule missing: ${capsuleDir}`);
+    if (!existsSync(sourcePath)) fail(`baked WASM source missing: ${sourcePath}`);
+    const expected = Buffer.from(capsule.wasmBase64, "base64");
+    if (!WebAssembly.validate(expected)) fail(`baked WASM module bytes are invalid for ${capsule.id}`);
+    if (!existsSync(modulePath)) fail(`baked WASM module not staged: ${modulePath} — run without --check to stage it`);
+    const staged = readFileSync(modulePath);
+    if (!staged.equals(expected)) {
+      fail(`baked WASM module out of date: ${modulePath} does not match expected bytes — run without --check to restage`);
+    }
+    log(`   verified baked WASM capsule ${capsule.id}/${capsule.module} (${staged.length} bytes, tracked input unchanged)`);
+  }
+}
+
 function stageOwnerFixture() {
   if (!existsSync(OWNER_FIXTURE_DIR)) fail(`owner fixture directory missing: ${OWNER_FIXTURE_DIR}`);
   if (!existsSync(OWNER_CREDENTIAL_PATH)) fail(`owner public credential fixture missing: ${OWNER_CREDENTIAL_PATH}`);
@@ -332,7 +354,7 @@ async function main() {
     checkStagedBinary(pins.deno);
     checkStagedBinary(pins.wasmtime);
     stageOwnerFixture();
-    stageBakedWasmCapsules();
+    checkBakedWasmCapsules();
     return;
   }
   log(`Vita ts-image — stage pinned Deno ${pins.deno.Version} + Wasmtime ${pins.wasmtime.Version} into ${REPO ? "ts-overlay" : ""}`);
