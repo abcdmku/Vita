@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { TextDecoder } from "node:util";
+import { TextDecoder, types as nodeTypes } from "node:util";
+import { zstdDecompressSync } from "node:zlib";
 
 import { verifyCatalog } from "../../catalog/src/catalog-manifest.ts";
 import type {
@@ -95,7 +96,18 @@ type Path = readonly string[];
 
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const INPUT_FIELDS = new Set(["catalog", "trustedKeys", "appId", "version", "mirrorStore"]);
-const ARTIFACT_FIELDS = new Set(["lockfile", "manifest"]);
+const TAR_BLOCK_BYTES = 512;
+const TAR_NAME_BYTES = 100;
+const TAR_SIZE_OFFSET = 124;
+const TAR_SIZE_BYTES = 12;
+const TAR_CHECKSUM_OFFSET = 148;
+const TAR_CHECKSUM_BYTES = 8;
+const TAR_TYPE_OFFSET = 156;
+const TAR_PREFIX_OFFSET = 345;
+const TAR_PREFIX_BYTES = 155;
+const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd] as const;
+const CAPSULE_MANIFEST_BASENAME = "manifest.json";
+const CAPSULE_LOCKFILE_BASENAMES = new Set(["lockfile.json", "package-lock.json", "deno.lock"]);
 
 export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
   try {
@@ -349,6 +361,20 @@ function normalizeMirrorStore(value: unknown):
       readonly ok: false;
       readonly error: ResolveFromCatalogError;
     } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      error: error("POLICY_REJECTED", ["mirrorStore"], "Expected mirror store object."),
+      ok: false,
+    };
+  }
+
+  if (nodeTypes.isProxy(value)) {
+    return {
+      error: error("POLICY_REJECTED", ["mirrorStore"], "Expected plain mirror store object."),
+      ok: false,
+    };
+  }
+
   if (value instanceof Map) {
     return {
       ok: true,
@@ -358,13 +384,6 @@ function normalizeMirrorStore(value: unknown):
           return item instanceof Uint8Array ? item : undefined;
         },
       },
-    };
-  }
-
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return {
-      error: error("POLICY_REJECTED", ["mirrorStore"], "Expected mirror store object."),
-      ok: false,
     };
   }
 
@@ -513,63 +532,177 @@ function parsePackageArtifact(bytes: Uint8Array):
       readonly ok: false;
       readonly error: ResolveFromCatalogError;
     } {
-  let parsed: unknown;
+  const tarBytes = capsuleTarBytes(bytes);
+  if (!tarBytes.ok) return { error: tarBytes.error, ok: false };
+
+  const files = readCapsuleFiles(tarBytes.value);
+  if (!files.ok) return { error: files.error, ok: false };
+
+  const manifest = parseArtifactJson(files.value.manifest, [CAPSULE_MANIFEST_BASENAME]);
+  if (!manifest.ok) return { error: manifest.error, ok: false };
+
+  const lockfile = parseArtifactJson(files.value.lockfile, [files.value.lockfilePath]);
+  if (!lockfile.ok) return { error: lockfile.error, ok: false };
+
+  return {
+    ok: true,
+    value: {
+      lockfile: lockfile.value,
+      manifest: manifest.value,
+    },
+  };
+}
+
+function capsuleTarBytes(bytes: Uint8Array):
+  | {
+      readonly ok: true;
+      readonly value: Uint8Array;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!hasZstdMagic(bytes)) {
+    return {
+      ok: true,
+      value: bytes,
+    };
+  }
 
   try {
-    parsed = JSON.parse(TEXT_DECODER.decode(bytes));
+    return {
+      ok: true,
+      value: zstdDecompressSync(bytes),
+    };
   } catch {
     return {
-      error: error("POLICY_REJECTED", [], "Catalog package artifact must be UTF-8 JSON."),
+      error: error("POLICY_REJECTED", [], "Catalog package artifact zstd decompression failed."),
       ok: false,
     };
   }
+}
 
-  const normalized = safeNormalize(parsed, { maxDepth: 128, maxNodes: 100_000 });
-  if (!normalized.ok) {
-    return {
-      error: error("POLICY_REJECTED", [], `Catalog package artifact could not be safely normalized: ${normalized.reason}`),
-      ok: false,
-    };
-  }
+function readCapsuleFiles(bytes: Uint8Array):
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly manifest: Uint8Array;
+        readonly lockfile: Uint8Array;
+        readonly lockfilePath: string;
+      };
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  let offset = 0;
+  let manifest: Uint8Array | undefined;
+  let lockfile: Uint8Array | undefined;
+  let lockfilePath: string | undefined;
 
-  if (!plainObject(normalized.value)) {
-    return {
-      error: error("POLICY_REJECTED", [], "Expected catalog package artifact object."),
-      ok: false,
-    };
-  }
-
-  const keys = sortedKeys(normalized.value);
-  for (let index = 0; index < keys.length; index += 1) {
-    const key = keys[index];
-    if (key !== undefined && !ARTIFACT_FIELDS.has(key)) {
+  while (offset < bytes.length) {
+    if (offset + TAR_BLOCK_BYTES > bytes.length) {
       return {
-        error: error("POLICY_REJECTED", [key], "Unknown catalog package artifact field."),
+        error: error("POLICY_REJECTED", [], "Capsule artifact tar header is truncated."),
         ok: false,
       };
     }
+
+    const header = bytes.subarray(offset, offset + TAR_BLOCK_BYTES);
+    if (isZeroBlock(header)) {
+      return readCapsuleFilesResult(manifest, lockfile, lockfilePath);
+    }
+
+    if (!validTarChecksum(header)) {
+      return {
+        error: error("POLICY_REJECTED", [], "Capsule artifact tar header checksum is invalid."),
+        ok: false,
+      };
+    }
+
+    const size = parseTarOctal(header, TAR_SIZE_OFFSET, TAR_SIZE_BYTES);
+    if (size === undefined) {
+      return {
+        error: error("POLICY_REJECTED", [], "Capsule artifact tar entry size is invalid."),
+        ok: false,
+      };
+    }
+
+    const dataStart = offset + TAR_BLOCK_BYTES;
+    const dataEnd = dataStart + size;
+    const nextOffset = dataStart + roundUpToTarBlock(size);
+    if (dataEnd > bytes.length || nextOffset > bytes.length) {
+      return {
+        error: error("POLICY_REJECTED", [], "Capsule artifact tar entry is truncated."),
+        ok: false,
+      };
+    }
+
+    if (isRegularTarEntry(header)) {
+      const path = readTarPath(header);
+      if (path === undefined) {
+        return {
+          error: error("POLICY_REJECTED", [], "Capsule artifact tar path is invalid."),
+          ok: false,
+        };
+      }
+
+      const basename = basenameFromPath(path);
+      if (basename === CAPSULE_MANIFEST_BASENAME) {
+        if (manifest !== undefined) {
+          return {
+            error: error("POLICY_REJECTED", [CAPSULE_MANIFEST_BASENAME], "Capsule artifact contains ambiguous manifests."),
+            ok: false,
+          };
+        }
+
+        manifest = bytes.slice(dataStart, dataEnd);
+      } else if (CAPSULE_LOCKFILE_BASENAMES.has(basename)) {
+        if (lockfile !== undefined) {
+          return {
+            error: error("POLICY_REJECTED", [basename], "Capsule artifact contains ambiguous lockfiles."),
+            ok: false,
+          };
+        }
+
+        lockfile = bytes.slice(dataStart, dataEnd);
+        lockfilePath = basename;
+      }
+    }
+
+    offset = nextOffset;
   }
 
-  if (!Object.hasOwn(normalized.value, "manifest")) {
+  return readCapsuleFilesResult(manifest, lockfile, lockfilePath);
+}
+
+function readCapsuleFilesResult(
+  manifest: Uint8Array | undefined,
+  lockfile: Uint8Array | undefined,
+  lockfilePath: string | undefined,
+):
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly manifest: Uint8Array;
+        readonly lockfile: Uint8Array;
+        readonly lockfilePath: string;
+      };
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (manifest === undefined) {
     return {
-      error: error("POLICY_REJECTED", ["manifest"], "Catalog package artifact manifest is required."),
+      error: error("POLICY_REJECTED", [CAPSULE_MANIFEST_BASENAME], "Capsule artifact manifest.json is required."),
       ok: false,
     };
   }
 
-  if (!Object.hasOwn(normalized.value, "lockfile")) {
+  if (lockfile === undefined || lockfilePath === undefined) {
     return {
-      error: error("POLICY_REJECTED", ["lockfile"], "Catalog package artifact lockfile is required."),
-      ok: false,
-    };
-  }
-
-  const manifest = normalized.value.manifest;
-  const lockfile = normalized.value.lockfile;
-
-  if (manifest === undefined || lockfile === undefined) {
-    return {
-      error: error("POLICY_REJECTED", [], "Catalog package artifact validation failed closed."),
+      error: error("POLICY_REJECTED", ["lockfile.json"], "Capsule artifact lockfile is required."),
       ok: false,
     };
   }
@@ -578,9 +711,158 @@ function parsePackageArtifact(bytes: Uint8Array):
     ok: true,
     value: {
       lockfile,
+      lockfilePath,
       manifest,
     },
   };
+}
+
+function parseArtifactJson(bytes: Uint8Array, path: Path):
+  | {
+      readonly ok: true;
+      readonly value: PlainJson;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(TEXT_DECODER.decode(bytes));
+  } catch {
+    return {
+      error: error("POLICY_REJECTED", path, "Capsule artifact JSON file is invalid."),
+      ok: false,
+    };
+  }
+
+  const normalized = safeNormalize(parsed, { maxDepth: 128, maxNodes: 100_000 });
+  if (!normalized.ok) {
+    return {
+      error: error("POLICY_REJECTED", path, `Capsule artifact JSON file could not be safely normalized: ${normalized.reason}`),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: normalized.value,
+  };
+}
+
+function hasZstdMagic(bytes: Uint8Array): boolean {
+  if (bytes.length < ZSTD_MAGIC.length) return false;
+
+  for (let index = 0; index < ZSTD_MAGIC.length; index += 1) {
+    if (bytes[index] !== ZSTD_MAGIC[index]) return false;
+  }
+
+  return true;
+}
+
+function isZeroBlock(bytes: Uint8Array): boolean {
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) return false;
+  }
+
+  return true;
+}
+
+function validTarChecksum(header: Uint8Array): boolean {
+  const expected = parseTarOctal(header, TAR_CHECKSUM_OFFSET, TAR_CHECKSUM_BYTES);
+  if (expected === undefined) return false;
+
+  let actual = 0;
+  for (let index = 0; index < header.length; index += 1) {
+    actual += index >= TAR_CHECKSUM_OFFSET && index < TAR_CHECKSUM_OFFSET + TAR_CHECKSUM_BYTES
+      ? 0x20
+      : header[index] ?? 0;
+  }
+
+  return actual === expected;
+}
+
+function parseTarOctal(bytes: Uint8Array, offset: number, length: number): number | undefined {
+  let value = 0;
+  let seenDigit = false;
+
+  for (let index = offset; index < offset + length; index += 1) {
+    const byte = bytes[index];
+    if (byte === undefined) return undefined;
+
+    if (byte === 0 || byte === 0x20) {
+      if (seenDigit) continue;
+      continue;
+    }
+
+    if (byte < 0x30 || byte > 0x37) {
+      return undefined;
+    }
+
+    seenDigit = true;
+    value = value * 8 + (byte - 0x30);
+    if (!Number.isSafeInteger(value)) {
+      return undefined;
+    }
+  }
+
+  return seenDigit ? value : undefined;
+}
+
+function roundUpToTarBlock(size: number): number {
+  return Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+}
+
+function isRegularTarEntry(header: Uint8Array): boolean {
+  const type = header[TAR_TYPE_OFFSET];
+  return type === 0 || type === 0x30;
+}
+
+function readTarPath(header: Uint8Array): string | undefined {
+  const name = readTarString(header, 0, TAR_NAME_BYTES);
+  if (name === undefined || name === "") return undefined;
+
+  const prefix = readTarString(header, TAR_PREFIX_OFFSET, TAR_PREFIX_BYTES);
+  const path = prefix === undefined || prefix === "" ? name : `${prefix}/${name}`;
+  return normalizeTarPath(path);
+}
+
+function readTarString(bytes: Uint8Array, offset: number, length: number): string | undefined {
+  let end = offset;
+  const limit = offset + length;
+
+  while (end < limit) {
+    const byte = bytes[end];
+    if (byte === undefined) return undefined;
+    if (byte === 0) break;
+    end += 1;
+  }
+
+  try {
+    return TEXT_DECODER.decode(bytes.subarray(offset, end));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeTarPath(path: string): string | undefined {
+  if (path === "" || path.includes("\\") || path.startsWith("/")) return undefined;
+
+  const parts = path.split("/");
+  const normalized: string[] = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === undefined || part === "" || part === "..") return undefined;
+    if (part !== ".") normalized[normalized.length] = part;
+  }
+
+  return normalized.length > 0 ? normalized.join("/") : undefined;
+}
+
+function basenameFromPath(path: string): string {
+  const separator = path.lastIndexOf("/");
+  return separator === -1 ? path : path.slice(separator + 1);
 }
 
 function inlinePackageContract(entry: PlainJson):
@@ -659,7 +941,7 @@ function verifySelectedContract(
 }
 
 function catalogEntryCandidate(value: PlainJsonObject): PlainJsonObject {
-  const candidate: Record<string, PlainJson> = {};
+  const candidate = Object.create(null) as Record<string, PlainJson>;
   const keys = sortedKeys(value);
 
   for (let index = 0; index < keys.length; index += 1) {
@@ -668,7 +950,12 @@ function catalogEntryCandidate(value: PlainJsonObject): PlainJsonObject {
 
     const child = value[key];
     if (child !== undefined) {
-      candidate[key] = child;
+      Object.defineProperty(candidate, key, {
+        configurable: true,
+        enumerable: true,
+        value: child,
+        writable: true,
+      });
     }
   }
 
@@ -719,6 +1006,13 @@ function snapshotInputObject(input: unknown):
   }
 
   try {
+    if (nodeTypes.isProxy(input)) {
+      return {
+        ok: false,
+        reason: "Expected plain resolveFromCatalog input object.",
+      };
+    }
+
     const prototype = Object.getPrototypeOf(input);
     if (prototype !== Object.prototype && prototype !== null) {
       return {

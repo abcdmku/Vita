@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { zstdCompressSync } from "node:zlib";
 
 import { resolveFromCatalog } from "../src/resolve-from-catalog.ts";
 import type {
@@ -35,6 +36,7 @@ type SriAlgorithm = "sha256" | "sha384" | "sha512";
 const packageRef = "file:///mirror/vita/notes-1.2.3.capsule.tar.zst";
 const alphaBytes = bytes("alpha package tarball");
 const betaBytes = bytes("beta package tarball");
+const TAR_BLOCK_BYTES = 512;
 
 const dataRead: CapabilityGrant = {
   access: "read-only",
@@ -124,6 +126,31 @@ test("artifact contract id and version must match the verified catalog selection
     }),
     "POLICY_REJECTED",
   );
+});
+
+test("artifact manifest own __proto__ field rejects instead of mutating the candidate prototype", () => {
+  const manifest = validInstallEntry() as InstallEntryFixture & MutableJsonObject;
+  Object.defineProperty(manifest, "__proto__", {
+    configurable: true,
+    enumerable: true,
+    value: {
+      package: validPackageContract({ id: "com.other.app" }),
+    },
+    writable: true,
+  });
+  const artifactBytes = packageArtifactBytes({
+    lockfile: validNpmLockfile(),
+    manifest,
+  });
+  const result = resolveFromCatalog({
+    appId: "com.vita.notes",
+    catalog: signCatalog(validCatalog(sri(artifactBytes, "sha512"))),
+    mirrorStore: validMirrorStore(artifactBytes),
+    trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+    version: "1.2.3",
+  });
+
+  assertRejects(result, "POLICY_REJECTED");
 });
 
 test("tampered catalog rejects as CATALOG_UNVERIFIED before mirror resolution", () => {
@@ -359,7 +386,78 @@ function packageArtifactBytes(value: {
   readonly lockfile: MutableJsonObject;
   readonly manifest: InstallEntryFixture;
 }): Uint8Array {
-  return bytes(JSON.stringify(value));
+  return zstdCompressSync(tarArchive({
+    "lockfile.json": bytes(JSON.stringify(value.lockfile)),
+    "manifest.json": bytes(JSON.stringify(value.manifest)),
+  }));
+}
+
+function tarArchive(files: Readonly<Record<string, Uint8Array>>): Uint8Array {
+  const chunks: Buffer[] = [];
+  const paths = Object.keys(files).sort();
+
+  for (let index = 0; index < paths.length; index += 1) {
+    const path = paths[index];
+    if (path === undefined) continue;
+
+    const content = files[path];
+    if (content === undefined) continue;
+
+    chunks[chunks.length] = tarHeader(path, content.length);
+    chunks[chunks.length] = Buffer.from(content);
+
+    const padding = roundUpToTarBlock(content.length) - content.length;
+    if (padding > 0) {
+      chunks[chunks.length] = Buffer.alloc(padding);
+    }
+  }
+
+  chunks[chunks.length] = Buffer.alloc(TAR_BLOCK_BYTES * 2);
+  return Buffer.concat(chunks);
+}
+
+function tarHeader(path: string, size: number): Buffer {
+  const header = Buffer.alloc(TAR_BLOCK_BYTES);
+  writeTarString(header, path, 0, 100);
+  writeTarOctal(header, 0o644, 100, 8);
+  writeTarOctal(header, 0, 108, 8);
+  writeTarOctal(header, 0, 116, 8);
+  writeTarOctal(header, size, 124, 12);
+  writeTarOctal(header, 0, 136, 12);
+  header.fill(0x20, 148, 156);
+  header[156] = 0x30;
+  writeTarString(header, "ustar", 257, 6);
+  writeTarString(header, "00", 263, 2);
+
+  let checksum = 0;
+  for (let index = 0; index < header.length; index += 1) {
+    checksum += header[index] ?? 0;
+  }
+
+  writeTarChecksum(header, checksum);
+  return header;
+}
+
+function writeTarString(header: Buffer, value: string, offset: number, length: number): void {
+  const encoded = Buffer.from(value, "utf8");
+  assert.ok(encoded.length <= length, "test tar path must fit in one header field");
+  encoded.copy(header, offset);
+}
+
+function writeTarOctal(header: Buffer, value: number, offset: number, length: number): void {
+  const encoded = Buffer.from(value.toString(8).padStart(length - 1, "0"), "ascii");
+  assert.equal(encoded.length, length - 1);
+  encoded.copy(header, offset);
+}
+
+function writeTarChecksum(header: Buffer, checksum: number): void {
+  const encoded = Buffer.from(`${checksum.toString(8).padStart(6, "0")}\0 `, "ascii");
+  assert.equal(encoded.length, 8);
+  encoded.copy(header, 148);
+}
+
+function roundUpToTarBlock(size: number): number {
+  return Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
 }
 
 function validCatalog(artifactIntegrity: string): CatalogPayload {
