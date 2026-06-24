@@ -38,6 +38,17 @@ test("snapshots distinguish active, configured-inactive, and absent from declare
   });
   assert.equal(absent.snapshots.status, "absent");
   assert.equal(absent.snapshots.evidence.measuredSnapshotCount, 99);
+
+  assert.equal(
+    mustProtection({
+      storageLayout: storageLayout({
+        cadence: "daily",
+        retentionCount: 7,
+        snapshotsArea: false,
+      }),
+    }).snapshots.status,
+    "absent",
+  );
 });
 
 test("mirror is absent for a single data volume and active only with explicit mirror device evidence", () => {

@@ -12,7 +12,6 @@ export const BACKUP_POLICY_CAPABILITY = "backup.policy";
 export const BACKUP_ARCHIVE_CAPABILITY = "backup.archive";
 export const NETWORK_POLICY_CAPABILITY = "network.policy";
 export const CAPSULE_REGISTRY_CAPABILITY = "capsule.registry";
-export const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 
 export type ProtectionDashboardReadResult =
   | {
@@ -67,27 +66,66 @@ interface CapsuleNetworkGrantSummary {
   readonly ingressGrants: number;
 }
 
-interface BundledCapsuleNetworkManifest {
+interface CapsuleNetworkGrantSource {
   readonly id: string;
   readonly version: string;
   readonly integrity: string;
-  readonly network: {
-    readonly egress: readonly unknown[];
-    readonly ingress: readonly unknown[];
-  };
+  readonly egressGrants: number;
+  readonly ingressGrants: number;
 }
 
-const BUNDLED_CAPSULE_NETWORK_MANIFESTS = Object.freeze([
+// Counts mirror the staged capsule manifests under /usr/lib/vita/capsules.
+const CAPSULE_NETWORK_GRANT_SOURCES = Object.freeze([
   Object.freeze({
+    egressGrants: 1,
     id: ON_DEVICE_CAPSULE_ENTRY.id,
     integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
-    network: Object.freeze({
-      egress: Object.freeze([Object.freeze({})]),
-      ingress: Object.freeze([Object.freeze({})]),
-    }),
+    ingressGrants: 1,
     version: ON_DEVICE_CAPSULE_ENTRY.version,
   }),
-]) satisfies readonly BundledCapsuleNetworkManifest[];
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.oci.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.missing-oci.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.hostile-oci.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.wasm.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.missing-wasm.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+  Object.freeze({
+    egressGrants: 0,
+    id: "local.invalid-net.capsule",
+    integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    ingressGrants: 0,
+    version: "1.0.0",
+  }),
+]) satisfies readonly CapsuleNetworkGrantSource[];
 
 export async function readProtectionDashboard(
   client: Pick<AgentClient, "getState">,
@@ -113,7 +151,6 @@ export async function readProtectionDashboard(
     backupArchiveState.state,
     networkState.state,
     registryState.state,
-    await readOptionalCapsuleExecuteState(client),
   );
 
   if (!dashboardInput.ok) {
@@ -187,7 +224,6 @@ function buildDashboardInput(
   backupArchiveState: AgentCapabilityState,
   networkState: AgentCapabilityState,
   registryState: AgentCapabilityState,
-  executeState: AgentCapabilityState | undefined,
 ):
   | {
       readonly ok: true;
@@ -211,7 +247,7 @@ function buildDashboardInput(
 
   const input: DashboardInput = {
     backupArchive: backupArchiveState,
-    capsuleNetworkGrants: buildCapsuleNetworkGrants(registry.value, executeState),
+    capsuleNetworkGrants: buildCapsuleNetworkGrants(registry.value),
     capsuleRegistry: registry.value ?? Object.freeze([]),
   };
 
@@ -251,16 +287,6 @@ async function readState(
       ok: false,
       reason,
     };
-  }
-}
-
-async function readOptionalCapsuleExecuteState(
-  client: Pick<AgentClient, "getState">,
-): Promise<AgentCapabilityState | undefined> {
-  try {
-    return await client.getState(CAPSULE_EXECUTE_CAPABILITY);
-  } catch {
-    return undefined;
   }
 }
 
@@ -362,13 +388,11 @@ function unwrapRegistryReadState(state: AgentCapabilityState): UnwrapRegistryRes
 
 function buildCapsuleNetworkGrants(
   registry: readonly PlainJson[] | undefined,
-  executeState: AgentCapabilityState | undefined,
 ): readonly PlainJsonObject[] {
   if (registry === undefined) {
     return Object.freeze([]);
   }
 
-  const measuredGrant = readCapsuleExecuteGrant(executeState);
   const grants: PlainJsonObject[] = [];
 
   for (let index = 0; index < registry.length; index += 1) {
@@ -378,9 +402,7 @@ function buildCapsuleNetworkGrants(
       continue;
     }
 
-    const grant = measuredGrant?.capsuleId === entry.id
-      ? measuredGrant
-      : readBundledCapsuleNetworkGrant(entry);
+    const grant = readCapsuleNetworkGrant(entry);
 
     if (grant === undefined || (grant.egressGrants === 0 && grant.ingressGrants === 0)) {
       continue;
@@ -394,39 +416,6 @@ function buildCapsuleNetworkGrants(
   }
 
   return Object.freeze(grants);
-}
-
-function readCapsuleExecuteGrant(
-  state: AgentCapabilityState | undefined,
-): CapsuleNetworkGrantSummary | undefined {
-  if (state === undefined) {
-    return undefined;
-  }
-
-  const last = field(state, "last");
-  if (!isPlainObject(last)) {
-    return undefined;
-  }
-
-  const capsuleId = field(last, "id");
-  const network = field(last, "network");
-
-  if (typeof capsuleId !== "string" || !isPlainObject(network)) {
-    return undefined;
-  }
-
-  const egressGrants = field(network, "egress");
-  const ingressGrants = field(network, "ingress");
-
-  if (!isNonNegativeSafeInteger(egressGrants) || !isNonNegativeSafeInteger(ingressGrants)) {
-    return undefined;
-  }
-
-  return {
-    capsuleId,
-    egressGrants,
-    ingressGrants,
-  };
 }
 
 function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistryEntryForDashboard | undefined {
@@ -456,11 +445,11 @@ function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistry
   };
 }
 
-function readBundledCapsuleNetworkGrant(
+function readCapsuleNetworkGrant(
   entry: CapsuleRegistryEntryForDashboard,
 ): CapsuleNetworkGrantSummary | undefined {
-  for (let index = 0; index < BUNDLED_CAPSULE_NETWORK_MANIFESTS.length; index += 1) {
-    const manifest = BUNDLED_CAPSULE_NETWORK_MANIFESTS[index];
+  for (let index = 0; index < CAPSULE_NETWORK_GRANT_SOURCES.length; index += 1) {
+    const manifest = CAPSULE_NETWORK_GRANT_SOURCES[index];
 
     if (
       manifest !== undefined &&
@@ -470,8 +459,8 @@ function readBundledCapsuleNetworkGrant(
     ) {
       return {
         capsuleId: entry.id,
-        egressGrants: manifest.network.egress.length,
-        ingressGrants: manifest.network.ingress.length,
+        egressGrants: manifest.egressGrants,
+        ingressGrants: manifest.ingressGrants,
       };
     }
   }
@@ -517,10 +506,6 @@ function field(value: PlainJsonObject, key: string): PlainJson | undefined {
 
 function isPlainObject(value: PlainJson | undefined): value is PlainJsonObject {
   return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isNonNegativeSafeInteger(value: PlainJson | undefined): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function markerToken(value: string): string {

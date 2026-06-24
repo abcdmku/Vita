@@ -309,7 +309,6 @@ const REQUIRED_STORAGE_AREA_ROLES: readonly StorageAreaRole[] = [
   "system-state",
   "user-data",
   "app-state",
-  "snapshots",
   "local-backup-cache",
 ];
 const SINGLETON_STORAGE_AREA_ROLES = new Set<StorageAreaRole>([
