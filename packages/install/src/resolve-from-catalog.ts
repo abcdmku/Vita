@@ -87,7 +87,7 @@ interface LocatedCatalogVersion {
 }
 
 interface CatalogPackageArtifact {
-  readonly entry: PlainJson;
+  readonly manifest: PlainJson;
   readonly lockfile: PlainJson;
 }
 
@@ -95,7 +95,7 @@ type Path = readonly string[];
 
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const INPUT_FIELDS = new Set(["catalog", "trustedKeys", "appId", "version", "mirrorStore"]);
-const ARTIFACT_FIELDS = new Set(["entry", "lockfile"]);
+const ARTIFACT_FIELDS = new Set(["lockfile", "manifest"]);
 
 export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
   try {
@@ -141,18 +141,25 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
     const artifact = parsePackageArtifact(artifactBytes.value);
     if (!artifact.ok) return reject([artifact.error]);
 
+    const contract = inlinePackageContract(artifact.value.manifest);
+    if (!contract.ok) return reject([contract.error]);
+
+    const contractMatch = verifySelectedContract(
+      contract.value,
+      request.value.appId,
+      request.value.version,
+    );
+    if (!contractMatch.ok) return reject([contractMatch.error]);
+
     const mirrorResult = resolveFromMirror(artifact.value.lockfile, request.value.mirrorStore);
     if (!mirrorResult.ok) {
       return reject(mirrorResult.errors.map(mirrorResolutionError));
     }
 
-    const installPlan = resolveInstallPlan(artifact.value.entry, artifact.value.lockfile);
+    const installPlan = resolveInstallPlan(artifact.value.manifest, artifact.value.lockfile);
     if (!installPlan.ok) {
       return reject(installPlan.errors.map(installPlanError));
     }
-
-    const contract = inlinePackageContract(artifact.value.entry);
-    if (!contract.ok) return reject([contract.error]);
 
     return {
       ok: true,
@@ -543,9 +550,9 @@ function parsePackageArtifact(bytes: Uint8Array):
     }
   }
 
-  if (!Object.hasOwn(normalized.value, "entry")) {
+  if (!Object.hasOwn(normalized.value, "manifest")) {
     return {
-      error: error("POLICY_REJECTED", ["entry"], "Catalog package artifact entry is required."),
+      error: error("POLICY_REJECTED", ["manifest"], "Catalog package artifact manifest is required."),
       ok: false,
     };
   }
@@ -557,10 +564,10 @@ function parsePackageArtifact(bytes: Uint8Array):
     };
   }
 
-  const entry = normalized.value.entry;
+  const manifest = normalized.value.manifest;
   const lockfile = normalized.value.lockfile;
 
-  if (entry === undefined || lockfile === undefined) {
+  if (manifest === undefined || lockfile === undefined) {
     return {
       error: error("POLICY_REJECTED", [], "Catalog package artifact validation failed closed."),
       ok: false,
@@ -570,8 +577,8 @@ function parsePackageArtifact(bytes: Uint8Array):
   return {
     ok: true,
     value: {
-      entry,
       lockfile,
+      manifest,
     },
   };
 }
@@ -587,7 +594,7 @@ function inlinePackageContract(entry: PlainJson):
     } {
   if (!plainObject(entry)) {
     return {
-      error: error("POLICY_REJECTED", ["entry"], "Expected catalog entry object."),
+      error: error("POLICY_REJECTED", ["manifest"], "Expected catalog artifact manifest object."),
       ok: false,
     };
   }
@@ -596,14 +603,14 @@ function inlinePackageContract(entry: PlainJson):
   const result = validateCatalogEntry(candidate);
   if (!result.ok) {
     return {
-      error: error("POLICY_REJECTED", ["entry"], "Catalog entry validation failed after install plan resolution."),
+      error: error("POLICY_REJECTED", ["manifest"], "Catalog artifact manifest validation failed after artifact resolution."),
       ok: false,
     };
   }
 
   if (typeof result.entry.package === "string" || "ref" in result.entry.package) {
     return {
-      error: error("POLICY_REJECTED", ["entry", "package"], "Expected embedded package contract."),
+      error: error("POLICY_REJECTED", ["manifest", "package"], "Expected embedded package contract."),
       ok: false,
     };
   }
@@ -612,6 +619,43 @@ function inlinePackageContract(entry: PlainJson):
     ok: true,
     value: result.entry.package,
   };
+}
+
+function verifySelectedContract(
+  contract: PackageContract,
+  appId: string,
+  version: string,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (contract.identity.id !== appId) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        ["manifest", "package", "identity", "id"],
+        "Resolved package artifact id does not match the selected catalog app.",
+      ),
+      ok: false,
+    };
+  }
+
+  if (contract.version !== version) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        ["manifest", "package", "version"],
+        "Resolved package artifact version does not match the selected catalog version.",
+      ),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
 }
 
 function catalogEntryCandidate(value: PlainJsonObject): PlainJsonObject {

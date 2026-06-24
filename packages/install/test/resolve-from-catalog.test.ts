@@ -32,7 +32,7 @@ type MutableJsonObject = { [key: string]: unknown };
 type ResolveFromCatalogErrorCode = ResolveFromCatalogError["code"];
 type SriAlgorithm = "sha256" | "sha384" | "sha512";
 
-const packageRef = "package://vita/notes/1.2.3";
+const packageRef = "file:///mirror/vita/notes-1.2.3.capsule.tar.zst";
 const alphaBytes = bytes("alpha package tarball");
 const betaBytes = bytes("beta package tarball");
 
@@ -51,7 +51,7 @@ const privateIngress: CapabilityGrant = {
   public: false,
 };
 
-test("valid verified catalog app resolves to ordered install plan, grants, package ref, and mirror closure", () => {
+test("valid verified catalog app resolves to ordered install plan, grants, artifact ref, and mirror closure", () => {
   const requestedCapabilities = [dataRead, privateIngress];
   const fixture = signedFixture({ requestedCapabilities });
   const result = resolveFromCatalog({
@@ -77,6 +77,52 @@ test("valid verified catalog app resolves to ordered install plan, grants, packa
   assert.deepEqual(
     plan.mirrorResolution.packages.map((entry) => entry.key),
     ["alpha@1.2.3", "beta@2.0.0"],
+  );
+});
+
+test("legacy metadata envelope is not accepted as the package artifact", () => {
+  const metadataBytes = bytes(JSON.stringify({
+    entry: validInstallEntry(),
+    lockfile: validNpmLockfile(),
+  }));
+  const result = resolveFromCatalog({
+    appId: "com.vita.notes",
+    catalog: signCatalog(validCatalog(sri(metadataBytes, "sha512"))),
+    mirrorStore: validMirrorStore(metadataBytes),
+    trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+    version: "1.2.3",
+  });
+
+  assertRejects(result, "POLICY_REJECTED");
+});
+
+test("artifact contract id and version must match the verified catalog selection", () => {
+  const mismatchedApp = signedFixture({
+    packageContract: validPackageContract({ id: "com.other.app" }),
+  });
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: mismatchedApp.catalog,
+      mirrorStore: validMirrorStore(mismatchedApp.artifactBytes),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
+
+  const mismatchedVersion = signedFixture({
+    packageContract: validPackageContract({ version: "9.9.9" }),
+  });
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: mismatchedVersion.catalog,
+      mirrorStore: validMirrorStore(mismatchedVersion.artifactBytes),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
   );
 });
 
@@ -288,18 +334,17 @@ function assertRejects(
 function signedFixture(
   options: {
     readonly requestedCapabilities?: readonly CapabilityGrant[];
+    readonly packageContract?: PackageContract;
   } = {},
 ): {
   readonly artifactBytes: Uint8Array;
   readonly artifactIntegrity: string;
   readonly catalog: SignedCatalogManifest;
 } {
-  const entry = options.requestedCapabilities === undefined
-    ? validInstallEntry()
-    : validInstallEntry({ requestedCapabilities: options.requestedCapabilities });
+  const entry = validInstallEntry(options);
   const artifactBytes = packageArtifactBytes({
-    entry,
     lockfile: validNpmLockfile(),
+    manifest: entry,
   });
   const artifactIntegrity = sri(artifactBytes, "sha512");
 
@@ -311,8 +356,8 @@ function signedFixture(
 }
 
 function packageArtifactBytes(value: {
-  readonly entry: InstallEntryFixture;
   readonly lockfile: MutableJsonObject;
+  readonly manifest: InstallEntryFixture;
 }): Uint8Array {
   return bytes(JSON.stringify(value));
 }
@@ -342,9 +387,10 @@ function validCatalog(artifactIntegrity: string): CatalogPayload {
 function validInstallEntry(
   options: {
     readonly requestedCapabilities?: readonly CapabilityGrant[];
+    readonly packageContract?: PackageContract;
   } = {},
 ): InstallEntryFixture {
-  const contract = validPackageContract();
+  const contract = options.packageContract ?? validPackageContract();
 
   return {
     digest: contract.digest,
@@ -372,7 +418,12 @@ function validInstallEntry(
   };
 }
 
-function validPackageContract(): PackageContract {
+function validPackageContract(
+  options: {
+    readonly id?: string;
+    readonly version?: string;
+  } = {},
+): PackageContract {
   return {
     accelerators: {
       optional: [],
@@ -406,7 +457,7 @@ function validPackageContract(): PackageContract {
     healthChecks: [],
     identity: {
       description: "First-party notes service.",
-      id: "com.vita.notes",
+      id: options.id ?? "com.vita.notes",
       name: "Vita Notes",
     },
     network: {
@@ -444,7 +495,7 @@ function validPackageContract(): PackageContract {
       schemaMigrations: [],
       strategy: "replace",
     },
-    version: "1.2.3",
+    version: options.version ?? "1.2.3",
     vulnerabilityStatus: {
       critical: 0,
       high: 0,
