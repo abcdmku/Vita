@@ -1,20 +1,19 @@
-# Vita /var mount. Explicit because gpt-auto only mounts a DPS /var when its UUID is machine-id-keyed.
-# The vita-data partition exists ONLY in VITA_VERITY builds (repart-verity). On a plain (non-verity) smoke image the
-# device is absent, so ConditionPathExists SKIPS the unit entirely (condition unmet = success-skip, NOT a failure):
-# a *failed* var.mount cascades to every RequiresMountsFor=/var/... dependent (e.g. vita-agentd's StateDirectory),
-# cancelling them; a *skipped* var.mount does not, and those units fall back to /var on the rw root. nofail + a short
-# device-timeout are belt-and-suspenders for the (shouldn't-happen) case where the node exists but is slow.
+# Vita LUKS /var mount. This committed unit is used only by the VITA_LUKS=1
+# verity overlay; build-and-boot.mjs generates the old by-label plaintext unit
+# for VITA_LUKS=0. Hard-depend on the unlock service and mount only the mapper,
+# never /dev/disk/by-label/vita-data, so wrong/no key cannot fall open.
 [Unit]
 Description=Vita persistent data partition (/var)
 DefaultDependencies=no
-Wants=vita-data-luks.service
+Requires=vita-data-luks.service
+BindsTo=vita-data-luks.service
 After=vita-data-luks.service
 Before=local-fs.target umount.target
 Conflicts=umount.target
-ConditionPathExists=/dev/disk/by-label/vita-data
+ConditionPathExists=/usr/lib/vita/luks/enabled
 
 [Mount]
-What=/dev/disk/by-label/vita-data
+What=/dev/mapper/vita-data
 Where=/var
 Type=ext4
 Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs

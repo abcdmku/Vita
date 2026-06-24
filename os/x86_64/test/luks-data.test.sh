@@ -13,6 +13,11 @@ else
 fi
 KEYGEN="$REPO/tools/luks-test-keys.sh"
 RESOLVER="$REPO/os/x86_64/verity-overlay/usr/lib/vita/luks/vita-data-unlock.sh"
+VAR_MOUNT="$REPO/os/x86_64/verity-overlay/usr/lib/systemd/system/var.mount"
+BUILD_AND_BOOT="$REPO/os/x86_64/build-and-boot.mjs"
+MKOSI_CONF="$REPO/os/x86_64/mkosi.conf"
+BUILD_ROOT="$REPO/os/x86_64/build-root.mjs"
+ROOT_DETERMINISM_TEST="$REPO/os/x86_64/test/root-determinism.test.ts"
 DATA_KEY="$REPO/os/x86_64/.luks/data.key"
 ROGUE_KEY="$REPO/os/x86_64/.luks/rogue.key"
 
@@ -37,6 +42,22 @@ assert_contains() {
   local needle="$2"
   local label="$3"
   printf '%s' "$text" | grep -Fq "$needle" || fail "$label: expected to contain '$needle'"
+}
+
+assert_file_line() {
+  local path="$1"
+  local pattern="$2"
+  local label="$3"
+  grep -Eq "$pattern" "$path" || fail "$label: expected $path to match $pattern"
+}
+
+reject_file_line() {
+  local path="$1"
+  local pattern="$2"
+  local label="$3"
+  if grep -Eq "$pattern" "$path"; then
+    fail "$label: $path must not match $pattern"
+  fi
 }
 
 expect_fail_output() {
@@ -86,6 +107,18 @@ if git ls-files --error-unmatch os/x86_64/.luks/rogue.key >/dev/null 2>&1; then
   fail "rogue.key is tracked"
 fi
 
+assert_file_line "$BUILD_AND_BOOT" '"PATH,PARTLABEL"' "build postprocess must locate loop partitions by device path"
+assert_file_line "$VAR_MOUNT" '^Requires=vita-data-luks\.service$' "var.mount must hard-require unlock"
+assert_file_line "$VAR_MOUNT" '^BindsTo=vita-data-luks\.service$' "var.mount must bind to unlock"
+assert_file_line "$VAR_MOUNT" '^After=vita-data-luks\.service$' "var.mount must start after unlock"
+assert_file_line "$VAR_MOUNT" '^What=/dev/mapper/vita-data$' "var.mount must mount the decrypted mapper"
+assert_file_line "$VAR_MOUNT" '^ConditionPathExists=/usr/lib/vita/luks/enabled$' "var.mount must be LUKS-build gated"
+reject_file_line "$VAR_MOUNT" '^Wants=vita-data-luks\.service$' "var.mount must not soft-depend on unlock"
+reject_file_line "$VAR_MOUNT" '^What=/dev/disk/by-label/vita-data$' "var.mount must not mount a raw by-label plaintext fallback"
+assert_file_line "$MKOSI_CONF" '^[[:space:]]+cryptsetup-bin$' "mkosi package set must include cryptsetup-bin"
+assert_file_line "$BUILD_ROOT" '^[[:space:]]+"cryptsetup-bin",$' "planner package allowlist must include cryptsetup-bin"
+assert_file_line "$ROOT_DETERMINISM_TEST" '^[[:space:]]+"cryptsetup-bin",$' "determinism test package allowlist must include cryptsetup-bin"
+
 tpm_output="$(expect_fail_output "TPM stub" bash "$RESOLVER" probe-source tpm)"
 assert_contains "$tpm_output" "unsupported: tpm-sealed slot is a stub" "TPM stub"
 assert_contains "$tpm_output" "OWNER WIRES" "TPM stub"
@@ -100,19 +133,19 @@ expect_fail_output "resolver with no usable source" env \
   bash "$RESOLVER" resolve-key >/dev/null
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "SKIP: root/loop LUKS exercise requires root; key, git-ignore, and resolver checks passed"
+  echo "SKIP: root/loop LUKS exercise requires root; key, git-ignore, resolver, fail-closed unit, loop-path, and package checks passed"
   exit 0
 fi
 
 for cmd in cryptsetup losetup mkfs.ext4 mount umount mountpoint truncate; do
   command -v "$cmd" >/dev/null 2>&1 || {
-    echo "SKIP: root/loop LUKS exercise needs '$cmd'; key, git-ignore, and resolver checks passed"
+    echo "SKIP: root/loop LUKS exercise needs '$cmd'; key, git-ignore, resolver, fail-closed unit, loop-path, and package checks passed"
     exit 0
   }
 done
 
 if ! losetup -f >/dev/null 2>&1; then
-  echo "SKIP: no free loop devices; key, git-ignore, and resolver checks passed"
+  echo "SKIP: no free loop devices; key, git-ignore, resolver, fail-closed unit, loop-path, and package checks passed"
   exit 0
 fi
 

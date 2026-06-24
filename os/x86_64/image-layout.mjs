@@ -201,8 +201,9 @@ const DATA_MOUNT_POINT = "/var";
 const VAR_MOUNT_UNIT = "var.mount";
 const VAR_MOUNT_UNIT_PATH = "/usr/lib/systemd/system/var.mount";
 const VAR_MOUNT_ENABLE_PATH = "/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf";
-// nofail + a short device-timeout so a missing vita-data device degrades gracefully; growfs grows /var on first boot.
-// (var.mount also carries ConditionPathExists for the device + ships in the verity-only overlay — see var.mount.)
+const VITA_DATA_MAPPER_DEVICE = "/dev/mapper/vita-data";
+// nofail + a short device-timeout preserve the P1-029 skip behavior for generated non-LUKS verity units; the
+// committed VITA_LUKS=1 unit hard-depends on unlock and mounts this mapper device.
 const VAR_MOUNT_OPTIONS = Object.freeze(["nofail", "x-systemd.device-timeout=5s", "x-systemd.growfs"]);
 
 class ConfigValidationError extends Error {
@@ -1184,7 +1185,7 @@ function buildSystemdMounts(resolvedConfig) {
       unit: VAR_MOUNT_UNIT,
       unitPath: VAR_MOUNT_UNIT_PATH,
       sourcePartition: dataPartition.id,
-      what: dataPartition.byLabel,
+      what: VITA_DATA_MAPPER_DEVICE,
       where: dataPartition.mountPoint,
       type: dataPartition.filesystem,
       options: [...VAR_MOUNT_OPTIONS],

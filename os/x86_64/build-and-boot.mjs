@@ -282,9 +282,9 @@ function captureLuksPostprocess(label, executable, args) {
 
 function findLoopPartitionByPartLabel(loopDevice, partLabel) {
   const stdout = captureLuksPostprocess("LUKS · locate vita-data loop partition", "lsblk",
-    ["-P", "-o", "NAME,PARTLABEL", loopDevice]);
+    ["-P", "-o", "PATH,PARTLABEL", loopDevice]);
   for (const line of stdout.split(/\r?\n/u)) {
-    const m = /^NAME="([^"]+)" PARTLABEL="([^"]*)"$/.exec(line.trim());
+    const m = /^PATH="([^"]+)" PARTLABEL="([^"]*)"$/.exec(line.trim());
     if (m && m[2] === partLabel && m[1] !== loopDevice) {
       return m[1];
     }
@@ -425,10 +425,10 @@ if (MODE === "smoke") {
   }
   const verityRepartDir = verityMode ? prepareVerityRepartDirectory({ luksMode }) : "";
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${verityRepartDir}`] : [];
-  // Verity root is read-only + PERSISTENT (P1-029): var.mount mounts /dev/disk/by-label/vita-data writable at
-  // /var. With VITA_LUKS=0 that label comes from the generated plaintext ext4 repart definition; with
-  // VITA_LUKS=1 it comes from the inner ext4 filesystem on the decrypted mapper. So NO systemd.volatile=overlay
-  // (that tmpfs-overlays / and would shadow the persistent /var).
+  // Verity root is read-only + PERSISTENT (P1-029): with VITA_LUKS=0 var.mount mounts the generated plaintext
+  // ext4 /dev/disk/by-label/vita-data; with VITA_LUKS=1 the committed overlay hard-depends on unlock and mounts
+  // /dev/mapper/vita-data so a wrong or missing key cannot fall open to a raw labelled partition.
+  // So NO systemd.volatile=overlay (that tmpfs-overlays / and would shadow the persistent /var).
   // var.mount + its local-fs drop-in live in a VERITY-ONLY overlay: on a plain (non-verity) image the vita-data
   // device never exists, and a present-but-failed var.mount cascades through RequiresMountsFor=/var/... to cancel
   // vita-agentd (StateDirectory=vita-agent) — breaking the agentd socket. So ship those units ONLY when VITA_VERITY=1.
