@@ -1,4 +1,4 @@
 This directory contains public-only owner smoke-test material.
-The image staging step regenerates the public credential and signed assertion from an in-memory
-test authenticator key, then discards the signer. No owner private key is staged here or used by
-the unprivileged TypeScript runtime.
+The image staging step validates these committed public/reject fixtures without regenerating them.
+The assertion is intentionally stale once agentd mints a fresh random challenge, so the unprivileged
+TypeScript runtime can prove fail-closed rejection without holding an owner private key.

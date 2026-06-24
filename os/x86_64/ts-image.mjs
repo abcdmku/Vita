@@ -23,7 +23,7 @@
 // instead of downloading (still sha256-verified against the pins).
 
 import { spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, randomBytes, sign as signBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -226,103 +226,89 @@ function stageBakedWasmCapsules() {
 }
 
 function stageOwnerFixture() {
-  mkdirSync(OWNER_FIXTURE_DIR, { recursive: true });
+  if (!existsSync(OWNER_FIXTURE_DIR)) fail(`owner fixture directory missing: ${OWNER_FIXTURE_DIR}`);
+  if (!existsSync(OWNER_CREDENTIAL_PATH)) fail(`owner public credential fixture missing: ${OWNER_CREDENTIAL_PATH}`);
+  if (!existsSync(OWNER_ASSERTION_PATH)) fail(`owner assertion fixture missing: ${OWNER_ASSERTION_PATH}`);
 
-  const { publicKey, privateKey: signingKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const publicJWK = publicKey.export({ format: "jwk" });
-  const x = base64URLDecode(publicJWK.x);
-  const y = base64URLDecode(publicJWK.y);
-  const credentialId = base64URLEncode(randomBytes(32));
-  const challenge = base64URLEncode(randomBytes(32));
-  const publicKeyCose = base64URLEncode(coseEC2PublicKey(x, y));
+  const credentialText = readFileSync(OWNER_CREDENTIAL_PATH, "utf8");
+  const assertionText = readFileSync(OWNER_ASSERTION_PATH, "utf8");
+  rejectInlineOwnerSecretMaterial(credentialText, OWNER_CREDENTIAL_PATH);
+  rejectInlineOwnerSecretMaterial(assertionText, OWNER_ASSERTION_PATH);
 
-  const credential = {
-    credentialId,
-    publicKeyCose,
-    signCount: 0,
-    aaguid: "00000000-0000-0000-0000-000000000000",
-    transports: ["internal"],
-    rpId: OWNER_FIXTURE_RP_ID,
-    userHandle: base64URLEncode(Buffer.from("owner", "utf8")),
-  };
-
-  const authenticatorData = authenticatorDataBytes(OWNER_FIXTURE_RP_ID, 0x01, 1);
-  const clientDataJSON = Buffer.from(JSON.stringify({
-    challenge,
-    origin: `https://${OWNER_FIXTURE_RP_ID}`,
-    type: "webauthn.get",
-  }), "utf8");
-  const signatureBase = Buffer.concat([
-    authenticatorData,
-    createHash("sha256").update(clientDataJSON).digest(),
-  ]);
-  const assertion = {
-    credentialId,
-    authenticatorData: base64URLEncode(authenticatorData),
-    clientDataJSON: base64URLEncode(clientDataJSON),
-    signature: base64URLEncode(signBytes("sha256", signatureBase, signingKey)),
-    action: OWNER_FIXTURE_ACTION,
-  };
-
-  writeFileSync(OWNER_CREDENTIAL_PATH, `${JSON.stringify(credential, null, 2)}\n`, { mode: 0o644 });
-  writeFileSync(OWNER_ASSERTION_PATH, `${JSON.stringify({
-    action: OWNER_FIXTURE_ACTION,
-    challenge,
-    assertion,
-  }, null, 2)}\n`, { mode: 0o644 });
-  log(`   staged owner public credential + signed assertion fixture (${OWNER_FIXTURE_DIR})`);
+  const credential = parseJSONFile(credentialText, OWNER_CREDENTIAL_PATH);
+  const fixture = parseJSONFile(assertionText, OWNER_ASSERTION_PATH);
+  validateOwnerCredentialFixture(credential);
+  validateOwnerAssertionFixture(fixture, credential);
+  log(`   verified owner public credential + pre-signed reject fixture (${OWNER_FIXTURE_DIR})`);
 }
 
-function authenticatorDataBytes(rpId, flags, counter) {
-  const out = Buffer.alloc(37);
-  createHash("sha256").update(rpId).digest().copy(out, 0);
-  out[32] = flags & 0xff;
-  out.writeUInt32BE(counter, 33);
-  return out;
+function parseJSONFile(text, path) {
+  try {
+    return JSON.parse(text);
+  } catch (cause) {
+    fail(`invalid JSON in ${path}: ${cause?.message ?? String(cause)}`);
+  }
 }
 
-function coseEC2PublicKey(x, y) {
-  return Buffer.concat([
-    cborHeader(5, 5),
-    cborInt(1),
-    cborInt(2),
-    cborInt(3),
-    cborInt(-7),
-    cborInt(-1),
-    cborInt(1),
-    cborInt(-2),
-    cborBytes(x),
-    cborInt(-3),
-    cborBytes(y),
-  ]);
+function validateOwnerCredentialFixture(value) {
+  if (!isPlainObject(value)) fail("owner credential fixture must be a JSON object");
+  assertBase64URL(value.credentialId, "owner credential credentialId", 1, 1024);
+  assertBase64URL(value.publicKeyCose, "owner credential publicKeyCose", 1, 4096);
+  assertBase64URL(value.userHandle, "owner credential userHandle", 1, 64);
+  if (value.rpId !== OWNER_FIXTURE_RP_ID) fail(`owner credential rpId must be ${OWNER_FIXTURE_RP_ID}`);
+  if (!Number.isSafeInteger(value.signCount) || value.signCount < 0) fail("owner credential signCount must be a non-negative integer");
+  if (value.aaguid !== undefined && typeof value.aaguid !== "string") fail("owner credential aaguid must be a string when present");
+  if (value.transports !== undefined) {
+    if (!Array.isArray(value.transports) || value.transports.length === 0) fail("owner credential transports must be a non-empty array when present");
+    for (const transport of value.transports) {
+      if (typeof transport !== "string" || transport.length === 0) fail("owner credential transports must contain strings");
+    }
+  }
 }
 
-function cborInt(value) {
-  return value >= 0 ? cborHeader(0, value) : cborHeader(1, -1 - value);
+function validateOwnerAssertionFixture(value, credential) {
+  if (!isPlainObject(value)) fail("owner assertion fixture must be a JSON object");
+  if (value.action !== OWNER_FIXTURE_ACTION) fail(`owner assertion fixture action must be ${OWNER_FIXTURE_ACTION}`);
+  assertBase64URL(value.challenge, "owner assertion fixture challenge", 32, 32);
+  const assertion = value.assertion;
+  if (!isPlainObject(assertion)) fail("owner assertion fixture assertion must be a JSON object");
+  if (assertion.credentialId !== credential.credentialId) fail("owner assertion fixture credentialId must match public credential");
+  if (assertion.action !== OWNER_FIXTURE_ACTION) fail(`owner assertion action must be ${OWNER_FIXTURE_ACTION}`);
+  assertBase64URL(assertion.authenticatorData, "owner assertion authenticatorData", 37, 4096);
+  const clientDataJSON = assertBase64URL(assertion.clientDataJSON, "owner assertion clientDataJSON", 1, 8192).toString("utf8");
+  assertBase64URL(assertion.signature, "owner assertion signature", 1, 512);
+  const clientData = parseJSONFile(clientDataJSON, "owner assertion clientDataJSON");
+  if (!isPlainObject(clientData)) fail("owner assertion clientDataJSON must decode to an object");
+  if (
+    clientData.type !== "webauthn.get" ||
+    clientData.challenge !== value.challenge ||
+    clientData.origin !== `https://${OWNER_FIXTURE_RP_ID}`
+  ) {
+    fail("owner assertion fixture clientDataJSON must match action challenge and origin");
+  }
 }
 
-function cborBytes(value) {
-  return Buffer.concat([cborHeader(2, value.length), Buffer.from(value)]);
-}
-
-function cborHeader(major, value) {
-  const prefix = major << 5;
-  if (value < 24) return Buffer.from([prefix | value]);
-  if (value <= 0xff) return Buffer.from([prefix | 24, value]);
-  if (value <= 0xffff) return Buffer.from([prefix | 25, (value >>> 8) & 0xff, value & 0xff]);
-  return Buffer.from([prefix | 26, (value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff]);
-}
-
-function base64URLEncode(value) {
-  return Buffer.from(value).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-
-function base64URLDecode(value) {
-  if (typeof value !== "string" || value.length === 0) fail("generated owner public key is missing a coordinate");
+function assertBase64URL(value, label, minBytes, maxBytes) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value) || value.includes("=")) {
+    fail(`${label} must be base64url without padding`);
+  }
   const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
   const decoded = Buffer.from(padded, "base64");
-  if (decoded.length !== 32) fail("generated owner public key coordinate has invalid length");
+  if (decoded.length < minBytes || decoded.length > maxBytes) {
+    fail(`${label} must decode to ${minBytes}..${maxBytes} bytes`);
+  }
   return decoded;
+}
+
+function rejectInlineOwnerSecretMaterial(text, path) {
+  const lowered = text.toLowerCase();
+  for (const marker of ["-----begin", "private_key", "privatekey", "openssh private key", "age-secret-key", "seed phrase", "mnemonic"]) {
+    if (lowered.includes(marker)) fail(`owner fixture ${path} contains private-key marker ${marker}`);
+  }
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function chmodDirectories(root) {

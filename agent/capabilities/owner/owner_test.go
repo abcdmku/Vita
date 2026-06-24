@@ -210,31 +210,49 @@ func TestVerifyAssertionAcceptsSignedEdDSA(t *testing.T) {
 	}
 }
 
-func TestChallengeUsesPublicAssertionFixture(t *testing.T) {
+func TestChallengeMintsFreshRandomServerSideChallenges(t *testing.T) {
+	capability := newCapability(newMemoryFileSystem(nil))
+
+	first := mustChallenge(t, capability, testAction)
+	second := mustChallenge(t, capability, testAction)
+
+	if first.Action != testAction || second.Action != testAction {
+		t.Fatalf("Challenge actions = %q/%q, want %q", first.Action, second.Action, testAction)
+	}
+	if first.Challenge == second.Challenge {
+		t.Fatalf("Challenge minted duplicate nonce %q", first.Challenge)
+	}
+	for _, ticket := range []ChallengeTicket{first, second} {
+		decoded, err := base64.RawURLEncoding.DecodeString(ticket.Challenge)
+		if err != nil {
+			t.Fatalf("Challenge %q is not base64url: %v", ticket.Challenge, err)
+		}
+		if len(decoded) != ownerChallengeBytes {
+			t.Fatalf("Challenge decoded to %d bytes, want %d", len(decoded), ownerChallengeBytes)
+		}
+		if !ticket.ExpiresAt.After(time.Now().UTC()) {
+			t.Fatalf("Challenge ExpiresAt = %s, want future expiry", ticket.ExpiresAt)
+		}
+	}
+}
+
+func TestVerifyAssertionRejectsCallerSuppliedUnmintedChallenge(t *testing.T) {
 	ctx := context.Background()
 	fixture := newES256Fixture(t, 0)
 	fs := newMemoryFileSystem(renderCredential(fixture.credential))
 	capability := newCapability(fs)
 	challenge := base64URL(bytes.Repeat([]byte{0x42}, ownerChallengeBytes))
 	assertion := fixture.assertion(t, ChallengeTicket{Challenge: challenge, Action: testAction}, assertionOptions{counter: 1})
-	fixturePath := filepath.Join(t.TempDir(), "owner-assertion.json")
-	if err := os.WriteFile(fixturePath, mustJSON(t, map[string]any{
-		"action":    testAction,
-		"challenge": challenge,
-		"assertion": assertion,
-	}), 0o600); err != nil {
-		t.Fatalf("WriteFile fixture returned error: %v", err)
-	}
-	capability.fixturePath = fixturePath
-
-	ticket := mustChallenge(t, capability, testAction)
-	if ticket.Challenge != challenge {
-		t.Fatalf("Challenge = %q, want fixture challenge %q", ticket.Challenge, challenge)
-	}
 
 	response := mustVerify(t, capability, ctx, assertion)
-	if !response.Verified || response.Action != testAction {
-		t.Fatalf("VerifyResponse = %#v, want verified fixture assertion", response)
+	if response.Verified {
+		t.Fatalf("VerifyResponse.Verified = true for unminted caller challenge")
+	}
+	if response.Reason != denyChallengeReplayed {
+		t.Fatalf("VerifyResponse.Reason = %q, want %q", response.Reason, denyChallengeReplayed)
+	}
+	if got := mustReadCredential(t, fs).SignCount; got != 0 {
+		t.Fatalf("stored signCount = %d after denied unminted challenge, want 0", got)
 	}
 }
 

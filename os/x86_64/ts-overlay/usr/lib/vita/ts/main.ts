@@ -89,7 +89,6 @@ const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
-const OWNER_MARKER = "VITA-OWNER";
 const OWNER_REJECT_MARKER = "VITA-OWNER-REJECT";
 const OWNER_ERROR_MARKER = "VITA-OWNER-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
@@ -734,9 +733,8 @@ type OwnerStateRead =
 
 interface OwnerFixture {
   readonly credential: OwnerCredential;
-  readonly action: string;
-  readonly challenge: string;
   readonly assertion: OwnerAssertion;
+  readonly assertionChallenge: string;
 }
 
 interface OwnerAssertionFixture {
@@ -777,54 +775,25 @@ async function emitOwnerMarkers(agentTransport: AgentTransport): Promise<void> {
       return;
     }
 
-    const assertion = ownerAssertionForChallenge(fixture, challenge);
-    if (assertion === undefined) {
+    if (
+      challenge.action !== OWNER_ACTION ||
+      fixture.assertion.action !== OWNER_ACTION ||
+      fixture.assertionChallenge === challenge.challenge
+    ) {
       emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
       return;
     }
 
-    const verifyResult = await client.apply(ownerVerifyPlan(assertion));
-
-    if (verifyResult.outcome !== "committed") {
-      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
-      await emitForcedOwnerRejectMarker(client, assertion);
+    const rejectResult = await client.apply(ownerVerifyPlan(fixture.assertion));
+    if (rejectResult.outcome !== "committed") {
+      emit(`${OWNER_REJECT_MARKER}: reason=${ownerRejectReason(rejectResult)} status=OK`);
       return;
     }
 
-    emit(
-      `${OWNER_MARKER}: enrolled=OK assertion=verified action=${markerToken(OWNER_ACTION)} status=OK`,
-    );
-    await emitForcedOwnerRejectMarker(client, assertion);
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
   } catch {
     emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
   }
-}
-
-async function emitForcedOwnerRejectMarker(
-  client: Pick<AgentClient, "apply">,
-  assertion: OwnerAssertion,
-): Promise<void> {
-  try {
-    const result = await client.apply(ownerVerifyPlan(assertion));
-
-    if (result.outcome !== "committed") {
-      emit(`${OWNER_REJECT_MARKER}: reason=${ownerRejectReason(result)} status=OK`);
-      return;
-    }
-  } catch (cause) {
-    if (
-      isAgentClientError(cause) &&
-      cause.agentError !== undefined &&
-      cause.status !== undefined &&
-      cause.status >= 400 &&
-      cause.status <= 499
-    ) {
-      emit(`${OWNER_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
-      return;
-    }
-  }
-
-  emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
 }
 
 async function readOwnerFixture(): Promise<OwnerFixture> {
@@ -839,14 +808,17 @@ async function readOwnerFixture(): Promise<OwnerFixture> {
 
   const assertionJSON = parseJsonOrText(await Deno.readTextFile(OWNER_ASSERTION_PATH));
   const fixture = parseOwnerAssertionFixture(assertionJSON);
-  if (fixture === undefined || fixture.assertion.credentialId !== credential.credentialId) {
+  if (
+    fixture === undefined ||
+    fixture.action !== OWNER_ACTION ||
+    fixture.assertion.credentialId !== credential.credentialId
+  ) {
     throw new Error("owner assertion fixture is invalid");
   }
 
   return {
-    action: fixture.action,
     assertion: fixture.assertion,
-    challenge: fixture.challenge,
+    assertionChallenge: fixture.challenge,
     credential,
   };
 }
@@ -1106,18 +1078,6 @@ function parseOwnerAssertion(value: Readonly<Record<string, unknown>>): OwnerAss
     credentialId,
     signature,
   };
-}
-
-function ownerAssertionForChallenge(fixture: OwnerFixture, challenge: OwnerChallenge): OwnerAssertion | undefined {
-  if (
-    challenge.action !== fixture.action ||
-    challenge.challenge !== fixture.challenge ||
-    fixture.assertion.action !== challenge.action ||
-    ownerAssertionChallenge(fixture.assertion) !== challenge.challenge
-  ) {
-    return undefined;
-  }
-  return fixture.assertion;
 }
 
 function ownerAssertionChallenge(assertion: OwnerAssertion): string | undefined {

@@ -28,7 +28,6 @@ const (
 
 	defaultStateRoot               = "/var/lib/vita-agent"
 	defaultOwnerCredentialFilename = "owner-credential.json"
-	defaultOwnerFixturePath        = "/usr/lib/vita/owner/owner-assertion.json"
 	ownerCredentialFileMode        = 0o600
 	stateRootMode                  = 0o700
 
@@ -258,7 +257,6 @@ type Capability struct {
 	fs           ownerFileSystem
 	now          func() time.Time
 	challengeTTL time.Duration
-	fixturePath  string
 
 	mu         sync.Mutex
 	challenges map[string]challengeRecord
@@ -317,7 +315,6 @@ func newCapability(fs ownerFileSystem) *Capability {
 		fs:           fs,
 		now:          time.Now,
 		challengeTTL: defaultChallengeTTL,
-		fixturePath:  defaultOwnerFixturePath,
 		challenges:   make(map[string]challengeRecord),
 	}
 }
@@ -364,16 +361,20 @@ func (c *Capability) Challenge(action string) (ChallengeTicket, error) {
 		return ChallengeTicket{}, &InvalidRequestError{Reason: "missing owner capability"}
 	}
 
-	challenge, err := c.challengeValue(action)
-	if err != nil {
-		return ChallengeTicket{}, err
+	challengeBytes := make([]byte, ownerChallengeBytes)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		return ChallengeTicket{}, fmt.Errorf("mint owner challenge: %w", err)
 	}
+	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := c.nowUTC()
 	c.pruneExpiredChallengesLocked(now)
+	if c.challenges == nil {
+		c.challenges = make(map[string]challengeRecord)
+	}
 	expiresAt := now.Add(c.challengeTTL)
 	c.challenges[challenge] = challengeRecord{
 		action:    action,
@@ -628,67 +629,6 @@ func (c *Capability) nowUTC() time.Time {
 		return time.Now().UTC()
 	}
 	return c.now().UTC()
-}
-
-func (c *Capability) challengeValue(action string) (string, error) {
-	challenge, ok, err := c.fixtureChallenge(action)
-	if err != nil || ok {
-		return challenge, err
-	}
-
-	challengeBytes := make([]byte, ownerChallengeBytes)
-	if _, err := rand.Read(challengeBytes); err != nil {
-		return "", fmt.Errorf("mint owner challenge: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(challengeBytes), nil
-}
-
-type ownerAssertionFixture struct {
-	Action    *string         `json:"action"`
-	Challenge *string         `json:"challenge"`
-	Assertion *OwnerAssertion `json:"assertion"`
-}
-
-func (c *Capability) fixtureChallenge(action string) (string, bool, error) {
-	if c == nil || c.fixturePath == "" {
-		return "", false, nil
-	}
-
-	raw, err := os.ReadFile(c.fixturePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("read owner assertion fixture: %w", err)
-	}
-
-	var fixture ownerAssertionFixture
-	if err := jsonsafe.DecodeStrict(raw, &fixture); err != nil {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture is invalid"}
-	}
-	if fixture.Action == nil || fixture.Challenge == nil || fixture.Assertion == nil {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture is incomplete"}
-	}
-	if *fixture.Action != action {
-		return "", false, nil
-	}
-	if err := validateBase64URLField(*fixture.Challenge, "challenge", ownerChallengeBytes, ownerChallengeBytes); err != nil {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture challenge is invalid"}
-	}
-	if fixture.Assertion.Action != action {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture action mismatch"}
-	}
-
-	clientDataJSON, err := decodeBase64URLField(fixture.Assertion.ClientDataJSON, "clientDataJSON", 1, maxClientDataJSONBytes)
-	if err != nil {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture client data is invalid"}
-	}
-	clientData, err := parseClientData(clientDataJSON)
-	if err != nil || clientData.Type != webauthnGetType || clientData.Challenge != *fixture.Challenge {
-		return "", false, &InvalidRequestError{Reason: "owner assertion fixture challenge mismatch"}
-	}
-
-	return *fixture.Challenge, true, nil
 }
 
 type undoOwnerCredential struct {
