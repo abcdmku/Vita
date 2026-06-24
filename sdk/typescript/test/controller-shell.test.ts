@@ -112,7 +112,16 @@ test("POST /api/preview returns diff counts and evaluator rejections without mut
 test("POST /api/preview reports a currently configured capability omitted by proposal as removed", async () => {
   const ports = mockPorts({
     hostname: "vita-node-7",
-    operations: ["hostname.set", "node.config"],
+    operations: ["hostname.set"],
+    states: {
+      "node.config": {
+        config: {
+          mode: "normal",
+          remoteAccess: "disabled",
+        },
+        exists: true,
+      },
+    },
   });
 
   const response = await handleControllerShellRequest(ports, {
@@ -130,6 +139,37 @@ test("POST /api/preview reports a currently configured capability omitted by pro
   assert.equal(body["ok"], true);
   assert.deepEqual(body["added"], []);
   assert.deepEqual(body["changed"], []);
+  assert.deepEqual(body["removed"], ["node.config"]);
+});
+
+test("POST /api/preview reads current applied plan from node state, not operations", async () => {
+  const ports = mockPorts({
+    failOperationsRead: true,
+    operations: ["hostname.set"],
+    states: {
+      "node.config": {
+        config: {
+          mode: "normal",
+          remoteAccess: "disabled",
+        },
+        exists: true,
+      },
+    },
+  });
+
+  const response = await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  });
+  const body = parseJsonObject(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body["ok"], true);
   assert.deepEqual(body["removed"], ["node.config"]);
 });
 
@@ -382,7 +422,8 @@ interface MockPortsOptions {
   readonly applyResponse?: ControllerShellApplyTransportResponse;
   readonly applyCalls?: ApplyCall[];
   readonly transportError?: boolean;
-  readonly states?: Readonly<Record<string, unknown>>;
+  readonly states?: Readonly<Record<string, PlainJson>>;
+  readonly failOperationsRead?: boolean;
 }
 
 interface ApplyCall {
@@ -406,6 +447,10 @@ function mockPorts(options: MockPortsOptions = {}): ControllerShellPorts {
       };
     },
     async getOperations(): Promise<unknown> {
+      if (options.failOperationsRead === true) {
+        throw new Error("operations registry must not be read");
+      }
+
       return operations;
     },
     async getState(capability): Promise<unknown> {
@@ -423,6 +468,9 @@ function mockPorts(options: MockPortsOptions = {}): ControllerShellPorts {
           enabled: true,
         },
       };
+    },
+    async getNodeState(): Promise<unknown> {
+      return nodeState(options, operations, hostname);
     },
   };
   const apply: ControllerShellApplyCaller = async (method, path, body) => {
@@ -447,6 +495,70 @@ function mockPorts(options: MockPortsOptions = {}): ControllerShellPorts {
     apply,
     diff: options.diff ?? diffByCapability,
     evaluate: mockEvaluate,
+  };
+}
+
+function nodeState(
+  options: MockPortsOptions,
+  operations: readonly string[],
+  hostname: string,
+): PlainJsonObject {
+  const capabilities: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
+
+  defineCapabilityState(capabilities, "hostname.set", {
+    current: hostname,
+  });
+
+  for (let index = 0; index < operations.length; index += 1) {
+    const capability = operations[index];
+
+    if (capability !== undefined && !Object.hasOwn(capabilities, capability)) {
+      defineCapabilityState(capabilities, capability, defaultState(capability));
+    }
+  }
+
+  if (options.states !== undefined) {
+    const names = Object.keys(options.states).sort(compareStrings);
+
+    for (let index = 0; index < names.length; index += 1) {
+      const capability = names[index];
+
+      if (capability !== undefined) {
+        defineCapabilityState(capabilities, capability, options.states[capability] ?? null);
+      }
+    }
+  }
+
+  return {
+    capabilities,
+    capsuleWorkloads: [],
+  };
+}
+
+function defineCapabilityState(
+  capabilities: Record<string, PlainJson>,
+  capability: string,
+  state: PlainJson,
+): void {
+  Object.defineProperty(capabilities, capability, {
+    configurable: true,
+    enumerable: true,
+    value: state,
+    writable: true,
+  });
+}
+
+function defaultState(capability: string): PlainJsonObject {
+  if (capability === "hostname.set") {
+    return {
+      current: "vita-node-7",
+    };
+  }
+
+  return {
+    current: {
+      enabled: true,
+    },
   };
 }
 

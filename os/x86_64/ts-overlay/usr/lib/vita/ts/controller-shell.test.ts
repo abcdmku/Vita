@@ -29,7 +29,7 @@ import type {
   ControllerShellResponse,
   ControllerShellTransactionPlan,
 } from "./vita/controller-shell.ts";
-import type { PlainJsonObject } from "./vita/safe-normalize.ts";
+import type { PlainJson, PlainJsonObject } from "./vita/safe-normalize.ts";
 
 const CAPABILITY_REGISTRY = new Map<string, CapabilityManifest>(
   Object.entries(DEFAULT_CAPABILITY_MANIFESTS),
@@ -112,7 +112,7 @@ test("VITA-UI status, preview, and apply markers are measured from mock agent re
 test("VITA-UI preview measures removed pds.repo-like current state", async () => {
   const ports = shellPorts({
     hostname: "vita-node-7",
-    operations: ["hostname.set", "pds.repo"],
+    operations: ["hostname.set"],
     states: {
       "pds.repo": {
         commitCursor: 43,
@@ -269,7 +269,7 @@ interface ShellPortsOptions {
   readonly applyResponse?: ControllerShellApplyTransportResponse;
   readonly applyCalls?: ApplyCall[];
   readonly transportError?: boolean;
-  readonly states?: Readonly<Record<string, unknown>>;
+  readonly states?: Readonly<Record<string, PlainJson>>;
 }
 
 interface ApplyCall {
@@ -312,6 +312,9 @@ function shellPorts(options: ShellPortsOptions = {}): ControllerShellPorts {
         },
       };
     },
+    async getNodeState(): Promise<unknown> {
+      return nodeState(options, operations, hostname);
+    },
   };
   const apply: ControllerShellApplyCaller = async (method, path, body) => {
     applyCalls[applyCalls.length] = {
@@ -338,6 +341,71 @@ function shellPorts(options: ShellPortsOptions = {}): ControllerShellPorts {
       desired as unknown as Parameters<typeof diffTransactionPlans>[1],
     ),
     evaluate: (config) => evaluateNodeConfig(config, CAPABILITY_REGISTRY),
+  };
+}
+
+function nodeState(
+  options: ShellPortsOptions,
+  operations: readonly string[],
+  hostname: string,
+): PlainJsonObject {
+  const capabilities: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
+
+  defineCapabilityState(capabilities, "hostname.set", {
+    current: hostname,
+  });
+
+  for (let index = 0; index < operations.length; index += 1) {
+    const capability = operations[index];
+
+    if (capability !== undefined && !Object.hasOwn(capabilities, capability)) {
+      defineCapabilityState(capabilities, capability, defaultState(capability));
+    }
+  }
+
+  if (options.states !== undefined) {
+    const names = Object.keys(options.states).sort(compareStrings);
+
+    for (let index = 0; index < names.length; index += 1) {
+      const capability = names[index];
+
+      if (capability !== undefined) {
+        defineCapabilityState(capabilities, capability, options.states[capability] ?? null);
+      }
+    }
+  }
+
+  return {
+    capabilities,
+    capsuleWorkloads: [],
+  };
+}
+
+function defineCapabilityState(
+  capabilities: Record<string, PlainJson>,
+  capability: string,
+  state: PlainJson,
+): void {
+  Object.defineProperty(capabilities, capability, {
+    configurable: true,
+    enumerable: true,
+    value: state,
+    writable: true,
+  });
+}
+
+function defaultState(capability: string): PlainJsonObject {
+  if (capability === "hostname.set") {
+    return {
+      current: "vita-node-7",
+    };
+  }
+
+  return {
+    current: {
+      mode: "normal",
+      remoteAccess: "disabled",
+    },
   };
 }
 
@@ -381,4 +449,16 @@ function assertApply(value: PlainJsonObject): Parameters<typeof formatController
 
 function normalizeLineEndings(source: string): string {
   return source.replaceAll("\r\n", "\n");
+}
+
+function compareStrings(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+
+  if (left > right) {
+    return 1;
+  }
+
+  return 0;
 }

@@ -16,10 +16,12 @@ import type {
   ControllerShellPorts,
   ControllerShellRequest,
   ControllerShellResponse,
+  ControllerShellAgent,
   ControllerShellTransactionPlan,
 } from "../../../sdk/typescript/src/controller-shell.ts";
 
-export type ControllerShellClient = Pick<AgentClient, "getHealth" | "getOperations" | "getState">;
+export type ControllerShellClient = Pick<AgentClient, "getHealth" | "getOperations" | "getState"> &
+  Pick<ControllerShellAgent, "getNodeState">;
 
 export interface ControllerShellOptions {
   readonly client: ControllerShellClient;

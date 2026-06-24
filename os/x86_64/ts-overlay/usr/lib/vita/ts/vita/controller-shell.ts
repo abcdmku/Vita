@@ -18,6 +18,7 @@ export interface ControllerShellAgent {
   getHealth(): Promise<unknown>;
   getOperations(): Promise<unknown>;
   getState(capability: string): Promise<unknown>;
+  getNodeState?(): Promise<unknown>;
 }
 
 export interface ControllerShellPlanOperation {
@@ -218,6 +219,20 @@ const RESULT_ERROR_OPTIONAL_FIELDS = Object.freeze(["index", "capability"]);
 const ERROR_RESPONSE_FIELDS = Object.freeze(["error"]);
 const APPLY_OUTCOMES = ["committed", "rolledBack", "rejected"] as const;
 const CURRENT_STATE_METADATA_FIELDS = Object.freeze(["exists", "raw"]);
+const NODE_STATE_ENVELOPE_FIELDS = Object.freeze([
+  "appliedPlan",
+  "capabilities",
+  "capsuleWorkloads",
+  "currentAppliedPlan",
+  "currentPlan",
+  "plan",
+]);
+const NODE_STATE_PLAN_FIELDS = Object.freeze([
+  "currentAppliedPlan",
+  "appliedPlan",
+  "currentPlan",
+  "plan",
+]);
 
 export async function handleControllerShellRequest(
   ports: ControllerShellPorts,
@@ -521,6 +536,16 @@ async function applyControllerShellPlan(
 async function readCurrentPlan(
   ports: ControllerShellPorts,
 ): Promise<ValidationResult<ControllerShellTransactionPlan>> {
+  if (ports.agent.getNodeState !== undefined) {
+    return readCurrentPlanFromNodeState(ports);
+  }
+
+  return readCurrentPlanFromOperations(ports);
+}
+
+async function readCurrentPlanFromOperations(
+  ports: ControllerShellPorts,
+): Promise<ValidationResult<ControllerShellTransactionPlan>> {
   const agent = ports.agent;
   const currentCapabilities = await readOperations(agent);
 
@@ -565,6 +590,167 @@ async function readCurrentPlan(
   return accept(Object.freeze({
     operations: Object.freeze(operations),
   }));
+}
+
+async function readCurrentPlanFromNodeState(
+  ports: ControllerShellPorts,
+): Promise<ValidationResult<ControllerShellTransactionPlan>> {
+  const state = await readNodeState(ports.agent);
+
+  if (!state.ok) {
+    return state;
+  }
+
+  const directPlan = readDirectCurrentPlan(state.value);
+
+  if (!directPlan.ok) {
+    return directPlan;
+  }
+  if (directPlan.value !== null) {
+    return accept(directPlan.value);
+  }
+
+  const capabilities = field(state.value, "capabilities");
+
+  if (!isPlainObject(capabilities)) {
+    return reject("node state capabilities must be an object.");
+  }
+
+  return projectNodeStateCapabilitiesToPlan(ports, capabilities);
+}
+
+async function readNodeState(
+  agent: ControllerShellAgent,
+): Promise<ValidationResult<PlainJsonObject>> {
+  const read = agent.getNodeState;
+
+  if (read === undefined) {
+    return reject("node state read is not available.");
+  }
+
+  try {
+    const normalized = normalizeJsonLike(await read.call(agent));
+
+    if (!normalized.ok) return reject(normalized.reason);
+    if (!isPlainObject(normalized.value)) {
+      return reject("node state must be an object.");
+    }
+
+    const fields = expectFields(
+      normalized.value,
+      [],
+      NODE_STATE_ENVELOPE_FIELDS,
+    );
+
+    if (!fields.ok) return fields;
+    if (!Object.hasOwn(normalized.value, "capabilities") && !hasCurrentPlanField(normalized.value)) {
+      return reject("node state must include capabilities or a current plan.");
+    }
+
+    return accept(normalized.value);
+  } catch {
+    return reject("node state could not be read.");
+  }
+}
+
+function hasCurrentPlanField(state: PlainJsonObject): boolean {
+  for (let index = 0; index < NODE_STATE_PLAN_FIELDS.length; index += 1) {
+    const key = NODE_STATE_PLAN_FIELDS[index];
+
+    if (key !== undefined && Object.hasOwn(state, key)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function readDirectCurrentPlan(
+  state: PlainJsonObject,
+): ValidationResult<ControllerShellTransactionPlan | null> {
+  let found: ControllerShellTransactionPlan | null = null;
+  let foundField = "";
+
+  for (let index = 0; index < NODE_STATE_PLAN_FIELDS.length; index += 1) {
+    const key = NODE_STATE_PLAN_FIELDS[index];
+
+    if (key === undefined || !Object.hasOwn(state, key)) {
+      continue;
+    }
+    if (found !== null) {
+      return reject(`node state has multiple current plan fields: ${foundField} and ${key}.`);
+    }
+
+    const plan = normalizePlan(field(state, key));
+
+    if (!plan.ok) {
+      return reject(`node state ${key} is malformed: ${plan.reason}`);
+    }
+
+    found = plan.value;
+    foundField = key;
+  }
+
+  return accept(found);
+}
+
+async function projectNodeStateCapabilitiesToPlan(
+  ports: ControllerShellPorts,
+  capabilities: PlainJsonObject,
+): Promise<ValidationResult<ControllerShellTransactionPlan>> {
+  const capabilityNames = Object.keys(capabilities).sort(compareStrings);
+  const operations: ControllerShellPlanOperation[] = [];
+
+  for (let index = 0; index < capabilityNames.length; index += 1) {
+    const capability = capabilityNames[index];
+
+    if (capability === undefined) {
+      continue;
+    }
+
+    const entry = field(capabilities, capability);
+
+    if (isStateCapabilityReadError(entry)) {
+      return reject(`state for ${capability} returned a read error.`);
+    }
+    if (!isPlainObject(entry)) {
+      return reject(`state for ${capability} must be an object.`);
+    }
+
+    const request = await projectCurrentStateToRequest(
+      ports.evaluate,
+      entry,
+      capability,
+    );
+
+    if (!request.ok) {
+      return request;
+    }
+    if (request.value === null) {
+      continue;
+    }
+
+    operations.push(Object.freeze({
+      capability,
+      request: request.value,
+    }));
+  }
+
+  return accept(Object.freeze({
+    operations: Object.freeze(operations),
+  }));
+}
+
+function isStateCapabilityReadError(
+  entry: PlainJson | undefined,
+): entry is PlainJsonObject {
+  if (!isPlainObject(entry)) {
+    return false;
+  }
+
+  const keys = Object.keys(entry);
+
+  return keys.length === 1 && keys[0] === "error";
 }
 
 async function readHealth(agent: ControllerShellAgent): Promise<ValidationResult<AgentHealth>> {

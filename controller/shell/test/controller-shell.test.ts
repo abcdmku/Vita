@@ -51,6 +51,16 @@ test("controller shell handler wires a real evaluator, diff, and apply transport
           current: "vita-node-7",
         };
       },
+      async getNodeState(): Promise<unknown> {
+        return {
+          capabilities: {
+            "hostname.set": {
+              current: "vita-node-7",
+            },
+          },
+          capsuleWorkloads: [],
+        };
+      },
     },
   });
 
@@ -108,6 +118,16 @@ function parityPorts(): ControllerShellPorts {
       async getState(): Promise<unknown> {
         return {
           current: "vita-node-7",
+        };
+      },
+      async getNodeState(): Promise<unknown> {
+        return {
+          capabilities: {
+            "hostname.set": {
+              current: "vita-node-7",
+            },
+          },
+          capsuleWorkloads: [],
         };
       },
     },

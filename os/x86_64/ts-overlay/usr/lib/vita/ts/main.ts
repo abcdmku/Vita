@@ -879,7 +879,12 @@ function createControllerShellPorts(
   const applyTransport = createApplyNodeTransport(agentTransport);
 
   return {
-    agent: client,
+    agent: {
+      getHealth: () => client.getHealth(),
+      getNodeState: () => readNodeStateSnapshot(agentTransport),
+      getOperations: () => client.getOperations(),
+      getState: (capability) => client.getState(capability),
+    },
     apply: async (method, path, body) => applyTransport(
       method,
       path,
@@ -891,6 +896,19 @@ function createControllerShellPorts(
     ),
     evaluate: (config) => evaluateNodeConfig(config, registry),
   };
+}
+
+async function readNodeStateSnapshot(agentTransport: AgentTransport): Promise<unknown> {
+  const response = await agentTransport(new URL("/state", AGENTD_BASE_URL).toString(), {
+    headers: STATE_JSON_HEADERS,
+    method: "GET",
+  });
+
+  if (!response.ok) {
+    throw new Error("agentd state request failed");
+  }
+
+  return parseJsonOrText(await response.text());
 }
 
 async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
