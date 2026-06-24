@@ -1,0 +1,666 @@
+diff --git a/agent/internal/sysdeps/sysdeps.go b/agent/internal/sysdeps/sysdeps.go
+index f23f85d..2b6c2b1 100644
+--- a/agent/internal/sysdeps/sysdeps.go
++++ b/agent/internal/sysdeps/sysdeps.go
+@@ -19,6 +19,28 @@ import (
+ // ErrUnsupported is returned by the non-Linux stubs.
+ var ErrUnsupported = errors.New("sysdeps: operation not supported on this platform")
+ 
++// WireGuardPeer is the narrow typed peer configuration accepted by the
++// WireGuard sysdeps helpers. Keys are raw 32-byte WireGuard keys; callers own
++// all validation and must not pass untrusted text through this boundary.
++type WireGuardPeer struct {
++	PublicKey           []byte
++	AllowedIPs          []string
++	Endpoint            string
++	PersistentKeepalive *int
++}
++
++type WireGuardPeerStatus struct {
++	PublicKey         []byte
++	AllowedIPs        []string
++	LastHandshakeUnix int64
++}
++
++type WireGuardDeviceStatus struct {
++	Name       string
++	ListenPort int
++	Peers      []WireGuardPeerStatus
++}
++
+ // ErrnoCode returns a stable errno token from a wrapped syscall failure.
+ func ErrnoCode(err error) string {
+ 	var errno syscall.Errno
+@@ -38,6 +60,8 @@ func ErrnoCode(err error) string {
+ 		return "ENODEV"
+ 	case syscall.ENOSYS:
+ 		return "ENOSYS"
++	case syscall.EOPNOTSUPP:
++		return "EOPNOTSUPP"
+ 	case syscall.EPERM:
+ 		return "EPERM"
+ 	default:
+diff --git a/agent/internal/sysdeps/sysdeps_linux.go b/agent/internal/sysdeps/sysdeps_linux.go
+index d7c96dc..a9d79cc 100644
+--- a/agent/internal/sysdeps/sysdeps_linux.go
++++ b/agent/internal/sysdeps/sysdeps_linux.go
+@@ -10,6 +10,7 @@ import (
+ 	"net/netip"
+ 	"os"
+ 	"os/exec"
++	"strconv"
+ 	"strings"
+ 	"sync/atomic"
+ 	"syscall"
+@@ -20,6 +21,37 @@ import (
+ const (
+ 	vethInfoPeer = 1
+ 	nftPath      = "/usr/sbin/nft"
++
++	ctrlAttrFamilyID   = 1
++	ctrlAttrFamilyName = 2
++
++	wgCmdGetDevice = 0
++	wgCmdSetDevice = 1
++
++	wgDeviceAIfindex    = 1
++	wgDeviceAIfname     = 2
++	wgDeviceAPrivateKey = 3
++	wgDeviceAFlags      = 5
++	wgDeviceAListenPort = 6
++	wgDeviceAPeers      = 8
++
++	wgPeerAPublicKey                   = 1
++	wgPeerAFlags                       = 3
++	wgPeerAEndpoint                    = 4
++	wgPeerAPersistentKeepaliveInterval = 5
++	wgPeerALastHandshakeTime           = 6
++	wgPeerAAllowedIPs                  = 9
++
++	wgAllowedIPAFamily   = 1
++	wgAllowedIPAIPAddr   = 2
++	wgAllowedIPACIDRMask = 3
++
++	wgDeviceFReplacePeers           = 1 << 0
++	wgPeerFReplaceAllowedIPs        = 1 << 1
++	wireGuardKeyLength              = 32
++	wireGuardGenericName            = "wireguard"
++	wireGuardGenericVersion         = 1
++	nlaTypeMask              uint16 = ^uint16(unix.NLA_F_NESTED | unix.NLA_F_NET_BYTEORDER)
+ )
+ 
+ var netlinkSeq uint32
+@@ -123,6 +155,15 @@ func CreateVeth(hostName string, peerName string) error {
+ 	return netlinkRequest(unix.RTM_NEWLINK, unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL, payload)
+ }
+ 
++// CreateWireGuardLink creates a WireGuard interface in the current network
++// namespace. Privileged: requires CAP_NET_ADMIN in that namespace.
++func CreateWireGuardLink(name string) error {
++	linkInfo := nlAttr(unix.IFLA_INFO_KIND, nulString("wireguard"))
++	payload := append(ifInfoMsg(0, 0, 0), nlAttr(unix.IFLA_IFNAME, nulString(name))...)
++	payload = append(payload, nlAttr(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, linkInfo)...)
++	return netlinkRequest(unix.RTM_NEWLINK, unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL, payload)
++}
++
+ // DeleteLink deletes an interface from the current network namespace.
+ // Privileged: requires CAP_NET_ADMIN in that namespace.
+ func DeleteLink(name string) error {
+@@ -155,14 +196,42 @@ func AddIPv4Address(name string, cidr string) error {
+ 	if !prefix.Addr().Is4() {
+ 		return fmt.Errorf("address must be IPv4")
+ 	}
++	return addIPAddressPrefix(name, prefix)
++}
++
++// AddIPAddress assigns an IPv4 or IPv6 CIDR address to an interface in the
++// current network namespace.
++// Privileged: requires CAP_NET_ADMIN in that namespace.
++func AddIPAddress(name string, cidr string) error {
++	prefix, err := netip.ParsePrefix(cidr)
++	if err != nil {
++		return err
++	}
++	return addIPAddressPrefix(name, prefix)
++}
++
++func addIPAddressPrefix(name string, prefix netip.Prefix) error {
+ 	iface, err := net.InterfaceByName(name)
+ 	if err != nil {
+ 		return err
+ 	}
+-	addr := prefix.Addr().As4()
+-	payload := ifAddrMsg(unix.AF_INET, uint8(prefix.Bits()), uint32(iface.Index), unix.RT_SCOPE_UNIVERSE)
+-	payload = append(payload, nlAttr(unix.IFA_LOCAL, addr[:])...)
+-	payload = append(payload, nlAttr(unix.IFA_ADDRESS, addr[:])...)
++	addr := prefix.Addr()
++	var family uint8
++	var addrBytes []byte
++	if addr.Is4() {
++		v4 := addr.As4()
++		family = unix.AF_INET
++		addrBytes = v4[:]
++	} else if addr.Is6() {
++		v6 := addr.As16()
++		family = unix.AF_INET6
++		addrBytes = v6[:]
++	} else {
++		return fmt.Errorf("address must be IPv4 or IPv6")
++	}
++	payload := ifAddrMsg(family, uint8(prefix.Bits()), uint32(iface.Index), unix.RT_SCOPE_UNIVERSE)
++	payload = append(payload, nlAttr(unix.IFA_LOCAL, addrBytes)...)
++	payload = append(payload, nlAttr(unix.IFA_ADDRESS, addrBytes)...)
+ 	return netlinkRequest(unix.RTM_NEWADDR, unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL, payload)
+ }
+ 
+@@ -188,6 +257,93 @@ func AddDefaultIPv4Route(name string, gateway string) error {
+ 	return netlinkRequest(unix.RTM_NEWROUTE, unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL, payload)
+ }
+ 
++// SetWireGuardPrivateKey sets a WireGuard private key and listen port via the
++// kernel WireGuard generic netlink family. The private key is raw 32-byte key
++// material and is never logged here.
++func SetWireGuardPrivateKey(name string, privateKey []byte, listenPort int) error {
++	if len(privateKey) != wireGuardKeyLength {
++		return fmt.Errorf("wireguard private key must be 32 bytes")
++	}
++	if listenPort <= 0 || listenPort > 65535 {
++		return fmt.Errorf("wireguard listen port must be 1-65535")
++	}
++	attrs := nlAttr(wgDeviceAIfname, nulString(name))
++	attrs = append(attrs, nlAttr(wgDeviceAPrivateKey, privateKey)...)
++	attrs = append(attrs, nlAttrUint16(wgDeviceAListenPort, uint16(listenPort))...)
++	return setWireGuardDevice(attrs)
++}
++
++// AddWireGuardPeer adds or updates a single WireGuard peer without replacing
++// the full peer set. Callers that need an exact peer set should use
++// ReplaceWireGuardPeers.
++func AddWireGuardPeer(name string, peer WireGuardPeer) error {
++	peerAttrs, err := wireGuardPeerAttr(peer)
++	if err != nil {
++		return err
++	}
++	attrs := nlAttr(wgDeviceAIfname, nulString(name))
++	attrs = append(attrs, nlAttr(wgDeviceAPeers|unix.NLA_F_NESTED, nlAttr(0|unix.NLA_F_NESTED, peerAttrs))...)
++	return setWireGuardDevice(attrs)
++}
++
++// SetWireGuardPeerAllowedIPs replaces a peer's allowed-IP set.
++func SetWireGuardPeerAllowedIPs(name string, publicKey []byte, allowedIPs []string) error {
++	return AddWireGuardPeer(name, WireGuardPeer{PublicKey: publicKey, AllowedIPs: allowedIPs})
++}
++
++// ReplaceWireGuardPeers replaces the full WireGuard peer set.
++func ReplaceWireGuardPeers(name string, peers []WireGuardPeer) error {
++	attrs := nlAttr(wgDeviceAIfname, nulString(name))
++	attrs = append(attrs, nlAttrUint32(wgDeviceAFlags, wgDeviceFReplacePeers)...)
++	peerItems := make([]byte, 0)
++	for i, peer := range peers {
++		peerAttrs, err := wireGuardPeerAttr(peer)
++		if err != nil {
++			return err
++		}
++		peerItems = append(peerItems, nlAttr(uint16(i)|unix.NLA_F_NESTED, peerAttrs)...)
++	}
++	attrs = append(attrs, nlAttr(wgDeviceAPeers|unix.NLA_F_NESTED, peerItems)...)
++	return setWireGuardDevice(attrs)
++}
++
++func setWireGuardDevice(attrs []byte) error {
++	family, err := wireGuardFamilyID()
++	if err != nil {
++		return err
++	}
++	payload := append(genlHeader(wgCmdSetDevice, wireGuardGenericVersion), attrs...)
++	_, err = genericNetlinkRequest(family, unix.NLM_F_REQUEST|unix.NLM_F_ACK, payload)
++	return err
++}
++
++// WireGuardDevice reads a WireGuard device via the kernel generic netlink
++// family and returns only the peer state required by callers.
++func WireGuardDevice(name string) (WireGuardDeviceStatus, error) {
++	family, err := wireGuardFamilyID()
++	if err != nil {
++		return WireGuardDeviceStatus{}, err
++	}
++	payload := append(genlHeader(wgCmdGetDevice, wireGuardGenericVersion), nlAttr(wgDeviceAIfname, nulString(name))...)
++	responses, err := genericNetlinkRequest(family, unix.NLM_F_REQUEST|unix.NLM_F_DUMP, payload)
++	if err != nil {
++		return WireGuardDeviceStatus{}, err
++	}
++	for _, response := range responses {
++		if len(response) < unix.GENL_HDRLEN {
++			continue
++		}
++		device, err := parseWireGuardDevice(response[unix.GENL_HDRLEN:])
++		if err != nil {
++			return WireGuardDeviceStatus{}, err
++		}
++		if device.Name == name {
++			return device, nil
++		}
++	}
++	return WireGuardDeviceStatus{}, os.ErrNotExist
++}
++
+ // ApplyNftRuleset atomically asks nftables to load an agent-generated ruleset
+ // from stdin. Callers must build the bytes from validated typed inputs only.
+ func ApplyNftRuleset(ruleset []byte) error {
+@@ -217,6 +373,202 @@ func DeleteNftTable(family string, table string) error {
+ 	return nil
+ }
+ 
++func wireGuardFamilyID() (uint16, error) {
++	payload := append(genlHeader(unix.CTRL_CMD_GETFAMILY, 1), nlAttr(ctrlAttrFamilyName, nulString(wireGuardGenericName))...)
++	responses, err := genericNetlinkRequest(unix.GENL_ID_CTRL, unix.NLM_F_REQUEST, payload)
++	if err != nil {
++		return 0, err
++	}
++	for _, response := range responses {
++		if len(response) < unix.GENL_HDRLEN {
++			continue
++		}
++		attrs, err := parseNetlinkAttrs(response[unix.GENL_HDRLEN:])
++		if err != nil {
++			return 0, err
++		}
++		if familyID := firstAttr(attrs, ctrlAttrFamilyID); len(familyID) >= 2 {
++			return binary.LittleEndian.Uint16(familyID[:2]), nil
++		}
++	}
++	return 0, os.ErrNotExist
++}
++
++func wireGuardPeerAttr(peer WireGuardPeer) ([]byte, error) {
++	if len(peer.PublicKey) != wireGuardKeyLength {
++		return nil, fmt.Errorf("wireguard public key must be 32 bytes")
++	}
++	attrs := nlAttr(wgPeerAPublicKey, peer.PublicKey)
++	attrs = append(attrs, nlAttrUint32(wgPeerAFlags, wgPeerFReplaceAllowedIPs)...)
++	if peer.Endpoint != "" {
++		endpoint, err := wireGuardEndpointBytes(peer.Endpoint)
++		if err != nil {
++			return nil, err
++		}
++		attrs = append(attrs, nlAttr(wgPeerAEndpoint, endpoint)...)
++	}
++	if peer.PersistentKeepalive != nil {
++		value := *peer.PersistentKeepalive
++		if value <= 0 || value > 65535 {
++			return nil, fmt.Errorf("wireguard persistent keepalive must be 1-65535")
++		}
++		attrs = append(attrs, nlAttrUint16(wgPeerAPersistentKeepaliveInterval, uint16(value))...)
++	}
++
++	allowedItems := make([]byte, 0)
++	for i, allowed := range peer.AllowedIPs {
++		allowedAttr, err := wireGuardAllowedIPAttr(allowed)
++		if err != nil {
++			return nil, err
++		}
++		allowedItems = append(allowedItems, nlAttr(uint16(i)|unix.NLA_F_NESTED, allowedAttr)...)
++	}
++	attrs = append(attrs, nlAttr(wgPeerAAllowedIPs|unix.NLA_F_NESTED, allowedItems)...)
++	return attrs, nil
++}
++
++func wireGuardAllowedIPAttr(value string) ([]byte, error) {
++	prefix, err := netip.ParsePrefix(value)
++	if err != nil {
++		return nil, err
++	}
++	attrs := make([]byte, 0)
++	if prefix.Addr().Is4() {
++		addr := prefix.Addr().As4()
++		attrs = append(attrs, nlAttrUint16(wgAllowedIPAFamily, unix.AF_INET)...)
++		attrs = append(attrs, nlAttr(wgAllowedIPAIPAddr, addr[:])...)
++	} else if prefix.Addr().Is6() {
++		addr := prefix.Addr().As16()
++		attrs = append(attrs, nlAttrUint16(wgAllowedIPAFamily, unix.AF_INET6)...)
++		attrs = append(attrs, nlAttr(wgAllowedIPAIPAddr, addr[:])...)
++	} else {
++		return nil, fmt.Errorf("wireguard allowed IP must be IPv4 or IPv6")
++	}
++	attrs = append(attrs, nlAttrUint8(wgAllowedIPACIDRMask, uint8(prefix.Bits()))...)
++	return attrs, nil
++}
++
++func wireGuardEndpointBytes(endpoint string) ([]byte, error) {
++	host, portText, err := net.SplitHostPort(endpoint)
++	if err != nil {
++		return nil, err
++	}
++	addr, err := netip.ParseAddr(host)
++	if err != nil {
++		return nil, err
++	}
++	port, err := strconv.Atoi(portText)
++	if err != nil || port <= 0 || port > 65535 {
++		return nil, fmt.Errorf("wireguard endpoint port must be 1-65535")
++	}
++	if addr.Is4() {
++		raw := make([]byte, 16)
++		binary.LittleEndian.PutUint16(raw[0:2], unix.AF_INET)
++		binary.BigEndian.PutUint16(raw[2:4], uint16(port))
++		v4 := addr.As4()
++		copy(raw[4:8], v4[:])
++		return raw, nil
++	}
++	if addr.Is6() {
++		raw := make([]byte, 28)
++		binary.LittleEndian.PutUint16(raw[0:2], unix.AF_INET6)
++		binary.BigEndian.PutUint16(raw[2:4], uint16(port))
++		v6 := addr.As16()
++		copy(raw[8:24], v6[:])
++		return raw, nil
++	}
++	return nil, fmt.Errorf("wireguard endpoint address must be IPv4 or IPv6")
++}
++
++func parseWireGuardDevice(raw []byte) (WireGuardDeviceStatus, error) {
++	attrs, err := parseNetlinkAttrs(raw)
++	if err != nil {
++		return WireGuardDeviceStatus{}, err
++	}
++	device := WireGuardDeviceStatus{}
++	if ifname := firstAttr(attrs, wgDeviceAIfname); len(ifname) > 0 {
++		device.Name = strings.TrimRight(string(ifname), "\x00")
++	}
++	if listenPort := firstAttr(attrs, wgDeviceAListenPort); len(listenPort) >= 2 {
++		device.ListenPort = int(binary.LittleEndian.Uint16(listenPort[:2]))
++	}
++	for _, peersPayload := range attrValues(attrs, wgDeviceAPeers) {
++		peerEntries, err := parseNetlinkAttrs(peersPayload)
++		if err != nil {
++			return WireGuardDeviceStatus{}, err
++		}
++		for _, peerEntry := range peerEntries {
++			peer, err := parseWireGuardPeer(peerEntry.Payload)
++			if err != nil {
++				return WireGuardDeviceStatus{}, err
++			}
++			device.Peers = append(device.Peers, peer)
++		}
++	}
++	return device, nil
++}
++
++func parseWireGuardPeer(raw []byte) (WireGuardPeerStatus, error) {
++	attrs, err := parseNetlinkAttrs(raw)
++	if err != nil {
++		return WireGuardPeerStatus{}, err
++	}
++	peer := WireGuardPeerStatus{}
++	if publicKey := firstAttr(attrs, wgPeerAPublicKey); len(publicKey) == wireGuardKeyLength {
++		peer.PublicKey = cloneBytes(publicKey)
++	}
++	if handshake := firstAttr(attrs, wgPeerALastHandshakeTime); len(handshake) >= 16 {
++		peer.LastHandshakeUnix = int64(binary.LittleEndian.Uint64(handshake[:8]))
++	}
++	for _, allowedPayload := range attrValues(attrs, wgPeerAAllowedIPs) {
++		allowedEntries, err := parseNetlinkAttrs(allowedPayload)
++		if err != nil {
++			return WireGuardPeerStatus{}, err
++		}
++		for _, allowedEntry := range allowedEntries {
++			allowed, err := parseWireGuardAllowedIP(allowedEntry.Payload)
++			if err != nil {
++				return WireGuardPeerStatus{}, err
++			}
++			if allowed != "" {
++				peer.AllowedIPs = append(peer.AllowedIPs, allowed)
++			}
++		}
++	}
++	return peer, nil
++}
++
++func parseWireGuardAllowedIP(raw []byte) (string, error) {
++	attrs, err := parseNetlinkAttrs(raw)
++	if err != nil {
++		return "", err
++	}
++	family := firstAttr(attrs, wgAllowedIPAFamily)
++	addrRaw := firstAttr(attrs, wgAllowedIPAIPAddr)
++	cidr := firstAttr(attrs, wgAllowedIPACIDRMask)
++	if len(family) < 2 || len(cidr) < 1 {
++		return "", nil
++	}
++	switch binary.LittleEndian.Uint16(family[:2]) {
++	case unix.AF_INET:
++		if len(addrRaw) < net.IPv4len {
++			return "", nil
++		}
++		var addr [4]byte
++		copy(addr[:], addrRaw[:net.IPv4len])
++		return netip.PrefixFrom(netip.AddrFrom4(addr), int(cidr[0])).String(), nil
++	case unix.AF_INET6:
++		if len(addrRaw) < net.IPv6len {
++			return "", nil
++		}
++		var addr [16]byte
++		copy(addr[:], addrRaw[:net.IPv6len])
++		return netip.PrefixFrom(netip.AddrFrom16(addr), int(cidr[0])).String(), nil
++	default:
++		return "", nil
++	}
++}
++
+ func mountInfoForTarget(target string) (mounted bool, shared bool, err error) {
+ 	raw, err := os.ReadFile("/proc/self/mountinfo")
+ 	if err != nil {
+@@ -243,6 +595,78 @@ func mountInfoForTarget(target string) (mounted bool, shared bool, err error) {
+ 	return false, false, nil
+ }
+ 
++func genericNetlinkRequest(msgType uint16, flags uint16, payload []byte) ([][]byte, error) {
++	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_GENERIC)
++	if err != nil {
++		return nil, err
++	}
++	defer unix.Close(fd)
++
++	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
++		return nil, err
++	}
++
++	seq := atomic.AddUint32(&netlinkSeq, 1)
++	msg := nlMsg(msgType, flags, seq, payload)
++	if err := unix.Sendto(fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
++		return nil, err
++	}
++
++	responses := make([][]byte, 0)
++	buf := make([]byte, 8192)
++	for {
++		n, _, err := unix.Recvfrom(fd, buf, 0)
++		if err != nil {
++			return nil, err
++		}
++		done, err := appendNetlinkResponses(buf[:n], seq, flags, &responses)
++		if err != nil {
++			if errorsIsWouldBlock(err) {
++				continue
++			}
++			return nil, err
++		}
++		if done {
++			return responses, nil
++		}
++	}
++}
++
++func appendNetlinkResponses(raw []byte, seq uint32, requestFlags uint16, responses *[][]byte) (bool, error) {
++	for offset := 0; offset+unix.SizeofNlMsghdr <= len(raw); {
++		length := int(binary.LittleEndian.Uint32(raw[offset:]))
++		if length < unix.SizeofNlMsghdr || offset+length > len(raw) {
++			return false, syscall.EINVAL
++		}
++		msgType := binary.LittleEndian.Uint16(raw[offset+4:])
++		msgFlags := binary.LittleEndian.Uint16(raw[offset+6:])
++		msgSeq := binary.LittleEndian.Uint32(raw[offset+8:])
++		payload := raw[offset+unix.SizeofNlMsghdr : offset+length]
++		if msgSeq == seq {
++			switch msgType {
++			case unix.NLMSG_ERROR:
++				if len(payload) < 4 {
++					return false, syscall.EINVAL
++				}
++				code := int32(binary.LittleEndian.Uint32(payload))
++				if code == 0 {
++					return true, nil
++				}
++				return false, syscall.Errno(-code)
++			case unix.NLMSG_DONE:
++				return true, nil
++			default:
++				*responses = append(*responses, cloneBytes(payload))
++				if requestFlags&unix.NLM_F_ACK == 0 && msgFlags&unix.NLM_F_MULTI == 0 {
++					return true, nil
++				}
++			}
++		}
++		offset += nlAlign(length)
++	}
++	return false, nil
++}
++
+ func netlinkRequest(msgType uint16, flags uint16, payload []byte) error {
+ 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+ 	if err != nil {
+@@ -327,6 +751,22 @@ func nlAttr(attrType uint16, payload []byte) []byte {
+ 	return attr
+ }
+ 
++func nlAttrUint8(attrType uint16, value uint8) []byte {
++	return nlAttr(attrType, []byte{value})
++}
++
++func nlAttrUint16(attrType uint16, value uint16) []byte {
++	data := make([]byte, 2)
++	binary.LittleEndian.PutUint16(data, value)
++	return nlAttr(attrType, data)
++}
++
++func nlAttrUint32(attrType uint16, value uint32) []byte {
++	data := make([]byte, 4)
++	binary.LittleEndian.PutUint32(data, value)
++	return nlAttr(attrType, data)
++}
++
+ func nlAttrInt32(attrType uint16, value int32) []byte {
+ 	data := make([]byte, 4)
+ 	binary.LittleEndian.PutUint32(data, uint32(value))
+@@ -337,6 +777,10 @@ func nulString(value string) []byte {
+ 	return append([]byte(value), 0)
+ }
+ 
++func genlHeader(command uint8, version uint8) []byte {
++	return []byte{command, version, 0, 0}
++}
++
+ func ifInfoMsg(index int32, flags uint32, change uint32) []byte {
+ 	msg := make([]byte, unix.SizeofIfInfomsg)
+ 	msg[0] = unix.AF_UNSPEC
+@@ -369,3 +813,59 @@ func rtMsg(family uint8, dstLen uint8, table uint8, protocol uint8, scope uint8,
+ func nlAlign(length int) int {
+ 	return (length + unix.NLMSG_ALIGNTO - 1) & ^(unix.NLMSG_ALIGNTO - 1)
+ }
++
++type netlinkAttr struct {
++	Type    uint16
++	Payload []byte
++}
++
++func parseNetlinkAttrs(raw []byte) ([]netlinkAttr, error) {
++	attrs := make([]netlinkAttr, 0)
++	for offset := 0; offset < len(raw); {
++		if offset+unix.SizeofRtAttr > len(raw) {
++			for _, b := range raw[offset:] {
++				if b != 0 {
++					return nil, syscall.EINVAL
++				}
++			}
++			return attrs, nil
++		}
++		length := int(binary.LittleEndian.Uint16(raw[offset:]))
++		if length < unix.SizeofRtAttr || offset+length > len(raw) {
++			return nil, syscall.EINVAL
++		}
++		attrType := binary.LittleEndian.Uint16(raw[offset+2:]) & nlaTypeMask
++		payload := cloneBytes(raw[offset+unix.SizeofRtAttr : offset+length])
++		attrs = append(attrs, netlinkAttr{Type: attrType, Payload: payload})
++		offset += nlAlign(length)
++	}
++	return attrs, nil
++}
++
++func firstAttr(attrs []netlinkAttr, attrType uint16) []byte {
++	for _, attr := range attrs {
++		if attr.Type == attrType {
++			return attr.Payload
++		}
++	}
++	return nil
++}
++
++func attrValues(attrs []netlinkAttr, attrType uint16) [][]byte {
++	values := make([][]byte, 0)
++	for _, attr := range attrs {
++		if attr.Type == attrType {
++			values = append(values, attr.Payload)
++		}
++	}
++	return values
++}
++
++func cloneBytes(in []byte) []byte {
++	if in == nil {
++		return nil
++	}
++	out := make([]byte, len(in))
++	copy(out, in)
++	return out
++}
+diff --git a/agent/internal/sysdeps/sysdeps_stub.go b/agent/internal/sysdeps/sysdeps_stub.go
+index 2697ff0..f417f36 100644
+--- a/agent/internal/sysdeps/sysdeps_stub.go
++++ b/agent/internal/sysdeps/sysdeps_stub.go
+@@ -44,9 +44,36 @@ func MoveLinkToNetns(name string, netnsFD int) error { return ErrUnsupported }
+ // AddIPv4Address is unsupported off Linux.
+ func AddIPv4Address(name string, cidr string) error { return ErrUnsupported }
+ 
++// AddIPAddress is unsupported off Linux.
++func AddIPAddress(name string, cidr string) error { return ErrUnsupported }
++
+ // AddDefaultIPv4Route is unsupported off Linux.
+ func AddDefaultIPv4Route(name string, gateway string) error { return ErrUnsupported }
+ 
++// CreateWireGuardLink is unsupported off Linux.
++func CreateWireGuardLink(name string) error { return ErrUnsupported }
++
++// SetWireGuardPrivateKey is unsupported off Linux.
++func SetWireGuardPrivateKey(name string, privateKey []byte, listenPort int) error {
++	return ErrUnsupported
++}
++
++// AddWireGuardPeer is unsupported off Linux.
++func AddWireGuardPeer(name string, peer WireGuardPeer) error { return ErrUnsupported }
++
++// SetWireGuardPeerAllowedIPs is unsupported off Linux.
++func SetWireGuardPeerAllowedIPs(name string, publicKey []byte, allowedIPs []string) error {
++	return ErrUnsupported
++}
++
++// ReplaceWireGuardPeers is unsupported off Linux.
++func ReplaceWireGuardPeers(name string, peers []WireGuardPeer) error { return ErrUnsupported }
++
++// WireGuardDevice is unsupported off Linux.
++func WireGuardDevice(name string) (WireGuardDeviceStatus, error) {
++	return WireGuardDeviceStatus{}, ErrUnsupported
++}
++
+ // ApplyNftRuleset is unsupported off Linux.
+ func ApplyNftRuleset(ruleset []byte) error { return ErrUnsupported }
+ 
