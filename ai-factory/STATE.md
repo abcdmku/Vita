@@ -17,10 +17,24 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Codex restored (~00:30 UTC); switched back from the Opus stopgap. Build green.
+## Status: RUNNING — Phases 2–5 substantially COMPLETE + boot-verified (20 features on main @ 54cd7f0).
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** +
 **"use opus in the meantime then back to codex after reset"** — run continuously; only stop on "stop" / §24.
-**93 contracts merged.**
+Owner (this session): **"finish 2–5"** then **Phase 6 desktop** (separable first-class package; see
+[spec §Phase 6](../typescript_personal_node_os_build_spec.md) + memory `vita-desktop-decisions`).
+
+- **2026-06-24 — held-slices tail + deferrals.** Boot PASSES with 20 features (control-plane eval→apply
+  commit+reject, 3 capsule runtimes + lifecycle, networking S1–S4, files, shared-folders/owner, PDS r/w + query,
+  drift, backup, full-restore, export, storage-health, controller-UI, protection-dashboard, owner-passkey
+  verify-only, power-loss). **DEFERRED: P1-071 + P1-083 (catalog install-resolve/exec)** — resolve/validation/
+  signing/bundle-SRI/id-version/packageClass all implemented (rev5–7, Opus-reviewed) but the rev-required
+  `manifest.integrity == catalog artifact integrity` is a **circular design question** (the artifact integrity IS
+  sri(the bundle), and the manifest lives inside that bundle), not a bug. Code preserved on origin/task/P1-071.
+  Catalog SIGNING core (P1-063) is merged — this is a documented follow-up once the integrity semantic is settled.
+  **IN FLIGHT: P1-087 (household-roles) + P1-090 (replacement-restore)** building via the **Opus bridge** —
+  the **Codex dispatch tool stalls on fresh-from-main dispatches** (0 output); it works only on existing
+  task-branch bases (re-dispatch revs), so fresh slices now go to Opus `isolation:worktree` builders.
+- **93+ contracts merged** (pre-this-session log below).
 - **2026-06-22 — OS INSTALL WAVE (parallel Codex + Opus builders, codex↔opus cross-review, host-verified on
   Borg51):** the bootable node gained the pieces to be a usable TypeScript OS. MERGED + HOST-VERIFIED:
   - **P1-031 RAUC** A/B update bundle (deterministic manifest; declare-only signing, no key material).
