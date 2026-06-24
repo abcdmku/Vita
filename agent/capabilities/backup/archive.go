@@ -804,10 +804,10 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 	if err := materializeArchive(ctx, archivePath(normalized.TargetPath, normalized.BackupID), manifest, stage); err != nil {
 		return ArchiveRestoreResult{}, nil, archiveStepError("restore_materialize", err)
 	}
-	if normalized.CompareSourceRoots != nil {
-		if err := compareStageToSourceRoots(ctx, stage, *normalized.CompareSourceRoots); err != nil {
-			return ArchiveRestoreResult{}, nil, archiveStepError("restore_compare", err)
-		}
+	if ok, err := treeMatchesManifest(stage, manifest); err != nil {
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_compare", err)
+	} else if !ok {
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_compare", errTreeMismatch)
 	}
 	if err := syncTreeDirs(stage); err != nil {
 		return ArchiveRestoreResult{}, nil, archiveStepError("restore_stage_sync", err)
@@ -922,6 +922,15 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 				})
 				files++
 			default:
+				reason, ok := sourceModeSkipReason(info.Mode())
+				if !ok {
+					reason = "special"
+				}
+				manifest.Skipped = append(manifest.Skipped, archiveManifestSkippedEntry{
+					Root:   root.Name,
+					Path:   rel,
+					Reason: reason,
+				})
 				return nil
 			}
 			return nil
@@ -985,7 +994,11 @@ func sourceEntrySkipReason(d fs.DirEntry) (string, bool) {
 	if d == nil {
 		return "unknown", true
 	}
-	modeType := d.Type()
+	return sourceModeSkipReason(d.Type())
+}
+
+func sourceModeSkipReason(mode fs.FileMode) (string, bool) {
+	modeType := mode.Type()
 	switch {
 	case modeType&fs.ModeSymlink != 0:
 		return "symlink", true
@@ -1285,25 +1298,6 @@ func materializeArchive(ctx context.Context, backupDir string, manifest archiveM
 	return nil
 }
 
-func compareStageToSourceRoots(ctx context.Context, stage string, roots []ArchiveSourceRoot) error {
-	for _, root := range roots {
-		sourceRoot := root.Path
-		restoredRoot := filepath.Join(stage, root.Name)
-		sourceEntries, err := digestSourceTree(ctx, sourceRoot)
-		if err != nil {
-			return fmt.Errorf("source root %q cannot be measured: %w", root.Name, err)
-		}
-		restoredEntries, err := digestTree(ctx, restoredRoot)
-		if err != nil {
-			return fmt.Errorf("restored tree for source root %q cannot be measured: %w", root.Name, err)
-		}
-		if err := compareDigestEntries(sourceEntries, restoredEntries); err != nil {
-			return fmt.Errorf("restored tree differs from source root %q: %w", root.Name, err)
-		}
-	}
-	return nil
-}
-
 func compareTrees(ctx context.Context, left string, right string) error {
 	leftEntries, err := digestTree(ctx, left)
 	if err != nil {
@@ -1340,28 +1334,9 @@ type treeDigestEntry struct {
 }
 
 func digestTree(ctx context.Context, root string) (map[string]treeDigestEntry, error) {
-	return digestTreeWithOptions(ctx, root, treeDigestOptions{})
-}
-
-func digestSourceTree(ctx context.Context, root string) (map[string]treeDigestEntry, error) {
-	return digestTreeWithOptions(ctx, root, treeDigestOptions{
-		allowAbsentRoot: true,
-		skipSpecial:     true,
-	})
-}
-
-type treeDigestOptions struct {
-	allowAbsentRoot bool
-	skipSpecial     bool
-}
-
-func digestTreeWithOptions(ctx context.Context, root string, options treeDigestOptions) (map[string]treeDigestEntry, error) {
 	entries := map[string]treeDigestEntry{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			if options.allowAbsentRoot && path == root && errors.Is(walkErr, os.ErrNotExist) {
-				return nil
-			}
 			return walkErr
 		}
 		if err := ctx.Err(); err != nil {
@@ -1385,9 +1360,6 @@ func digestTreeWithOptions(ctx context.Context, root string, options treeDigestO
 			return nil
 		}
 		if !info.Mode().IsRegular() {
-			if options.skipSpecial {
-				return nil
-			}
 			return archiveInvalid("tree contains non-regular entry")
 		}
 		digest, size, err := digestFile(path)
@@ -1401,16 +1373,33 @@ func digestTreeWithOptions(ctx context.Context, root string, options treeDigestO
 }
 
 func treeMatchesManifest(destination string, manifest archiveManifest) (bool, error) {
-	if _, err := os.Lstat(destination); err != nil {
+	info, err := os.Lstat(destination)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stat restore destination: %w", err)
 	}
+	if !info.IsDir() {
+		return false, nil
+	}
 
 	expected := make(map[string]archiveManifestEntry, len(manifest.Entries))
 	for _, entry := range manifest.Entries {
 		expected[manifestEntryID(entry)] = entry
+	}
+	rootNames := make(map[string]struct{}, len(manifest.Roots))
+	for _, root := range manifest.Roots {
+		rootNames[root.Name] = struct{}{}
+	}
+	topEntries, err := os.ReadDir(destination)
+	if err != nil {
+		return false, fmt.Errorf("read restore destination: %w", err)
+	}
+	for _, entry := range topEntries {
+		if _, ok := rootNames[entry.Name()]; !ok || !entry.IsDir() {
+			return false, nil
+		}
 	}
 	seen := make(map[string]struct{}, len(expected))
 	for _, root := range manifest.Roots {

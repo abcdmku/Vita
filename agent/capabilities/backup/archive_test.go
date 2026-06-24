@@ -280,11 +280,11 @@ func TestArchiveRestoreRoundTripAndUndoRestoresPriorTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
+	manifest := mustLoadManifest(t, target, created.BackupID)
 	restored, undo, err := capability.Restore(ctx, ArchiveRestoreRequest{
-		TargetPath:         target,
-		BackupID:           created.BackupID,
-		DestinationRoot:    destination,
-		CompareSourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+		TargetPath:      target,
+		BackupID:        created.BackupID,
+		DestinationRoot: destination,
 	})
 	if err != nil {
 		t.Fatalf("Restore returned error: %v", err)
@@ -295,9 +295,7 @@ func TestArchiveRestoreRoundTripAndUndoRestoresPriorTree(t *testing.T) {
 	if !restored.Restored || restored.BackupID != created.BackupID || restored.Files != created.Files {
 		t.Fatalf("Restore result = %#v, want restored backup %q files %d", restored, created.BackupID, created.Files)
 	}
-	if err := compareTrees(ctx, source, filepath.Join(destination, "agent")); err != nil {
-		t.Fatalf("restored tree differs from source: %v", err)
-	}
+	assertTreeMatchesManifest(t, destination, manifest)
 
 	if err := undo.Undo(ctx); err != nil {
 		t.Fatalf("Undo returned error: %v", err)
@@ -350,7 +348,7 @@ func TestArchiveRestoreTamperRefusesWithoutMutationOrLeaks(t *testing.T) {
 	}
 }
 
-func TestArchiveRestoreCompareSourceRootsRejectsSourceMismatchWithoutMutation(t *testing.T) {
+func TestArchiveRestoreUsesManifestSnapshotWhenLiveSourceMutates(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()
 	target := t.TempDir()
@@ -364,34 +362,34 @@ func TestArchiveRestoreCompareSourceRootsRejectsSourceMismatchWithoutMutation(t 
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
+	manifest := mustLoadManifest(t, target, created.BackupID)
 	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":false}`), 0o600)
 
-	beforeTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
 	restored, undo, err := capability.Restore(ctx, ArchiveRestoreRequest{
 		TargetPath:         target,
 		BackupID:           created.BackupID,
 		DestinationRoot:    destination,
 		CompareSourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
 	})
-	if undo != nil {
-		t.Fatalf("Restore returned undo %v, want nil", undo)
+	if err != nil {
+		t.Fatalf("Restore returned error after live source mutation: %v", err)
 	}
-	if err == nil {
-		t.Fatalf("Restore result = %#v, want compare failure", restored)
+	if undo == nil {
+		t.Fatal("Restore returned nil undo")
 	}
-	var opErr *ArchiveOperationError
-	if !errors.As(err, &opErr) {
-		t.Fatalf("Restore error = %T %v, want ArchiveOperationError", err, err)
+	if !restored.Restored || restored.BackupID != created.BackupID || restored.Files != created.Files {
+		t.Fatalf("Restore result = %#v, want restored backup %q files %d", restored, created.BackupID, created.Files)
 	}
-	if code := opErr.ApplyErrorCode(); code != "restore_compare" {
-		t.Fatalf("ApplyErrorCode = %q, want restore_compare failure", code)
+	assertTreeMatchesManifest(t, destination, manifest)
+	if got := string(mustReadFile(t, filepath.Join(destination, "agent", "state.json"))); got != `{"ok":true}` {
+		t.Fatalf("restored state = %q, want captured source content", got)
+	}
+
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
 	}
 	if got := mustDigestTree(t, destination); !reflect.DeepEqual(got, prior) {
-		t.Fatalf("destination after refused compare restore = %#v, want unchanged %#v", got, prior)
-	}
-	afterTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
-	if !reflect.DeepEqual(afterTemps, beforeTemps) {
-		t.Fatalf("restore temp dirs after compare failure = %v, want unchanged %v", afterTemps, beforeTemps)
+		t.Fatalf("destination after Undo = %#v, want prior %#v", got, prior)
 	}
 }
 
@@ -569,6 +567,17 @@ func mustLoadManifest(t *testing.T, target string, backupID string) archiveManif
 		t.Fatalf("validateArchiveManifest returned error: %v", err)
 	}
 	return manifest
+}
+
+func assertTreeMatchesManifest(t *testing.T, destination string, manifest archiveManifest) {
+	t.Helper()
+	ok, err := treeMatchesManifest(destination, manifest)
+	if err != nil {
+		t.Fatalf("treeMatchesManifest returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("restored tree at %s does not match manifest", destination)
+	}
 }
 
 func manifestEntriesByID(manifest archiveManifest) map[string]archiveManifestEntry {

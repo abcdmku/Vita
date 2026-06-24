@@ -14,18 +14,8 @@ import type {
 } from "./vita/agent-client.ts";
 
 const BACKUP_ID = `sha256:${"B".repeat(43)}`;
-const BACKUP_SOURCE_ROOTS = [
-  {
-    name: "capsule-volumes",
-    path: "/var/lib/vita/runtime/volumes",
-  },
-  {
-    name: "vita-agent",
-    path: "/var/lib/vita-agent",
-  },
-] as const;
 
-test("backup archive round-trip restore asks agentd to compare restored bytes with source roots", async () => {
+test("backup archive round-trip restore relies on manifest-backed agent verification", async () => {
   const plans: AgentApplyPlan[] = [];
   const states: AgentCapabilityState[] = [
     backupState({
@@ -87,7 +77,6 @@ test("backup archive round-trip restore asks agentd to compare restored bytes wi
       op: "restore",
       restore: {
         backupId: BACKUP_ID,
-        compareSourceRoots: BACKUP_SOURCE_ROOTS,
         destinationRoot: "/var/lib/vita-backup-restore/sha256_BBBBBBBBBBB",
         targetPath: "/var/lib/vita-backups",
       },

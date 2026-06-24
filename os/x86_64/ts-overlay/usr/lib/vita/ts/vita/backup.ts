@@ -226,7 +226,6 @@ function buildRestorePlan(backupId: string, destinationRoot: string): AgentApply
           op: "restore",
           restore: Object.freeze({
             backupId,
-            compareSourceRoots: BACKUP_SOURCE_ROOTS,
             destinationRoot,
             targetPath: BACKUP_TARGET_PATH,
           }),
