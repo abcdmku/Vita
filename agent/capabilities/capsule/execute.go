@@ -1635,9 +1635,30 @@ func (l systemdRunLauncher) StopTransientUnit(ctx context.Context, unit string) 
 
 func (l systemdRunLauncher) ResetFailedUnit(ctx context.Context, unit string) error {
 	if output, err := exec.CommandContext(ctx, l.systemctl, "reset-failed", unit).CombinedOutput(); err != nil {
-		return fmt.Errorf("reset capsule transient unit: %w: %s", err, strings.TrimSpace(string(output)))
+		trimmed := strings.TrimSpace(string(output))
+		// A transient unit that stopped cleanly auto-vanishes, so `systemctl
+		// reset-failed` exits non-zero reporting the unit is "not loaded". That
+		// absence IS the desired post-stop state — reset-failed only matters when
+		// the unit still exists in a failed state — so treat not-loaded/no-such-unit
+		// as success. Every other reset-failed error stays fail-closed.
+		if resetFailedUnitAbsent(trimmed) {
+			return nil
+		}
+		return fmt.Errorf("reset capsule transient unit: %w: %s", err, trimmed)
 	}
 	return nil
+}
+
+// resetFailedUnitAbsent reports whether a `systemctl reset-failed` failure means
+// the unit no longer exists (it was never loaded / has no such unit), which after
+// a clean stop is the intended outcome rather than a real failure. It is
+// deliberately narrow: only the unit-absent diagnostics match, so genuine
+// reset-failed errors are never swallowed.
+func resetFailedUnitAbsent(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "not loaded") ||
+		strings.Contains(lower, "no such unit") ||
+		strings.Contains(lower, "not found")
 }
 
 func (l systemdRunLauncher) dynamicUID(ctx context.Context, unit string) (string, error) {

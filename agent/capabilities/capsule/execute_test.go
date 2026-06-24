@@ -1069,6 +1069,85 @@ exit 1
 	}
 }
 
+func TestResetFailedUnitAbsentClassifiesNotLoadedAsSuccess(t *testing.T) {
+	tolerated := []string{
+		"Failed to reset failed state of unit vita-capsule-local.test.capsule-dd4b6822.service: Unit vita-capsule-local.test.capsule-dd4b6822.service not loaded.",
+		"Unit foo.service not loaded.",
+		"Failed to reset-failed bar.service: No such unit bar.service.",
+		"Unit baz.service not found.",
+	}
+	for _, msg := range tolerated {
+		if !resetFailedUnitAbsent(msg) {
+			t.Errorf("resetFailedUnitAbsent(%q) = false, want true (unit-absent is the desired post-stop state)", msg)
+		}
+	}
+
+	genuine := []string{
+		"Failed to reset failed state of unit foo.service: Access denied.",
+		"Connection to bus failed.",
+		"Interactive authentication required.",
+		"",
+	}
+	for _, msg := range genuine {
+		if resetFailedUnitAbsent(msg) {
+			t.Errorf("resetFailedUnitAbsent(%q) = true, want false (genuine errors must stay fail-closed)", msg)
+		}
+	}
+}
+
+func TestResetFailedUnitToleratesNotLoaded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake systemd scripts require a POSIX shell")
+	}
+
+	dir := t.TempDir()
+	systemctl := filepath.Join(dir, "systemctl")
+	// A transient unit that stopped cleanly has auto-vanished, so reset-failed
+	// exits 1 reporting the unit is not loaded. The launcher must treat that as
+	// success (the unit is gone — exactly the goal), not as a stop failure.
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+case "$1" in
+  reset-failed)
+    echo "Failed to reset failed state of unit $2: Unit $2 not loaded." 1>&2
+    exit 1
+    ;;
+esac
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile systemctl returned error: %v", err)
+	}
+
+	launcher := systemdRunLauncher{systemctl: systemctl}
+	if err := launcher.ResetFailedUnit(context.Background(), "vita-capsule-local.test.capsule-dd4b6822.service"); err != nil {
+		t.Fatalf("ResetFailedUnit on a not-loaded unit returned error %v, want nil", err)
+	}
+}
+
+func TestResetFailedUnitFailsClosedOnGenuineError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake systemd scripts require a POSIX shell")
+	}
+
+	dir := t.TempDir()
+	systemctl := filepath.Join(dir, "systemctl")
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+case "$1" in
+  reset-failed)
+    echo "Failed to reset failed state of unit $2: Access denied." 1>&2
+    exit 1
+    ;;
+esac
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile systemctl returned error: %v", err)
+	}
+
+	launcher := systemdRunLauncher{systemctl: systemctl}
+	if err := launcher.ResetFailedUnit(context.Background(), "foo.service"); err == nil {
+		t.Fatalf("ResetFailedUnit on a genuine failure returned nil, want error (fail-closed)")
+	}
+}
+
 func TestExecuteVolumeStartFailureReturnsSpecificCode(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
