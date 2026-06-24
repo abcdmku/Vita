@@ -2501,7 +2501,7 @@ func executeNetworkStatus(networkPolicy *ExecutionNetwork, netns *capsuleNetns, 
 			status.EgressDenied = check.Egress.DeniedCIDR
 			status.EgressDrop = check.Egress.Drop
 		}
-		if check.Ingress != nil && check.Ingress.Status == capsuleIngressStatusOK {
+		if check.Ingress != nil && check.Ingress.Drop == capsuleIngressDropEnforced {
 			status.IngressHostAddr = check.Ingress.HostAddr
 			status.IngressPort = check.Ingress.Port
 			status.IngressDeniedPort = check.Ingress.DeniedPort

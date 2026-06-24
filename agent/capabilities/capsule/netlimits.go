@@ -89,17 +89,17 @@ func confirmCapsuleNetLimits(ctx context.Context, manifest ExecutionManifest, un
 	if err := confirmCapsuleNetLimitsEgress(config, check); err == nil {
 		status.Egress = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, capsuleNetLimitsStepError("egress_confirm", err))
+		errs = errors.Join(errs, capsuleNetLimitsAxisError("egress_confirm", err))
 	}
-	if err := confirmCapsuleNetLimitsIngress(config, check); err == nil {
+	if err := confirmCapsuleNetLimitsIngress(ctx, config, check); err == nil {
 		status.Ingress = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, capsuleNetLimitsStepError("ingress_confirm", err))
+		errs = errors.Join(errs, capsuleNetLimitsAxisError("ingress_confirm", err))
 	}
 	if err := confirmCapsuleNetLimitsIsolation(config, unit.Properties, check); err == nil {
 		status.Isolation = capsuleNetLimitValueEnforced
 	} else {
-		errs = errors.Join(errs, capsuleNetLimitsStepError("isolation_confirm", err))
+		errs = errors.Join(errs, capsuleNetLimitsAxisError("isolation_confirm", err))
 	}
 
 	if status.Egress == capsuleNetLimitValueEnforced &&
@@ -134,31 +134,56 @@ func confirmCapsuleNetLimitsEgress(config capsuleEgressConfig, check *capsuleNet
 	return verifyCapsuleNetLimitsEgressTable(config, check.Egress.Table)
 }
 
-func confirmCapsuleNetLimitsIngress(config capsuleEgressConfig, check *capsuleNetnsCheck) error {
+func capsuleNetLimitsAxisError(axis string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var stepErr *capsuleNetLimitsStepFailure
+	if errors.As(err, &stepErr) && stepErr != nil && (stepErr.Step == axis || strings.HasPrefix(stepErr.Step, axis+":")) {
+		return err
+	}
+	return capsuleNetLimitsStepError(axis, err)
+}
+
+func capsuleNetLimitsSubstepError(axis string, substep string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return capsuleNetLimitsStepError(axis+":"+substep, err)
+}
+
+func confirmCapsuleNetLimitsIngress(ctx context.Context, config capsuleEgressConfig, check *capsuleNetnsCheck) error {
+	const axis = "ingress_confirm"
 	if config.Ingress == nil || len(config.Ingress.Grants) == 0 {
-		return errors.New("hostile capsule ingress grants are absent")
+		return capsuleNetLimitsSubstepError(axis, "grants_absent", errors.New("hostile capsule ingress grants are absent"))
 	}
 	if check.Ingress == nil {
-		return errors.New("agent ingress check is absent")
+		return capsuleNetLimitsSubstepError(axis, "agent_check_absent", errors.New("agent ingress check is absent"))
 	}
-	if check.Ingress.Status != capsuleIngressStatusOK || check.Ingress.Drop != capsuleIngressDropEnforced {
-		return fmt.Errorf("agent ingress check is not enforced: drop=%s status=%s", check.Ingress.Drop, check.Ingress.Status)
+	if check.Ingress.Drop != capsuleIngressDropEnforced {
+		return capsuleNetLimitsSubstepError(axis, "policy_not_drop", fmt.Errorf("agent ingress check is not enforced: drop=%s status=%s", check.Ingress.Drop, check.Ingress.Status))
 	}
 	if check.Ingress.Port <= 0 || check.Ingress.DeniedPort <= 0 || check.Ingress.Port == check.Ingress.DeniedPort {
-		return errors.New("agent ingress probes are invalid")
+		return capsuleNetLimitsSubstepError(axis, "probe_invalid", errors.New("agent ingress probes are invalid"))
 	}
 	if check.Ingress.HostAddr != config.Ingress.HostAddr ||
 		check.Ingress.Port != config.Ingress.ProbePort ||
 		check.Ingress.DeniedPort != config.Ingress.ProbeDeniedPort {
-		return fmt.Errorf("agent ingress probes do not match derived config: host=%s port=%d denied=%d", check.Ingress.HostAddr, check.Ingress.Port, check.Ingress.DeniedPort)
+		return capsuleNetLimitsSubstepError(axis, "probe_mismatch", fmt.Errorf("agent ingress probes do not match derived config: host=%s port=%d denied=%d", check.Ingress.HostAddr, check.Ingress.Port, check.Ingress.DeniedPort))
 	}
 	if check.Egress == nil || check.Egress.Table == "" || check.Egress.HostTable == "" {
-		return errors.New("agent ingress nft table evidence is absent")
+		return capsuleNetLimitsSubstepError(axis, "nft_read_err", errors.New("agent ingress nft table evidence is absent"))
 	}
 	if err := verifyCapsuleIngressNetnsTable(*config.Ingress, check.Egress.Table); err != nil {
-		return err
+		return capsuleNetLimitsSubstepError(axis, "netns_table_invalid", err)
 	}
-	return verifyCapsuleNetLimitsIngressHostTable(*config.Ingress, check.Egress.HostTable)
+	if err := verifyCapsuleNetLimitsIngressHostTable(*config.Ingress, check.Egress.HostTable); err != nil {
+		return capsuleNetLimitsSubstepError(axis, "host_table_invalid", err)
+	}
+	if reached := probeCapsuleIngressTCP(ctx, check.Ingress.HostAddr, check.Ingress.DeniedPort); reached == capsuleIngressReachOK {
+		return capsuleNetLimitsSubstepError(axis, "nonGranted_reachable", fmt.Errorf("non-granted ingress %s:%d was reachable", check.Ingress.HostAddr, check.Ingress.DeniedPort))
+	}
+	return nil
 }
 
 func confirmCapsuleNetLimitsIsolation(config capsuleEgressConfig, properties []systemdProperty, check *capsuleNetnsCheck) error {

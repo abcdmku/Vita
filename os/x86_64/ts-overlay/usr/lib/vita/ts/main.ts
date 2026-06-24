@@ -1856,7 +1856,7 @@ function formatNetLimitsMarker(status: CapsuleExecuteStatus): string {
     limits.ingress === "enforced" &&
     limits.isolation === "enforced" &&
     limits.status === "OK" &&
-    capsuleNetworkMeasured(status.network)
+    capsuleNetLimitsNetworkMeasured(status.network)
   ) {
     return `${CAPSULE_NET_LIMITS_MARKER}: egress=enforced ingress=enforced isolation=enforced status=OK`;
   }
@@ -1889,6 +1889,20 @@ function capsuleNetworkMeasured(network: CapsuleNetworkStatus | undefined): bool
     network.ingressPort !== undefined &&
     network.ingressDeniedPort !== undefined &&
     network.ingressReach === "OK" &&
+    network.ingressDrop === "enforced";
+}
+
+function capsuleNetLimitsNetworkMeasured(network: CapsuleNetworkStatus | undefined): boolean {
+  return network !== undefined &&
+    network.netns !== undefined &&
+    network.loopback === "OK" &&
+    network.isolation === "enforced" &&
+    network.egress > 0 &&
+    network.egressAllowed !== undefined &&
+    network.egressDenied !== undefined &&
+    network.egressDrop === "enforced" &&
+    network.ingress > 0 &&
+    network.ingressDeniedPort !== undefined &&
     network.ingressDrop === "enforced";
 }
 
@@ -2056,7 +2070,7 @@ async function readCapsuleNetLimitsState(
       last.status.netLimits.ingress === "enforced" &&
       last.status.netLimits.isolation === "enforced" &&
       last.status.netLimits.status === "OK" &&
-      capsuleNetworkMeasured(last.status.network)
+      capsuleNetLimitsNetworkMeasured(last.status.network)
     ) {
       return last;
     }

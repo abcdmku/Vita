@@ -123,6 +123,92 @@ func TestCapsuleNetLimitsConfirmRequiresStrictAgentEvidence(t *testing.T) {
 	}
 }
 
+func TestCapsuleNetLimitsIngressConfirmationDoesNotRequireGrantedReach(t *testing.T) {
+	manifest := hostileNetManifest()
+	unit, err := composeTypeScriptTransientUnit(manifest)
+	if err != nil {
+		t.Fatalf("composeTypeScriptTransientUnit returned error: %v", err)
+	}
+	check := capsuleNetLimitsCheckForUnit(t, unit)
+	check.Ingress.Status = capsuleIngressStatusFail
+	check.Egress.Ingress.Status = capsuleIngressStatusFail
+
+	status, err := confirmCapsuleNetLimits(context.Background(), manifest, unit, &check)
+	if err != nil {
+		t.Fatalf("confirmCapsuleNetLimits returned error: %v", err)
+	}
+	if status != enforcedCapsuleNetLimitsStatus() {
+		t.Fatalf("status = %#v, want enforced OK", status)
+	}
+}
+
+func TestCapsuleNetLimitsIngressFailureReasonsAreSpecific(t *testing.T) {
+	manifest := hostileNetManifest()
+	unit, err := composeTypeScriptTransientUnit(manifest)
+	if err != nil {
+		t.Fatalf("composeTypeScriptTransientUnit returned error: %v", err)
+	}
+	check := capsuleNetLimitsCheckForUnit(t, unit)
+	check.Ingress.Drop = "not_enforced"
+	check.Egress.Ingress.Drop = "not_enforced"
+
+	status, err := confirmCapsuleNetLimits(context.Background(), manifest, unit, &check)
+	if err == nil {
+		t.Fatal("confirmCapsuleNetLimits accepted ingress without enforced drop")
+	}
+	if status.Ingress != capsuleNetLimitValueNotEnforced || status.Status != capsuleNetLimitStatusFail {
+		t.Fatalf("status = %#v, want ingress not_enforced FAIL", status)
+	}
+	if reason := capsuleNetLimitsFailureReason(err); reason != "capsule_net_limits_failed:ingress_confirm:policy_not_drop" {
+		t.Fatalf("reason = %q, want ingress policy_not_drop", reason)
+	}
+}
+
+func TestCapsuleNetLimitsIngressDeniedReachableFails(t *testing.T) {
+	manifest := hostileNetManifest()
+	unit, err := composeTypeScriptTransientUnit(manifest)
+	if err != nil {
+		t.Fatalf("composeTypeScriptTransientUnit returned error: %v", err)
+	}
+	if unit.NetNS == nil || unit.NetNS.Egress == nil || unit.NetNS.Egress.Ingress == nil {
+		t.Fatalf("unit.NetNS = %#v, want ingress config", unit.NetNS)
+	}
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+	go acceptAndClose(listener)
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener.Addr() = %T, want *net.TCPAddr", listener.Addr())
+	}
+	ingress := unit.NetNS.Egress.Ingress
+	ingress.HostAddr = "127.0.0.1"
+	ingress.ProbeDeniedPort = addr.Port
+
+	check := capsuleNetLimitsCheckForUnit(t, unit)
+	check.Ingress.HostAddr = ingress.HostAddr
+	check.Ingress.DeniedPort = ingress.ProbeDeniedPort
+	check.Egress.Table = string(renderCapsuleEgressRuleset(*unit.NetNS.Egress))
+	check.Egress.HostTable = string(renderCapsuleIngressHostRuleset(*ingress))
+
+	status, err := confirmCapsuleNetLimits(context.Background(), manifest, unit, &check)
+	if err == nil {
+		t.Fatal("confirmCapsuleNetLimits accepted reachable non-granted ingress")
+	}
+	if status.Ingress != capsuleNetLimitValueNotEnforced || status.Status != capsuleNetLimitStatusFail {
+		t.Fatalf("status = %#v, want ingress not_enforced FAIL", status)
+	}
+	if reason := capsuleNetLimitsFailureReason(err); reason != "capsule_net_limits_failed:ingress_confirm:nonGranted_reachable" {
+		t.Fatalf("reason = %q, want ingress nonGranted_reachable", reason)
+	}
+}
+
 func TestExecuteConfirmsHostileNetLimitsAndExposesStatus(t *testing.T) {
 	ctx := context.Background()
 	entry := hostileNetEntry()
