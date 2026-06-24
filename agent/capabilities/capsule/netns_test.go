@@ -407,9 +407,9 @@ func TestExecuteNetworkProofDoesNotSetLoopbackForIncompleteMeasurement(t *testin
 	}
 }
 
-func TestComposeOCIWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
+func TestComposeOCIWithNetworkWithoutGrantsUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
 	manifest := executeOCIManifest(executeOCIEntry())
-	manifest.Network = validExecutionNetworkNoEgress()
+	manifest.Network = validExecutionNetworkNoGrants()
 
 	unit, err := composeOCITransientUnit(manifest)
 	if err != nil {
@@ -431,9 +431,9 @@ func TestComposeOCIWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testi
 	assertContainsProperty(t, props, "SystemCallFilter", "@system-service")
 }
 
-func TestComposeWasmWithNetworkGrantUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
+func TestComposeWasmWithNetworkWithoutGrantsUsesPrivateNetworkAndWidenedFamilies(t *testing.T) {
 	manifest := executeWasmManifest(executeWasmEntry())
-	manifest.Network = validExecutionNetworkNoEgress()
+	manifest.Network = validExecutionNetworkNoGrants()
 
 	unit, err := composeWasmTransientUnit(manifest)
 	if err != nil {
@@ -494,17 +494,29 @@ func (m *recordingNetnsManager) Check(ctx context.Context, netns capsuleNetns) (
 	}
 	if m.check == nil {
 		if netns.Egress != nil {
+			var ingressCheck *capsuleIngressCheck
+			if netns.Egress.Ingress != nil {
+				ingressCheck = &capsuleIngressCheck{
+					HostAddr:   netns.Egress.Ingress.HostAddr,
+					Port:       netns.Egress.Ingress.ProbePort,
+					DeniedPort: netns.Egress.Ingress.ProbeDeniedPort,
+					Drop:       capsuleIngressDropEnforced,
+					Status:     capsuleIngressStatusOK,
+				}
+			}
 			egressCheck := capsuleEgressCheck{
 				AllowedCIDR: netns.Egress.ProbeAllowedCIDR,
 				DeniedCIDR:  netns.Egress.ProbeDeniedCIDR,
 				Drop:        capsuleEgressDropEnforced,
 				Status:      capsuleEgressStatusOK,
+				Ingress:     ingressCheck,
 			}
 			return capsuleNetnsCheck{
 				Interfaces: []string{"lo", netns.Egress.CapsuleInterface},
 				Isolation:  capsuleNetnsIsolationEnforced,
 				Status:     capsuleNetnsMeasuredStatusOK,
 				Egress:     &egressCheck,
+				Ingress:    ingressCheck,
 			}, nil
 		}
 		return capsuleNetnsCheck{

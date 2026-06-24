@@ -42,6 +42,7 @@ type capsuleEgressConfig struct {
 	ProbeDeniedCIDR  string
 	ProbeDeniedAddr  string
 	Grants           []capsuleEgressGrant
+	Ingress          *capsuleIngressConfig
 
 	probe *capsuleEgressProbe
 }
@@ -57,6 +58,7 @@ type capsuleEgressCheck struct {
 	DeniedCIDR  string
 	Drop        string
 	Status      string
+	Ingress     *capsuleIngressCheck
 }
 
 type capsuleEgressProof struct {
@@ -83,18 +85,7 @@ func capsuleEgressConfigForUnit(unitName string, policy *ExecutionNetwork) (*cap
 		return nil, err
 	}
 
-	names := capsuleEgressNames(unitName)
-	hostAddr, capsuleAddr := capsuleEgressIPv4Pair(unitName)
-	config := &capsuleEgressConfig{
-		HostInterface:    names.host,
-		CapsuleInterface: names.capsule,
-		Table:            names.table,
-		HostAddr:         hostAddr.String(),
-		HostCIDR:         netip.PrefixFrom(hostAddr, 30).String(),
-		CapsuleAddr:      capsuleAddr.String(),
-		CapsuleCIDR:      netip.PrefixFrom(capsuleAddr, 30).String(),
-	}
-
+	config := capsuleBaseEgressConfigForUnit(unitName)
 	for i, rule := range policy.Egress {
 		if err := rule.Validate(i); err != nil {
 			return nil, err
@@ -122,6 +113,20 @@ func capsuleEgressConfigForUnit(unitName string, policy *ExecutionNetwork) (*cap
 	}
 	config.fillDeniedProbe()
 	return config, nil
+}
+
+func capsuleBaseEgressConfigForUnit(unitName string) *capsuleEgressConfig {
+	names := capsuleEgressNames(unitName)
+	hostAddr, capsuleAddr := capsuleEgressIPv4Pair(unitName)
+	return &capsuleEgressConfig{
+		HostInterface:    names.host,
+		CapsuleInterface: names.capsule,
+		Table:            names.table,
+		HostAddr:         hostAddr.String(),
+		HostCIDR:         netip.PrefixFrom(hostAddr, 30).String(),
+		CapsuleAddr:      capsuleAddr.String(),
+		CapsuleCIDR:      netip.PrefixFrom(capsuleAddr, 30).String(),
+	}
 }
 
 func (c *capsuleEgressConfig) fillProbe(prefix netip.Prefix, portValue int) {
@@ -181,6 +186,7 @@ func (c defaultCapsuleEgressConfigurator) Setup(ctx context.Context, netns *caps
 	defer target.Close()
 
 	createdHost := false
+	appliedIngress := false
 	if err := sysdeps.CreateVeth(config.HostInterface, config.CapsuleInterface); err != nil {
 		return capsuleNetnsStepError("egress_veth_create", err)
 	}
@@ -192,6 +198,9 @@ func (c defaultCapsuleEgressConfigurator) Setup(ctx context.Context, netns *caps
 		if config.probe != nil {
 			_ = config.probe.Close()
 			config.probe = nil
+		}
+		if appliedIngress && config.Ingress != nil {
+			_ = sysdeps.DeleteNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable)
 		}
 	}
 	committed := false
@@ -245,6 +254,16 @@ func (c defaultCapsuleEgressConfigurator) Setup(ctx context.Context, netns *caps
 		return err
 	}
 
+	if config.Ingress != nil {
+		if err := sysdeps.DeleteNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable); err != nil && !isMissingNetworkObject(err) {
+			return capsuleNetnsStepError("ingress_dnat_delete", err)
+		}
+		if err := sysdeps.ApplyNftRuleset(renderCapsuleIngressHostRuleset(*config.Ingress)); err != nil {
+			return capsuleNetnsStepError("ingress_dnat_apply", err)
+		}
+		appliedIngress = true
+	}
+
 	committed = true
 	return nil
 }
@@ -279,11 +298,30 @@ func (c defaultCapsuleEgressConfigurator) Check(ctx context.Context, netns capsu
 		return capsuleEgressCheck{}, capsuleNetnsStepError("egress_nft_check", err)
 	}
 
+	var ingressCheck *capsuleIngressCheck
+	if config.Ingress != nil {
+		hostTable, err := sysdeps.ListNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable)
+		if err != nil {
+			return capsuleEgressCheck{}, capsuleNetnsStepError("ingress_dnat_check", err)
+		}
+		if err := verifyCapsuleIngressHostTable(*config.Ingress, string(hostTable)); err != nil {
+			return capsuleEgressCheck{}, capsuleNetnsStepError("ingress_dnat_check", err)
+		}
+		ingressCheck = &capsuleIngressCheck{
+			HostAddr:   config.Ingress.HostAddr,
+			Port:       config.Ingress.ProbePort,
+			DeniedPort: config.Ingress.ProbeDeniedPort,
+			Drop:       capsuleIngressDropEnforced,
+			Status:     capsuleIngressStatusOK,
+		}
+	}
+
 	return capsuleEgressCheck{
 		AllowedCIDR: config.ProbeAllowedCIDR,
 		DeniedCIDR:  config.ProbeDeniedCIDR,
 		Drop:        capsuleEgressDropEnforced,
 		Status:      capsuleEgressStatusOK,
+		Ingress:     ingressCheck,
 	}, nil
 }
 
@@ -301,6 +339,11 @@ func (c defaultCapsuleEgressConfigurator) Teardown(ctx context.Context, netns ca
 			teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("egress_probe_close", err))
 		}
 		config.probe = nil
+	}
+	if config.Ingress != nil {
+		if err := sysdeps.DeleteNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable); err != nil && !isMissingNetworkObject(err) {
+			teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("ingress_dnat_delete", err))
+		}
 	}
 	if err := sysdeps.DeleteLink(config.HostInterface); err != nil && !isMissingNetworkObject(err) {
 		teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("egress_veth_delete", err))
@@ -332,8 +375,19 @@ func validateCapsuleEgressConfig(config capsuleEgressConfig) error {
 	if _, err := netip.ParseAddr(config.HostAddr); err != nil {
 		return &ExecuteInvalidRequestError{Reason: "capsule egress host address is invalid"}
 	}
-	if len(config.Grants) == 0 {
-		return &ExecuteInvalidRequestError{Reason: "capsule egress grants are required"}
+	if len(config.Grants) == 0 && (config.Ingress == nil || len(config.Ingress.Grants) == 0) {
+		return &ExecuteInvalidRequestError{Reason: "capsule network grants are required"}
+	}
+	if config.Ingress != nil {
+		if err := validateCapsuleIngressConfig(*config.Ingress); err != nil {
+			return err
+		}
+		if config.Ingress.HostInterface != config.HostInterface ||
+			config.Ingress.CapsuleInterface != config.CapsuleInterface ||
+			config.Ingress.HostAddr != config.HostAddr ||
+			config.Ingress.CapsuleAddr != config.CapsuleAddr {
+			return &ExecuteInvalidRequestError{Reason: "capsule ingress addresses must match capsule network"}
+		}
 	}
 	for i, grant := range config.Grants {
 		if !validNetworkProtocol(grant.Protocol) {
@@ -365,6 +419,7 @@ func renderCapsuleEgressRuleset(config capsuleEgressConfig) []byte {
 	b.WriteString("    type filter hook input priority filter; policy drop;\n")
 	b.WriteString("    iifname \"lo\" accept\n")
 	b.WriteString("    ct state established,related accept\n")
+	writeCapsuleIngressInputRules(&b, config.Ingress)
 	b.WriteString("  }\n")
 	b.WriteString("  chain output {\n")
 	b.WriteString("    type filter hook output priority filter; policy drop;\n")
@@ -402,6 +457,11 @@ func verifyCapsuleEgressTable(config capsuleEgressConfig, table string) error {
 	if !strings.Contains(table, "ct state established,related accept") &&
 		!strings.Contains(table, "ct state related,established accept") {
 		return errors.New("nft table does not allow established return traffic")
+	}
+	if config.Ingress != nil {
+		if err := verifyCapsuleIngressNetnsTable(*config.Ingress, table); err != nil {
+			return err
+		}
 	}
 	for _, grant := range config.Grants {
 		if !tableContainsDestination(table, grant.Destination) {
