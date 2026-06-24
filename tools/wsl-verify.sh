@@ -9,6 +9,7 @@
 #   smoke  — build then headless boot
 #   full   — full-mode build through verity-format (conversion + veritysetup), assert root hashes captured
 #   secboot— adversarial Secure Boot enforcement matrix (positive enrolls+enforces; negatives rejected)
+#   tpmseal— VITA_LUKS=1 TPM-seal + recovery-share matrix with swtpm-backed QEMU boots
 set -uo pipefail
 REPO=/home/borg/Vita
 MODE="${1:-smoke}"
@@ -17,7 +18,7 @@ git config --global --add safe.directory "$REPO" >/dev/null 2>&1
 
 echo "===== ENV ====="
 echo "host=$(uname -n) user=$(id -un) kvm=$([ -e /dev/kvm ] && echo yes || echo no)"
-for t in node mkosi qemu-system-x86_64 mkfs.ext4 veritysetup; do
+for t in node mkosi qemu-system-x86_64 mkfs.ext4 veritysetup swtpm swtpm_setup systemd-cryptenroll; do
   printf '%s=%s\n' "$t" "$(command -v "$t" 2>/dev/null || echo MISSING)"
 done
 
@@ -573,6 +574,96 @@ run_verity() {
   fi
 }
 
+# ── TPM-sealed LUKS + recovery-share matrix ─────────────────────────────────────────────────────────
+TPMWORK="$REPO/os/x86_64/out/tpmseal-check"
+TPMSTATE="$TPMWORK/swtpm-state"
+
+tpmseal_start_swtpm() {
+  local sock="$TPMWORK/swtpm.sock" ctrl="$TPMWORK/swtpm.ctrl" pid="$TPMWORK/swtpm.pid"
+  mkdir -p "$TPMWORK" "$TPMSTATE"
+  rm -f "$sock" "$ctrl" "$pid"
+  if [ -z "$(find "$TPMSTATE" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    swtpm_setup --tpm2 --tpmstate "dir=$TPMSTATE" --create-ek-cert --create-platform-cert --lock-nvram --not-overwrite >/dev/null
+  fi
+  swtpm socket --tpm2 --tpmstate "dir=$TPMSTATE" \
+    --ctrl "type=unixio,path=$ctrl" \
+    --server "type=unixio,path=$sock" \
+    --pid "file=$pid" --daemon >/dev/null
+  printf '%s\n' "$sock"
+}
+
+tpmseal_stop_swtpm() {
+  local pid="$TPMWORK/swtpm.pid"
+  if [ -f "$pid" ]; then
+    kill "$(cat "$pid")" >/dev/null 2>&1 || true
+  fi
+  rm -f "$TPMWORK/swtpm.sock" "$TPMWORK/swtpm.ctrl" "$pid"
+}
+
+tpmseal_boot() {   # $1=label $2=disk $3=secs ; Echoes the log path.
+  local label="$1" disk="$2" secs="${3:-180}"
+  local log="$TPMWORK/serial-$label.log"
+  local code=/usr/share/OVMF/OVMF_CODE_4M.fd vars_base=/usr/share/OVMF/OVMF_VARS_4M.fd vars="$TPMWORK/vars-$label.fd"
+  [ -f "$code" ] || { code=/usr/share/OVMF/OVMF_CODE.fd; vars_base=/usr/share/OVMF/OVMF_VARS.fd; }
+  cp "$vars_base" "$vars"; : > "$log"
+  local sock; sock=$(tpmseal_start_swtpm)
+  local accel; accel=$(sb_accel); local cpu=(-cpu max); [ "$accel" = kvm ] && cpu=(-cpu host -enable-kvm)
+  timeout "$secs" qemu-system-x86_64 -machine q35 -m 2048 "${cpu[@]}" \
+    -drive if=pflash,format=raw,readonly=on,file="$code" \
+    -drive if=pflash,format=raw,file="$vars" \
+    -drive file="$disk",format=raw,if=virtio \
+    -chardev "socket,id=chrtpm,path=$sock" \
+    -tpmdev emulator,id=tpm0,chardev=chrtpm \
+    -device tpm-tis,tpmdev=tpm0 \
+    -serial "file:$log" -display none -no-reboot >/dev/null 2>&1
+  tpmseal_stop_swtpm
+  echo "$log"
+}
+
+run_tpmseal() {
+  echo "===== TPM-SEAL MATRIX (TPM token + N-of-M TEST recovery shares) ====="
+  command -v swtpm >/dev/null || { echo "RESULT: FAIL (swtpm MISSING)"; return 1; }
+  command -v swtpm_setup >/dev/null || { echo "RESULT: FAIL (swtpm_setup MISSING)"; return 1; }
+  command -v systemd-cryptenroll >/dev/null || { echo "RESULT: FAIL (systemd-cryptenroll MISSING)"; return 1; }
+  command -v cryptsetup >/dev/null || { echo "RESULT: FAIL (cryptsetup MISSING)"; return 1; }
+  rm -rf "$TPMWORK"; mkdir -p "$TPMWORK"
+
+  echo "----- generate TEST LUKS/recovery material (gitignored) -----"
+  bash "$REPO/tools/luks-test-keys.sh" >/dev/null || return 1
+  bash "$REPO/tools/luks-recovery-test-shares.sh" >/dev/null || return 1
+
+  echo "----- build VITA_LUKS=1 VITA_VERITY=1 image -----"
+  rm -f "$REPO"/os/x86_64/out/*.raw
+  VITA_LUKS=1 VITA_VERITY=1 VITA_TPM_STATE_DIR="$TPMSTATE" \
+    node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -18
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "RESULT: FAIL (TPM-seal build failed)"; return 1; }
+  local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
+  [ -f "$disk" ] || { echo "RESULT: FAIL (no disk)"; return 1; }
+  echo "disk=$disk"
+
+  echo "----- boot #1 (TPM unlock + marker creates persistence sentinel) -----"
+  local log1; log1=$(tpmseal_boot first "$disk" 210)
+  grep -qa 'VITA-TPM-SEAL: sealed=OK recovery=OK wrong-key=fail-closed status=OK' "$log1" \
+    || { echo "RESULT: FAIL (boot #1 missing VITA-TPM-SEAL marker)"; tail -40 "$log1"; return 1; }
+  grep -qa 'VITA-LUKS-PENDING: encrypted=OK unlocked=OK persists=awaiting-second-boot tpm=OK recovery=OK status=PENDING' "$log1" \
+    || { echo "RESULT: FAIL (boot #1 missing VITA-LUKS pending marker)"; tail -40 "$log1"; return 1; }
+
+  echo "----- boot #2 (same swtpm state; persisted sentinel proves mapper-backed /var) -----"
+  local log2; log2=$(tpmseal_boot second "$disk" 210)
+  local seal luks
+  seal=$(grep -a 'VITA-TPM-SEAL:' "$log2" | tail -1)
+  luks=$(grep -a 'VITA-LUKS: encrypted=OK unlocked=OK persists=OK tpm=OK recovery=OK status=OK' "$log2" | tail -1)
+  echo "  $seal"
+  echo "  $luks"
+  if [ -n "$seal" ] && [ -n "$luks" ]; then
+    echo "RESULT: PASS (TPM token unlocks; threshold recovery opens; below-threshold/wrong-PCR fail closed)"
+  else
+    echo "RESULT: FAIL (missing TPM-seal or persisted LUKS marker)"
+    tail -50 "$log2"
+    return 1
+  fi
+}
+
 case "$MODE" in
   tests) run_tests; echo "RESULT: $([ $? = 0 ] && echo PASS || echo FAIL)";;
   build) build_smoke && echo "RESULT: PASS (disk built)" || echo "RESULT: FAIL (build)";;
@@ -584,6 +675,7 @@ case "$MODE" in
   full)  build_full;;
   secboot) secboot;;
   verity) run_verity;;
+  tpmseal) run_tpmseal;;
   ts)    build_smoke && boot_ts || echo "RESULT: FAIL";;
   *) echo "unknown mode: $MODE"; exit 2;;
 esac

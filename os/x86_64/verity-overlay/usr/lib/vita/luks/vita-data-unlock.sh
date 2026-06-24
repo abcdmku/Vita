@@ -2,31 +2,36 @@
 # Vita LUKS data unlock resolver.
 #
 # Source order on certified hardware is:
-#   1. TPM-sealed slot    - STUBBED here; owner wires section 16 material later.
-#   2. Recovery key       - STUBBED here; owner wires N-of-M offline recovery.
-#   3. TEST keyfile       - BUILD-ONLY for VITA_LUKS=1 mechanism tests.
+#   1. TPM2 sealed LUKS token - unattended trusted-boot unlock.
+#   2. Recovery shares        - explicit N-of-M offline recovery presentation.
+#   3. TEST keyfile           - BUILD-ONLY for VITA_LUKS=1 mechanism tests.
 #
-# The resolver is closed: unsupported or missing sources do not fall through to
-# a plaintext data volume. Only a resolved keyfile can unlock the mapper.
+# The resolver is closed: missing or invalid sources do not fall through to a
+# plaintext data volume. Only a source that opens the LUKS mapper succeeds.
 set -euo pipefail
 
 OUTER_DEVICE="${VITA_LUKS_OUTER_DEVICE:-/dev/disk/by-partlabel/vita-data}"
 MAPPER_NAME="${VITA_LUKS_MAPPER_NAME:-vita-data}"
 TEST_KEY="${VITA_LUKS_TEST_KEY:-/usr/lib/vita/luks/data.key}"
 TEST_KEY_ENABLED="${VITA_LUKS_TEST_KEY_ENABLED:-1}"
+SOURCE_FILE="${VITA_LUKS_SOURCE_FILE:-/run/vita-luks/source}"
+TPM_HELPER="${VITA_LUKS_TPM_HELPER:-/usr/lib/vita/luks/tpm-seal.sh}"
+RECOVERY_HELPER="${VITA_LUKS_RECOVERY_HELPER:-/usr/lib/vita/luks/recovery-unlock.sh}"
 
-unsupported_tpm() {
-  # OWNER WIRES §16: replace this stub with a TPM2-sealed token/key path, for
-  # example systemd-cryptenroll --tpm2-device=auto on the vita-data LUKS slot.
-  echo "unsupported: tpm-sealed slot is a stub (# OWNER WIRES §16)" >&2
-  return 2
+record_source() {
+  local source="$1"
+  mkdir -p "$(dirname -- "$SOURCE_FILE")"
+  printf '%s\n' "$source" >"$SOURCE_FILE"
 }
 
-unsupported_recovery() {
-  # OWNER WIRES §16: replace this stub with the owner's N-of-M offline recovery
-  # key flow. No recovery secret is generated, escrowed, or shipped here.
-  echo "unsupported: recovery key source is a stub (# OWNER WIRES §16)" >&2
-  return 2
+unlock_with_tpm() {
+  [ -r "$TPM_HELPER" ] || return 2
+  /bin/bash "$TPM_HELPER" open
+}
+
+unlock_with_recovery() {
+  [ -r "$RECOVERY_HELPER" ] || return 2
+  /bin/bash "$RECOVERY_HELPER" open
 }
 
 test_key() {
@@ -41,21 +46,22 @@ test_key() {
   printf '%s\n' "$TEST_KEY"
 }
 
+unlock_with_test() {
+  local key rc
+  if ! key="$(test_key)"; then
+    return 2
+  fi
+  if cryptsetup luksOpen --key-file "$key" "$OUTER_DEVICE" "$MAPPER_NAME"; then
+    record_source "test-key"
+    echo "VITA-LUKS-SOURCE: test-key opened $MAPPER_NAME" >&2
+    return 0
+  fi
+  rc=$?
+  return "$rc"
+}
+
 resolve_key() {
-  local key
-  if key="$(unsupported_tpm)"; then
-    printf '%s\n' "$key"
-    return 0
-  fi
-  if key="$(unsupported_recovery)"; then
-    printf '%s\n' "$key"
-    return 0
-  fi
-  if key="$(test_key)"; then
-    printf '%s\n' "$key"
-    return 0
-  fi
-  return 1
+  test_key
 }
 
 emit_error() {
@@ -75,8 +81,30 @@ wait_for_outer_device() {
   return 1
 }
 
+unlock_sources() {
+  local rc
+  if unlock_with_tpm; then
+    return 0
+  fi
+  rc=$?
+  echo "VITA-LUKS-SOURCE-SKIP: tpm2 rc=$rc" >&2
+
+  if unlock_with_recovery; then
+    return 0
+  fi
+  rc=$?
+  echo "VITA-LUKS-SOURCE-SKIP: recovery rc=$rc" >&2
+
+  if unlock_with_test; then
+    return 0
+  fi
+  rc=$?
+  echo "VITA-LUKS-SOURCE-SKIP: test-key rc=$rc" >&2
+  return 1
+}
+
 unlock_data() {
-  local key rc
+  local rc
 
   if cryptsetup status "$MAPPER_NAME" >/dev/null 2>&1; then
     return 0
@@ -95,16 +123,8 @@ unlock_data() {
     return 1
   fi
 
-  if ! key="$(resolve_key)"; then
-    emit_error "resolve_key" 1
-    return 1
-  fi
-
-  if cryptsetup luksOpen --key-file "$key" "$OUTER_DEVICE" "$MAPPER_NAME"; then
-    :
-  else
-    rc=$?
-    emit_error "luks_open" "$rc"
+  if ! unlock_sources; then
+    emit_error "unlock_sources" 1
     return 1
   fi
 
@@ -122,8 +142,8 @@ case "${1:-unlock}" in
     ;;
   probe-source)
     case "${2:-}" in
-      tpm) unsupported_tpm ;;
-      recovery) unsupported_recovery ;;
+      tpm) [ -r "$TPM_HELPER" ] && /bin/bash "$TPM_HELPER" probe ;;
+      recovery) [ -r "$RECOVERY_HELPER" ] && /bin/bash "$RECOVERY_HELPER" probe ;;
       test) test_key ;;
       *) echo "usage: $0 probe-source tpm|recovery|test" >&2; exit 64 ;;
     esac

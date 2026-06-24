@@ -160,6 +160,7 @@ function findOutput(suffix) {
 }
 
 const REPART_VERITY_DIR = join(HERE, "repart-verity");
+const DEFAULT_TPM2_PCRS = "7+11";
 const PLAIN_DATA_REPART_CONF = `# Vita smoke VERITY layout - persistent mutable /var data partition. The root partition stays
 # dm-verity read-only; smoke-overlay/usr/lib/systemd/system/var.mount mounts this partition by
 # filesystem label instead of relying on machine-id-derived Discoverable Partitions UUIDs.
@@ -238,7 +239,7 @@ function prepareVerityOverlay({ luksMode }) {
   return plainOverlay;
 }
 
-function stageLuksTestKeyOverlay(keyPath) {
+function stageLuksTestKeyOverlay(keyPath, recoveryShareDir) {
   const overlay = join(OUT, "luks-overlay");
   if (DRY) return overlay;
   if (!existsSync(keyPath)) {
@@ -247,16 +248,35 @@ function stageLuksTestKeyOverlay(keyPath) {
       "       bash tools/luks-test-keys.sh\n" +
       `     or set VITA_LUKS_TEST_KEY_PATH. Looked for:\n       ${keyPath}`);
   }
+  if (!existsSync(recoveryShareDir)) {
+    fail(
+      "VITA_LUKS=1 needs the TEST recovery shares. Generate them (gitignored, throwaway, spec section 16):\n" +
+      "       bash tools/luks-recovery-test-shares.sh\n" +
+      `     or set VITA_LUKS_RECOVERY_SHARE_DIR. Looked for:\n       ${recoveryShareDir}`);
+  }
+  const recoveryShareNames = readdirSync(recoveryShareDir)
+    .filter((name) => /^share-[0-9]+\.env$/u.test(name))
+    .sort();
+  if (recoveryShareNames.length === 0) {
+    fail(`VITA_LUKS=1 recovery share dir has no share-*.env files: ${recoveryShareDir}`);
+  }
 
   const luksDir = join(overlay, "usr", "lib", "vita", "luks");
+  const stagedShareDir = join(luksDir, "recovery-shares");
   rmSync(overlay, { recursive: true, force: true });
   mkdirSync(luksDir, { recursive: true });
+  mkdirSync(stagedShareDir, { recursive: true });
   const stagedKey = join(luksDir, "data.key");
   copyFileSync(keyPath, stagedKey);
   chmodSync(stagedKey, 0o400);
+  for (const name of recoveryShareNames) {
+    const stagedShare = join(stagedShareDir, name);
+    copyFileSync(join(recoveryShareDir, name), stagedShare);
+    chmodSync(stagedShare, 0o400);
+  }
   writeFileSync(join(luksDir, "enabled"), "VITA_LUKS=1 build-only TEST unlock enabled\n", { mode: 0o444 });
   writeFileSync(join(luksDir, "README.DO-NOT-SHIP.txt"),
-    "DO-NOT-SHIP: build-only Vita LUKS TEST key overlay. Real TPM/recovery secrets are owner-held.\n",
+    "DO-NOT-SHIP: build-only Vita LUKS TEST key/share overlay. Real TPM/recovery secrets are owner-held.\n",
     { mode: 0o444 });
   return overlay;
 }
@@ -303,12 +323,14 @@ function cleanupLuksPostprocess(loopDevice, mapperName) {
   }
 }
 
-function luksFormatDataPartition(disk, keyPath) {
+function luksFormatDataPartition(disk, keyPath, recoveryPassphrasePath) {
   log("\n── LUKS · format vita-data as LUKS2 and create inner ext4 label");
-  log("   (cryptsetup LUKS2 defaults are used for cipher/KDF; no production key material is generated)");
+  log("   (cryptsetup LUKS2 defaults are used for cipher/KDF; TPM/recovery use TEST material only)");
   if (DRY) {
     log(`   $ losetup --find --show --partscan ${disk}`);
     log("   $ cryptsetup luksFormat --type luks2 --batch-mode --key-file <TEST key> <vita-data partition>");
+    log("   $ cryptsetup luksAddKey --key-file <TEST key> <vita-data partition> <TEST recovery passphrase>");
+    log(`   $ systemd-cryptenroll <vita-data partition> --unlock-key-file=<TEST key> --tpm2-device=auto --tpm2-pcrs=${DEFAULT_TPM2_PCRS}`);
     log("   $ cryptsetup luksOpen --key-file <TEST key> <vita-data partition> <build mapper>");
     log("   $ mkfs.ext4 -F -L vita-data /dev/mapper/<build mapper>");
     return;
@@ -325,6 +347,20 @@ function luksFormatDataPartition(disk, keyPath) {
     runLuksPostprocess("LUKS · wipe plaintext outer filesystem signatures", "wipefs", ["--all", "--force", dataPartition]);
     runLuksPostprocess("LUKS · luksFormat vita-data outer container", "cryptsetup",
       ["luksFormat", "--type", "luks2", "--batch-mode", "--key-file", keyPath, dataPartition]);
+    if (!existsSync(recoveryPassphrasePath)) {
+      throw new Error(
+        "LUKS: missing TEST recovery passphrase. Generate it with bash tools/luks-recovery-test-shares.sh; " +
+        `looked for ${recoveryPassphrasePath}`);
+    }
+    runLuksPostprocess("LUKS · enroll TEST recovery keyslot", "cryptsetup",
+      ["luksAddKey", "--key-file", keyPath, dataPartition, recoveryPassphrasePath]);
+    runLuksPostprocess(`LUKS · enroll TPM2 sealed token (PCR ${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS})`, "env", [
+      `VITA_LUKS_OUTER_DEVICE=${dataPartition}`,
+      `VITA_TPM2_DEVICE=${process.env.VITA_TPM2_DEVICE ?? "auto"}`,
+      `VITA_TPM2_PCRS=${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS}`,
+      "bash", join(HERE, "verity-overlay", "usr", "lib", "vita", "luks", "tpm-seal.sh"),
+      "enroll", keyPath,
+    ]);
     runLuksPostprocess("LUKS · open vita-data mapper for inner ext4 formatting", "cryptsetup",
       ["luksOpen", "--key-file", keyPath, dataPartition, mapperName]);
     runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
@@ -435,7 +471,9 @@ if (MODE === "smoke") {
   const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode }) : "";
   const verityTree = verityMode ? [`--extra-tree=${verityOverlay}`] : [];
   const luksKey = resolve(process.env.VITA_LUKS_TEST_KEY_PATH ?? join(HERE, ".luks", "data.key"));
-  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey)}`] : [];
+  const recoveryShareDir = resolve(process.env.VITA_LUKS_RECOVERY_SHARE_DIR ?? join(HERE, ".luks", "recovery"));
+  const recoveryPassphrase = resolve(process.env.VITA_LUKS_RECOVERY_PASSPHRASE_PATH ?? join(recoveryShareDir, "recovery.passphrase"));
+  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey, recoveryShareDir)}`] : [];
   const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
@@ -483,7 +521,7 @@ if (MODE === "smoke") {
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
-  if (luksMode) luksFormatDataPartition(disk, luksKey);
+  if (luksMode) luksFormatDataPartition(disk, luksKey, recoveryPassphrase);
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
@@ -582,6 +620,79 @@ run("6 · RAUC bundle", "rauc",
 if (!NO_BOOT) bootQemu(imageRaw, { secureBoot: !NO_SIGN });
 log(`\n✓ full build complete → ${imageRaw}` + (NO_SIGN ? " (UNSIGNED)" : " (signed)"));
 
+function toolPresent(executable, args = ["--version"]) {
+  return spawnSync(executable, args, { stdio: "ignore" }).error === undefined;
+}
+
+function startSwtpmForQemu() {
+  const tpmRequested = process.env.VITA_LUKS === "1" || process.env.VITA_QEMU_TPM === "1";
+  if (!tpmRequested) {
+    return { args: [], cleanup: () => {} };
+  }
+
+  const stateDir = resolve(process.env.VITA_TPM_STATE_DIR ?? join(HERE, ".luks", "swtpm"));
+  const runDir = join(OUT, "swtpm");
+  const sock = join(runDir, "swtpm.sock");
+  const ctrl = join(runDir, "swtpm.ctrl");
+  const pidFile = join(runDir, "swtpm.pid");
+  const logFile = join(runDir, "swtpm.log");
+  const args = [
+    "-chardev", `socket,id=chrtpm,path=${sock}`,
+    "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+    "-device", "tpm-tis,tpmdev=tpm0",
+  ];
+
+  if (DRY) {
+    log(`   (swtpm: state=${stateDir} socket=${sock}; QEMU gets tpm-tis)`);
+    return { args, cleanup: () => {} };
+  }
+
+  if (!toolPresent("swtpm")) fail("VITA_LUKS=1 QEMU boot needs swtpm on PATH");
+  if (!toolPresent("swtpm_setup", ["--help"])) fail("VITA_LUKS=1 QEMU boot needs swtpm_setup on PATH");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  rmSync(sock, { force: true });
+  rmSync(ctrl, { force: true });
+  rmSync(pidFile, { force: true });
+
+  const initialized = readdirSync(stateDir).length > 0;
+  if (!initialized) {
+    run("TPM · initialize swtpm state", "swtpm_setup", [
+      "--tpm2",
+      "--tpmstate", `dir=${stateDir}`,
+      "--create-ek-cert",
+      "--create-platform-cert",
+      "--lock-nvram",
+      "--not-overwrite",
+    ]);
+  }
+
+  run("TPM · start swtpm for QEMU", "swtpm", [
+    "socket",
+    "--tpm2",
+    "--tpmstate", `dir=${stateDir}`,
+    "--ctrl", `type=unixio,path=${ctrl}`,
+    "--server", `type=unixio,path=${sock}`,
+    "--log", `file=${logFile},level=20`,
+    "--pid", `file=${pidFile}`,
+    "--daemon",
+  ]);
+
+  return {
+    args,
+    cleanup: () => {
+      if (!existsSync(pidFile)) return;
+      const pid = readFileSync(pidFile, "utf8").trim();
+      if (/^[0-9]+$/u.test(pid)) {
+        spawnSync("kill", [pid], { stdio: "ignore" });
+      }
+      rmSync(sock, { force: true });
+      rmSync(ctrl, { force: true });
+      rmSync(pidFile, { force: true });
+    },
+  };
+}
+
 function bootQemu(image, { secureBoot, sbCert }) {
   // Auto-detect OVMF firmware: Debian trixie ships ONLY the 4M variants; older Debian + other distros differ.
   const firstExisting = (paths) => paths.find((p) => existsSync(p)) ?? paths[0];
@@ -650,11 +761,17 @@ function bootQemu(image, { secureBoot, sbCert }) {
   const kvm = !DRY && existsSync("/dev/kvm");
   const accel = process.env.VITA_QEMU_ACCEL ?? (kvm ? "kvm" : "tcg");
   const cpu = accel === "kvm" ? ["-cpu", "host", "-enable-kvm"] : ["-cpu", "max"];
-  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
-    "-machine", "q35", "-m", "2048", ...cpu,
-    "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
-    "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
-    "-drive", `file=${image},format=raw,if=virtio`,
-    "-serial", "mon:stdio", "-nographic",
-  ]);
+  const swtpm = startSwtpmForQemu();
+  try {
+    run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
+      "-machine", "q35", "-m", "2048", ...cpu,
+      "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
+      "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
+      "-drive", `file=${image},format=raw,if=virtio`,
+      ...swtpm.args,
+      "-serial", "mon:stdio", "-nographic",
+    ]);
+  } finally {
+    swtpm.cleanup();
+  }
 }
