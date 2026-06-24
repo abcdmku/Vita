@@ -43,10 +43,11 @@ const (
 type ArchiveOperation string
 
 const (
-	ArchiveOperationCreate     ArchiveOperation = "create"
-	ArchiveOperationVerify     ArchiveOperation = "verify"
-	ArchiveOperationRestore    ArchiveOperation = "restore"
-	ArchiveOperationRestoreAll ArchiveOperation = "restore-all"
+	ArchiveOperationCreate         ArchiveOperation = "create"
+	ArchiveOperationVerify         ArchiveOperation = "verify"
+	ArchiveOperationRestore        ArchiveOperation = "restore"
+	ArchiveOperationRestoreAll     ArchiveOperation = "restore-all"
+	ArchiveOperationVerifyRestored ArchiveOperation = "verify-restored"
 )
 
 type ArchiveReadRequest struct{}
@@ -56,11 +57,12 @@ func (ArchiveReadRequest) CapabilityRequest() {}
 func (ArchiveReadRequest) Validate() error { return nil }
 
 type ArchiveApplyRequest struct {
-	Op         ArchiveOperation          `json:"op"`
-	Create     *ArchiveCreateRequest     `json:"create,omitempty"`
-	Verify     *ArchiveVerifyRequest     `json:"verify,omitempty"`
-	Restore    *ArchiveRestoreRequest    `json:"restore,omitempty"`
-	RestoreAll *ArchiveRestoreAllRequest `json:"restoreAll,omitempty"`
+	Op             ArchiveOperation              `json:"op"`
+	Create         *ArchiveCreateRequest         `json:"create,omitempty"`
+	Verify         *ArchiveVerifyRequest         `json:"verify,omitempty"`
+	Restore        *ArchiveRestoreRequest        `json:"restore,omitempty"`
+	RestoreAll     *ArchiveRestoreAllRequest     `json:"restoreAll,omitempty"`
+	VerifyRestored *ArchiveVerifyRestoredRequest `json:"verifyRestored,omitempty"`
 }
 
 func (ArchiveApplyRequest) CapabilityRequest() {}
@@ -112,6 +114,7 @@ type ArchiveStatus struct {
 	Op       ArchiveOperation            `json:"op"`
 	BackupID string                      `json:"backupId,omitempty"`
 	Files    int                         `json:"files"`
+	Volumes  int                         `json:"volumes,omitempty"`
 	Created  bool                        `json:"created"`
 	Verified bool                        `json:"verified"`
 	Restored bool                        `json:"restored"`
@@ -294,11 +297,27 @@ func (c *ArchiveCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			Op:       ArchiveOperationRestoreAll,
 			BackupID: result.BackupID,
 			Files:    result.Files,
+			Volumes:  result.Volumes,
 			Restored: result.Restored,
 			Verified: true,
 			Status:   "OK",
 		})
 		return archiveUndo{capability: c, prior: prior, undo: undo}, nil
+	case ArchiveOperationVerifyRestored:
+		result, err := verifyRestoredArchive(ctx, *normalized.VerifyRestored)
+		if err != nil {
+			return nil, err
+		}
+		c.setLast(ArchiveStatus{
+			Op:       ArchiveOperationVerifyRestored,
+			BackupID: result.BackupID,
+			Files:    result.Files,
+			Volumes:  result.Volumes,
+			Restored: true,
+			Verified: true,
+			Status:   "OK",
+		})
+		return archiveUndo{capability: c, prior: prior}, nil
 	default:
 		return nil, archiveInvalid("unknown backup archive operation")
 	}
@@ -334,6 +353,14 @@ func (c *ArchiveCapability) RestoreAll(ctx context.Context, req ArchiveRestoreAl
 		return ArchiveRestoreAllResult{}, nil, err
 	}
 	return restoreAllArchive(ctx, normalized)
+}
+
+func (c *ArchiveCapability) VerifyRestored(ctx context.Context, req ArchiveVerifyRestoredRequest) (ArchiveVerifyRestoredResult, error) {
+	normalized, err := normalizeArchiveVerifyRestoredRequest(req)
+	if err != nil {
+		return ArchiveVerifyRestoredResult{}, err
+	}
+	return verifyRestoredArchive(ctx, normalized)
 }
 
 func (c *ArchiveCapability) cloneLast() *ArchiveStatus {
@@ -415,11 +442,12 @@ func (u archiveRestoreUndo) Undo(ctx context.Context) error {
 }
 
 type normalizedArchiveApplyRequest struct {
-	Op         ArchiveOperation
-	Create     *ArchiveCreateRequest
-	Verify     *ArchiveVerifyRequest
-	Restore    *ArchiveRestoreRequest
-	RestoreAll *ArchiveRestoreAllRequest
+	Op             ArchiveOperation
+	Create         *ArchiveCreateRequest
+	Verify         *ArchiveVerifyRequest
+	Restore        *ArchiveRestoreRequest
+	RestoreAll     *ArchiveRestoreAllRequest
+	VerifyRestored *ArchiveVerifyRestoredRequest
 }
 
 func normalizeArchiveApplyRequest(req ArchiveApplyRequest) (normalizedArchiveApplyRequest, error) {
@@ -436,8 +464,11 @@ func normalizeArchiveApplyRequest(req ArchiveApplyRequest) (normalizedArchiveApp
 	if req.RestoreAll != nil {
 		set++
 	}
+	if req.VerifyRestored != nil {
+		set++
+	}
 	if set != 1 {
-		return normalizedArchiveApplyRequest{}, archiveInvalid("exactly one of create, verify, restore, or restoreAll is required")
+		return normalizedArchiveApplyRequest{}, archiveInvalid("exactly one of create, verify, restore, restoreAll, or verifyRestored is required")
 	}
 
 	switch req.Op {
@@ -477,8 +508,17 @@ func normalizeArchiveApplyRequest(req ArchiveApplyRequest) (normalizedArchiveApp
 			return normalizedArchiveApplyRequest{}, err
 		}
 		return normalizedArchiveApplyRequest{Op: req.Op, RestoreAll: &normalized}, nil
+	case ArchiveOperationVerifyRestored:
+		if req.VerifyRestored == nil {
+			return normalizedArchiveApplyRequest{}, archiveInvalid("verifyRestored request is required for verify-restored op")
+		}
+		normalized, err := normalizeArchiveVerifyRestoredRequest(*req.VerifyRestored)
+		if err != nil {
+			return normalizedArchiveApplyRequest{}, err
+		}
+		return normalizedArchiveApplyRequest{Op: req.Op, VerifyRestored: &normalized}, nil
 	default:
-		return normalizedArchiveApplyRequest{}, archiveInvalid("op must be create, verify, restore, or restore-all")
+		return normalizedArchiveApplyRequest{}, archiveInvalid("op must be create, verify, restore, restore-all, or verify-restored")
 	}
 }
 

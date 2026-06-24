@@ -32,6 +32,104 @@ type ArchiveRestoreAllResult struct {
 	Restored bool   `json:"restored"`
 }
 
+// ArchiveVerifyRestoredRequest re-reads each already-restored destination root
+// and proves its bytes hash-match the manifest. It is the MEASURED gate for the
+// VITA-RESTORE-FULL marker: the marker is emitted only after this op confirms
+// every mapped root's destination contents match the manifest per-entry digests
+// — never from a status field alone.
+type ArchiveVerifyRestoredRequest struct {
+	TargetPath   string         `json:"targetPath"`
+	BackupID     string         `json:"backupId"`
+	RootMappings *[]RootMapping `json:"rootMappings,omitempty"`
+}
+
+// ArchiveVerifyRestoredResult reports the MEASURED outcome: Volumes is the count
+// of roots whose destination bytes actually hash-matched the manifest. Verified
+// is true only when every mapped root matched.
+type ArchiveVerifyRestoredResult struct {
+	BackupID string `json:"backupId"`
+	Files    int    `json:"files"`
+	Volumes  int    `json:"volumes"`
+	Verified bool   `json:"verified"`
+}
+
+func normalizeArchiveVerifyRestoredRequest(req ArchiveVerifyRestoredRequest) (ArchiveVerifyRestoredRequest, error) {
+	normalized, err := normalizeArchiveRestoreAllRequest(ArchiveRestoreAllRequest{
+		TargetPath:   req.TargetPath,
+		BackupID:     req.BackupID,
+		RootMappings: req.RootMappings,
+	})
+	if err != nil {
+		return ArchiveVerifyRestoredRequest{}, err
+	}
+	return ArchiveVerifyRestoredRequest{
+		TargetPath:   normalized.TargetPath,
+		BackupID:     normalized.BackupID,
+		RootMappings: normalized.RootMappings,
+	}, nil
+}
+
+// verifyRestoredArchive independently re-hashes the restored destinations against
+// the manifest. It is READ-ONLY (mutates nothing) and fail-CLOSED: the backup
+// store is re-verified first (content + manifest digest + backup-id), the mapping
+// must exactly cover the manifest roots, and EVERY mapped destination must
+// byte-match the manifest (per-entry digests via rootMatchesManifest). Any
+// mismatch or unreadable destination is reported as a verification failure so the
+// caller cannot emit a MEASURED success marker without proven hash-match.
+func verifyRestoredArchive(ctx context.Context, req ArchiveVerifyRestoredRequest) (ArchiveVerifyRestoredResult, error) {
+	normalized, err := normalizeArchiveVerifyRestoredRequest(req)
+	if err != nil {
+		return ArchiveVerifyRestoredResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ArchiveVerifyRestoredResult{}, err
+	}
+	verify, manifest, err := verifyArchive(ctx, normalized.TargetPath, normalized.BackupID)
+	if err != nil {
+		return ArchiveVerifyRestoredResult{}, err
+	}
+	if !verify.OK {
+		return ArchiveVerifyRestoredResult{}, &ArchiveVerificationError{Failure: *verify.Failure}
+	}
+
+	mappings, err := restoreAllMappingsForManifest(*normalized.RootMappings, manifest)
+	if err != nil {
+		return ArchiveVerifyRestoredResult{}, err
+	}
+
+	matched := 0
+	for _, mapping := range mappings {
+		if err := ctx.Err(); err != nil {
+			return ArchiveVerifyRestoredResult{}, err
+		}
+		ok, err := rootMatchesManifest(mapping.Path, mapping.Name, manifest)
+		if err != nil {
+			return ArchiveVerifyRestoredResult{}, archiveStepError("verify_restored_root_check", err)
+		}
+		if !ok {
+			return ArchiveVerifyRestoredResult{}, &ArchiveVerificationError{Failure: ArchiveVerificationFailure{
+				Entry:  mapping.Name,
+				Reason: "restored root content does not match manifest",
+			}}
+		}
+		matched++
+	}
+
+	if matched != len(manifest.Roots) {
+		return ArchiveVerifyRestoredResult{}, &ArchiveVerificationError{Failure: ArchiveVerificationFailure{
+			Entry:  "roots",
+			Reason: "restored root count does not match manifest",
+		}}
+	}
+
+	return ArchiveVerifyRestoredResult{
+		BackupID: manifest.Digest,
+		Files:    verify.Files,
+		Volumes:  matched,
+		Verified: true,
+	}, nil
+}
+
 type archiveRestoreAllUndo struct {
 	undos          []archiveRestoreUndo
 	stage          string

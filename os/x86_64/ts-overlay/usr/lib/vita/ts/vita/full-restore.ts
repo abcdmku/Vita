@@ -51,9 +51,10 @@ export type FullRestoreRejectResult =
     };
 
 interface FullRestoreArchiveStatus {
-  readonly op: "create" | "restore-all";
+  readonly op: "create" | "restore-all" | "verify-restored";
   readonly backupId?: string;
   readonly files: number;
+  readonly volumes: number;
   readonly created: boolean;
   readonly verified: boolean;
   readonly restored: boolean;
@@ -107,11 +108,36 @@ export async function runFullRestoreRoundTrip(
     return failedFullRestore("restore_all_not_measured");
   }
 
+  // MEASURED gate: do NOT trust the restore-all status alone. Re-read each
+  // committed destination root and prove its bytes hash-match the manifest
+  // (per-entry digests) for EVERY root before emitting VITA-RESTORE-FULL. The
+  // verified `volumes` count comes from this independent re-hash, not from the
+  // request mapping length.
+  const verify = await applyArchivePlan(
+    client,
+    buildVerifyRestoredPlan(backupId, rootMappings),
+    "verify_restored",
+  );
+  if (!verify.ok) return verify;
+
+  const verified = await readArchiveStatus(client);
+  if (!verified.ok) return failedFullRestore(`verify_restored_${verified.reason}`);
+  if (
+    verified.status.op !== "verify-restored" ||
+    !verified.status.verified ||
+    !verified.status.restored ||
+    verified.status.backupId !== backupId ||
+    verified.status.files !== created.status.files ||
+    verified.status.volumes !== rootMappings.length
+  ) {
+    return failedFullRestore("verify_restored_not_measured");
+  }
+
   return {
     backupId,
     files: created.status.files,
     ok: true,
-    volumes: rootMappings.length,
+    volumes: verified.status.volumes,
   };
 }
 
@@ -214,6 +240,27 @@ function buildRestoreAllPlan(
   }) satisfies AgentApplyPlan;
 }
 
+function buildVerifyRestoredPlan(
+  backupId: string,
+  rootMappings: readonly FullRestoreRootMapping[],
+): AgentApplyPlan {
+  return Object.freeze({
+    operations: Object.freeze([
+      Object.freeze({
+        capability: BACKUP_ARCHIVE_CAPABILITY,
+        request: Object.freeze({
+          op: "verify-restored",
+          verifyRestored: Object.freeze({
+            backupId,
+            rootMappings,
+            targetPath: FULL_RESTORE_TARGET_PATH,
+          }),
+        }),
+      }),
+    ]),
+  }) satisfies AgentApplyPlan;
+}
+
 function buildTamperedRestoreAllPlan(): AgentApplyPlan {
   return Object.freeze({
     operations: Object.freeze([
@@ -287,24 +334,33 @@ function parseArchiveStatus(state: AgentCapabilityState): StatusReadResult {
   const op = field(last, "op");
   const backupId = optionalField(last, "backupId");
   const files = field(last, "files");
+  const volumes = optionalField(last, "volumes");
   const created = field(last, "created");
   const verified = field(last, "verified");
   const restored = field(last, "restored");
   const status = field(last, "status");
 
-  if (op !== "create" && op !== "restore-all") return rejectStatus("op_invalid");
+  if (op !== "create" && op !== "restore-all" && op !== "verify-restored") {
+    return rejectStatus("op_invalid");
+  }
   if (backupId !== undefined && typeof backupId !== "string") {
     return rejectStatus("backup_id_invalid");
   }
   if (!isNonNegativeSafeInteger(files)) return rejectStatus("files_invalid");
+  // `volumes` is omitempty on the agent side (absent for create/zero); treat an
+  // absent field as 0 but reject any present non-integer.
+  if (volumes !== undefined && !isNonNegativeSafeInteger(volumes)) {
+    return rejectStatus("volumes_invalid");
+  }
   if (typeof created !== "boolean") return rejectStatus("created_invalid");
   if (typeof verified !== "boolean") return rejectStatus("verified_invalid");
   if (typeof restored !== "boolean") return rejectStatus("restored_invalid");
   if (typeof status !== "string" || status !== "OK") return rejectStatus("status_invalid");
 
   const parsed: {
-    op: "create" | "restore-all";
+    op: "create" | "restore-all" | "verify-restored";
     files: number;
+    volumes: number;
     created: boolean;
     verified: boolean;
     restored: boolean;
@@ -317,6 +373,7 @@ function parseArchiveStatus(state: AgentCapabilityState): StatusReadResult {
     restored,
     status,
     verified,
+    volumes: volumes === undefined ? 0 : volumes,
   };
 
   if (backupId !== undefined) {

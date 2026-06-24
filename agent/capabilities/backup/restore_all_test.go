@@ -503,6 +503,206 @@ func TestArchiveRestoreAllFailClosedInputHandling(t *testing.T) {
 	}
 }
 
+func TestArchiveVerifyRestoredConfirmsRestoredRootsHashMatchManifest(t *testing.T) {
+	ctx := context.Background()
+	capability := NewArchiveCapability()
+	target := t.TempDir()
+	sources := createRestoreAllSources(t)
+	destParent := t.TempDir()
+	capsuleDest := filepath.Join(destParent, "capsule-volumes")
+	agentDest := filepath.Join(destParent, "vita-agent")
+	mappings := []RootMapping{
+		{Name: "capsule-volumes", Path: capsuleDest},
+		{Name: "vita-agent", Path: agentDest},
+	}
+
+	created, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &sources.roots,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, _, err := capability.RestoreAll(ctx, ArchiveRestoreAllRequest{
+		TargetPath:   target,
+		BackupID:     created.BackupID,
+		RootMappings: &mappings,
+	}); err != nil {
+		t.Fatalf("RestoreAll returned error: %v", err)
+	}
+
+	result, err := capability.VerifyRestored(ctx, ArchiveVerifyRestoredRequest{
+		TargetPath:   target,
+		BackupID:     created.BackupID,
+		RootMappings: &mappings,
+	})
+	if err != nil {
+		t.Fatalf("VerifyRestored returned error: %v", err)
+	}
+	if result.BackupID != created.BackupID || result.Files != created.Files || result.Volumes != 2 || !result.Verified {
+		t.Fatalf("VerifyRestored result = %#v, want backup %q files %d volumes 2 verified", result, created.BackupID, created.Files)
+	}
+
+	// The Apply path must surface a MEASURED verify-restored status the marker
+	// driver reads (verified + volumes count).
+	undo, err := capability.Apply(ctx, ArchiveApplyRequest{
+		Op: ArchiveOperationVerifyRestored,
+		VerifyRestored: &ArchiveVerifyRestoredRequest{
+			TargetPath:   target,
+			BackupID:     created.BackupID,
+			RootMappings: &mappings,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply verify-restored returned error: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Apply verify-restored returned nil undo")
+	}
+	response, err := capability.Handle(ctx, ArchiveReadRequest{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	read, ok := response.(ArchiveReadResponse)
+	if !ok || read.Last == nil {
+		t.Fatalf("Handle response = %#v, want ArchiveReadResponse with last status", response)
+	}
+	if read.Last.Op != ArchiveOperationVerifyRestored || read.Last.BackupID != created.BackupID ||
+		read.Last.Files != created.Files || read.Last.Volumes != 2 || !read.Last.Verified ||
+		!read.Last.Restored || read.Last.Status != "OK" {
+		t.Fatalf("last status = %#v, want measured verify-restored status", read.Last)
+	}
+}
+
+func TestArchiveVerifyRestoredRefusesTamperedDestination(t *testing.T) {
+	ctx := context.Background()
+	capability := NewArchiveCapability()
+	target := t.TempDir()
+	sources := createRestoreAllSources(t)
+	destParent := t.TempDir()
+	capsuleDest := filepath.Join(destParent, "capsule-volumes")
+	agentDest := filepath.Join(destParent, "vita-agent")
+	mappings := []RootMapping{
+		{Name: "capsule-volumes", Path: capsuleDest},
+		{Name: "vita-agent", Path: agentDest},
+	}
+
+	created, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &sources.roots,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, _, err := capability.RestoreAll(ctx, ArchiveRestoreAllRequest{
+		TargetPath:   target,
+		BackupID:     created.BackupID,
+		RootMappings: &mappings,
+	}); err != nil {
+		t.Fatalf("RestoreAll returned error: %v", err)
+	}
+
+	// Mutate a restored destination byte AFTER the restore committed: a status
+	// field would still read "restored=true", but a MEASURED re-hash of the
+	// destination must detect the divergence and REFUSE.
+	tamperedFile := filepath.Join(agentDest, "node-config.env")
+	content := mustReadFile(t, tamperedFile)
+	content[0] ^= 0xff
+	writeTestFile(t, tamperedFile, content, 0o600)
+
+	if _, err := capability.VerifyRestored(ctx, ArchiveVerifyRestoredRequest{
+		TargetPath:   target,
+		BackupID:     created.BackupID,
+		RootMappings: &mappings,
+	}); err == nil {
+		t.Fatal("VerifyRestored returned nil error for tampered destination, want refusal")
+	} else {
+		var verifyErr *ArchiveVerificationError
+		if !errors.As(err, &verifyErr) {
+			t.Fatalf("VerifyRestored error = %T %v, want ArchiveVerificationError", err, err)
+		}
+		if verifyErr.Failure.Entry != "vita-agent" {
+			t.Fatalf("verification failure entry = %q, want vita-agent", verifyErr.Failure.Entry)
+		}
+	}
+}
+
+func TestArchiveVerifyRestoredRefusesMissingDestination(t *testing.T) {
+	ctx := context.Background()
+	capability := NewArchiveCapability()
+	target := t.TempDir()
+	sources := createRestoreAllSources(t)
+	destParent := t.TempDir()
+	capsuleDest := filepath.Join(destParent, "capsule-volumes")
+	agentDest := filepath.Join(destParent, "vita-agent")
+	mappings := []RootMapping{
+		{Name: "capsule-volumes", Path: capsuleDest},
+		{Name: "vita-agent", Path: agentDest},
+	}
+
+	created, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &sources.roots,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	// Only restore one root; the other destination is absent. A no-op verify
+	// would pass; a MEASURED verify must refuse because not every root matches.
+	if _, _, err := capability.RestoreAll(ctx, ArchiveRestoreAllRequest{
+		TargetPath: target,
+		BackupID:   created.BackupID,
+		RootMappings: &[]RootMapping{
+			{Name: "capsule-volumes", Path: capsuleDest},
+		},
+	}); err == nil {
+		t.Fatal("RestoreAll with partial mapping returned nil error, want mapping totality refusal")
+	}
+
+	if _, err := capability.VerifyRestored(ctx, ArchiveVerifyRestoredRequest{
+		TargetPath:   target,
+		BackupID:     created.BackupID,
+		RootMappings: &mappings,
+	}); err == nil {
+		t.Fatal("VerifyRestored returned nil error for absent destination, want refusal")
+	} else {
+		var verifyErr *ArchiveVerificationError
+		if !errors.As(err, &verifyErr) {
+			t.Fatalf("VerifyRestored error = %T %v, want ArchiveVerificationError", err, err)
+		}
+	}
+}
+
+func TestArchiveVerifyRestoredFailsClosedOnInvalidRequest(t *testing.T) {
+	ctx := context.Background()
+	capability := NewArchiveCapability()
+	cases := []struct {
+		name string
+		req  ArchiveVerifyRestoredRequest
+	}{
+		{
+			name: "relative target",
+			req:  ArchiveVerifyRestoredRequest{TargetPath: "relative", BackupID: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		},
+		{
+			name: "missing backup id",
+			req:  ArchiveVerifyRestoredRequest{TargetPath: "/tmp/target"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := capability.VerifyRestored(ctx, tc.req); err == nil {
+				t.Fatal("VerifyRestored returned nil error, want rejection")
+			} else {
+				var invalid *ArchiveInvalidRequestError
+				if !errors.As(err, &invalid) {
+					t.Fatalf("VerifyRestored error = %T %v, want ArchiveInvalidRequestError", err, err)
+				}
+			}
+		})
+	}
+}
+
 type restoreAllSources struct {
 	roots   []ArchiveSourceRoot
 	capsule string
