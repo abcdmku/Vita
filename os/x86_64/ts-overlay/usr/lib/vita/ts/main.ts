@@ -108,11 +108,34 @@ const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
 const FILES_MARKER = "VITA-FILES";
 const FILES_REJECT_MARKER = "VITA-FILES-REJECT";
 const FILES_ERROR_MARKER = "VITA-FILES-ERROR";
+const FILES_SHARED_MARKER = "VITA-FILES-SHARED";
+const FILES_SHARED_REJECT_MARKER = "VITA-FILES-SHARED-REJECT";
+const FILES_SHARED_ERROR_MARKER = "VITA-FILES-SHARED-ERROR";
+const FILES_SHARED_DEFERRED_MARKER = "VITA-FILES-SHARED-DEFERRED";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const FILES_RW_GRANT = "runtime-files";
 const FILES_RO_GRANT = "runtime-files-ro";
 const FILES_ROUNDTRIP_PATH = "roundtrip.txt";
+// Shared-folder grants from agentd's OWN config (agent/cmd/agentd/main.go):
+//   - FILES_SHARED_RW_GRANT: a shared folder whose roles map binds owner ->
+//     read-write. The runtime authenticates through the vita-agent group, which
+//     agentd binds to the owner role, so an owner write -> list -> read-back ->
+//     stat round-trip succeeds and is MEASURED below (never synthesized).
+//   - FILES_SHARED_MEMBER_FORBIDDEN_GRANT: a shared folder whose roles map binds
+//     household-member -> forbidden (no access at all). agentd binds that role to
+//     the AUTHENTICATED uid below, so the role_forbidden denial comes from a real
+//     per-peer decision — it cannot be reached by the owner-role runtime peer.
+const FILES_SHARED_RW_GRANT = "runtime-files-shared-rw";
+const FILES_SHARED_MEMBER_FORBIDDEN_GRANT = "runtime-files-shared-member-forbidden";
+const FILES_SHARED_ROUNDTRIP_PATH = "shared-roundtrip.txt";
+// The authenticated uid agentd binds to the household-member role. To exercise the
+// member-forbidden REJECT against a REAL agentd per-peer decision, a peer must
+// connect to agentd.sock authenticating with THIS uid (so SO_PEERCRED reports it)
+// while also being in the vita-agent group (the socket is group-0660 + the listener
+// re-checks group membership). The reject's role_forbidden must originate from that
+// peer's agentd-resolved role, never be fabricated by this owner-role runtime.
+const FILES_SHARED_MEMBER_UID = 65540;
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
@@ -648,6 +671,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${FILES_SHARED_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -699,6 +723,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsRepoMarker({ ok: false, reason: "PDS sync-state write failed" }));
   }
   await emitFilesMarkers(filesTransport);
+  await emitFilesSharedMarkers(filesTransport);
   await emitBackupArchiveMarkers(agentTransport);
 }
 
@@ -979,6 +1004,198 @@ async function emitFilesRejectMarker(reason: string, attempt: () => Promise<void
   }
 
   emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+// Shared-folder + household-role proof (P1-073). Two halves, each MEASURED from a
+// REAL agentd per-peer decision, never synthesized:
+//
+//   1) OWNER op on a shared grant. The runtime authenticates through the
+//      vita-agent group, which agentd binds to the owner role; on the owner=RW
+//      shared grant a write -> list -> read-back -> stat round-trip succeeds, and
+//      the marker is gated on the read-back bytes matching exactly what was
+//      written. This exercises the shared-grant `roles` map (owner -> read-write),
+//      distinct from a flat read-write grant.
+//
+//   2) HOUSEHOLD-MEMBER op on the member-forbidden grant. agentd binds the
+//      household-member role to a DIFFERENT authenticated uid (65540), so the
+//      role_forbidden denial can ONLY come from a peer authenticating with that
+//      uid — it is unreachable from this owner-role runtime peer. Presenting that
+//      peer requires spawning a uid-65540 helper that opens its own agentd
+//      connection; see emitFilesSharedMemberForbiddenMarker for why that is
+//      intractable inside the locked-down vita-ts.service sandbox on the
+//      single-node image, and how the attempt fails closed to a DEFERRED marker
+//      rather than fabricating the reject.
+async function emitFilesSharedMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createFilesClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+  const data = new TextEncoder().encode("vita shared-folder owner roundtrip\n");
+
+  try {
+    const write = await client.write(FILES_SHARED_RW_GRANT, FILES_SHARED_ROUNDTRIP_PATH, data);
+    const entries = await client.list(FILES_SHARED_RW_GRANT, FILES_SHARED_ROUNDTRIP_PATH);
+    const read = await client.read(FILES_SHARED_RW_GRANT, FILES_SHARED_ROUNDTRIP_PATH);
+    const stat = await client.stat(FILES_SHARED_RW_GRANT, FILES_SHARED_ROUNDTRIP_PATH);
+    const listed = entries.length === 1 &&
+      entries[0]?.name === FILES_SHARED_ROUNDTRIP_PATH &&
+      entries[0]?.kind === "file";
+
+    if (
+      write.size !== data.byteLength ||
+      read.size !== data.byteLength ||
+      stat.kind !== "file" ||
+      stat.size !== data.byteLength ||
+      !listed ||
+      !bytesEqual(read.data, data)
+    ) {
+      emit(`${FILES_SHARED_ERROR_MARKER}: status=FAILSAFE`);
+      await emitFilesSharedMemberForbiddenMarker(client);
+      return;
+    }
+
+    emit(
+      `${FILES_SHARED_MARKER}: ` +
+        `grant=${FILES_SHARED_RW_GRANT} ` +
+        "role=owner " +
+        "op=write+read+list+stat " +
+        `bytes=${read.data.byteLength} ` +
+        "roundtrip=OK " +
+        "status=OK",
+    );
+  } catch {
+    emit(`${FILES_SHARED_ERROR_MARKER}: status=FAILSAFE`);
+    await emitFilesSharedMemberForbiddenMarker(client);
+    return;
+  }
+
+  await emitFilesSharedMemberForbiddenMarker(client);
+}
+
+// Prove the household-member role is role_forbidden on the member-forbidden grant
+// using a REAL agentd per-peer decision. agentd resolves the household-member role
+// ONLY from a peer whose SO_PEERCRED uid is FILES_SHARED_MEMBER_UID, so this
+// runtime (an owner-role peer) cannot reach that decision itself: it must hand the
+// /files write off to a helper that authenticates as uid 65540 (and is in the
+// vita-agent group, since the socket is group-0660 and the listener re-checks group
+// membership), reads back agentd's verdict, and reports role_forbidden ONLY if
+// agentd actually returned it.
+//
+// On this single-node smoke image that helper is intractable. vita-ts.service runs
+// the runtime under DynamicUser + NoNewPrivileges + an empty CapabilityBoundingSet +
+// RestrictSUIDSGID + RestrictNamespaces, and Deno is started WITHOUT --allow-run
+// (its only grants are read/write on agentd.sock). So the runtime can neither
+// setuid to 65540 itself nor spawn `systemd-run --uid=65540` (Deno denies the
+// subprocess outright; even with --allow-run the sandbox forbids the uid change and
+// a transient DynamicUser has no authority to ask PID1 to spawn a unit as an
+// arbitrary uid). Standing up a dedicated User=65540 unit (or a second OS user) is
+// new boot composition the contract puts out of scope. We TRY the uid-helper first
+// (so the limitation is observed, not assumed), and on its failure emit a clearly
+// labelled DEFERRED marker — we never fabricate a role_forbidden the way a hardcoded
+// reject would. The role gate itself is fully covered by the Go suite, and the
+// owner=RW shared-grant marker above proves the role-scoped path end-to-end on a
+// real boot.
+async function emitFilesSharedMemberForbiddenMarker(
+  client: ReturnType<typeof createFilesClient>,
+): Promise<void> {
+  const presented = await presentHouseholdMemberPeer();
+
+  if (presented.ok) {
+    // A real uid-65540 peer ran the write and reported agentd's verdict.
+    if (presented.reason === "role_forbidden") {
+      emit(`${FILES_SHARED_REJECT_MARKER}: reason=role_forbidden status=OK`);
+    } else {
+      emit(`${FILES_SHARED_REJECT_MARKER}: reason=${markerToken(presented.reason)} status=FAILSAFE`);
+    }
+    return;
+  }
+
+  // Could not present a uid-65540 peer on this single-node image. Do NOT synthesize
+  // the reject from this owner-role peer — the household-member decision must come
+  // from agentd's real per-peer auth. Sanity-check that the owner role is NOT
+  // forbidden on the member-forbidden grant (a positive control: read succeeds for
+  // owner), then DEFER the member-forbidden reject with the exact reason.
+  let ownerReadable = false;
+  try {
+    await client.read(FILES_SHARED_MEMBER_FORBIDDEN_GRANT, FILES_SHARED_ROUNDTRIP_PATH);
+    ownerReadable = true;
+  } catch (cause) {
+    if (isFilesClientError(cause)) {
+      // file_not_found / not_file etc. mean the grant resolved and the owner role
+      // was permitted (the read reached the filesystem). Only role_forbidden would
+      // indicate the owner was wrongly denied.
+      ownerReadable = cause.reason !== "role_forbidden";
+    }
+  }
+
+  if (!ownerReadable) {
+    emit(`${FILES_SHARED_ERROR_MARKER}: reason=owner_unexpectedly_forbidden status=FAILSAFE`);
+    return;
+  }
+
+  emit(
+    `${FILES_SHARED_DEFERRED_MARKER}: ` +
+      `grant=${FILES_SHARED_MEMBER_FORBIDDEN_GRANT} ` +
+      "role=household-member " +
+      `reason=${markerToken(presented.reason)} ` +
+      "status=DEFERRED",
+  );
+}
+
+type PresentedPeerResult =
+  | { readonly ok: true; readonly reason: string }
+  | { readonly ok: false; readonly reason: string };
+
+// Attempt to present an authenticated uid-65540 peer by spawning a helper that runs
+// the /files write under that uid and reports agentd's verdict. Returns ok:false
+// with a sanitized reason whenever the helper cannot be presented (the expected
+// outcome inside the vita-ts sandbox). It NEVER returns a fabricated verdict.
+async function presentHouseholdMemberPeer(): Promise<PresentedPeerResult> {
+  try {
+    // The standard way to present a different authenticated unix peer on one host:
+    // ask the service manager to run the op under the target uid. The probe
+    // entrypoint (files-member-probe.ts, staged beside main.ts) opens its OWN agentd
+    // connection — so agentd reads THAT peer's SO_PEERCRED uid, resolves the
+    // household-member role, and the role_forbidden denial is its real per-peer
+    // decision — then prints exactly agentd's error code on its last stdout line.
+    // The runtime holds no --allow-run, so Deno denies this outright before any
+    // process is spawned; even if it did spawn, NoNewPrivileges/RestrictSUIDSGID
+    // forbid the uid change. Either way we observe the failure and defer (below).
+    const command = new Deno.Command("systemd-run", {
+      args: [
+        "--quiet",
+        "--collect",
+        "--pipe",
+        "--wait",
+        `--uid=${FILES_SHARED_MEMBER_UID}`,
+        "--property=SupplementaryGroups=vita-agent",
+        "/usr/lib/vita/deno",
+        "run",
+        "--no-remote",
+        "--cached-only",
+        "--no-config",
+        "--quiet",
+        `--allow-read=${AGENTD_SOCKET_PATH}`,
+        `--allow-write=${AGENTD_SOCKET_PATH}`,
+        "/usr/lib/vita/ts/files-member-probe.ts",
+      ],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    });
+    const output = await command.output();
+    const lines = new TextDecoder().decode(output.stdout).trim().split(/\r?\n/u);
+    const verdict = (lines[lines.length - 1] ?? "").trim();
+
+    if (output.success && verdict.length > 0) {
+      return { ok: true, reason: verdict };
+    }
+    return { ok: false, reason: "uid_helper_no_verdict" };
+  } catch {
+    // Expected on the locked-down single-node image: no --allow-run / no authority
+    // to run a unit as uid 65540. Treat as "peer not presentable".
+    return { ok: false, reason: "uid_helper_unavailable_single_node" };
+  }
 }
 
 async function emitBackupArchiveMarkers(agentTransport: AgentTransport): Promise<void> {
