@@ -218,14 +218,6 @@ const RESULT_ERROR_OPTIONAL_FIELDS = Object.freeze(["index", "capability"]);
 const ERROR_RESPONSE_FIELDS = Object.freeze(["error"]);
 const APPLY_OUTCOMES = ["committed", "rolledBack", "rejected"] as const;
 const CURRENT_STATE_METADATA_FIELDS = Object.freeze(["exists", "raw"]);
-const NODE_STATE_ENVELOPE_FIELDS = Object.freeze([
-  "appliedPlan",
-  "capabilities",
-  "capsuleWorkloads",
-  "currentAppliedPlan",
-  "currentPlan",
-  "plan",
-]);
 const NODE_STATE_PLAN_FIELDS = Object.freeze([
   "currentAppliedPlan",
   "appliedPlan",
@@ -635,13 +627,12 @@ async function readNodeState(
       return reject("node state must be an object.");
     }
 
-    const fields = expectFields(
-      normalized.value,
-      [],
-      NODE_STATE_ENVELOPE_FIELDS,
-    );
-
-    if (!fields.ok) return fields;
+    // The node-state envelope is read-only telemetry that grows over time
+    // (e.g. storageHealth/hardwareInventory). Do NOT pin it to a closed field
+    // allow-list: unfamiliar top-level read fields are tolerated and ignored by
+    // the current-plan projection below. We require only that the envelope
+    // carries a current-plan source (a capabilities map or a direct plan field).
+    // A genuinely malformed (non-object) envelope is still rejected above.
     if (!Object.hasOwn(normalized.value, "capabilities") && !hasCurrentPlanField(normalized.value)) {
       return reject("node state must include capabilities or a current plan.");
     }
@@ -709,8 +700,13 @@ async function projectNodeStateCapabilitiesToPlan(
 
     const entry = field(capabilities, capability);
 
+    // A capability present in /state may not expose a readable config (e.g. a
+    // pure runtime capability such as `files`, which agentd surfaces with a
+    // read-error envelope). That is NOT malformed input — it simply has no
+    // current-plan operation to project. Skip it so an unfamiliar/unreadable
+    // capability never aborts the whole current-plan read (and the preview).
     if (isStateCapabilityReadError(entry)) {
-      return reject(`state for ${capability} returned a read error.`);
+      continue;
     }
     if (!isPlainObject(entry)) {
       return reject(`state for ${capability} must be an object.`);
