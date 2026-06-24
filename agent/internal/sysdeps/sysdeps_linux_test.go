@@ -87,6 +87,9 @@ func createTestNetworkNamespace(t *testing.T) *os.File {
 	if err := UnshareNetworkNamespace(); err != nil {
 		runtime.UnlockOSThread()
 		_ = prior.Close()
+		if ErrnoCode(err) == "EPERM" {
+			t.Skipf("CLONE_NEWNET unavailable (unprivileged container): %v", err)
+		}
 		t.Fatalf("UnshareNetworkNamespace returned error: %v", err)
 	}
 
