@@ -2,14 +2,14 @@
 # Vita LUKS TEST recovery-share generator - THROWAWAY, per-host, NEVER shipped.
 #
 # Creates an N-of-M TEST recovery set under os/x86_64/.luks/recovery/:
-#   recovery.passphrase  - enrolled TEST recovery keyslot passphrase
-#   share-*.env          - offline TEST shares used to reconstruct that passphrase
+#   recovery.passphrase  - host-local TEST recovery keyslot passphrase
+#   share-*.env          - offline TEST share fragments used to reconstruct it
 #
-# This is not a Shamir implementation and makes no cryptographic threshold
-# claim. The mechanism under test is the fail-closed quorum resolver: distinct
-# enrolled share references must meet the threshold before the TEST passphrase
-# is released to cryptsetup. Real recovery material is owner-held (spec section
-# 16) and is not generated, escrowed, or committed here.
+# This is TEST material for proving the fail-closed quorum resolver. It uses a
+# small Shamir-style GF(256) splitter so a threshold set reconstructs the TEST
+# passphrase, but makes no production cryptographic hardening claim. Real
+# recovery material is owner-held (spec section 16) and is not generated,
+# escrowed, shipped, or committed here.
 set -euo pipefail
 
 if [ -n "${VITA_REPO:-}" ]; then
@@ -74,8 +74,8 @@ write_share() {
     return 0
   fi
 
-  local passphrase
-  passphrase="$(tr -d '\r\n' <"$PASSPHRASE")"
+  local fragment="${2:-}"
+  [ -n "$fragment" ] || fail "missing generated fragment for share-$index.env"
   {
     printf '# DO-NOT-SHIP: Vita TEST recovery share %s/%s.\n' "$index" "$TOTAL"
     printf 'VITA_RECOVERY_SHARE_VERSION=1\n'
@@ -85,15 +85,89 @@ write_share() {
     printf 'keyStoreRef=%s\n' "$KEYSTORE_REF"
     printf 'threshold=%s\n' "$THRESHOLD"
     printf 'total=%s\n' "$TOTAL"
-    printf 'passphraseBase64=%s\n' "$passphrase"
+    printf 'x=%s\n' "$index"
+    printf 'fragmentBase64=%s\n' "$fragment"
   } >"$path"
   chmod 400 "$path"
   echo "gen  share-$index.env: $path"
 }
 
 gen_passphrase
+
+needs_regen=0
 for i in $(seq 1 "$TOTAL"); do
-  write_share "$i"
+  [ -f "$DIR/share-$i.env" ] || needs_regen=1
+done
+if [ "$needs_regen" = "0" ]; then
+  share_count=0
+  for f in "$DIR"/share-*.env; do
+    [ -e "$f" ] || continue
+    share_count=$((share_count + 1))
+    if grep -Eq '^(passphraseBase64=|x=|fragmentBase64=)' "$f"; then
+      grep -Eq '^passphraseBase64=' "$f" && needs_regen=1
+      grep -Eq '^x=' "$f" || needs_regen=1
+      grep -Eq '^fragmentBase64=' "$f" || needs_regen=1
+    else
+      needs_regen=1
+    fi
+  done
+  [ "$share_count" = "$TOTAL" ] || needs_regen=1
+fi
+if [ "$needs_regen" = "1" ]; then
+  rm -f "$DIR"/share-*.env
+  mapfile -t fragments < <(node - "$PASSPHRASE" "$THRESHOLD" "$TOTAL" <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+
+const [passphrasePath, thresholdText, totalText] = process.argv.slice(2);
+const threshold = Number(thresholdText);
+const total = Number(totalText);
+const secret = Buffer.from(fs.readFileSync(passphrasePath, "utf8").trim(), "utf8");
+
+function gfMul(left, right) {
+  let a = left;
+  let b = right;
+  let product = 0;
+  while (b !== 0) {
+    if ((b & 1) !== 0) product ^= a;
+    const carry = a & 0x80;
+    a = (a << 1) & 0xff;
+    if (carry !== 0) a ^= 0x1b;
+    b >>= 1;
+  }
+  return product;
+}
+
+const coefficients = Array.from({ length: secret.length }, () =>
+  threshold <= 1 ? Buffer.alloc(0) : crypto.randomBytes(threshold - 1)
+);
+
+for (let x = 1; x <= total; x += 1) {
+  const fragment = Buffer.alloc(secret.length);
+  for (let byteIndex = 0; byteIndex < secret.length; byteIndex += 1) {
+    let y = secret[byteIndex];
+    let power = x;
+    for (let degree = 1; degree < threshold; degree += 1) {
+      y ^= gfMul(coefficients[byteIndex][degree - 1], power);
+      power = gfMul(power, x);
+    }
+    fragment[byteIndex] = y;
+  }
+  process.stdout.write(`${x}=${fragment.toString("base64")}\n`);
+}
+NODE
+  )
+else
+  fragments=()
+fi
+for i in $(seq 1 "$TOTAL"); do
+  if [ "$needs_regen" = "1" ]; then
+    fragment_line="${fragments[$((i - 1))]:-}"
+    [ "${fragment_line%%=*}" = "$i" ] || fail "fragment generator returned unexpected share index for $i"
+    write_share "$i" "${fragment_line#*=}"
+  else
+    write_share "$i" "skip"
+  fi
 done
 
 if [ -f "$NOTE" ]; then

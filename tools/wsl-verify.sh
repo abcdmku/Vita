@@ -604,6 +604,7 @@ tpmseal_boot() {   # $1=label $2=disk $3=secs ; Echoes the log path.
   local label="$1" disk="$2" secs="${3:-180}"
   local log="$TPMWORK/serial-$label.log"
   local code=/usr/share/OVMF/OVMF_CODE_4M.fd vars_base=/usr/share/OVMF/OVMF_VARS_4M.fd vars="$TPMWORK/vars-$label.fd"
+  local share_dir="$REPO/os/x86_64/.luks/recovery"
   [ -f "$code" ] || { code=/usr/share/OVMF/OVMF_CODE.fd; vars_base=/usr/share/OVMF/OVMF_VARS.fd; }
   cp "$vars_base" "$vars"; : > "$log"
   local sock; sock=$(tpmseal_start_swtpm)
@@ -615,9 +616,54 @@ tpmseal_boot() {   # $1=label $2=disk $3=secs ; Echoes the log path.
     -chardev "socket,id=chrtpm,path=$sock" \
     -tpmdev emulator,id=tpm0,chardev=chrtpm \
     -device tpm-tis,tpmdev=tpm0 \
+    -virtfs "local,path=$share_dir,mount_tag=vita-recovery-shares,security_model=none,readonly=on" \
     -serial "file:$log" -display none -no-reboot >/dev/null 2>&1
   tpmseal_stop_swtpm
   echo "$log"
+}
+
+tpmseal_prior_chain_ok() {
+  local log="$1" missing="" label pattern
+  while IFS='|' read -r label pattern; do
+    [ -n "$label" ] || continue
+    if ! grep -qaE "$pattern" "$log" 2>/dev/null; then
+      missing="$missing $label"
+    fi
+  done <<'EOF'
+TS|VITA-TS:
+EVAL|VITA-EVAL:
+PREVIEW|VITA-PREVIEW:
+EXPLAIN|VITA-EXPLAIN:
+STATE|VITA-STATE
+APPLY-COMMIT|VITA-APPLY: outcome=committed
+APPLY-REJECT|VITA-APPLY: outcome=rejected
+CAPSULE-PREVIEW|VITA-CAPSULE-PREVIEW:
+CAPSULE-COMMIT|VITA-CAPSULE:.*outcome=committed
+CAPSULE-REJECT|VITA-CAPSULE:.*outcome=rejected
+PDS|VITA-PDS:
+PDS-WRITE|VITA-PDS-WRITE: outcome=committed
+CAPSULE-EXEC|VITA-CAPSULE-EXECUTED:
+CAPSULE-EXEC-REJECT|VITA-CAPSULE-EXECUTE-REJECT:
+CAPSULE-FETCH|VITA-CAPSULE-FETCH:.*verified=OK
+CAPSULE-HEALTH|VITA-CAPSULE-HEALTH:
+CAPSULE-VOLUME|VITA-CAPSULE-VOLUME:.*mounted=OK
+OCI-FETCH|VITA-CAPSULE-OCI-FETCH:.*verified=OK
+OCI-EXEC|VITA-CAPSULE-OCI-EXECUTED:.*health=OK
+OCI-LIMITS|VITA-CAPSULE-OCI-LIMITS:.*status=OK
+NET-PARSE|VITA-CAPSULE-NET-PARSE:.*status=OK
+WASM|VITA-CAPSULE-WASM-EXECUTED:.*health=OK
+NET-NS|VITA-CAPSULE-NET-NS:.*loopback=OK.*isolation=enforced
+NET-EGRESS|VITA-CAPSULE-NET-EGRESS:.*reach=OK.*drop=enforced
+NET-INGRESS|VITA-CAPSULE-NET-INGRESS:.*reach=OK.*drop=enforced
+FILES|VITA-FILES:.*roundtrip=OK
+PDS-REPO|VITA-PDS-REPO:.*status=OK
+DRIFT|VITA-DRIFT:.*status=OK
+BACKUP|VITA-BACKUP:.*verified=OK
+EOF
+  if [ -n "$missing" ]; then
+    echo "missing prior-chain markers:$missing"
+    return 1
+  fi
 }
 
 run_tpmseal() {
@@ -634,7 +680,7 @@ run_tpmseal() {
 
   echo "----- build VITA_LUKS=1 VITA_VERITY=1 image -----"
   rm -f "$REPO"/os/x86_64/out/*.raw
-  VITA_LUKS=1 VITA_VERITY=1 VITA_TPM_STATE_DIR="$TPMSTATE" \
+  VITA_LUKS=1 VITA_VERITY=1 VITA_TPM_STATE_DIR="$TPMSTATE" VITA_LUKS_RECOVERY_SHARE_DIR="$REPO/os/x86_64/.luks/recovery" \
     node "$REPO"/os/x86_64/build-and-boot.mjs --mode=smoke --no-boot 2>&1 | tail -18
   [ "${PIPESTATUS[0]}" = 0 ] || { echo "RESULT: FAIL (TPM-seal build failed)"; return 1; }
   local disk; disk=$(ls -t "$REPO"/os/x86_64/out/*.raw 2>/dev/null | head -1)
@@ -655,10 +701,10 @@ run_tpmseal() {
   luks=$(grep -a 'VITA-LUKS: encrypted=OK unlocked=OK persists=OK tpm=OK recovery=OK status=OK' "$log2" | tail -1)
   echo "  $seal"
   echo "  $luks"
-  if [ -n "$seal" ] && [ -n "$luks" ]; then
-    echo "RESULT: PASS (TPM token unlocks; threshold recovery opens; below-threshold/wrong-PCR fail closed)"
+  if [ -n "$seal" ] && [ -n "$luks" ] && tpmseal_prior_chain_ok "$log2"; then
+    echo "RESULT: PASS (TPM token unlocks; threshold recovery opens; below-threshold/wrong-PCR fail closed; prior chain PASS)"
   else
-    echo "RESULT: FAIL (missing TPM-seal or persisted LUKS marker)"
+    echo "RESULT: FAIL (missing TPM-seal/LUKS marker or prior chain marker)"
     tail -50 "$log2"
     return 1
   fi

@@ -9,7 +9,7 @@ SENTINEL="${VITA_LUKS_SENTINEL:-/var/lib/vita/luks/persist.sentinel}"
 SOURCE_FILE="${VITA_LUKS_SOURCE_FILE:-/run/vita-luks/source}"
 RECOVERY_HELPER="${VITA_LUKS_RECOVERY_HELPER:-/usr/lib/vita/luks/recovery-unlock.sh}"
 TPM_HELPER="${VITA_LUKS_TPM_HELPER:-/usr/lib/vita/luks/tpm-seal.sh}"
-SHARE_DIR="${VITA_RECOVERY_SHARE_DIR:-/usr/lib/vita/luks/recovery-shares}"
+SHARE_DIR="${VITA_RECOVERY_SHARE_DIR:-/run/vita-recovery-shares}"
 
 fail_marker() {
   local step="$1"

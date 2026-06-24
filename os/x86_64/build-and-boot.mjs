@@ -239,7 +239,7 @@ function prepareVerityOverlay({ luksMode }) {
   return plainOverlay;
 }
 
-function stageLuksTestKeyOverlay(keyPath, recoveryShareDir) {
+function stageLuksTestKeyOverlay(keyPath) {
   const overlay = join(OUT, "luks-overlay");
   if (DRY) return overlay;
   if (!existsSync(keyPath)) {
@@ -248,35 +248,16 @@ function stageLuksTestKeyOverlay(keyPath, recoveryShareDir) {
       "       bash tools/luks-test-keys.sh\n" +
       `     or set VITA_LUKS_TEST_KEY_PATH. Looked for:\n       ${keyPath}`);
   }
-  if (!existsSync(recoveryShareDir)) {
-    fail(
-      "VITA_LUKS=1 needs the TEST recovery shares. Generate them (gitignored, throwaway, spec section 16):\n" +
-      "       bash tools/luks-recovery-test-shares.sh\n" +
-      `     or set VITA_LUKS_RECOVERY_SHARE_DIR. Looked for:\n       ${recoveryShareDir}`);
-  }
-  const recoveryShareNames = readdirSync(recoveryShareDir)
-    .filter((name) => /^share-[0-9]+\.env$/u.test(name))
-    .sort();
-  if (recoveryShareNames.length === 0) {
-    fail(`VITA_LUKS=1 recovery share dir has no share-*.env files: ${recoveryShareDir}`);
-  }
 
   const luksDir = join(overlay, "usr", "lib", "vita", "luks");
-  const stagedShareDir = join(luksDir, "recovery-shares");
   rmSync(overlay, { recursive: true, force: true });
   mkdirSync(luksDir, { recursive: true });
-  mkdirSync(stagedShareDir, { recursive: true });
   const stagedKey = join(luksDir, "data.key");
   copyFileSync(keyPath, stagedKey);
   chmodSync(stagedKey, 0o400);
-  for (const name of recoveryShareNames) {
-    const stagedShare = join(stagedShareDir, name);
-    copyFileSync(join(recoveryShareDir, name), stagedShare);
-    chmodSync(stagedShare, 0o400);
-  }
   writeFileSync(join(luksDir, "enabled"), "VITA_LUKS=1 build-only TEST unlock enabled\n", { mode: 0o444 });
   writeFileSync(join(luksDir, "README.DO-NOT-SHIP.txt"),
-    "DO-NOT-SHIP: build-only Vita LUKS TEST key/share overlay. Real TPM/recovery secrets are owner-held.\n",
+    "DO-NOT-SHIP: build-only Vita LUKS TEST key overlay. Recovery shares are owner-presented at unlock time.\n",
     { mode: 0o444 });
   return overlay;
 }
@@ -354,13 +335,19 @@ function luksFormatDataPartition(disk, keyPath, recoveryPassphrasePath) {
     }
     runLuksPostprocess("LUKS · enroll TEST recovery keyslot", "cryptsetup",
       ["luksAddKey", "--key-file", keyPath, dataPartition, recoveryPassphrasePath]);
-    runLuksPostprocess(`LUKS · enroll TPM2 sealed token (PCR ${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS})`, "env", [
-      `VITA_LUKS_OUTER_DEVICE=${dataPartition}`,
-      `VITA_TPM2_DEVICE=${process.env.VITA_TPM2_DEVICE ?? "auto"}`,
-      `VITA_TPM2_PCRS=${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS}`,
-      "bash", join(HERE, "verity-overlay", "usr", "lib", "vita", "luks", "tpm-seal.sh"),
-      "enroll", keyPath,
-    ]);
+    const tpm = startSwtpmForEnrollment();
+    try {
+      runLuksPostprocess(`LUKS · enroll TPM2 sealed token (PCR ${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS})`, "env", [
+        `VITA_LUKS_OUTER_DEVICE=${dataPartition}`,
+        `VITA_TPM2_DEVICE=${process.env.VITA_TPM2_DEVICE ?? "auto"}`,
+        `VITA_TPM2_PCRS=${process.env.VITA_TPM2_PCRS ?? DEFAULT_TPM2_PCRS}`,
+        ...(tpm.tcti ? [`VITA_TPM2_TCTI=${tpm.tcti}`] : []),
+        "bash", join(HERE, "verity-overlay", "usr", "lib", "vita", "luks", "tpm-seal.sh"),
+        "enroll", keyPath,
+      ]);
+    } finally {
+      tpm.cleanup();
+    }
     runLuksPostprocess("LUKS · open vita-data mapper for inner ext4 formatting", "cryptsetup",
       ["luksOpen", "--key-file", keyPath, dataPartition, mapperName]);
     runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
@@ -389,6 +376,12 @@ function installAgentOverlay() {
     "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -buildid=", "-o", "/work/os/x86_64/out/agent/agentd", "./cmd/agentd",
   ];
   run("1a · build vita agentd (reproducible static binary)", "node", buildArgs);
+  const recoveryCombineBuildArgs = [
+    "tools/build/go-in-docker.mjs", "--dir", "agent",
+    "--env", "CGO_ENABLED=0", "--env", "GOOS=linux", "--env", "GOARCH=amd64", "--env", "SOURCE_DATE_EPOCH=1781308800",
+    "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -buildid=", "-o", "/work/os/x86_64/out/agent/recovery-combine", "./cmd/recovery-combine",
+  ];
+  run("1b · build vita recovery combiner (reproducible static binary)", "node", recoveryCombineBuildArgs);
   if (!DRY) {
     const built = join(OUT, "agent", "agentd");
     if (!existsSync(built)) fail(`agentd build did not produce ${built} — check the go-in-docker step`);
@@ -396,6 +389,12 @@ function installAgentOverlay() {
     mkdirSync(dirname(binDest), { recursive: true });
     copyFileSync(built, binDest);
     log(`   staged agentd → ${binDest}`);
+    const recoveryCombiner = join(OUT, "agent", "recovery-combine");
+    if (!existsSync(recoveryCombiner)) fail(`recovery-combine build did not produce ${recoveryCombiner} — check the go-in-docker step`);
+    const recoveryCombinerDest = join(overlayHost, "usr", "lib", "vita", "recovery-combine");
+    copyFileSync(recoveryCombiner, recoveryCombinerDest);
+    chmodSync(recoveryCombinerDest, 0o755);
+    log(`   staged recovery-combine → ${recoveryCombinerDest}`);
   }
   return useNative ? overlayHost : "/work/os/x86_64/agent-overlay";
 }
@@ -473,7 +472,7 @@ if (MODE === "smoke") {
   const luksKey = resolve(process.env.VITA_LUKS_TEST_KEY_PATH ?? join(HERE, ".luks", "data.key"));
   const recoveryShareDir = resolve(process.env.VITA_LUKS_RECOVERY_SHARE_DIR ?? join(HERE, ".luks", "recovery"));
   const recoveryPassphrase = resolve(process.env.VITA_LUKS_RECOVERY_PASSPHRASE_PATH ?? join(recoveryShareDir, "recovery.passphrase"));
-  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey, recoveryShareDir)}`] : [];
+  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey)}`] : [];
   const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
@@ -624,29 +623,15 @@ function toolPresent(executable, args = ["--version"]) {
   return spawnSync(executable, args, { stdio: "ignore" }).error === undefined;
 }
 
-function startSwtpmForQemu() {
-  const tpmRequested = process.env.VITA_LUKS === "1" || process.env.VITA_QEMU_TPM === "1";
-  if (!tpmRequested) {
-    return { args: [], cleanup: () => {} };
-  }
-
+function startSwtpmSocket(label, runDir) {
   const stateDir = resolve(process.env.VITA_TPM_STATE_DIR ?? join(HERE, ".luks", "swtpm"));
-  const runDir = join(OUT, "swtpm");
   const sock = join(runDir, "swtpm.sock");
   const ctrl = join(runDir, "swtpm.ctrl");
   const pidFile = join(runDir, "swtpm.pid");
   const logFile = join(runDir, "swtpm.log");
-  const args = [
-    "-chardev", `socket,id=chrtpm,path=${sock}`,
-    "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
-    "-device", "tpm-tis,tpmdev=tpm0",
-  ];
+  const tcti = process.env.VITA_TPM2_TCTI ?? `swtpm:path=${sock}`;
 
-  if (DRY) {
-    log(`   (swtpm: state=${stateDir} socket=${sock}; QEMU gets tpm-tis)`);
-    return { args, cleanup: () => {} };
-  }
-
+  if (DRY) return { sock, tcti, cleanup: () => {} };
   if (!toolPresent("swtpm")) fail("VITA_LUKS=1 QEMU boot needs swtpm on PATH");
   if (!toolPresent("swtpm_setup", ["--help"])) fail("VITA_LUKS=1 QEMU boot needs swtpm_setup on PATH");
   mkdirSync(stateDir, { recursive: true });
@@ -657,7 +642,7 @@ function startSwtpmForQemu() {
 
   const initialized = readdirSync(stateDir).length > 0;
   if (!initialized) {
-    run("TPM · initialize swtpm state", "swtpm_setup", [
+    run(`${label} · initialize swtpm state`, "swtpm_setup", [
       "--tpm2",
       "--tpmstate", `dir=${stateDir}`,
       "--create-ek-cert",
@@ -667,7 +652,7 @@ function startSwtpmForQemu() {
     ]);
   }
 
-  run("TPM · start swtpm for QEMU", "swtpm", [
+  run(`${label} · start swtpm`, "swtpm", [
     "socket",
     "--tpm2",
     "--tpmstate", `dir=${stateDir}`,
@@ -679,7 +664,8 @@ function startSwtpmForQemu() {
   ]);
 
   return {
-    args,
+    sock,
+    tcti,
     cleanup: () => {
       if (!existsSync(pidFile)) return;
       const pid = readFileSync(pidFile, "utf8").trim();
@@ -691,6 +677,46 @@ function startSwtpmForQemu() {
       rmSync(pidFile, { force: true });
     },
   };
+}
+
+function startSwtpmForEnrollment() {
+  if (process.env.VITA_TPM2_TCTI) {
+    return { tcti: process.env.VITA_TPM2_TCTI, cleanup: () => {} };
+  }
+  const runDir = join(OUT, "swtpm-enroll");
+  const tpm = startSwtpmSocket("TPM enroll", runDir);
+  if (DRY) log(`   (swtpm enroll: tcti=${tpm.tcti})`);
+  return tpm;
+}
+
+function startSwtpmForQemu() {
+  const tpmRequested = process.env.VITA_LUKS === "1" || process.env.VITA_QEMU_TPM === "1";
+  if (!tpmRequested) {
+    return { args: [], cleanup: () => {} };
+  }
+
+  const runDir = join(OUT, "swtpm");
+  const tpm = startSwtpmSocket("TPM QEMU", runDir);
+  const args = [
+    "-chardev", `socket,id=chrtpm,path=${tpm.sock}`,
+    "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+    "-device", "tpm-tis,tpmdev=tpm0",
+  ];
+
+  if (DRY) log(`   (swtpm qemu: tcti=${tpm.tcti}; QEMU gets tpm-tis)`);
+  return { args, cleanup: tpm.cleanup };
+}
+
+function recoveryShareQemuArgs() {
+  if (process.env.VITA_LUKS !== "1") return [];
+  const shareDir = resolve(process.env.VITA_LUKS_RECOVERY_SHARE_DIR ?? join(HERE, ".luks", "recovery"));
+  if (!DRY && !existsSync(shareDir)) {
+    fail("VITA_LUKS=1 QEMU boot needs host-presented TEST recovery shares. Generate them with:\n" +
+         "       bash tools/luks-recovery-test-shares.sh\n" +
+         `     or set VITA_LUKS_RECOVERY_SHARE_DIR. Looked for:\n       ${shareDir}`);
+  }
+  if (DRY) log(`   (recovery shares: 9p tag vita-recovery-shares path=${shareDir})`);
+  return ["-virtfs", `local,path=${shareDir},mount_tag=vita-recovery-shares,security_model=none,readonly=on`];
 }
 
 function bootQemu(image, { secureBoot, sbCert }) {
@@ -762,6 +788,7 @@ function bootQemu(image, { secureBoot, sbCert }) {
   const accel = process.env.VITA_QEMU_ACCEL ?? (kvm ? "kvm" : "tcg");
   const cpu = accel === "kvm" ? ["-cpu", "host", "-enable-kvm"] : ["-cpu", "max"];
   const swtpm = startSwtpmForQemu();
+  const recoveryShares = recoveryShareQemuArgs();
   try {
     run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
       "-machine", "q35", "-m", "2048", ...cpu,
@@ -769,6 +796,7 @@ function bootQemu(image, { secureBoot, sbCert }) {
       "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
       "-drive", `file=${image},format=raw,if=virtio`,
       ...swtpm.args,
+      ...recoveryShares,
       "-serial", "mon:stdio", "-nographic",
     ]);
   } finally {

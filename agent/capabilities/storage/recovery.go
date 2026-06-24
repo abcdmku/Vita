@@ -42,8 +42,9 @@ func (a *RecoveryAttempt) UnmarshalJSON(raw []byte) error {
 }
 
 type TrustedRecoveryShare struct {
-	Ref        RecoveryKeyRef
-	Passphrase []byte
+	Ref      RecoveryKeyRef
+	Index    byte
+	Fragment []byte
 }
 
 func ValidateRecoveryAttempt(attempt RecoveryAttempt) error {
@@ -85,7 +86,9 @@ func CombineRecoveryPassphrase(quorum RecoveryQuorum, presented []TrustedRecover
 	}
 
 	seen := make(map[string]int, len(presented))
-	var passphrase []byte
+	seenIndexes := make(map[byte]int, len(presented))
+	var fragments []TrustedRecoveryShare
+	fragmentLen := 0
 	matchingShares := 0
 	for i, share := range presented {
 		ref, err := normalizeRecoveryKeyRef(share.Ref, fmt.Sprintf("presentedShares[%d].ref", i))
@@ -100,14 +103,26 @@ func CombineRecoveryPassphrase(quorum RecoveryQuorum, presented []TrustedRecover
 		if _, ok := allowed[key]; !ok {
 			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] is not part of the recovery quorum", i)}
 		}
-		if len(share.Passphrase) == 0 {
-			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] has empty recovery passphrase material", i)}
+		if share.Index == 0 {
+			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] has invalid recovery share index", i)}
 		}
-		if passphrase == nil {
-			passphrase = cloneBytes(share.Passphrase)
-		} else if !bytes.Equal(passphrase, share.Passphrase) {
-			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] does not reconstruct the same recovery passphrase", i)}
+		if previous, ok := seenIndexes[share.Index]; ok {
+			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] duplicates recovery share index from presentedShares[%d]", i, previous)}
 		}
+		seenIndexes[share.Index] = i
+		if len(share.Fragment) == 0 {
+			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] has empty recovery share fragment", i)}
+		}
+		if fragmentLen == 0 {
+			fragmentLen = len(share.Fragment)
+		} else if len(share.Fragment) != fragmentLen {
+			return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] recovery share fragment length differs from the quorum", i)}
+		}
+		fragments = append(fragments, TrustedRecoveryShare{
+			Ref:      ref,
+			Index:    share.Index,
+			Fragment: cloneBytes(share.Fragment),
+		})
 		matchingShares++
 	}
 
@@ -115,7 +130,11 @@ func CombineRecoveryPassphrase(quorum RecoveryQuorum, presented []TrustedRecover
 		return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares must contain at least %d distinct quorum shares", normalizedQuorum.Threshold)}
 	}
 
-	return cloneBytes(passphrase), nil
+	passphrase, err := recoverShamirSecret(fragments[:normalizedQuorum.Threshold])
+	if err != nil {
+		return nil, err
+	}
+	return passphrase, nil
 }
 
 func normalizeRecoveryAttempt(attempt RecoveryAttempt) (RecoveryAttempt, error) {
@@ -356,4 +375,82 @@ func recoveryKeyRefKey(ref RecoveryKeyRef) string {
 		keyStoreRef = *ref.KeyStoreRef
 	}
 	return ref.ID + "\x00" + ref.Handle + "\x00" + keyStoreRef
+}
+
+func recoverShamirSecret(shares []TrustedRecoveryShare) ([]byte, error) {
+	if len(shares) == 0 {
+		return nil, &InvalidRequestError{Reason: "presentedShares must contain at least one recovery share"}
+	}
+	secretLen := len(shares[0].Fragment)
+	if secretLen == 0 {
+		return nil, &InvalidRequestError{Reason: "presentedShares[0] has empty recovery share fragment"}
+	}
+
+	secret := make([]byte, secretLen)
+	for byteIndex := 0; byteIndex < secretLen; byteIndex++ {
+		var recovered byte
+		for i, share := range shares {
+			if share.Index == 0 {
+				return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] has invalid recovery share index", i)}
+			}
+			if len(share.Fragment) != secretLen {
+				return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] recovery share fragment length differs from the quorum", i)}
+			}
+			basis := byte(1)
+			for j, other := range shares {
+				if i == j {
+					continue
+				}
+				if other.Index == 0 {
+					return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] has invalid recovery share index", j)}
+				}
+				denominator := share.Index ^ other.Index
+				if denominator == 0 {
+					return nil, &InvalidRequestError{Reason: fmt.Sprintf("presentedShares[%d] duplicates recovery share index from presentedShares[%d]", i, j)}
+				}
+				basis = recoveryGFMul(basis, recoveryGFDiv(other.Index, denominator))
+			}
+			recovered ^= recoveryGFMul(share.Fragment[byteIndex], basis)
+		}
+		secret[byteIndex] = recovered
+	}
+	return secret, nil
+}
+
+func recoveryGFDiv(a byte, b byte) byte {
+	if b == 0 {
+		return 0
+	}
+	if a == 0 {
+		return 0
+	}
+	return recoveryGFMul(a, recoveryGFPow(b, 254))
+}
+
+func recoveryGFPow(a byte, exponent int) byte {
+	result := byte(1)
+	for exponent > 0 {
+		if exponent&1 == 1 {
+			result = recoveryGFMul(result, a)
+		}
+		a = recoveryGFMul(a, a)
+		exponent >>= 1
+	}
+	return result
+}
+
+func recoveryGFMul(a byte, b byte) byte {
+	var product byte
+	for b != 0 {
+		if b&1 != 0 {
+			product ^= a
+		}
+		carry := a & 0x80
+		a <<= 1
+		if carry != 0 {
+			a ^= 0x1b
+		}
+		b >>= 1
+	}
+	return product
 }

@@ -13,6 +13,7 @@ OUTER_DEVICE="${VITA_LUKS_OUTER_DEVICE:-/dev/disk/by-partlabel/vita-data}"
 MAPPER_NAME="${VITA_LUKS_MAPPER_NAME:-vita-data}"
 SOURCE_FILE="${VITA_LUKS_SOURCE_FILE:-/run/vita-luks/source}"
 TPM2_DEVICE="${VITA_TPM2_DEVICE:-auto}"
+TPM2_TCTI="${VITA_TPM2_TCTI:-}"
 TPM2_PCRS="${VITA_TPM2_PCRS:-7+11}"
 SYSTEMD_CRYPTSETUP="${VITA_SYSTEMD_CRYPTSETUP:-systemd-cryptsetup}"
 SYSTEMD_CRYPTENROLL="${VITA_SYSTEMD_CRYPTENROLL:-systemd-cryptenroll}"
@@ -28,6 +29,14 @@ probe_tpm() {
   [ -e "$OUTER_DEVICE" ] || return 2
 }
 
+with_tpm_env() {
+  if [ -n "$TPM2_TCTI" ]; then
+    env TPM2TOOLS_TCTI="$TPM2_TCTI" TSS2_TCTI="$TPM2_TCTI" "$@"
+  else
+    "$@"
+  fi
+}
+
 open_with_tpm() {
   probe_tpm || return 2
   if cryptsetup status "$MAPPER_NAME" >/dev/null 2>&1; then
@@ -37,7 +46,7 @@ open_with_tpm() {
 
   local options rc
   options="tpm2-device=${TPM2_DEVICE},tpm2-pcrs=${TPM2_PCRS}"
-  if "$SYSTEMD_CRYPTSETUP" attach "$MAPPER_NAME" "$OUTER_DEVICE" - "$options"; then
+  if with_tpm_env "$SYSTEMD_CRYPTSETUP" attach "$MAPPER_NAME" "$OUTER_DEVICE" - "$options"; then
     write_source
     echo "VITA-LUKS-SOURCE: tpm2 opened $MAPPER_NAME pcrs=$TPM2_PCRS" >&2
     return 0
@@ -50,7 +59,7 @@ enroll_tpm() {
   local unlock_key="${1:-}"
   [ -n "$unlock_key" ] || { echo "usage: $0 enroll <unlock-key-file>" >&2; return 64; }
   command -v "$SYSTEMD_CRYPTENROLL" >/dev/null 2>&1 || return 127
-  "$SYSTEMD_CRYPTENROLL" "$OUTER_DEVICE" \
+  with_tpm_env "$SYSTEMD_CRYPTENROLL" "$OUTER_DEVICE" \
     --unlock-key-file="$unlock_key" \
     --tpm2-device="$TPM2_DEVICE" \
     --tpm2-pcrs="$TPM2_PCRS"

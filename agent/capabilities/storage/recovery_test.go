@@ -10,9 +10,10 @@ import (
 
 func TestCombineRecoveryPassphraseAcceptsThresholdDistinctShares(t *testing.T) {
 	passphrase := []byte("vita test recovery passphrase")
+	shares := testRecoveryTrustedShares(t, testRecoveryQuorum(2), passphrase)
 	got, err := CombineRecoveryPassphrase(testRecoveryQuorum(2), []TrustedRecoveryShare{
-		{Ref: testRecoveryRef(1), Passphrase: passphrase},
-		{Ref: testRecoveryRef(3), Passphrase: passphrase},
+		shares[0],
+		shares[2],
 	})
 	if err != nil {
 		t.Fatalf("CombineRecoveryPassphrase returned error: %v", err)
@@ -28,35 +29,42 @@ func TestCombineRecoveryPassphraseAcceptsThresholdDistinctShares(t *testing.T) {
 }
 
 func TestCombineRecoveryPassphraseRejectsBelowThreshold(t *testing.T) {
+	shares := testRecoveryTrustedShares(t, testRecoveryQuorum(3), []byte("same passphrase"))
 	_, err := CombineRecoveryPassphrase(testRecoveryQuorum(3), []TrustedRecoveryShare{
-		{Ref: testRecoveryRef(1), Passphrase: []byte("same passphrase")},
-		{Ref: testRecoveryRef(2), Passphrase: []byte("same passphrase")},
+		shares[0],
+		shares[1],
 	})
 	assertInvalidRecovery(t, err, "at least 3")
 }
 
 func TestCombineRecoveryPassphraseRejectsDuplicatePresentedShare(t *testing.T) {
+	shares := testRecoveryTrustedShares(t, testRecoveryQuorum(2), []byte("same passphrase"))
 	_, err := CombineRecoveryPassphrase(testRecoveryQuorum(2), []TrustedRecoveryShare{
-		{Ref: testRecoveryRef(1), Passphrase: []byte("same passphrase")},
-		{Ref: testRecoveryRef(1), Passphrase: []byte("same passphrase")},
+		shares[0],
+		shares[0],
 	})
 	assertInvalidRecovery(t, err, "duplicates")
 }
 
 func TestCombineRecoveryPassphraseRejectsForeignShare(t *testing.T) {
+	shares := testRecoveryTrustedShares(t, testRecoveryQuorum(2), []byte("same passphrase"))
+	foreign := shares[1]
+	foreign.Ref = RecoveryKeyRef{ID: "rk:test-foreign", Handle: "rk_test_foreign", KeyStoreRef: stringPtr("keystore:vita-test-recovery")}
 	_, err := CombineRecoveryPassphrase(testRecoveryQuorum(2), []TrustedRecoveryShare{
-		{Ref: testRecoveryRef(1), Passphrase: []byte("same passphrase")},
-		{Ref: RecoveryKeyRef{ID: "rk:test-foreign", Handle: "rk_test_foreign", KeyStoreRef: stringPtr("keystore:vita-test-recovery")}, Passphrase: []byte("same passphrase")},
+		shares[0],
+		foreign,
 	})
 	assertInvalidRecovery(t, err, "not part of the recovery quorum")
 }
 
-func TestCombineRecoveryPassphraseRejectsInconsistentMaterial(t *testing.T) {
+func TestCombineRecoveryPassphraseRejectsMismatchedFragmentLength(t *testing.T) {
+	shares := testRecoveryTrustedShares(t, testRecoveryQuorum(2), []byte("same passphrase"))
+	shares[1].Fragment = shares[1].Fragment[:len(shares[1].Fragment)-1]
 	_, err := CombineRecoveryPassphrase(testRecoveryQuorum(2), []TrustedRecoveryShare{
-		{Ref: testRecoveryRef(1), Passphrase: []byte("first passphrase")},
-		{Ref: testRecoveryRef(2), Passphrase: []byte("second passphrase")},
+		shares[0],
+		shares[1],
 	})
-	assertInvalidRecovery(t, err, "same recovery passphrase")
+	assertInvalidRecovery(t, err, "fragment length")
 }
 
 func TestValidateRecoveryAttemptMirrorsQuorumSemantics(t *testing.T) {
@@ -198,6 +206,34 @@ func testRecoveryQuorum(threshold int) RecoveryQuorum {
 			testRecoveryRef(3),
 		},
 	}
+}
+
+func testRecoveryTrustedShares(t *testing.T, quorum RecoveryQuorum, passphrase []byte) []TrustedRecoveryShare {
+	t.Helper()
+	shares := make([]TrustedRecoveryShare, len(quorum.Shares))
+	for i, ref := range quorum.Shares {
+		x := byte(i + 1)
+		fragment := make([]byte, len(passphrase))
+		for j, secretByte := range passphrase {
+			y := secretByte
+			power := x
+			for degree := 1; degree < quorum.Threshold; degree++ {
+				coefficient := byte((j + 1 + degree*17) % 255)
+				if coefficient == 0 {
+					coefficient = 1
+				}
+				y ^= recoveryGFMul(coefficient, power)
+				power = recoveryGFMul(power, x)
+			}
+			fragment[j] = y
+		}
+		shares[i] = TrustedRecoveryShare{
+			Ref:      ref,
+			Index:    x,
+			Fragment: fragment,
+		}
+	}
+	return shares
 }
 
 func testRecoveryRef(index int) RecoveryKeyRef {

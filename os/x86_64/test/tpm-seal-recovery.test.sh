@@ -22,6 +22,7 @@ WSL_VERIFY="$REPO/tools/wsl-verify.sh"
 SHARE_DIR="$REPO/os/x86_64/.luks/recovery"
 RECOVERY_PASSPHRASE="$SHARE_DIR/recovery.passphrase"
 DATA_KEY="$REPO/os/x86_64/.luks/data.key"
+COMBINER="$REPO/os/x86_64/out/recovery-combine-test"
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -87,7 +88,9 @@ passphrase_bytes="$(wc -c <"$RECOVERY_PASSPHRASE" | tr -d '[:space:]')"
 for f in "$SHARE_DIR"/share-*.env; do
   assert_file "$f"
   grep -Eq '^VITA_RECOVERY_SHARE_VERSION=1$' "$f" || fail "$f missing version"
-  grep -Eq '^passphraseBase64=' "$f" || fail "$f missing TEST passphrase material"
+  grep -Eq '^x=[1-9][0-9]*$' "$f" || fail "$f missing share index"
+  grep -Eq '^fragmentBase64=' "$f" || fail "$f missing TEST share fragment"
+  reject_file_line "$f" '^passphraseBase64=' "recovery shares must not embed the full passphrase"
 done
 
 cd "$REPO"
@@ -108,8 +111,7 @@ reject_file_line "$RESOLVER" 'unsupported_tpm|unsupported_recovery|tpm=stub|reco
 reject_file_line "$MARKER" 'tpm=stub|recovery=stub' "marker must not report stubs"
 assert_file_line "$TPM_HELPER" 'PCR 7 \+ PCR 11' "TPM helper must document stable PCR policy"
 assert_file_line "$TPM_HELPER" 'systemd-cryptsetup.*attach|SYSTEMD_CRYPTSETUP.*systemd-cryptsetup' "TPM helper must use systemd token unlock"
-assert_file_line "$RECOVERY_HELPER" 'below_threshold' "recovery helper must fail closed below threshold"
-assert_file_line "$RECOVERY_HELPER" 'foreign_share' "recovery helper must reject foreign shares"
+assert_file_line "$RECOVERY_HELPER" 'VITA_RECOVERY_COMBINER|recovery-combine' "recovery helper must delegate to the Go combiner"
 assert_file_line "$MARKER" 'VITA-TPM-SEAL: sealed=OK recovery=OK wrong-key=fail-closed status=OK' "marker must emit measured TPM seal OK"
 assert_file_line "$MARKER" 'VITA-TPM-SEAL-ERROR: reason=' "marker must emit TPM seal failsafe errors"
 
@@ -134,22 +136,32 @@ reject_file_line "$VAR_MOUNT" '^What=/dev/disk/by-label/vita-data$' "var.mount m
 assert_file_line "$BUILD_AND_BOOT" 'luksAddKey' "build must enroll a recovery keyslot"
 assert_file_line "$BUILD_AND_BOOT" 'systemd-cryptenroll|tpm-seal\.sh' "build must enroll a TPM2 token"
 assert_file_line "$BUILD_AND_BOOT" 'DEFAULT_TPM2_PCRS = "7\+11"' "build must use documented TPM PCR policy"
-assert_file_line "$BUILD_AND_BOOT" 'recovery-shares' "build must stage TEST recovery shares"
+assert_file_line "$BUILD_AND_BOOT" 'VITA_TPM2_TCTI|startSwtpmForEnrollment' "build must pass the swtpm TCTI to TPM enrollment"
+assert_file_line "$BUILD_AND_BOOT" 'vita-recovery-shares' "QEMU boot must host-present recovery shares instead of baking them"
+reject_file_line "$BUILD_AND_BOOT" 'stagedShareDir|copyFileSync\(join\(recoveryShareDir' "build must not stage recovery shares into the rootfs"
 assert_file_line "$WSL_VERIFY" 'tpmseal\)' "wsl-verify must expose tpmseal mode"
+assert_file_line "$WSL_VERIFY" 'tpmseal_prior_chain_ok' "tpmseal mode must require the prior on-device chain"
 
 node "$REPO/tools/build/go-in-docker.mjs" --dir agent vet ./capabilities/storage/...
 node "$REPO/tools/build/go-in-docker.mjs" --dir agent test ./capabilities/storage/...
+mkdir -p "$REPO/os/x86_64/out"
+node "$REPO/tools/build/go-in-docker.mjs" --dir agent \
+  --env CGO_ENABLED=0 --env GOOS=linux --env GOARCH=amd64 --env SOURCE_DATE_EPOCH=1781308800 \
+  build -trimpath -buildvcs=false -ldflags "-s -w -buildid=" -o /work/os/x86_64/out/recovery-combine-test ./cmd/recovery-combine
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "SKIP: live TPM/loop LUKS exercise requires root; structural, recovery-share, resolver, marker, and Go tests passed"
   exit 0
 fi
 
-for cmd in cryptsetup losetup truncate systemd-cryptenroll systemd-cryptsetup swtpm swtpm_setup; do
+for cmd in cryptsetup losetup truncate systemd-cryptenroll systemd-cryptsetup; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "SKIP: live TPM/loop LUKS exercise needs '$cmd'; structural and Go tests passed"
     exit 0
   }
+done
+for cmd in swtpm swtpm_setup; do
+  command -v "$cmd" >/dev/null 2>&1 || fail "live root/loop lane requires '$cmd' to exercise swtpm"
 done
 
 if ! losetup -f >/dev/null 2>&1; then
@@ -157,15 +169,12 @@ if ! losetup -f >/dev/null 2>&1; then
   exit 0
 fi
 
-if [ "${VITA_TPM2_DEVICE:-auto}" = "auto" ] && [ ! -e /dev/tpmrm0 ] && [ ! -e /dev/tpm0 ]; then
-  echo "SKIP: no host TPM2 device for systemd-cryptenroll auto; swtpm-backed boot is orchestrator floor"
-  exit 0
-fi
-
 bash "$LUKS_KEYGEN" >/dev/null
 TMP="$(mktemp -d)"
 IMG="$TMP/vita-data.img"
 LOOP=""
+SWTPM_PID=""
+SWTPM_TCTI=""
 MAPPER_TPM="vita-data-tpm-test-$$"
 MAPPER_RECOVERY="vita-data-recovery-test-$$"
 MAPPER_WRONG_RECOVERY="vita-data-recovery-wrong-$$"
@@ -178,37 +187,54 @@ cleanup() {
   cryptsetup status "$MAPPER_WRONG_RECOVERY" >/dev/null 2>&1 && cryptsetup luksClose "$MAPPER_WRONG_RECOVERY"
   cryptsetup status "$MAPPER_WRONG_TPM" >/dev/null 2>&1 && cryptsetup luksClose "$MAPPER_WRONG_TPM"
   [ -n "$LOOP" ] && losetup -d "$LOOP" >/dev/null 2>&1
+  [ -n "$SWTPM_PID" ] && kill "$SWTPM_PID" >/dev/null 2>&1
   rm -rf "$TMP"
 }
 trap cleanup EXIT
 
+start_swtpm() {
+  local state="$TMP/swtpm-state" sock="$TMP/swtpm.sock" ctrl="$TMP/swtpm.ctrl" pid="$TMP/swtpm.pid"
+  mkdir -p "$state"
+  swtpm_setup --tpm2 --tpmstate "dir=$state" --create-ek-cert --create-platform-cert --lock-nvram --not-overwrite >/dev/null
+  swtpm socket --tpm2 --tpmstate "dir=$state" \
+    --ctrl "type=unixio,path=$ctrl" \
+    --server "type=unixio,path=$sock" \
+    --pid "file=$pid" --daemon >/dev/null
+  SWTPM_PID="$(cat "$pid")"
+  SWTPM_TCTI="swtpm:path=$sock"
+}
+
 truncate -s 128M "$IMG"
 LOOP="$(losetup --find --show "$IMG")"
+start_swtpm
 
 cryptsetup luksFormat --type luks2 --batch-mode --key-file "$DATA_KEY" "$LOOP"
 cryptsetup luksAddKey --key-file "$DATA_KEY" "$LOOP" "$RECOVERY_PASSPHRASE"
-if ! env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_TPM2_DEVICE="${VITA_TPM2_DEVICE:-auto}" \
-  bash "$TPM_HELPER" enroll "$DATA_KEY"; then
-  echo "SKIP: systemd-cryptenroll could not enroll the available TPM; structural and recovery tests passed"
-  exit 0
-fi
+env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_TPM2_DEVICE="${VITA_TPM2_DEVICE:-auto}" VITA_TPM2_TCTI="$SWTPM_TCTI" \
+  bash "$TPM_HELPER" enroll "$DATA_KEY"
 
 env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_LUKS_MAPPER_NAME="$MAPPER_TPM" \
-  VITA_LUKS_SOURCE_FILE="$TMP/source-tpm" \
+  VITA_LUKS_SOURCE_FILE="$TMP/source-tpm" VITA_TPM2_TCTI="$SWTPM_TCTI" \
   bash "$TPM_HELPER" open
 cryptsetup status "$MAPPER_TPM" >/dev/null 2>&1 || fail "TPM helper did not open mapper"
 cryptsetup luksClose "$MAPPER_TPM"
 
 env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_LUKS_MAPPER_NAME="$MAPPER_RECOVERY" \
   VITA_LUKS_SOURCE_FILE="$TMP/source-recovery" \
-  VITA_RECOVERY_SHARE_DIR="$SHARE_DIR" VITA_RECOVERY_AUTO=1 \
+  VITA_RECOVERY_SHARE_DIR="$SHARE_DIR" VITA_RECOVERY_COMBINER="$COMBINER" VITA_RECOVERY_AUTO=1 \
   bash "$RECOVERY_HELPER" open
 cryptsetup status "$MAPPER_RECOVERY" >/dev/null 2>&1 || fail "recovery helper did not open mapper"
 cryptsetup luksClose "$MAPPER_RECOVERY"
 
+threshold="$(grep -E '^threshold=' "$SHARE_DIR/share-1.env" | head -1 | cut -d= -f2)"
+below_count=$((threshold - 1))
+below_paths=""
+for i in $(seq 1 "$below_count"); do
+  below_paths="${below_paths}${below_paths:+ }$SHARE_DIR/share-$i.env"
+done
 if env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_LUKS_MAPPER_NAME="$MAPPER_WRONG_RECOVERY" \
-  VITA_RECOVERY_SHARE_DIR="$SHARE_DIR" \
-  VITA_RECOVERY_SHARE_PATHS="$SHARE_DIR/share-1.env $SHARE_DIR/share-2.env" \
+  VITA_RECOVERY_SHARE_DIR="$SHARE_DIR" VITA_RECOVERY_COMBINER="$COMBINER" \
+  VITA_RECOVERY_SHARE_PATHS="$below_paths" \
   bash "$RECOVERY_HELPER" open >/dev/null 2>&1; then
   fail "below-threshold recovery shares unexpectedly opened mapper"
 fi
@@ -217,7 +243,7 @@ if cryptsetup status "$MAPPER_WRONG_RECOVERY" >/dev/null 2>&1; then
 fi
 
 if env VITA_LUKS_OUTER_DEVICE="$LOOP" VITA_LUKS_MAPPER_NAME="$MAPPER_WRONG_TPM" \
-  VITA_TPM2_DEVICE="${VITA_TPM2_DEVICE:-auto}" VITA_TPM2_PCRS="0+1+2+3+4+5+6" \
+  VITA_TPM2_DEVICE="${VITA_TPM2_DEVICE:-auto}" VITA_TPM2_TCTI="$SWTPM_TCTI" VITA_TPM2_PCRS="0+1+2+3+4+5+6" \
   bash "$TPM_HELPER" open >/dev/null 2>&1; then
   fail "wrong-PCR TPM policy unexpectedly opened mapper"
 fi
