@@ -1,11 +1,11 @@
 {
   "action": "vita.owner.test-action",
-  "challenge": "M2p_eId4Mzlwy2QkN5VWycqxwmXnSVSzJb4kAQHVaEs",
+  "challenge": "8bTshBRmacmSvLeFRGJifA-_GfDc8mi3saTWFCxSIGE",
   "assertion": {
-    "credentialId": "VrMUSBQ6K1pU0KwGoBG7Dznc5MqmNZYLQrz7zHS529c",
+    "credentialId": "nZWYv8t4X7tiL7rYujaDiwAUxKqgmIV37hHNg90kaCM",
     "authenticatorData": "_dREwJlOJ18sYMBuO28fIkg-KkIFPaNoRWl8Ak3TyEgBAAAAAQ",
-    "clientDataJSON": "eyJjaGFsbGVuZ2UiOiJNMnBfZUlkNE16bHd5MlFrTjVWV3ljcXh3bVhuU1ZTekpiNGtBUUhWYUVzIiwib3JpZ2luIjoiaHR0cHM6Ly9vd25lci5leGFtcGxlLmNvbSIsInR5cGUiOiJ3ZWJhdXRobi5nZXQifQ",
-    "signature": "MEUCIFw7YI69B4b9Ykn3768ZkekDvilluOH74qVdbb74AL3KAiEAmjDgfrKRIYunrfzhJcOCyztPIUqeZkT_R3T7sZUoK8c",
+    "clientDataJSON": "eyJjaGFsbGVuZ2UiOiI4YlRzaEJSbWFjbVN2TGVGUkdKaWZBLV9HZkRjOG1pM3NhVFdGQ3hTSUdFIiwib3JpZ2luIjoiaHR0cHM6Ly9vd25lci5leGFtcGxlLmNvbSIsInR5cGUiOiJ3ZWJhdXRobi5nZXQifQ",
+    "signature": "MEUCIDwN--GjaJr2D-lYhJJlSS0uUFEQK50g0J--Mmp4_CWZAiEAu_m1VUukExnL1fqogi5enZzJGkvX6xEi_IVzkiquG6A",
     "action": "vita.owner.test-action"
   }
 }

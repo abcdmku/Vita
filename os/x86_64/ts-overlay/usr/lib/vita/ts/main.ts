@@ -89,6 +89,7 @@ const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
+const OWNER_MARKER = "VITA-OWNER";
 const OWNER_REJECT_MARKER = "VITA-OWNER-REJECT";
 const OWNER_ERROR_MARKER = "VITA-OWNER-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
@@ -97,6 +98,7 @@ const OWNER_CAPABILITY = "owner.identity";
 const OWNER_ACTION = "vita.owner.test-action";
 const OWNER_CREDENTIAL_PATH = "/usr/lib/vita/owner/owner-credential.json";
 const OWNER_ASSERTION_PATH = "/usr/lib/vita/owner/owner-assertion.json";
+const OWNER_TEST_AUTHENTICATOR_SOCKET_PATH = "/run/vita-owner-test-authenticator/signer.sock";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
@@ -784,7 +786,26 @@ async function emitOwnerMarkers(agentTransport: AgentTransport): Promise<void> {
       return;
     }
 
-    const rejectResult = await client.apply(ownerVerifyPlan(fixture.assertion));
+    const assertion = await signOwnerAssertion(challenge, fixture.credential);
+    if (
+      assertion === undefined ||
+      assertion.action !== OWNER_ACTION ||
+      assertion.credentialId !== fixture.credential.credentialId ||
+      ownerAssertionChallenge(assertion) !== challenge.challenge
+    ) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const verifyResult = await client.apply(ownerVerifyPlan(assertion));
+    if (verifyResult.outcome !== "committed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    emit(`${OWNER_MARKER}: enrolled=OK assertion=verified action=${markerToken(OWNER_ACTION)} status=OK`);
+
+    const rejectResult = await client.apply(ownerVerifyPlan(assertion));
     if (rejectResult.outcome !== "committed") {
       emit(`${OWNER_REJECT_MARKER}: reason=${ownerRejectReason(rejectResult)} status=OK`);
       return;
@@ -844,6 +865,98 @@ async function mintOwnerChallenge(
   } catch {
     return undefined;
   }
+}
+
+async function signOwnerAssertion(
+  challenge: OwnerChallenge,
+  credential: OwnerCredential,
+): Promise<OwnerAssertion | undefined> {
+  const deadline = Date.now() + 5000;
+
+  while (true) {
+    const assertion = await trySignOwnerAssertion(challenge, credential);
+    if (assertion !== undefined || Date.now() >= deadline) {
+      return assertion;
+    }
+    await delay(100);
+  }
+}
+
+async function trySignOwnerAssertion(
+  challenge: OwnerChallenge,
+  credential: OwnerCredential,
+): Promise<OwnerAssertion | undefined> {
+  let conn: Deno.Conn | undefined;
+
+  try {
+    conn = await Deno.connect({
+      path: OWNER_TEST_AUTHENTICATOR_SOCKET_PATH,
+      transport: "unix",
+    });
+    const request = {
+      action: challenge.action,
+      challenge: challenge.challenge,
+      credentialId: credential.credentialId,
+      rpId: credential.rpId,
+    };
+    await writeAllToConn(conn, new TextEncoder().encode(`${JSON.stringify(request)}\n`));
+    const response = parseJsonOrText(await readAllFromConn(conn, 16 * 1024));
+    if (!isJsonObject(response) || response["ok"] !== true) {
+      return undefined;
+    }
+
+    const assertionValue = response["assertion"];
+    if (!isJsonObject(assertionValue)) {
+      return undefined;
+    }
+    return parseOwnerAssertion(assertionValue);
+  } catch {
+    return undefined;
+  } finally {
+    conn?.close();
+  }
+}
+
+async function writeAllToConn(conn: Deno.Conn, data: Uint8Array): Promise<void> {
+  let offset = 0;
+
+  while (offset < data.length) {
+    const written = await conn.write(data.subarray(offset));
+    if (written <= 0) {
+      throw new Error("owner authenticator socket write made no progress");
+    }
+    offset += written;
+  }
+}
+
+async function readAllFromConn(conn: Deno.Conn, maxResponseBytes: number): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  const buffer = new Uint8Array(2048);
+  let total = 0;
+
+  while (true) {
+    const read = await conn.read(buffer);
+    if (read === null) {
+      break;
+    }
+
+    total += read;
+    if (total > maxResponseBytes) {
+      throw new Error("owner authenticator response exceeded size limit");
+    }
+    chunks.push(buffer.slice(0, read));
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    if (chunk !== undefined) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+  }
+  return new TextDecoder().decode(out);
 }
 
 function ownerEnrollPlan(credential: OwnerCredential): AgentApplyPlan {

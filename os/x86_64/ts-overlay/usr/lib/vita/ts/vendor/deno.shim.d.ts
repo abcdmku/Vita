@@ -39,13 +39,18 @@ declare namespace Deno {
     readonly port: number;
   }
 
+  interface UnixListenOptions {
+    readonly transport: "unix";
+    readonly path: string;
+  }
+
   interface Conn {
     read(p: Uint8Array): Promise<number | null>;
     write(p: Uint8Array): Promise<number>;
     close(): void;
   }
 
-  interface Listener {
+  interface Listener extends AsyncIterable<Conn> {
     accept(): Promise<Conn>;
     close(): void;
   }
@@ -60,6 +65,10 @@ declare namespace Deno {
     get(key: string): string | undefined;
   };
 
+  namespace errors {
+    class NotFound extends Error {}
+  }
+
   /** Open a Unix domain socket connection. */
   function connect(options: UnixConnectOptions): Promise<Conn>;
 
@@ -68,6 +77,15 @@ declare namespace Deno {
 
   /** Open a TCP listener. */
   function listen(options: TcpListenOptions): Listener;
+
+  /** Open a Unix domain socket listener. */
+  function listen(options: UnixListenOptions): Listener;
+
+  /** Change mode bits on a filesystem path. */
+  function chmod(path: string | URL, mode: number): Promise<void>;
+
+  /** Remove a filesystem path. */
+  function remove(path: string | URL): Promise<void>;
 
   /** Synchronously write text to a file, optionally appending. Subset of Deno's WriteFileOptions. */
   function writeTextFileSync(

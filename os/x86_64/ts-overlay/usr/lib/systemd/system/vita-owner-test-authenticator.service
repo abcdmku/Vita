@@ -1,0 +1,52 @@
+# Vita smoke-test owner authenticator.
+#
+# This service is deliberately separate from the unprivileged TypeScript runtime:
+# vita-ts relays a fresh agentd challenge over the Unix socket, while this
+# root-owned test helper holds the build fixture key and returns a WebAuthn
+# assertion. Production owner authenticators are external passkeys; this helper
+# exists only for deterministic x86_64 smoke verification.
+[Unit]
+Description=Vita owner smoke-test authenticator
+Documentation=https://vita.local/owner
+After=vita-agentd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet --allow-read=/usr/lib/vita/owner-authenticator/test-authenticator-key.jwk --allow-write=/run/vita-owner-test-authenticator/signer.sock /usr/lib/vita/owner-authenticator/test-authenticator.ts
+Restart=no
+StandardOutput=journal+console
+StandardError=journal+console
+
+User=root
+Group=vita-agent
+UMask=0007
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+SystemCallFilter=pkey_alloc pkey_free pkey_mprotect
+RuntimeDirectory=vita-owner-test-authenticator
+RuntimeDirectoryMode=0770
+Environment=DENO_DIR=/run/vita-owner-test-authenticator/deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
+
+[Install]
+WantedBy=multi-user.target

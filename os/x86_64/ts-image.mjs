@@ -36,6 +36,9 @@ const OVERLAY_ROOT = join(HERE, "ts-overlay");
 const OWNER_FIXTURE_DIR = join(OVERLAY_ROOT, "usr", "lib", "vita", "owner");
 const OWNER_CREDENTIAL_PATH = join(OWNER_FIXTURE_DIR, "owner-credential.json");
 const OWNER_ASSERTION_PATH = join(OWNER_FIXTURE_DIR, "owner-assertion.json");
+const OWNER_AUTHENTICATOR_DIR = join(OVERLAY_ROOT, "usr", "lib", "vita", "owner-authenticator");
+const OWNER_AUTHENTICATOR_SCRIPT_PATH = join(OWNER_AUTHENTICATOR_DIR, "test-authenticator.ts");
+const OWNER_AUTHENTICATOR_KEY_PATH = join(OWNER_AUTHENTICATOR_DIR, "test-authenticator-key.jwk");
 const OWNER_FIXTURE_RP_ID = "owner.example.com";
 const OWNER_FIXTURE_ACTION = "vita.owner.test-action";
 const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
@@ -229,6 +232,8 @@ function stageOwnerFixture() {
   if (!existsSync(OWNER_FIXTURE_DIR)) fail(`owner fixture directory missing: ${OWNER_FIXTURE_DIR}`);
   if (!existsSync(OWNER_CREDENTIAL_PATH)) fail(`owner public credential fixture missing: ${OWNER_CREDENTIAL_PATH}`);
   if (!existsSync(OWNER_ASSERTION_PATH)) fail(`owner assertion fixture missing: ${OWNER_ASSERTION_PATH}`);
+  if (!existsSync(OWNER_AUTHENTICATOR_SCRIPT_PATH)) fail(`owner test authenticator missing: ${OWNER_AUTHENTICATOR_SCRIPT_PATH}`);
+  if (!existsSync(OWNER_AUTHENTICATOR_KEY_PATH)) fail(`owner test authenticator key missing: ${OWNER_AUTHENTICATOR_KEY_PATH}`);
 
   const credentialText = readFileSync(OWNER_CREDENTIAL_PATH, "utf8");
   const assertionText = readFileSync(OWNER_ASSERTION_PATH, "utf8");
@@ -237,9 +242,13 @@ function stageOwnerFixture() {
 
   const credential = parseJSONFile(credentialText, OWNER_CREDENTIAL_PATH);
   const fixture = parseJSONFile(assertionText, OWNER_ASSERTION_PATH);
+  const authenticatorKey = parseJSONFile(readFileSync(OWNER_AUTHENTICATOR_KEY_PATH, "utf8"), OWNER_AUTHENTICATOR_KEY_PATH);
   validateOwnerCredentialFixture(credential);
   validateOwnerAssertionFixture(fixture, credential);
-  log(`   verified owner public credential + pre-signed reject fixture (${OWNER_FIXTURE_DIR})`);
+  validateOwnerAuthenticatorFixture(authenticatorKey, credential);
+  chmodSync(OWNER_AUTHENTICATOR_SCRIPT_PATH, 0o500);
+  chmodSync(OWNER_AUTHENTICATOR_KEY_PATH, 0o400);
+  log(`   verified owner public credential + pre-signed reject fixture + root-only test authenticator`);
 }
 
 function parseJSONFile(text, path) {
@@ -286,6 +295,36 @@ function validateOwnerAssertionFixture(value, credential) {
   ) {
     fail("owner assertion fixture clientDataJSON must match action challenge and origin");
   }
+}
+
+function validateOwnerAuthenticatorFixture(value, credential) {
+  if (!isPlainObject(value)) fail("owner test authenticator key must be a JSON object");
+  if (value.kty !== "EC" || value.crv !== "P-256") fail("owner test authenticator key must be P-256 EC JWK");
+  const keyX = assertBase64URL(value.x, "owner test authenticator key x", 32, 32);
+  const keyY = assertBase64URL(value.y, "owner test authenticator key y", 32, 32);
+  assertBase64URL(value.d, "owner test authenticator key d", 32, 32);
+
+  const cose = assertBase64URL(credential.publicKeyCose, "owner credential publicKeyCose", 77, 77);
+  const cosePoint = parseOwnerES256COSEPoint(cose);
+  if (!cosePoint.x.equals(keyX) || !cosePoint.y.equals(keyY)) {
+    fail("owner test authenticator public key must match owner credential publicKeyCose");
+  }
+}
+
+function parseOwnerES256COSEPoint(cose) {
+  const prefix = Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]);
+  const middle = Buffer.from([0x22, 0x58, 0x20]);
+  if (
+    cose.length !== 77 ||
+    !cose.subarray(0, prefix.length).equals(prefix) ||
+    !cose.subarray(42, 45).equals(middle)
+  ) {
+    fail("owner credential publicKeyCose must be an ES256 P-256 public COSE_Key");
+  }
+  return {
+    x: cose.subarray(10, 42),
+    y: cose.subarray(45, 77),
+  };
 }
 
 function assertBase64URL(value, label, minBytes, maxBytes) {
