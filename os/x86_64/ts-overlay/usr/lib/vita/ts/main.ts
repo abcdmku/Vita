@@ -42,6 +42,14 @@ import {
   runBackupArchiveRoundTrip,
 } from "./vita/backup.ts";
 import {
+  formatCapsuleLifecycleErrorMarker,
+  formatCapsuleLifecycleRejectMarker,
+  formatCapsuleLifecycleRollbackMarker,
+  formatCapsuleLifecycleSummaryMarker,
+  formatCapsuleLifecycleUpdateMarker,
+  runCapsuleLifecycleProof,
+} from "./vita/capsule-lifecycle.ts";
+import {
   applyAndReadPdsRepoCreate,
   formatPdsRepoMarker,
   rejectInvalidPdsRepoCreate,
@@ -697,6 +705,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker("agentd_connect_failed"));
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -725,6 +734,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(formatOCILimitsFailureMarker());
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+      emit(formatCapsuleLifecycleErrorMarker("capsule_preview_failed"));
     }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
@@ -741,6 +751,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker("state_unreadable"));
   }
 
   await emitPdsReadMarker(client);
@@ -787,6 +798,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker("registry_config_invalid"));
     return;
   }
 
@@ -807,6 +819,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(formatOCILimitsFailureMarker());
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker("registry_apply_failed"));
     return;
   }
 
@@ -818,6 +831,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=capsule_fetch_failed status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker("capsule_fetch_failed"));
   }
   await emitForcedCapsuleRejectMarker(agentTransport);
   await emitCapsuleOCIFetchMarkers(agentTransport);
@@ -1387,6 +1401,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
       emit(`${CAPSULE_NET_INGRESS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+      emit(formatCapsuleLifecycleErrorMarker(reason));
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
@@ -1400,6 +1415,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
       emit(`${CAPSULE_NET_INGRESS_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+      emit(formatCapsuleLifecycleErrorMarker("state_unreadable"));
       await emitForcedCapsuleExecuteRejectMarker(client);
       return;
     }
@@ -1428,6 +1444,10 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
       emit(formatCapsuleHealthMarker(health.workload));
     } else {
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+      emit(formatCapsuleLifecycleErrorMarker("health_unverified"));
+      await emitForcedCapsuleNetworkRejectMarker(client);
+      await emitForcedCapsuleExecuteRejectMarker(client);
+      return;
     }
   } catch (cause) {
     const reason = agentClientErrorReason(cause, "transport_failed");
@@ -1437,9 +1457,11 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     emit(`${CAPSULE_NET_INGRESS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatCapsuleLifecycleErrorMarker(reason));
     return;
   }
 
+  await emitCapsuleLifecycleMarkers(client);
   await emitForcedCapsuleNetworkRejectMarker(client);
   await emitForcedCapsuleExecuteRejectMarker(client);
 }
@@ -1490,6 +1512,16 @@ async function emitForcedCapsuleNetworkRejectMarker(
   emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
   emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
   emit(`${CAPSULE_NET_INGRESS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
+}
+
+async function emitCapsuleLifecycleMarkers(
+  client: Pick<AgentClient, "apply" | "getState">,
+): Promise<void> {
+  const result = await runCapsuleLifecycleProof(client);
+  emit(formatCapsuleLifecycleUpdateMarker(result));
+  emit(formatCapsuleLifecycleRollbackMarker(result));
+  emit(formatCapsuleLifecycleRejectMarker(result));
+  emit(formatCapsuleLifecycleSummaryMarker(result));
 }
 
 async function emitForcedCapsuleExecuteRejectMarker(

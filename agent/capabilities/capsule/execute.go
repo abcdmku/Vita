@@ -40,6 +40,9 @@ const (
 	executePackageClassOCIService  = "oci-service"
 	executePackageClassWasmService = "wasm-service"
 
+	lifecyclePolicyFail    = "fail"
+	lifecyclePolicyRestart = "restart"
+
 	maxCPUQuotaCores = 64
 	maxMemoryMiB     = 1024 * 1024
 	maxStorageMiB    = 1024 * 1024
@@ -149,6 +152,8 @@ func (ExecuteReadResponse) CapabilityResponse() {}
 
 type ExecuteStatus struct {
 	ID         string                `json:"id"`
+	Version    string                `json:"version,omitempty"`
+	Integrity  string                `json:"integrity,omitempty"`
 	Unit       string                `json:"unit"`
 	DynamicUID string                `json:"dynamicUid"`
 	Health     string                `json:"health"`
@@ -192,8 +197,9 @@ type ExecuteCapability struct {
 	netns      capsuleNetnsManager
 	supervisor *capsuleruntime.Supervisor
 
-	mu   sync.Mutex
-	last *ExecuteStatus
+	mu           sync.Mutex
+	last         *ExecuteStatus
+	lastManifest *ExecutionManifest
 }
 
 type ExecuteInvalidRequestError struct {
@@ -354,29 +360,38 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	if err != nil {
 		return nil, err
 	}
+
+	undo, _, err := c.startValidatedManifest(ctx, desired, entry, manifest)
+	return undo, err
+}
+
+func (c *ExecuteCapability) startValidatedManifest(ctx context.Context, desired ExecuteDesired, entry CapsuleEntry, manifest ExecutionManifest) (transaction.Undo, ExecuteStatus, error) {
+	if c == nil || c.launcher == nil {
+		return nil, ExecuteStatus{}, &ExecuteInvalidRequestError{Reason: "missing capsule execute dependency"}
+	}
 	if err := validateManifestMatchesRequest(manifest, desired, entry); err != nil {
-		return nil, err
+		return nil, ExecuteStatus{}, err
 	}
 
 	unit, err := composeTransientUnit(manifest)
 	if err != nil {
-		return nil, err
+		return nil, ExecuteStatus{}, err
 	}
 	healthChecks, err := healthChecksForUnit(manifest.HealthChecks, unit.Name)
 	if err != nil {
-		return nil, &ExecuteInvalidRequestError{Reason: err.Error()}
+		return nil, ExecuteStatus{}, &ExecuteInvalidRequestError{Reason: err.Error()}
 	}
 
 	var createdNetns *capsuleNetns
 	if unit.NetNS != nil {
 		if c.netns == nil {
-			return nil, &ExecuteInvalidRequestError{Reason: "missing capsule netns manager"}
+			return nil, ExecuteStatus{}, &ExecuteInvalidRequestError{Reason: "missing capsule netns manager"}
 		}
 		netns, err := c.netns.Create(ctx, *unit.NetNS)
 		if err != nil {
 			reason := capsuleNetnsFailureReason(err)
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
-			return nil, &ExecuteStartError{Code: reason, Err: err}
+			return nil, ExecuteStatus{}, &ExecuteStartError{Code: reason, Err: err}
 		}
 		unit.NetNS = &netns
 		unit.Properties = replaceCapsuleNetnsProperties(unit.Properties, unit.NetNS)
@@ -398,7 +413,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			}
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", code)
 		}
-		return nil, &ExecuteStartError{Code: code, Err: err}
+		return nil, ExecuteStatus{}, &ExecuteStartError{Code: code, Err: err}
 	}
 	if unit.NetNS != nil && unit.NetNS.Private {
 		if status.NetworkNamespacePath == "" {
@@ -409,7 +424,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			)
 			reason := capsuleNetnsFailureReason(limitErr)
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
-			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
+			return nil, ExecuteStatus{}, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
 		}
 		unit.NetNS.Path = status.NetworkNamespacePath
 	}
@@ -429,7 +444,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			)
 			reason := capsuleNetnsFailureReason(limitErr)
 			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
-			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
+			return nil, ExecuteStatus{}, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
 		}
 	}
 
@@ -453,12 +468,14 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 				}
 				log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=oci_limits_failed status=FAILSAFE")
 			}
-			return nil, &ExecuteStartError{Code: "oci_limits_failed", Err: limitErr}
+			return nil, ExecuteStatus{}, &ExecuteStartError{Code: "oci_limits_failed", Err: limitErr}
 		}
 	}
 
 	executeStatus := ExecuteStatus{
 		ID:         manifest.ID,
+		Version:    manifest.Version,
+		Integrity:  manifest.Integrity,
 		Unit:       unit.Name,
 		DynamicUID: status.DynamicUID,
 		Health:     "OK",
@@ -467,7 +484,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		OCILimits:  ociLimits,
 		Network:    executeNetworkStatus(manifest.Network, unit.NetNS, netnsCheck),
 	}
-	c.setLast(executeStatus)
+	c.setLastManifest(executeStatus, &manifest)
 	c.startWorkload(manifest.ID, unit.Name, healthChecks)
 	for _, volume := range unit.Volumes {
 		log.Printf("VITA-CAPSULE-VOLUME: id=%s vol=%s path=%s mounted=OK status=OK", manifest.ID, volume.Name, volume.Path)
@@ -479,7 +496,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		netns:      c.netns,
 		unit:       unit.Name,
 		unitNetns:  createdNetns,
-	}, nil
+	}, executeStatus, nil
 }
 
 func (c *ExecuteCapability) installedEntry(ctx context.Context, desired ExecuteDesired) (CapsuleEntry, error) {
@@ -516,11 +533,17 @@ func (c *ExecuteCapability) installedEntry(ctx context.Context, desired ExecuteD
 }
 
 func (c *ExecuteCapability) setLast(status ExecuteStatus) {
+	c.setLastManifest(status, nil)
+}
+
+func (c *ExecuteCapability) setLastManifest(status ExecuteStatus, manifest *ExecutionManifest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.last = &ExecuteStatus{
 		ID:         status.ID,
+		Version:    status.Version,
+		Integrity:  status.Integrity,
 		Unit:       status.Unit,
 		DynamicUID: status.DynamicUID,
 		Health:     status.Health,
@@ -529,6 +552,12 @@ func (c *ExecuteCapability) setLast(status ExecuteStatus) {
 		OCILimits:  cloneOCILimitsStatus(status.OCILimits),
 		Network:    cloneExecuteNetworkStatus(status.Network),
 	}
+	if manifest == nil {
+		c.lastManifest = nil
+		return
+	}
+	cloned := cloneExecutionManifest(*manifest)
+	c.lastManifest = &cloned
 }
 
 func (c *ExecuteCapability) clearLast(unit string) {
@@ -537,6 +566,7 @@ func (c *ExecuteCapability) clearLast(unit string) {
 
 	if c.last != nil && c.last.Unit == unit {
 		c.last = nil
+		c.lastManifest = nil
 	}
 }
 
@@ -649,17 +679,69 @@ func (u executeUndo) Undo(ctx context.Context) error {
 }
 
 type ExecutionManifest struct {
-	ID             string                  `json:"id"`
-	Version        string                  `json:"version"`
-	Integrity      string                  `json:"integrity"`
-	PackageClass   string                  `json:"packageClass"`
-	Runtime        ExecutionRuntime        `json:"runtime"`
-	ResourceLimits ExecutionResourceLimits `json:"resourceLimits"`
-	Data           ExecutionData           `json:"data,omitempty"`
-	HealthChecks   []capsuleruntime.Check  `json:"healthChecks,omitempty"`
-	Network        *ExecutionNetwork       `json:"network,omitempty"`
+	ID              string                  `json:"id"`
+	Version         string                  `json:"version"`
+	Integrity       string                  `json:"integrity"`
+	PackageClass    string                  `json:"packageClass"`
+	Runtime         ExecutionRuntime        `json:"runtime"`
+	ResourceLimits  ExecutionResourceLimits `json:"resourceLimits"`
+	Data            ExecutionData           `json:"data,omitempty"`
+	HealthChecks    []capsuleruntime.Check  `json:"healthChecks,omitempty"`
+	Network         *ExecutionNetwork       `json:"network,omitempty"`
+	LifecyclePolicy LifecyclePolicy         `json:"lifecyclePolicy,omitempty"`
 
 	baseDir string
+}
+
+type LifecyclePolicy struct {
+	OnUnhealthy string `json:"onUnhealthy,omitempty"`
+}
+
+func (p *LifecyclePolicy) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, lifecyclePolicyFields); err != nil {
+		return &ExecuteInvalidRequestError{Reason: err.Error()}
+	}
+
+	onUnhealthy := lifecyclePolicyFail
+	if rawOnUnhealthy, ok := fields["onUnhealthy"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawOnUnhealthy), []byte("null")) {
+			return &ExecuteInvalidRequestError{Reason: "lifecyclePolicy.onUnhealthy must be restart or fail"}
+		}
+		if err := decodeSingleJSONValue(rawOnUnhealthy, &onUnhealthy); err != nil {
+			return &ExecuteInvalidRequestError{Reason: "lifecyclePolicy.onUnhealthy must be a string"}
+		}
+	}
+
+	policy := LifecyclePolicy{OnUnhealthy: onUnhealthy}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	*p = policy
+	return nil
+}
+
+func (p LifecyclePolicy) Validate() error {
+	switch p.effectiveOnUnhealthy() {
+	case lifecyclePolicyFail, lifecyclePolicyRestart:
+		return nil
+	default:
+		return &ExecuteInvalidRequestError{Reason: "lifecyclePolicy.onUnhealthy must be restart or fail"}
+	}
+}
+
+func (p LifecyclePolicy) effectiveOnUnhealthy() string {
+	if p.OnUnhealthy == "" {
+		return lifecyclePolicyFail
+	}
+	return p.OnUnhealthy
 }
 
 func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
@@ -712,17 +794,22 @@ func (m *ExecutionManifest) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	lifecyclePolicy, err := optionalLifecyclePolicyField(fields, "lifecyclePolicy")
+	if err != nil {
+		return err
+	}
 
 	manifest := ExecutionManifest{
-		ID:             id,
-		Version:        version,
-		Integrity:      integrity,
-		PackageClass:   packageClass,
-		Runtime:        runtime,
-		ResourceLimits: limits,
-		Data:           data,
-		HealthChecks:   healthChecks,
-		Network:        networkPolicy,
+		ID:              id,
+		Version:         version,
+		Integrity:       integrity,
+		PackageClass:    packageClass,
+		Runtime:         runtime,
+		ResourceLimits:  limits,
+		Data:            data,
+		HealthChecks:    healthChecks,
+		Network:         networkPolicy,
+		LifecyclePolicy: lifecyclePolicy,
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -765,6 +852,9 @@ func (m ExecutionManifest) Validate() error {
 		if err := check.Validate(); err != nil {
 			return &ExecuteInvalidRequestError{Reason: fmt.Sprintf("healthChecks[%d]: %v", i, err)}
 		}
+	}
+	if err := m.LifecyclePolicy.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1670,15 +1760,19 @@ var (
 		"version":   {},
 	}
 	executionManifestFields = map[string]struct{}{
-		"data":           {},
-		"healthChecks":   {},
-		"id":             {},
-		"integrity":      {},
-		"network":        {},
-		"packageClass":   {},
-		"resourceLimits": {},
-		"runtime":        {},
-		"version":        {},
+		"data":            {},
+		"healthChecks":    {},
+		"id":              {},
+		"integrity":       {},
+		"lifecyclePolicy": {},
+		"network":         {},
+		"packageClass":    {},
+		"resourceLimits":  {},
+		"runtime":         {},
+		"version":         {},
+	}
+	lifecyclePolicyFields = map[string]struct{}{
+		"onUnhealthy": {},
 	}
 	executionRuntimeFields = map[string]struct{}{
 		"oci":        {},
@@ -2071,6 +2165,19 @@ func optionalExecutionNetworkField(fields map[string]json.RawMessage, key string
 		return nil, err
 	}
 	return &networkPolicy, nil
+}
+
+func optionalLifecyclePolicyField(fields map[string]json.RawMessage, key string) (LifecyclePolicy, error) {
+	raw, ok := fields[key]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return LifecyclePolicy{}, nil
+	}
+
+	var policy LifecyclePolicy
+	if err := decodeSingleJSONValue(raw, &policy); err != nil {
+		return LifecyclePolicy{}, err
+	}
+	return policy, nil
 }
 
 func requiredNetworkIngressField(fields map[string]json.RawMessage, key string) ([]ExecutionNetworkIngressRule, error) {
@@ -2473,6 +2580,29 @@ func cloneExecuteNetworkStatus(status *ExecuteNetworkStatus) *ExecuteNetworkStat
 	}
 	out := *status
 	return &out
+}
+
+func cloneExecutionManifest(manifest ExecutionManifest) ExecutionManifest {
+	out := manifest
+	out.Data = ExecutionData{
+		Classes: append([]capsulestorage.DataClass(nil), manifest.Data.Classes...),
+		Volumes: append([]capsulestorage.VolumeSpec(nil), manifest.Data.Volumes...),
+	}
+	out.HealthChecks = append([]capsuleruntime.Check(nil), manifest.HealthChecks...)
+	out.Runtime.OCI.Image.Entrypoint = append([]string(nil), manifest.Runtime.OCI.Image.Entrypoint...)
+	if manifest.Network != nil {
+		networkPolicy := &ExecutionNetwork{
+			Ingress: append([]ExecutionNetworkIngressRule(nil), manifest.Network.Ingress...),
+			Egress:  make([]ExecutionNetworkEgressRule, len(manifest.Network.Egress)),
+		}
+		for i, rule := range manifest.Network.Egress {
+			networkPolicy.Egress[i] = rule
+			networkPolicy.Egress[i].Destinations = append([]string(nil), rule.Destinations...)
+			networkPolicy.Egress[i].Ports = append([]int(nil), rule.Ports...)
+		}
+		out.Network = networkPolicy
+	}
+	return out
 }
 
 func positiveFinite(value float64) bool {

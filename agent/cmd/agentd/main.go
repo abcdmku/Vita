@@ -49,12 +49,16 @@ const (
 
 func main() {
 	startedAt := time.Now().UTC()
+	archiveCapability := backup.NewArchiveCapability()
+	executeCapability := capsule.NewExecuteCapability()
+	lifecycleCapability := capsule.NewLifecycleCapability(executeCapability, archiveCapability)
 
 	registry, err := capabilities.NewRegistry(
 		accounts.NewCapability(),
 		backup.NewCapability(),
-		backup.NewArchiveCapability(),
-		capsule.NewExecuteCapability(),
+		archiveCapability,
+		executeCapability,
+		lifecycleCapability,
 		capsule.NewFetchCapability(),
 		capsule.NewCapability(),
 		hostname.NewCapability(),
