@@ -1,0 +1,16 @@
+# Vita data-volume LUKS unlock. This unit is inert unless the VITA_LUKS=1 build
+# stages /usr/lib/vita/luks/enabled into the measured rootfs. When enabled, any
+# unlock-source failure is fail-closed: no plaintext data partition is mounted.
+[Unit]
+Description=Unlock Vita LUKS2 data volume
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=var.mount
+ConditionPathExists=/usr/lib/vita/luks/enabled
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/lib/vita/luks/vita-data-unlock.sh unlock
+StandardOutput=journal+console
+StandardError=journal+console

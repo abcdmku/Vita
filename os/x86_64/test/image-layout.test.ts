@@ -441,7 +441,7 @@ test("GPT partitions have pinned sizes, GUIDs, labels, and non-overlapping byte 
   assert.equal(plan.image.imageSizeBytes, lastPartition.endExclusiveByte + plan.image.alignmentBytes);
 });
 
-test("persistent data partition is explicitly mounted as /var by label", async () => {
+test("persistent data partition is explicitly mounted as /var by the inner filesystem label", async () => {
   const imageLayout = await loadImageLayoutModule();
   const plan = imageLayout.planImageLayout(await readPlanInput());
   const data = findPartition(plan, "data");
@@ -483,7 +483,9 @@ test("persistent data partition is explicitly mounted as /var by label", async (
   const repartText = await readFile(repartDataUrl, "utf8");
   assert.match(repartText, /^Type=linux-generic$/mu);
   assert.match(repartText, /^Label=vita-data$/mu);
-  assert.match(repartText, /^Format=ext4$/mu);
+  assert.doesNotMatch(repartText, /^Format=ext4$/mu);
+  assert.doesNotMatch(repartText, /^FileSystemLabel=vita-data$/mu);
+  assert.match(repartText, /OUTER partition is an opaque LUKS2 container/u);
   assert.match(repartText, /^SizeMinBytes=512M$/mu);
   assert.match(repartText, /^Weight=1000$/mu);
   assert.match(repartText, /^FactoryReset=no$/mu);
@@ -491,6 +493,8 @@ test("persistent data partition is explicitly mounted as /var by label", async (
 
   const unitText = await readFile(varMountUnitUrl, "utf8");
   assert.match(unitText, /^DefaultDependencies=no$/mu);
+  assert.match(unitText, /^Wants=vita-data-luks\.service$/mu);
+  assert.match(unitText, /^After=vita-data-luks\.service$/mu);
   assert.match(unitText, /^Before=local-fs\.target umount\.target$/mu);
   assert.match(unitText, /^Conflicts=umount\.target$/mu);
   // var.mount is verity-only + must SKIP (not fail) when the device is absent, else RequiresMountsFor=/var/...

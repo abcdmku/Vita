@@ -20,7 +20,16 @@
 //   VITA_OVMF_CODE / VITA_OVMF_VARS  OVMF firmware paths for QEMU (defaults to common Debian locations)
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -150,6 +159,184 @@ function findOutput(suffix) {
   return join(OUT, hit);
 }
 
+const REPART_VERITY_DIR = join(HERE, "repart-verity");
+const PLAIN_DATA_REPART_CONF = `# Vita smoke VERITY layout - persistent mutable /var data partition. The root partition stays
+# dm-verity read-only; smoke-overlay/usr/lib/systemd/system/var.mount mounts this partition by
+# filesystem label instead of relying on machine-id-derived Discoverable Partitions UUIDs.
+[Partition]
+Type=linux-generic
+Label=vita-data
+Format=ext4
+# FileSystemLabel sets the ext4 LABEL (=> /dev/disk/by-label/vita-data), which var.mount resolves.
+# (Label= above is only the GPT partition name => /dev/disk/by-partlabel/, which var.mount does NOT use.)
+# Requires systemd-repart >= v257; the build host is systemd 259.
+FileSystemLabel=vita-data
+SizeMinBytes=512M
+Weight=1000
+FactoryReset=no
+`;
+
+const PLAIN_VAR_MOUNT_UNIT = `# Vita /var mount. Explicit because gpt-auto only mounts a DPS /var when its UUID is machine-id-keyed.
+# The vita-data partition exists ONLY in VITA_VERITY builds (repart-verity). On a plain (non-verity) smoke image the
+# device is absent, so ConditionPathExists SKIPS the unit entirely (condition unmet = success-skip, NOT a failure):
+# a *failed* var.mount cascades to every RequiresMountsFor=/var/... dependent (e.g. vita-agentd's StateDirectory),
+# cancelling them; a *skipped* var.mount does not, and those units fall back to /var on the rw root. nofail + a short
+# device-timeout are belt-and-suspenders for the (shouldn't-happen) case where the node exists but is slow.
+[Unit]
+Description=Vita persistent data partition (/var)
+DefaultDependencies=no
+Before=local-fs.target umount.target
+Conflicts=umount.target
+ConditionPathExists=/dev/disk/by-label/vita-data
+
+[Mount]
+What=/dev/disk/by-label/vita-data
+Where=/var
+Type=ext4
+Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs
+`;
+
+function prepareVerityRepartDirectory({ luksMode }) {
+  if (luksMode) {
+    return REPART_VERITY_DIR;
+  }
+
+  // The committed repart file now models the LUKS outer container. For VITA_LUKS=0,
+  // generate the old plaintext ext4 data-partition definition so non-LUKS verity
+  // images remain byte-compatible with P1-029.
+  const plainDir = join(OUT, "repart-verity-plain");
+  if (DRY) return plainDir;
+  rmSync(plainDir, { recursive: true, force: true });
+  mkdirSync(plainDir, { recursive: true });
+  for (const name of readdirSync(REPART_VERITY_DIR)) {
+    if (name.endsWith(".conf")) {
+      copyFileSync(join(REPART_VERITY_DIR, name), join(plainDir, name));
+    }
+  }
+  writeFileSync(join(plainDir, "40-data.conf"), PLAIN_DATA_REPART_CONF, { mode: 0o644 });
+  return plainDir;
+}
+
+function prepareVerityOverlay({ luksMode }) {
+  const overlay = join(HERE, "verity-overlay");
+  if (luksMode) {
+    return overlay;
+  }
+
+  // Keep VITA_LUKS=0 verity image contents identical to P1-029: no unlock unit,
+  // no marker unit, and var.mount without LUKS ordering edges.
+  const plainOverlay = join(OUT, "verity-overlay-plain");
+  if (DRY) return plainOverlay;
+  const systemdDir = join(plainOverlay, "usr", "lib", "systemd", "system");
+  rmSync(plainOverlay, { recursive: true, force: true });
+  mkdirSync(join(systemdDir, "local-fs.target.d"), { recursive: true });
+  writeFileSync(join(systemdDir, "var.mount"), PLAIN_VAR_MOUNT_UNIT, { mode: 0o644 });
+  copyFileSync(
+    join(overlay, "usr", "lib", "systemd", "system", "local-fs.target.d", "10-vita-var.conf"),
+    join(systemdDir, "local-fs.target.d", "10-vita-var.conf"),
+  );
+  return plainOverlay;
+}
+
+function stageLuksTestKeyOverlay(keyPath) {
+  const overlay = join(OUT, "luks-overlay");
+  if (DRY) return overlay;
+  if (!existsSync(keyPath)) {
+    fail(
+      "VITA_LUKS=1 needs the TEST keyfile. Generate it (gitignored, throwaway, spec §16):\n" +
+      "       bash tools/luks-test-keys.sh\n" +
+      `     or set VITA_LUKS_TEST_KEY_PATH. Looked for:\n       ${keyPath}`);
+  }
+
+  const luksDir = join(overlay, "usr", "lib", "vita", "luks");
+  rmSync(overlay, { recursive: true, force: true });
+  mkdirSync(luksDir, { recursive: true });
+  const stagedKey = join(luksDir, "data.key");
+  copyFileSync(keyPath, stagedKey);
+  chmodSync(stagedKey, 0o400);
+  writeFileSync(join(luksDir, "enabled"), "VITA_LUKS=1 build-only TEST unlock enabled\n", { mode: 0o444 });
+  writeFileSync(join(luksDir, "README.DO-NOT-SHIP.txt"),
+    "DO-NOT-SHIP: build-only Vita LUKS TEST key overlay. Real TPM/recovery secrets are owner-held.\n",
+    { mode: 0o444 });
+  return overlay;
+}
+
+function runLuksPostprocess(label, executable, args) {
+  log(`\n── ${label}`);
+  log(`   $ ${executable} ${args.join(" ")}`);
+  const r = spawnSync(executable, args, { cwd: REPO, stdio: "inherit" });
+  if (r.error) throw new Error(`${label}: ${r.error.message}` + (r.error.code === "ENOENT" ? ` (install ${executable})` : ""));
+  if (r.status !== 0) throw new Error(`${label}: exited ${r.status}`);
+}
+
+function captureLuksPostprocess(label, executable, args) {
+  log(`\n── ${label}`);
+  log(`   $ ${executable} ${args.join(" ")}`);
+  const r = spawnSync(executable, args, { cwd: REPO, encoding: "utf8" });
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+  if (r.error) throw new Error(`${label}: ${r.error.message}` + (r.error.code === "ENOENT" ? ` (install ${executable})` : ""));
+  if (r.status !== 0) throw new Error(`${label}: exited ${r.status}`);
+  return r.stdout ?? "";
+}
+
+function findLoopPartitionByPartLabel(loopDevice, partLabel) {
+  const stdout = captureLuksPostprocess("LUKS · locate vita-data loop partition", "lsblk",
+    ["-P", "-o", "NAME,PARTLABEL", loopDevice]);
+  for (const line of stdout.split(/\r?\n/u)) {
+    const m = /^NAME="([^"]+)" PARTLABEL="([^"]*)"$/.exec(line.trim());
+    if (m && m[2] === partLabel && m[1] !== loopDevice) {
+      return m[1];
+    }
+  }
+  throw new Error(`LUKS: could not find loop partition with PARTLABEL=${partLabel} under ${loopDevice}`);
+}
+
+function cleanupLuksPostprocess(loopDevice, mapperName) {
+  if (mapperName && spawnSync("cryptsetup", ["status", mapperName], { stdio: "ignore" }).status === 0) {
+    const r = spawnSync("cryptsetup", ["luksClose", mapperName], { stdio: "inherit" });
+    if (r.status !== 0) log(`   (cleanup warning: cryptsetup luksClose ${mapperName} exited ${r.status})`);
+  }
+  if (loopDevice) {
+    const r = spawnSync("losetup", ["-d", loopDevice], { stdio: "inherit" });
+    if (r.status !== 0) log(`   (cleanup warning: losetup -d ${loopDevice} exited ${r.status})`);
+  }
+}
+
+function luksFormatDataPartition(disk, keyPath) {
+  log("\n── LUKS · format vita-data as LUKS2 and create inner ext4 label");
+  log("   (cryptsetup LUKS2 defaults are used for cipher/KDF; no production key material is generated)");
+  if (DRY) {
+    log(`   $ losetup --find --show --partscan ${disk}`);
+    log("   $ cryptsetup luksFormat --type luks2 --batch-mode --key-file <TEST key> <vita-data partition>");
+    log("   $ cryptsetup luksOpen --key-file <TEST key> <vita-data partition> <build mapper>");
+    log("   $ mkfs.ext4 -F -L vita-data /dev/mapper/<build mapper>");
+    return;
+  }
+
+  let loopDevice = "";
+  const mapperName = `vita-data-build-${process.pid}`;
+  let postprocessError;
+  try {
+    const loop = captureLuksPostprocess("LUKS · attach disk image", "losetup", ["--find", "--show", "--partscan", disk]);
+    loopDevice = loop.trim().split(/\s+/u)[0] ?? "";
+    if (!loopDevice) throw new Error("LUKS: losetup did not return a loop device");
+    const dataPartition = findLoopPartitionByPartLabel(loopDevice, "vita-data");
+    runLuksPostprocess("LUKS · wipe plaintext outer filesystem signatures", "wipefs", ["--all", "--force", dataPartition]);
+    runLuksPostprocess("LUKS · luksFormat vita-data outer container", "cryptsetup",
+      ["luksFormat", "--type", "luks2", "--batch-mode", "--key-file", keyPath, dataPartition]);
+    runLuksPostprocess("LUKS · open vita-data mapper for inner ext4 formatting", "cryptsetup",
+      ["luksOpen", "--key-file", keyPath, dataPartition, mapperName]);
+    runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
+      ["-F", "-L", "vita-data", `/dev/mapper/${mapperName}`]);
+  } catch (e) {
+    postprocessError = e;
+  } finally {
+    cleanupLuksPostprocess(loopDevice, mapperName);
+  }
+  if (postprocessError) fail(postprocessError.message);
+}
+
 // Build the Vita agentd (P1-026) reproducibly via its plan's go-in-docker command, then stage the binary into
 // the committed agent-overlay so mkosi's --extra-tree ships /usr/lib/vita/agentd + vita-agentd.service into the
 // rootfs. planAgentImage is the deterministic spec; here we execute it. go-in-docker mounts cwd(=REPO) at /work,
@@ -229,15 +416,26 @@ if (MODE === "smoke") {
   if (verityMode && !DRY && !useNative)
     fail("VITA_VERITY=1 requires the native mkosi engine — --repart-directory is a host path not mounted into " +
          "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
-  const verity = verityMode ? ["--verity=hash", `--repart-directory=${join(HERE, "repart-verity")}`] : [];
-  // Verity root is read-only + PERSISTENT (P1-029): the repart-verity vita-data partition is mounted writable at
-  // /var (verity-overlay var.mount, by FileSystemLabel). So NO systemd.volatile=overlay (that tmpfs-overlays / and
-  // would shadow the persistent /var). Host-verified: boots ro, /var on the ext4 data partition, state persists.
+  const luksMode = process.env.VITA_LUKS === "1";
+  if (luksMode && !verityMode) {
+    fail("VITA_LUKS=1 requires VITA_VERITY=1: the encrypted data partition is only present in repart-verity.");
+  }
+  if (luksMode && !DRY && !useNative) {
+    fail("VITA_LUKS=1 requires the native mkosi engine — LUKS post-processing uses host loop devices.");
+  }
+  const verityRepartDir = verityMode ? prepareVerityRepartDirectory({ luksMode }) : "";
+  const verity = verityMode ? ["--verity=hash", `--repart-directory=${verityRepartDir}`] : [];
+  // Verity root is read-only + PERSISTENT (P1-029): var.mount mounts /dev/disk/by-label/vita-data writable at
+  // /var. With VITA_LUKS=0 that label comes from the generated plaintext ext4 repart definition; with
+  // VITA_LUKS=1 it comes from the inner ext4 filesystem on the decrypted mapper. So NO systemd.volatile=overlay
+  // (that tmpfs-overlays / and would shadow the persistent /var).
   // var.mount + its local-fs drop-in live in a VERITY-ONLY overlay: on a plain (non-verity) image the vita-data
   // device never exists, and a present-but-failed var.mount cascades through RequiresMountsFor=/var/... to cancel
   // vita-agentd (StateDirectory=vita-agent) — breaking the agentd socket. So ship those units ONLY when VITA_VERITY=1.
-  const verityOverlay = useNative ? join(HERE, "verity-overlay") : "/work/os/x86_64/verity-overlay";
+  const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode }) : "";
   const verityTree = verityMode ? [`--extra-tree=${verityOverlay}`] : [];
+  const luksKey = resolve(process.env.VITA_LUKS_TEST_KEY_PATH ?? join(HERE, ".luks", "data.key"));
+  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey)}`] : [];
   const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
@@ -282,9 +480,10 @@ if (MODE === "smoke") {
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...incremental, ...verity, ...bootloaderPin, ...sb,
-     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree,
+     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
+  if (luksMode) luksFormatDataPartition(disk, luksKey);
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));

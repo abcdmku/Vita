@@ -7,6 +7,8 @@
 [Unit]
 Description=Vita persistent data partition (/var)
 DefaultDependencies=no
+Wants=vita-data-luks.service
+After=vita-data-luks.service
 Before=local-fs.target umount.target
 Conflicts=umount.target
 ConditionPathExists=/dev/disk/by-label/vita-data
