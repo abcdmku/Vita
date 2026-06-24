@@ -12,6 +12,7 @@
 
 import { evaluateNodeConfig } from "./vita/evaluate.ts";
 import { diffTransactionPlans, TransactionPlanDiffError } from "./vita/transaction-plan-diff.ts";
+import { computeDrift, DRIFT_OBSERVED_CAPABILITIES, DriftError } from "./vita/drift.ts";
 import { explainTransactionPlanChange } from "./vita/transaction-plan-explain.ts";
 import { DEFAULT_CAPABILITY_MANIFESTS } from "./vita/generated/capability-manifests.generated.ts";
 import { createAgentClient, isAgentClientError } from "./vita/agent-client.ts";
@@ -51,6 +52,7 @@ import {
   createDenoUnixSocketFilesAgentTransport,
 } from "./vita/unix-socket-transport.ts";
 import type { AgentApplyPlan, AgentApplyResult, AgentClient, AgentTransport } from "./vita/agent-client.ts";
+import type { DriftResult, ObservedState } from "./vita/drift.ts";
 import type {
   ApplyNodeApplyResult,
   ApplyNodeConfigResult,
@@ -58,6 +60,7 @@ import type {
 } from "./vita/apply-node-config.ts";
 import type { CapsuleEntry } from "./vita/capsule-registry-model.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
+import type { TransactionPlan } from "./vita/transaction-plan-diff.ts";
 
 const TS_MARKER = "VITA-TS";
 const EVAL_MARKER = "VITA-EVAL";
@@ -69,6 +72,9 @@ const EXPLAIN_MARKER = "VITA-EXPLAIN";
 const CONNECT_MARKER = "VITA-CONNECT";
 const CONNECT_ERROR_MARKER = "VITA-CONNECT-ERROR";
 const STATE_ERROR_MARKER = "VITA-STATE-ERROR";
+const DRIFT_MARKER = "VITA-DRIFT";
+const DRIFT_REJECT_MARKER = "VITA-DRIFT-REJECT";
+const DRIFT_ERROR_MARKER = "VITA-DRIFT-ERROR";
 const APPLY_MARKER = "VITA-APPLY";
 const APPLY_ERROR_MARKER = "VITA-APPLY-ERROR";
 const CAPSULE_MARKER = "VITA-CAPSULE";
@@ -674,6 +680,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   } catch {
     emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
@@ -703,6 +710,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   const state = await readAgentStateSummary(client);
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
+    await emitDriftMarkers(client);
     await emitApplyMarkers(state.state.hostname, agentTransport);
     if (await emitCapsulePreviewMarker(client)) {
       await emitCapsuleMarkers(agentTransport);
@@ -720,6 +728,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     }
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -823,6 +832,132 @@ async function emitCapsulePreviewMarker(
   const result = await readCapsuleRegistryPreview(client);
   emit(formatCapsuleRegistryPreviewMarker(result));
   return result.ok;
+}
+
+async function emitDriftMarkers(client: Pick<AgentClient, "getState">): Promise<void> {
+  const declaredConfig = buildDriftDeclaredConfig();
+  const declared = evaluateNodeConfig(declaredConfig, CAPABILITY_REGISTRY);
+
+  if (!declared.ok) {
+    emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
+    return;
+  }
+
+  try {
+    const observed = await readObservedDriftState(client);
+    const liveDrift = computeDrift(declared.plan, observed);
+    emit(formatDriftMarker(declared.plan, observed, liveDrift));
+
+    const syntheticObserved = buildSyntheticDriftObservedState(declared.plan);
+    const syntheticDrift = computeDrift(declared.plan, syntheticObserved);
+    emit(formatDriftMarker(declared.plan, syntheticObserved, syntheticDrift));
+  } catch (cause) {
+    if (cause instanceof DriftError) {
+      emit(`${DRIFT_REJECT_MARKER}: reason=${markerToken(cause.message)} status=OK`);
+      return;
+    }
+
+    emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
+  }
+}
+
+function buildDriftDeclaredConfig(): Readonly<Record<string, unknown>> {
+  const source: Readonly<Record<string, unknown>> = VALID_CONFIG;
+  const declared: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+
+  for (let index = 0; index < DRIFT_OBSERVED_CAPABILITIES.length; index += 1) {
+    const capability = DRIFT_OBSERVED_CAPABILITIES[index];
+
+    if (capability === undefined || !Object.hasOwn(source, capability)) {
+      continue;
+    }
+
+    Object.defineProperty(declared, capability, {
+      configurable: true,
+      enumerable: true,
+      value: source[capability],
+      writable: false,
+    });
+  }
+
+  return Object.freeze(declared);
+}
+
+async function readObservedDriftState(
+  client: Pick<AgentClient, "getState">,
+): Promise<ObservedState> {
+  const observed: Record<string, ObservedState[string]> = Object.create(null) as Record<string, ObservedState[string]>;
+
+  for (let index = 0; index < DRIFT_OBSERVED_CAPABILITIES.length; index += 1) {
+    const capability = DRIFT_OBSERVED_CAPABILITIES[index];
+
+    if (capability === undefined) {
+      continue;
+    }
+
+    Object.defineProperty(observed, capability, {
+      configurable: true,
+      enumerable: true,
+      value: await client.getState(capability),
+      writable: false,
+    });
+  }
+
+  return Object.freeze(observed);
+}
+
+function buildSyntheticDriftObservedState(declared: TransactionPlan): ObservedState {
+  const observed: Record<string, ObservedState[string]> = Object.create(null) as Record<string, ObservedState[string]>;
+
+  Object.defineProperty(observed, "hostname.set", {
+    configurable: true,
+    enumerable: true,
+    value: Object.freeze({
+      current: divergentHostname(readDeclaredHostname(declared)),
+    }),
+    writable: false,
+  });
+
+  return Object.freeze(observed);
+}
+
+function readDeclaredHostname(declared: TransactionPlan): string {
+  for (let index = 0; index < declared.operations.length; index += 1) {
+    const operation = declared.operations[index];
+
+    if (operation === undefined || operation.capability !== "hostname.set") {
+      continue;
+    }
+
+    const desired = operation.request["desired"];
+
+    if (typeof desired === "string" && desired.length > 0) {
+      return desired;
+    }
+  }
+
+  return "vita-node-7";
+}
+
+function divergentHostname(hostname: string): string {
+  return hostname === "vita-node-8" ? "vita-node-7" : "vita-node-8";
+}
+
+function formatDriftMarker(
+  declared: TransactionPlan,
+  observed: ObservedState,
+  result: DriftResult,
+): string {
+  return (
+    `${DRIFT_MARKER}: ` +
+    `declared=${declared.operations.length} ` +
+    `observed=${Object.keys(observed).length} ` +
+    `drifted=${result.drifted} ` +
+    `added=${result.added.length} ` +
+    `removed=${result.removed.length} ` +
+    `changed=${result.changed.length} ` +
+    "status=OK"
+  );
 }
 
 function hostnameConfig(currentHostname: string): unknown {
