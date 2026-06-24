@@ -155,6 +155,21 @@ func (c *ArchiveCapability) Apply(context.Context, capabilities.TypedRequest) (t
 	return nil, archiveUnsupported()
 }
 
+// Create, Verify, and Restore mirror the linux typed surface so the archive
+// capability satisfies the capsule lifecycle's non-racy result-channel interface
+// on every platform; they are inert (unsupported) off linux.
+func (c *ArchiveCapability) Create(context.Context, ArchiveCreateRequest) (ArchiveCreateResult, transaction.Undo, error) {
+	return ArchiveCreateResult{}, nil, archiveUnsupported()
+}
+
+func (c *ArchiveCapability) Verify(context.Context, ArchiveVerifyRequest) (ArchiveVerifyResult, error) {
+	return ArchiveVerifyResult{}, archiveUnsupported()
+}
+
+func (c *ArchiveCapability) Restore(context.Context, ArchiveRestoreRequest) (ArchiveRestoreResult, transaction.Undo, error) {
+	return ArchiveRestoreResult{}, nil, archiveUnsupported()
+}
+
 func archiveUnsupported() *ArchiveInvalidRequestError {
 	return &ArchiveInvalidRequestError{
 		Reason: "backup.archive requires linux",
