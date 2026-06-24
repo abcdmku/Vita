@@ -37,12 +37,13 @@ const artifactSpec = {
   name: "alpha",
   version: "1.0.0",
 };
+const mirrorBaseUrl = "https://mirror.example.test/cache/";
 
 test("happy path stores a pinned artifact at deterministic content-addressed layout and updates the index", async (t) => {
   const root = tempStore(t);
   const fetcher = memoryFetcher(artifactBytes);
 
-  const first = assertStored(await fetchAndStore(artifactSpec, { fetcher, root }));
+  const first = assertStored(await fetchAndStore(artifactSpec, { fetcher, mirrorBaseUrl, root }));
   const expectedPath = deterministicPath(root, artifactBytes, "sha256");
 
   assert.equal(first.path, expectedPath);
@@ -52,7 +53,7 @@ test("happy path stores a pinned artifact at deterministic content-addressed lay
     "alpha@1.0.0": artifactIntegrity,
   });
 
-  const second = assertStored(await fetchAndStore(artifactSpec, { fetcher, root }));
+  const second = assertStored(await fetchAndStore(artifactSpec, { fetcher, mirrorBaseUrl, root }));
   assert.equal(second.path, expectedPath);
   assert.deepEqual(readFileSync(second.path), readFileSync(first.path));
 });
@@ -61,6 +62,7 @@ test("read-back verifies blobs and fails closed for tampered blobs, bad index in
   const root = tempStore(t);
   const stored = assertStored(await fetchAndStore(artifactSpec, {
     fetcher: memoryFetcher(artifactBytes),
+    mirrorBaseUrl,
     root,
   }));
   const store = new OnDiskMirrorStore(root);
@@ -75,6 +77,7 @@ test("read-back verifies blobs and fails closed for tampered blobs, bad index in
 
   assertStored(await fetchAndStore(artifactSpec, {
     fetcher: memoryFetcher(artifactBytes),
+    mirrorBaseUrl,
     root,
   }));
   writeFileSync(join(root, "index.json"), JSON.stringify({ "alpha@1.0.0": "sha256-not-base64" }));
@@ -85,6 +88,7 @@ test("integrity mismatch rejects and leaves no blob or index entry", async (t) =
   const root = tempStore(t);
   const result = await fetchAndStore(artifactSpec, {
     fetcher: memoryFetcher(bytes("wrong tarball")),
+    mirrorBaseUrl,
     root,
   });
 
@@ -95,6 +99,19 @@ test("integrity mismatch rejects and leaves no blob or index entry", async (t) =
 
 test("remote origins, unpinned versions, and malformed integrity reject before fetch", async (t) => {
   const root = tempStore(t);
+
+  let localWithoutBaseCalls = 0;
+  const localWithoutBase = await fetchAndStore(artifactSpec, {
+    fetcher: {
+      async fetch(): Promise<Uint8Array> {
+        localWithoutBaseCalls += 1;
+        return artifactBytes;
+      },
+    },
+    root,
+  });
+  assertRejects(localWithoutBase, "REMOTE_REJECTED");
+  assert.equal(localWithoutBaseCalls, 0);
 
   await assertRejectsBeforeFetch(
     {
@@ -141,6 +158,33 @@ test("remote origins, unpinned versions, and malformed integrity reject before f
     root,
     "INVALID_SPEC",
   );
+});
+
+test("local mirror references cannot escape the configured base path after URL normalization", async (t) => {
+  const root = tempStore(t);
+
+  const cases = [
+    "local-mirror://%2e%2e/evil.tgz",
+    "local-mirror://..\\..\\evil.tgz",
+    "vita-mirror://pkg/%2e%2e\\..\\evil.tgz",
+  ];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const mirrorUrl = cases[index];
+    if (mirrorUrl === undefined) {
+      continue;
+    }
+
+    await assertRejectsBeforeFetch(
+      {
+        ...artifactSpec,
+        mirrorUrl,
+      },
+      root,
+      "REMOTE_REJECTED",
+      "https://mirror.example.test/cache/subdir/",
+    );
+  }
 });
 
 test("explicit allowed mirror origins and local references resolved against a base URL are the only fetch URLs accepted", async (t) => {
@@ -220,6 +264,7 @@ test("fetch failures, timeouts, and non-byte fetch results reject without throwi
           throw new Error("network down");
         },
       },
+      mirrorBaseUrl,
       root,
     }),
     "FETCH_FAILED",
@@ -232,6 +277,7 @@ test("fetch failures, timeouts, and non-byte fetch results reject without throwi
           return await new Promise<never>(() => undefined);
         },
       },
+      mirrorBaseUrl,
       root,
       timeoutMs: 5,
     }),
@@ -245,11 +291,35 @@ test("fetch failures, timeouts, and non-byte fetch results reject without throwi
           return "not bytes";
         },
       },
+      mirrorBaseUrl,
       root,
     }),
     "FETCH_FAILED",
   );
 
+  assert.equal(existsSync(join(root, "index.json")), false);
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test("post-fetch mutation of returned bytes is rejected before publish", async (t) => {
+  const root = tempStore(t);
+  const mutableBytes = bytes("alpha package tarball");
+  const fetcher: MirrorFetcher = {
+    async fetch(): Promise<Uint8Array> {
+      queueMicrotask(() => {
+        mutableBytes[0] = 0;
+      });
+      return mutableBytes;
+    },
+  };
+
+  const result = await fetchAndStore(artifactSpec, {
+    fetcher,
+    mirrorBaseUrl,
+    root,
+  });
+
+  assertRejects(result, "INTEGRITY_MISMATCH");
   assert.equal(existsSync(join(root, "index.json")), false);
   assert.deepEqual(readdirSync(root), []);
 });
@@ -261,6 +331,7 @@ test("store I/O errors return structured STORE_IO rejections", async (t) => {
 
   const result = await fetchAndStore(artifactSpec, {
     fetcher: memoryFetcher(artifactBytes),
+    mirrorBaseUrl,
     root: rootFile,
   });
 
@@ -328,6 +399,7 @@ test("fetchAndStore output backs resolveFromMirror end to end", async (t) => {
   const root = tempStore(t);
   assertStored(await fetchAndStore(artifactSpec, {
     fetcher: memoryFetcher(artifactBytes),
+    mirrorBaseUrl,
     root,
   }));
 
@@ -366,6 +438,7 @@ async function assertRejectsBeforeFetch(
   spec: unknown,
   root: string,
   code: StoreError["code"],
+  baseUrl = mirrorBaseUrl,
 ): Promise<void> {
   let calls = 0;
   const result = await fetchAndStore(spec, {
@@ -375,6 +448,7 @@ async function assertRejectsBeforeFetch(
         return artifactBytes;
       },
     },
+    mirrorBaseUrl: baseUrl,
     root,
   });
 
@@ -389,6 +463,7 @@ async function assertDoesNotThrowRejects(
 ): Promise<void> {
   const result = await fetchAndStore(spec, {
     fetcher: memoryFetcher(artifactBytes),
+    mirrorBaseUrl,
     root,
   });
   assertRejects(result, code);
