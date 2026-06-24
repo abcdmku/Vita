@@ -1,15 +1,20 @@
+//go:build linux
+
 package backup
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/vita/agent/transaction"
 )
@@ -66,6 +71,187 @@ func TestArchiveCreateProducesContentAddressedManifestAndObjects(t *testing.T) {
 	assertFileEntryMatchesSource(t, entries["agent/capsules/state.bin"], filepath.Join(source, "capsules", "state.bin"), target, result.BackupID)
 	if entry, ok := entries["agent/empty-dir"]; !ok || entry.Type != "dir" || entry.Mode != 0o700 {
 		t.Fatalf("empty directory entry = %#v, %v; want recorded dir mode 0700", entry, ok)
+	}
+}
+
+func TestArchiveCreateRejectsUnsafeExistingTargetWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	parent := t.TempDir()
+	target := filepath.Join(parent, "unsafe-target")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("create unsafe target: %v", err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatalf("chmod unsafe target: %v", err)
+	}
+	beforeInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat unsafe target before create: %v", err)
+	}
+
+	capability := NewArchiveCapability()
+	result, undo, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err == nil {
+		t.Fatalf("Create result = %#v, undo = %v, want unsafe target rejection", result, undo)
+	}
+	if undo != nil {
+		t.Fatalf("Create returned undo %v, want nil", undo)
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Create error = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_target_unsafe" {
+		t.Fatalf("ApplyErrorCode = %q, want create_target_unsafe", code)
+	}
+
+	afterInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat unsafe target after create: %v", err)
+	}
+	if afterInfo.Mode().Perm() != beforeInfo.Mode().Perm() {
+		t.Fatalf("target mode after rejection = %#o, want unchanged %#o", afterInfo.Mode().Perm(), beforeInfo.Mode().Perm())
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read unsafe target after rejection: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsafe target entries after rejection = %v, want none", entries)
+	}
+}
+
+func TestArchiveCreateAllowsAbsentSourceRootAsEmptyRoot(t *testing.T) {
+	ctx := context.Background()
+	target := t.TempDir()
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+
+	capability := NewArchiveCapability()
+	result, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "capsule-volumes", Path: missingRoot}},
+	})
+	if err != nil {
+		t.Fatalf("Create returned error for absent source root: %v", err)
+	}
+	if result.Files != 0 {
+		t.Fatalf("Files = %d, want 0 for empty absent root", result.Files)
+	}
+
+	manifest := mustLoadManifest(t, target, result.BackupID)
+	if len(manifest.Roots) != 1 || manifest.Roots[0].Name != "capsule-volumes" {
+		t.Fatalf("manifest roots = %#v, want recorded absent root", manifest.Roots)
+	}
+	if len(manifest.Entries) != 0 {
+		t.Fatalf("manifest entries = %#v, want none for absent root", manifest.Entries)
+	}
+
+	verify, err := capability.Verify(ctx, ArchiveVerifyRequest{TargetPath: target, BackupID: result.BackupID})
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+	if !verify.OK || verify.Failure != nil {
+		t.Fatalf("Verify = %#v, want ok", verify)
+	}
+}
+
+func TestArchiveCreateSkipsSpecialEntriesAndDanglingSymlinks(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+
+	if err := os.Symlink(filepath.Join(source, "missing"), filepath.Join(source, "dangling")); err != nil {
+		t.Fatalf("create dangling symlink: %v", err)
+	}
+	if err := unix.Mkfifo(filepath.Join(source, "events.fifo"), 0o600); err != nil {
+		t.Fatalf("create fifo: %v", err)
+	}
+	socket, err := net.Listen("unix", filepath.Join(source, "agent.sock"))
+	if err != nil {
+		t.Fatalf("create unix socket: %v", err)
+	}
+	defer socket.Close()
+
+	capability := NewArchiveCapability()
+	result, _, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("Files = %d, want only the regular file", result.Files)
+	}
+
+	manifest := mustLoadManifest(t, target, result.BackupID)
+	entries := manifestEntriesByID(manifest)
+	if _, ok := entries["agent/state.json"]; !ok {
+		t.Fatalf("manifest entries = %#v, want regular file", entries)
+	}
+	for _, skipped := range []string{"agent/dangling", "agent/events.fifo", "agent/agent.sock"} {
+		if _, ok := entries[skipped]; ok {
+			t.Fatalf("manifest included skipped special entry %q", skipped)
+		}
+	}
+	skipped := manifestSkippedByID(manifest)
+	if got := skipped["agent/dangling"]; got != "symlink" {
+		t.Fatalf("skipped dangling symlink reason = %q, want symlink", got)
+	}
+	if got := skipped["agent/events.fifo"]; got != "fifo" {
+		t.Fatalf("skipped fifo reason = %q, want fifo", got)
+	}
+	if got := skipped["agent/agent.sock"]; got != "socket" {
+		t.Fatalf("skipped socket reason = %q, want socket", got)
+	}
+}
+
+func TestArchiveBuildManifestExcludesTargetSubtree(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := filepath.Join(source, "vita-backups")
+	objectsDir := filepath.Join(target, ".backup-archive-stage", archiveObjectsDirName)
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, filepath.Join(objectsDir, "preexisting-object"), []byte("must not be walked"), 0o600)
+
+	manifest, files, err := buildArchiveManifest(ctx, []ArchiveSourceRoot{{Name: "agent", Path: source}}, objectsDir, target)
+	if err != nil {
+		t.Fatalf("buildArchiveManifest returned error: %v", err)
+	}
+	if files != 1 {
+		t.Fatalf("files = %d, want only source state file", files)
+	}
+
+	entries := manifestEntriesByID(manifest)
+	if _, ok := entries["agent/state.json"]; !ok {
+		t.Fatalf("manifest entries = %#v, want source state file", entries)
+	}
+	for id := range entries {
+		if strings.Contains(id, "vita-backups") {
+			t.Fatalf("manifest included backup target entry %q", id)
+		}
+	}
+}
+
+func TestArchiveBuildManifestFailsOnHashFailureInsteadOfDroppingFile(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	objectsDir := filepath.Join(t.TempDir(), "objects-as-file")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, objectsDir, []byte("not a directory"), 0o600)
+
+	_, _, err := buildArchiveManifest(ctx, []ArchiveSourceRoot{{Name: "agent", Path: source}}, objectsDir, target)
+	if err == nil {
+		t.Fatal("buildArchiveManifest returned nil, want source-walk failure")
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("buildArchiveManifest error = %T %v, want ArchiveOperationError", err, err)
+	}
+	code := opErr.ApplyErrorCode()
+	if !strings.HasPrefix(code, "create_source_walk:ENOTDIR:") || !strings.Contains(code, "state.json") {
+		t.Fatalf("ApplyErrorCode = %q, want ENOTDIR source path failure", code)
 	}
 }
 
@@ -143,11 +329,11 @@ func TestArchiveRestoreRoundTripAndUndoRestoresPriorTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
+	manifest := mustLoadManifest(t, target, created.BackupID)
 	restored, undo, err := capability.Restore(ctx, ArchiveRestoreRequest{
-		TargetPath:         target,
-		BackupID:           created.BackupID,
-		DestinationRoot:    destination,
-		CompareSourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+		TargetPath:      target,
+		BackupID:        created.BackupID,
+		DestinationRoot: destination,
 	})
 	if err != nil {
 		t.Fatalf("Restore returned error: %v", err)
@@ -158,9 +344,7 @@ func TestArchiveRestoreRoundTripAndUndoRestoresPriorTree(t *testing.T) {
 	if !restored.Restored || restored.BackupID != created.BackupID || restored.Files != created.Files {
 		t.Fatalf("Restore result = %#v, want restored backup %q files %d", restored, created.BackupID, created.Files)
 	}
-	if err := compareTrees(ctx, source, filepath.Join(destination, "agent")); err != nil {
-		t.Fatalf("restored tree differs from source: %v", err)
-	}
+	assertTreeMatchesManifest(t, destination, manifest)
 
 	if err := undo.Undo(ctx); err != nil {
 		t.Fatalf("Undo returned error: %v", err)
@@ -201,12 +385,60 @@ func TestArchiveRestoreTamperRefusesWithoutMutationOrLeaks(t *testing.T) {
 	if !errors.As(err, &verifyErr) {
 		t.Fatalf("Restore Apply error = %T %v, want ArchiveVerificationError", err, err)
 	}
+	if code := verifyErr.ApplyErrorCode(); code != "verify_digest_mismatch" {
+		t.Fatalf("verification error code = %q, want verify_digest_mismatch", code)
+	}
 	if got := mustDigestTree(t, destination); !reflect.DeepEqual(got, prior) {
 		t.Fatalf("destination after refused restore = %#v, want unchanged %#v", got, prior)
 	}
 	afterTemps := restoreTemps(t, filepath.Dir(destination), filepath.Base(destination))
 	if !reflect.DeepEqual(afterTemps, beforeTemps) {
 		t.Fatalf("restore temp dirs after refused restore = %v, want unchanged %v", afterTemps, beforeTemps)
+	}
+}
+
+func TestArchiveRestoreUsesManifestSnapshotWhenLiveSourceMutates(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	target := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "restore-root")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, filepath.Join(destination, "prior.txt"), []byte("prior"), 0o600)
+	prior := mustDigestTree(t, destination)
+
+	capability := NewArchiveCapability()
+	created, _, err := capability.Create(ctx, archiveCreateRequest(target, source))
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	manifest := mustLoadManifest(t, target, created.BackupID)
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":false}`), 0o600)
+
+	restored, undo, err := capability.Restore(ctx, ArchiveRestoreRequest{
+		TargetPath:         target,
+		BackupID:           created.BackupID,
+		DestinationRoot:    destination,
+		CompareSourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+	})
+	if err != nil {
+		t.Fatalf("Restore returned error after live source mutation: %v", err)
+	}
+	if undo == nil {
+		t.Fatal("Restore returned nil undo")
+	}
+	if !restored.Restored || restored.BackupID != created.BackupID || restored.Files != created.Files {
+		t.Fatalf("Restore result = %#v, want restored backup %q files %d", restored, created.BackupID, created.Files)
+	}
+	assertTreeMatchesManifest(t, destination, manifest)
+	if got := string(mustReadFile(t, filepath.Join(destination, "agent", "state.json"))); got != `{"ok":true}` {
+		t.Fatalf("restored state = %q, want captured source content", got)
+	}
+
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
+	}
+	if got := mustDigestTree(t, destination); !reflect.DeepEqual(got, prior) {
+		t.Fatalf("destination after Undo = %#v, want prior %#v", got, prior)
 	}
 }
 
@@ -291,6 +523,41 @@ func TestArchiveFailClosedInputHandling(t *testing.T) {
 	}
 }
 
+func TestArchiveApplyReportsSpecificFilesystemDiagnosticCode(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	targetParent := filepath.Join(t.TempDir(), "not-a-dir")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, targetParent, []byte("file"), 0o600)
+
+	capability := NewArchiveCapability()
+	undo, err := capability.Apply(ctx, ArchiveApplyRequest{Op: ArchiveOperationCreate, Create: &ArchiveCreateRequest{
+		TargetPath:  filepath.Join(targetParent, "child"),
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+	}})
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Apply error = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_target_mkdir_ENOTDIR" {
+		t.Fatalf("ApplyErrorCode = %q, want create_target_mkdir_ENOTDIR", code)
+	}
+}
+
+func TestArchiveSourceWalkDiagnosticCodeIncludesErrnoAndPath(t *testing.T) {
+	err := archiveStepPathError("create_source_walk", "/var/lib/vita/runtime/volumes/capsule.sock", os.ErrPermission)
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("archiveStepPathError = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_source_walk:EACCES:var_lib_vita_runtime_volumes_capsule_sock" {
+		t.Fatalf("ApplyErrorCode = %q, want source walk errno and path", code)
+	}
+}
+
 func TestArchiveDuplicateJSONKeysRejectedBeforeDecode(t *testing.T) {
 	raw := []byte(`{"op":"create","op":"verify","create":{"targetPath":"/tmp/target","sourceRoots":[{"name":"agent","path":"/tmp/source"}]}}`)
 	var req ArchiveApplyRequest
@@ -351,12 +618,31 @@ func mustLoadManifest(t *testing.T, target string, backupID string) archiveManif
 	return manifest
 }
 
+func assertTreeMatchesManifest(t *testing.T, destination string, manifest archiveManifest) {
+	t.Helper()
+	ok, err := treeMatchesManifest(destination, manifest)
+	if err != nil {
+		t.Fatalf("treeMatchesManifest returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("restored tree at %s does not match manifest", destination)
+	}
+}
+
 func manifestEntriesByID(manifest archiveManifest) map[string]archiveManifestEntry {
 	entries := make(map[string]archiveManifestEntry, len(manifest.Entries))
 	for _, entry := range manifest.Entries {
 		entries[manifestEntryID(entry)] = entry
 	}
 	return entries
+}
+
+func manifestSkippedByID(manifest archiveManifest) map[string]string {
+	skipped := make(map[string]string, len(manifest.Skipped))
+	for _, entry := range manifest.Skipped {
+		skipped[entry.Root+"/"+entry.Path] = entry.Reason
+	}
+	return skipped
 }
 
 func firstFileEntry(t *testing.T, manifest archiveManifest) archiveManifestEntry {

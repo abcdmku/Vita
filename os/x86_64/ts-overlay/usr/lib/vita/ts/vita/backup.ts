@@ -68,26 +68,25 @@ type StatusReadResult =
 export async function runBackupArchiveRoundTrip(
   client: Pick<AgentClient, "apply" | "getState">,
 ): Promise<BackupArchiveRoundTripResult> {
-  const create = await applyArchivePlan(client, buildCreatePlan());
+  const create = await applyArchivePlan(client, buildCreatePlan(), "create");
   if (!create.ok) return create;
 
   const created = await readArchiveStatus(client);
-  if (!created.ok) return failedArchive(created.reason);
+  if (!created.ok) return failedArchive(`create_${created.reason}`);
   if (
     created.status.op !== "create" ||
     !created.status.created ||
-    created.status.backupId === undefined ||
-    created.status.files < 1
+    created.status.backupId === undefined
   ) {
     return failedArchive("create_not_measured");
   }
 
   const backupId = created.status.backupId;
-  const verify = await applyArchivePlan(client, buildVerifyPlan(backupId));
+  const verify = await applyArchivePlan(client, buildVerifyPlan(backupId), "verify");
   if (!verify.ok) return verify;
 
   const verified = await readArchiveStatus(client);
-  if (!verified.ok) return failedArchive(verified.reason);
+  if (!verified.ok) return failedArchive(`verify_${verified.reason}`);
   if (
     verified.status.op !== "verify" ||
     !verified.status.verified ||
@@ -99,11 +98,12 @@ export async function runBackupArchiveRoundTrip(
   const restore = await applyArchivePlan(
     client,
     buildRestorePlan(backupId, restoreDestination(backupId)),
+    "restore",
   );
   if (!restore.ok) return restore;
 
   const restored = await readArchiveStatus(client);
-  if (!restored.ok) return failedArchive(restored.reason);
+  if (!restored.ok) return failedArchive(`restore_${restored.reason}`);
   if (
     restored.status.op !== "restore" ||
     !restored.status.verified ||
@@ -130,7 +130,7 @@ export async function rejectTamperedBackupArchive(
     if (result.outcome !== "committed") {
       return {
         ok: true,
-        reason: agentApplyResultReason(result),
+        reason: markerToken(`restore_${agentApplyResultReason(result)}`),
       };
     }
   } catch (cause) {
@@ -143,13 +143,13 @@ export async function rejectTamperedBackupArchive(
     ) {
       return {
         ok: true,
-        reason: markerToken(cause.agentError.code),
+        reason: markerToken(`restore_${agentClientErrorReason(cause)}`),
       };
     }
 
     return {
       ok: false,
-      reason: "transport_failed",
+      reason: "restore_transport_failed",
     };
   }
 
@@ -161,7 +161,7 @@ export async function rejectTamperedBackupArchive(
 
 export function formatBackupArchiveMarker(result: BackupArchiveRoundTripResult): string {
   if (!result.ok) {
-    return "VITA-BACKUP-ERROR: status=FAILSAFE";
+    return `VITA-BACKUP-ERROR: reason=${markerToken(result.reason)} status=FAILSAFE`;
   }
 
   return (
@@ -177,7 +177,7 @@ export function formatBackupArchiveMarker(result: BackupArchiveRoundTripResult):
 
 export function formatBackupArchiveRejectMarker(result: BackupArchiveRejectResult): string {
   if (!result.ok) {
-    return "VITA-BACKUP-ERROR: status=FAILSAFE";
+    return `VITA-BACKUP-ERROR: reason=${markerToken(result.reason)} status=FAILSAFE`;
   }
 
   return `VITA-BACKUP-REJECT: reason=${markerToken(result.reason)} status=OK`;
@@ -226,7 +226,6 @@ function buildRestorePlan(backupId: string, destinationRoot: string): AgentApply
           op: "restore",
           restore: Object.freeze({
             backupId,
-            compareSourceRoots: BACKUP_SOURCE_ROOTS,
             destinationRoot,
             targetPath: BACKUP_TARGET_PATH,
           }),
@@ -257,12 +256,13 @@ function buildTamperedRestorePlan(): AgentApplyPlan {
 async function applyArchivePlan(
   client: Pick<AgentClient, "apply">,
   plan: AgentApplyPlan,
+  step: string,
 ): Promise<BackupArchiveRoundTripResult> {
   try {
     const result = await client.apply(plan);
 
     if (result.outcome !== "committed") {
-      return failedArchive(agentApplyResultReason(result));
+      return failedArchive(scopedArchiveReason(step, agentApplyResultReason(result)));
     }
 
     return {
@@ -278,10 +278,10 @@ async function applyArchivePlan(
       cause.status >= 400 &&
       cause.status <= 499
     ) {
-      return failedArchive(cause.agentError.code);
+      return failedArchive(scopedArchiveReason(step, agentClientErrorReason(cause)));
     }
 
-    return failedArchive("transport_failed");
+    return failedArchive(`${step}_transport_failed`);
   }
 }
 
@@ -361,6 +361,26 @@ function manifestDigestPrefix(backupId: string): string {
 
 function agentApplyResultReason(result: AgentApplyResult): string {
   return markerToken(result.error?.code ?? "transaction_rejected");
+}
+
+function agentClientErrorReason(cause: unknown): string {
+  if (isAgentClientError(cause)) {
+    if (cause.agentError !== undefined) {
+      return markerToken(cause.agentError.code);
+    }
+    return markerToken(cause.code.toLowerCase());
+  }
+
+  return "transport_failed";
+}
+
+function scopedArchiveReason(step: string, reason: string): string {
+  const token = markerToken(reason);
+  if (token === step || token.startsWith(`${step}_`) || token.startsWith(`${step}:`)) {
+    return token;
+  }
+
+  return `${step}_${token}`;
 }
 
 function failedArchive(reason: string): BackupArchiveRoundTripResult {
