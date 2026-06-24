@@ -25,6 +25,7 @@ import (
 	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
+	"github.com/vita/agent/capabilities/storagesnap"
 	nodetime "github.com/vita/agent/capabilities/time"
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
@@ -89,6 +90,7 @@ func main() {
 		pdssync.NewCapability(),
 		services.NewCapability(),
 		storage.NewCapability(),
+		storagesnap.NewCapability(),
 		nodetime.NewCapability(),
 		timesync.NewCapability(),
 		update.NewCapability(),

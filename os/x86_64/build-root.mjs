@@ -11,6 +11,7 @@ export const DEFAULT_DEBIAN_SNAPSHOT = "20260613T000000Z";
 export const DEFAULT_SOURCE_DATE_EPOCH = "1781308800";
 export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "bash",
+  "btrfs-progs",
   "ca-certificates",
   "coreutils",
   "cryptsetup-bin",
@@ -49,6 +50,7 @@ CleanPackageMetadata=yes
 WithNetwork=no
 Packages=
     bash
+    btrfs-progs
     ca-certificates
     coreutils
     dbus
@@ -81,6 +83,7 @@ Output=vita-debian-trixie-x86_64-root
 [Content]
 Packages=
     bash
+    btrfs-progs
     ca-certificates
     coreutils
     cryptsetup-bin

@@ -1,0 +1,13 @@
+# Emits the measured VITA-BTRFS boot marker only after real Btrfs data-plane
+# checks: @data mount, read-only snapshot, quota enforcement, and rollback.
+[Unit]
+Description=Vita Btrfs data-volume measured marker
+After=var.mount vita-agentd.service vita-ts.service
+Wants=var.mount vita-agentd.service vita-ts.service
+ConditionPathExists=/usr/lib/vita/btrfs/enabled
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/lib/vita/btrfs/vita-btrfs-marker.sh
+StandardOutput=journal+console
+StandardError=journal+console
