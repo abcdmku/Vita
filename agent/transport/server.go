@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	exportcap "github.com/vita/agent/capabilities/export"
 	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
@@ -576,6 +578,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleApply(w, r)
 	case "/files":
 		h.handleFiles(w, r)
+	case "/export":
+		h.handleExport(w, r)
 	case "/audit":
 		h.handleAudit(w, r)
 	case "/read":
@@ -655,6 +659,57 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *handler) handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var request exportcap.VerifyRequest
+	if err := decodeBody(w, r, &request, exportcap.MaxManifestBytes); err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	if err := request.Validate(); err != nil {
+		writeExportError(w, err)
+		return
+	}
+
+	manifestBytes, err := h.readExportFile(r.Context(), request.Grant, request.ManifestPath)
+	if err != nil {
+		writeFilesError(w, err)
+		return
+	}
+
+	result, err := exportcap.VerifyBundle(manifestBytes, func(path string) ([]byte, error) {
+		return h.readExportFile(r.Context(), request.Grant, path)
+	})
+	if err != nil {
+		writeExportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) readExportFile(ctx context.Context, grant string, path string) ([]byte, error) {
+	response, err := h.files.Handle(ctx, filecap.Request{
+		Op:    filecap.OperationRead,
+		Grant: grant,
+		Path:  path,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.Data == nil {
+		return nil, &exportcap.BundleError{Code: "integrity_mismatch", Message: "export content read returned no data"}
+	}
+	content, err := base64.StdEncoding.Strict().DecodeString(*response.Data)
+	if err != nil {
+		return nil, &exportcap.BundleError{Code: "integrity_mismatch", Message: "export content read returned malformed data"}
+	}
+	return content, nil
 }
 
 func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {
@@ -1181,6 +1236,15 @@ func writeFilesError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "files_failed", "files request failed")
+}
+
+func writeExportError(w http.ResponseWriter, err error) {
+	var bundleErr *exportcap.BundleError
+	if errors.As(err, &bundleErr) {
+		writeError(w, bundleErr.HTTPStatus(), bundleErr.Code, bundleErr.Message)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "export_failed", "export request failed")
 }
 
 func badRequest(code string, message string) *requestError {

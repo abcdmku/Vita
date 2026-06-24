@@ -66,6 +66,13 @@ import {
   runFullRestoreRoundTrip,
 } from "./vita/full-restore.ts";
 import {
+  formatExportMarker,
+  formatExportRejectMarker,
+  rejectInlineSecretExportMetadata,
+  rejectTamperedExportBundle,
+  runExportRoundTrip,
+} from "./vita/export-client.ts";
+import {
   applyAndReadPdsRepoCreate,
   formatPdsRepoMarker,
   rejectInvalidPdsRepoCreate,
@@ -73,6 +80,7 @@ import {
 import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
+  createDenoUnixSocketExportAgentTransport,
   createDenoUnixSocketFilesAgentTransport,
 } from "./vita/unix-socket-transport.ts";
 import type { AgentApplyPlan, AgentApplyResult, AgentClient, AgentTransport } from "./vita/agent-client.ts";
@@ -145,11 +153,13 @@ const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
 const FILES_MARKER = "VITA-FILES";
 const FILES_REJECT_MARKER = "VITA-FILES-REJECT";
 const FILES_ERROR_MARKER = "VITA-FILES-ERROR";
+const EXPORT_ERROR_MARKER = "VITA-EXPORT-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
 const FILES_RW_GRANT = "runtime-files";
 const FILES_RO_GRANT = "runtime-files-ro";
 const FILES_ROUNDTRIP_PATH = "roundtrip.txt";
+const EXPORT_GRANT = "export";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
@@ -756,6 +766,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatCapsuleLifecycleErrorMarker("agentd_connect_failed"));
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${EXPORT_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -763,6 +774,9 @@ async function emitAgentdConnectMarker(): Promise<void> {
     socketPath: AGENTD_SOCKET_PATH,
   });
   const filesTransport = createDenoUnixSocketFilesAgentTransport({
+    socketPath: AGENTD_SOCKET_PATH,
+  });
+  const exportTransport = createDenoUnixSocketExportAgentTransport({
     socketPath: AGENTD_SOCKET_PATH,
   });
   const state = await readAgentStateSummary(client);
@@ -813,6 +827,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatPdsRepoMarker({ ok: false, reason: "PDS sync-state write failed" }));
   }
   await emitFilesMarkers(filesTransport);
+  await emitExportMarkers(client, filesTransport, exportTransport);
   await emitBackupArchiveMarkers(agentTransport);
   await emitProtectionDashboardMarkers(client);
   await emitFullRestoreMarkers(agentTransport);
@@ -1382,6 +1397,45 @@ async function emitFilesMarkers(agentTransport: AgentTransport): Promise<void> {
   }
 
   await emitFilesRejectMarkers(client);
+}
+
+async function emitExportMarkers(
+  agentClient: AgentClient,
+  filesTransport: AgentTransport,
+  exportTransport: AgentTransport,
+): Promise<void> {
+  const filesClient = createFilesClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: filesTransport,
+  });
+  const roundTrip = await runExportRoundTrip({
+    agentClient,
+    baseUrl: AGENTD_BASE_URL,
+    exportGrant: EXPORT_GRANT,
+    filesClient,
+    sourceGrant: FILES_RW_GRANT,
+    sourcePath: FILES_ROUNDTRIP_PATH,
+    stateTransport: exportTransport,
+    verifyTransport: exportTransport,
+  });
+
+  emit(formatExportMarker(roundTrip));
+
+  const tampered = await rejectTamperedExportBundle({
+    baseUrl: AGENTD_BASE_URL,
+    exportGrant: EXPORT_GRANT,
+    filesClient,
+    verifyTransport: exportTransport,
+  });
+  emit(formatExportRejectMarker(tampered));
+
+  const secret = await rejectInlineSecretExportMetadata({
+    baseUrl: AGENTD_BASE_URL,
+    exportGrant: EXPORT_GRANT,
+    filesClient,
+    verifyTransport: exportTransport,
+  });
+  emit(formatExportRejectMarker(secret));
 }
 
 async function emitFilesRejectMarkers(client: ReturnType<typeof createFilesClient>): Promise<void> {
