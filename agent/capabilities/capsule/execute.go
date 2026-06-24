@@ -148,14 +148,15 @@ type ExecuteReadResponse struct {
 func (ExecuteReadResponse) CapabilityResponse() {}
 
 type ExecuteStatus struct {
-	ID         string                `json:"id"`
-	Unit       string                `json:"unit"`
-	DynamicUID string                `json:"dynamicUid"`
-	Health     string                `json:"health"`
-	Status     string                `json:"status"`
-	Volumes    []ExecuteVolumeStatus `json:"volumes,omitempty"`
-	OCILimits  *OCILimitsStatus      `json:"ociLimits,omitempty"`
-	Network    *ExecuteNetworkStatus `json:"network,omitempty"`
+	ID         string                  `json:"id"`
+	Unit       string                  `json:"unit"`
+	DynamicUID string                  `json:"dynamicUid"`
+	Health     string                  `json:"health"`
+	Status     string                  `json:"status"`
+	Volumes    []ExecuteVolumeStatus   `json:"volumes,omitempty"`
+	OCILimits  *OCILimitsStatus        `json:"ociLimits,omitempty"`
+	NetLimits  *CapsuleNetLimitsStatus `json:"netLimits,omitempty"`
+	Network    *ExecuteNetworkStatus   `json:"network,omitempty"`
 }
 
 type ExecuteNetworkStatus struct {
@@ -314,6 +315,7 @@ func (c *ExecuteCapability) Handle(ctx context.Context, req capabilities.TypedRe
 	last := *c.last
 	last.Volumes = cloneExecuteVolumeStatuses(c.last.Volumes)
 	last.OCILimits = cloneOCILimitsStatus(c.last.OCILimits)
+	last.NetLimits = cloneCapsuleNetLimitsStatus(c.last.NetLimits)
 	last.Network = cloneExecuteNetworkStatus(c.last.Network)
 	if c.supervisor != nil {
 		for _, workload := range c.supervisor.Snapshot() {
@@ -433,6 +435,30 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		}
 	}
 
+	var netLimits *CapsuleNetLimitsStatus
+	if shouldConfirmCapsuleNetLimitEnforcement(manifest) {
+		confirmed, err := confirmCapsuleNetLimits(ctx, manifest, unit, netnsCheck)
+		confirmed = normalizeCapsuleNetLimitsStatus(confirmed)
+		netLimits = &confirmed
+		logCapsuleNetLimitsStatus(manifest.ID, confirmed)
+		if err != nil || confirmed.Status != capsuleNetLimitStatusOK {
+			limitErr := err
+			if limitErr == nil {
+				limitErr = fmt.Errorf("capsule net limits not enforced: egress=%s ingress=%s isolation=%s", confirmed.Egress, confirmed.Ingress, confirmed.Isolation)
+			}
+			if cleanupErr := stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name); cleanupErr != nil {
+				limitErr = errors.Join(limitErr, cleanupErr)
+			}
+			if createdNetns != nil {
+				if cleanupErr := c.netns.Teardown(ctx, *createdNetns); cleanupErr != nil {
+					limitErr = errors.Join(limitErr, cleanupErr)
+				}
+				log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=capsule_net_limits_failed status=FAILSAFE")
+			}
+			return nil, &ExecuteStartError{Code: "capsule_net_limits_failed", Err: limitErr}
+		}
+	}
+
 	var ociLimits *OCILimitsStatus
 	if shouldConfirmOCILimitEnforcement(manifest) {
 		confirmed, err := c.launcher.ConfirmOCILimits(ctx, unit.Name, manifest.ResourceLimits)
@@ -465,6 +491,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		Status:     "OK",
 		Volumes:    volumeStatuses(unit.Volumes),
 		OCILimits:  ociLimits,
+		NetLimits:  netLimits,
 		Network:    executeNetworkStatus(manifest.Network, unit.NetNS, netnsCheck),
 	}
 	c.setLast(executeStatus)
@@ -527,6 +554,7 @@ func (c *ExecuteCapability) setLast(status ExecuteStatus) {
 		Status:     status.Status,
 		Volumes:    cloneExecuteVolumeStatuses(status.Volumes),
 		OCILimits:  cloneOCILimitsStatus(status.OCILimits),
+		NetLimits:  cloneCapsuleNetLimitsStatus(status.NetLimits),
 		Network:    cloneExecuteNetworkStatus(status.Network),
 	}
 }
@@ -1827,11 +1855,16 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 		environment += " VITA_CAPSULE_NETNS_PROOF=" + networkProofPath
 	}
 	if netns != nil && netns.Egress != nil && netns.Egress.ProbeAllowedAddr != "" {
+		environment += " VITA_CAPSULE_HOST_ADDR=" + netns.Egress.HostAddr
 		environment += " VITA_CAPSULE_EGRESS_ALLOWED_ADDR=" + netns.Egress.ProbeAllowedAddr
 		environment += " VITA_CAPSULE_EGRESS_ALLOWED_CIDR=" + netns.Egress.ProbeAllowedCIDR
 		environment += " VITA_CAPSULE_EGRESS_ALLOWED_PORT=" + strconv.Itoa(netns.Egress.ProbeAllowedPort)
 		environment += " VITA_CAPSULE_EGRESS_DENIED_ADDR=" + netns.Egress.ProbeDeniedAddr
 		environment += " VITA_CAPSULE_EGRESS_DENIED_CIDR=" + netns.Egress.ProbeDeniedCIDR
+	}
+	if netns != nil && netns.Egress != nil && netns.Egress.Ingress != nil {
+		environment += " VITA_CAPSULE_INGRESS_GRANTED_PORT=" + strconv.Itoa(netns.Egress.Ingress.ProbePort)
+		environment += " VITA_CAPSULE_INGRESS_DENIED_PORT=" + strconv.Itoa(netns.Egress.Ingress.ProbeDeniedPort)
 	}
 	properties = append(properties,
 		systemdProperty{Name: "Environment", Value: environment},
@@ -1933,7 +1966,7 @@ func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount, networkPr
 	if networkProofPath != "" {
 		argv = append(argv,
 			"--allow-net",
-			"--allow-env=VITA_CAPSULE_NETNS_PROOF,VITA_CAPSULE_EGRESS_ALLOWED_ADDR,VITA_CAPSULE_EGRESS_ALLOWED_CIDR,VITA_CAPSULE_EGRESS_ALLOWED_PORT,VITA_CAPSULE_EGRESS_DENIED_ADDR,VITA_CAPSULE_EGRESS_DENIED_CIDR",
+			"--allow-env=VITA_CAPSULE_NETNS_PROOF,VITA_CAPSULE_EGRESS_ALLOWED_ADDR,VITA_CAPSULE_EGRESS_ALLOWED_CIDR,VITA_CAPSULE_EGRESS_ALLOWED_PORT,VITA_CAPSULE_EGRESS_DENIED_ADDR,VITA_CAPSULE_EGRESS_DENIED_CIDR,VITA_CAPSULE_HOST_ADDR,VITA_CAPSULE_INGRESS_GRANTED_PORT,VITA_CAPSULE_INGRESS_DENIED_PORT",
 		)
 	}
 	readPaths, writePaths := volumePermissionPaths(volumes)

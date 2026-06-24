@@ -59,6 +59,8 @@ type capsuleEgressCheck struct {
 	Drop        string
 	Status      string
 	Ingress     *capsuleIngressCheck
+	Table       string
+	HostTable   string
 }
 
 type capsuleEgressProof struct {
@@ -299,8 +301,10 @@ func (c defaultCapsuleEgressConfigurator) Check(ctx context.Context, netns capsu
 	}
 
 	var ingressCheck *capsuleIngressCheck
+	var hostTable []byte
 	if config.Ingress != nil {
-		hostTable, err := sysdeps.ListNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable)
+		var err error
+		hostTable, err = sysdeps.ListNftTable(capsuleIngressNftFamily, config.Ingress.HostNatTable)
 		if err != nil {
 			return capsuleEgressCheck{}, capsuleNetnsStepError("ingress_dnat_check", err)
 		}
@@ -322,6 +326,8 @@ func (c defaultCapsuleEgressConfigurator) Check(ctx context.Context, netns capsu
 		Drop:        capsuleEgressDropEnforced,
 		Status:      capsuleEgressStatusOK,
 		Ingress:     ingressCheck,
+		Table:       string(table),
+		HostTable:   string(hostTable),
 	}, nil
 }
 

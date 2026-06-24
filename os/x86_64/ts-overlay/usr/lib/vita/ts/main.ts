@@ -85,6 +85,7 @@ const CAPSULE_NET_EGRESS_ERROR_MARKER = "VITA-CAPSULE-NET-EGRESS-ERROR";
 const CAPSULE_NET_INGRESS_MARKER = "VITA-CAPSULE-NET-INGRESS";
 const CAPSULE_NET_INGRESS_REJECT_MARKER = "VITA-CAPSULE-NET-INGRESS-REJECT";
 const CAPSULE_NET_INGRESS_ERROR_MARKER = "VITA-CAPSULE-NET-INGRESS-ERROR";
+const CAPSULE_NET_LIMITS_MARKER = "VITA-CAPSULE-NET-LIMITS";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
@@ -123,6 +124,12 @@ const HOSTILE_OCI_CAPSULE_ENTRY = Object.freeze({
   state: "installed",
   version: "1.0.0",
 }) satisfies CapsuleEntry;
+const HOSTILE_NET_CAPSULE_ENTRY = Object.freeze({
+  id: "local.hostile-net.capsule",
+  integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  state: "installed",
+  version: "1.0.0",
+}) satisfies CapsuleEntry;
 const INVALID_NET_CAPSULE_ENTRY = Object.freeze({
   id: "local.invalid-net.capsule",
   integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
@@ -146,6 +153,7 @@ const OCI_CAPSULE_REGISTRY = Object.freeze([
   OCI_CAPSULE_ENTRY,
   MISSING_OCI_CAPSULE_ENTRY,
   HOSTILE_OCI_CAPSULE_ENTRY,
+  HOSTILE_NET_CAPSULE_ENTRY,
   WASM_CAPSULE_ENTRY,
   MISSING_WASM_CAPSULE_ENTRY,
 ]) satisfies readonly CapsuleEntry[];
@@ -405,6 +413,21 @@ const HOSTILE_OCI_LIMITS_EXECUTE_PLAN = Object.freeze({
   ]),
 }) satisfies AgentApplyPlan;
 
+const HOSTILE_NET_LIMITS_EXECUTE_PLAN = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({
+      capability: CAPSULE_EXECUTE_CAPABILITY,
+      request: Object.freeze({
+        desired: Object.freeze({
+          id: HOSTILE_NET_CAPSULE_ENTRY.id,
+          integrity: HOSTILE_NET_CAPSULE_ENTRY.integrity,
+          version: HOSTILE_NET_CAPSULE_ENTRY.version,
+        }),
+      }),
+    }),
+  ]),
+}) satisfies AgentApplyPlan;
+
 const WASM_CAPSULE_EXECUTE_PLAN = Object.freeze({
   operations: Object.freeze([
     Object.freeze({
@@ -621,6 +644,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
+    emit(formatNetLimitsFailureMarker("agentd_connect_failed"));
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -644,6 +668,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(formatOCILimitsFailureMarker());
+      emit(formatNetLimitsFailureMarker("capsule_preview_failed"));
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     }
@@ -659,6 +684,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
+    emit(formatNetLimitsFailureMarker("state_unreadable"));
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
@@ -700,6 +726,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
+    emit(formatNetLimitsFailureMarker("registry_config_invalid"));
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -720,13 +747,16 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
+    emit(formatNetLimitsFailureMarker("registry_apply_failed"));
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
   emit(formatCommittedCapsuleMarker(ON_DEVICE_CAPSULE_ENTRY, result.applyResult));
-  if (await emitCapsuleFetchMarkers(agentTransport)) {
+  const fetched = await emitCapsuleFetchMarkers(agentTransport);
+  await emitHostileNetLimitsMarker(agentTransport);
+  if (fetched) {
     await emitCapsuleExecuteMarkers(agentTransport);
   } else {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
@@ -1232,6 +1262,40 @@ async function emitHostileOCILimitsMarker(agentTransport: AgentTransport): Promi
   }
 }
 
+async function emitHostileNetLimitsMarker(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const registryResult = await client.apply(OCI_CAPSULE_REGISTRY_PLAN);
+
+    if (registryResult.outcome !== "committed") {
+      emit(formatNetLimitsFailureMarker("registry_apply_failed"));
+      return;
+    }
+
+    const result = await client.apply(HOSTILE_NET_LIMITS_EXECUTE_PLAN);
+
+    if (result.outcome !== "committed") {
+      emit(formatNetLimitsFailureMarker(agentApplyResultReason(result)));
+      return;
+    }
+
+    const state = await readCapsuleNetLimitsState(client);
+
+    if (state.ok) {
+      emit(formatNetLimitsMarker(state.status));
+      return;
+    }
+
+    emit(formatNetLimitsFailureMarker("net_limits_unverified"));
+  } catch (cause) {
+    emit(formatNetLimitsFailureMarker(agentClientErrorReason(cause, "transport_failed")));
+  }
+}
+
 async function emitForcedOCICapsuleExecuteRejectMarker(
   client: Pick<AgentClient, "apply">,
 ): Promise<void> {
@@ -1342,6 +1406,7 @@ interface CapsuleExecuteStatus {
   readonly volumes: readonly CapsuleVolumeStatus[];
   readonly network?: CapsuleNetworkStatus;
   readonly ociLimits?: CapsuleOCILimitsStatus;
+  readonly netLimits?: CapsuleNetLimitsStatus;
 }
 
 interface CapsuleNetworkStatus {
@@ -1373,6 +1438,13 @@ interface CapsuleOCILimitsStatus {
   readonly mem: string;
   readonly tasks: string;
   readonly cpu: string;
+  readonly status: "OK" | "FAIL";
+}
+
+interface CapsuleNetLimitsStatus {
+  readonly egress: string;
+  readonly ingress: string;
+  readonly isolation: string;
   readonly status: "OK" | "FAIL";
 }
 
@@ -1412,6 +1484,7 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
   const volumes = parseCapsuleVolumeStatuses(last["volumes"]);
   const network = parseCapsuleNetworkStatus(last["network"]);
   const ociLimits = parseCapsuleOCILimitsStatus(last["ociLimits"]);
+  const netLimits = parseCapsuleNetLimitsStatus(last["netLimits"]);
 
   if (
     id === undefined ||
@@ -1440,11 +1513,18 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
         network,
       } satisfies CapsuleExecuteStatus;
 
+  const statusWithNetLimits = netLimits === undefined
+    ? statusWithNetwork
+    : {
+        ...statusWithNetwork,
+        netLimits,
+      } satisfies CapsuleExecuteStatus;
+
   if (ociLimits !== undefined) {
     return {
       ok: true,
       status: {
-        ...statusWithNetwork,
+        ...statusWithNetLimits,
         ociLimits,
       },
     };
@@ -1452,7 +1532,7 @@ function parseCapsuleExecuteState(value: unknown): CapsuleExecuteReadResult {
 
   return {
     ok: true,
-    status: statusWithNetwork,
+    status: statusWithNetLimits,
   };
 }
 
@@ -1588,6 +1668,36 @@ function parseCapsuleOCILimitsStatus(value: unknown): CapsuleOCILimitsStatus | u
     mem,
     status,
     tasks,
+  };
+}
+
+function parseCapsuleNetLimitsStatus(value: unknown): CapsuleNetLimitsStatus | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const egress = readStringField(value, "egress");
+  const ingress = readStringField(value, "ingress");
+  const isolation = readStringField(value, "isolation");
+  const status = readStringField(value, "status");
+
+  if (
+    egress === undefined ||
+    ingress === undefined ||
+    isolation === undefined ||
+    (status !== "OK" && status !== "FAIL")
+  ) {
+    return undefined;
+  }
+
+  return {
+    egress,
+    ingress,
+    isolation,
+    status,
   };
 }
 
@@ -1737,6 +1847,51 @@ function formatOCILimitsFailureMarker(): string {
   );
 }
 
+function formatNetLimitsMarker(status: CapsuleExecuteStatus): string {
+  const limits = status.netLimits;
+  if (
+    status.id === HOSTILE_NET_CAPSULE_ENTRY.id &&
+    limits !== undefined &&
+    limits.egress === "enforced" &&
+    limits.ingress === "enforced" &&
+    limits.isolation === "enforced" &&
+    limits.status === "OK" &&
+    capsuleNetworkMeasured(status.network)
+  ) {
+    return `${CAPSULE_NET_LIMITS_MARKER}: egress=enforced ingress=enforced isolation=enforced status=OK`;
+  }
+
+  return formatNetLimitsFailureMarker("net_limits_unverified");
+}
+
+function formatNetLimitsFailureMarker(reason: string): string {
+  return (
+    `${CAPSULE_NET_LIMITS_MARKER}: ` +
+    "egress=NOT_enforced " +
+    "ingress=NOT_enforced " +
+    "isolation=NOT_enforced " +
+    "status=FAILSAFE " +
+    `reason=${markerToken(reason)}`
+  );
+}
+
+function capsuleNetworkMeasured(network: CapsuleNetworkStatus | undefined): boolean {
+  return network !== undefined &&
+    network.netns !== undefined &&
+    network.loopback === "OK" &&
+    network.isolation === "enforced" &&
+    network.egress > 0 &&
+    network.egressAllowed !== undefined &&
+    network.egressDenied !== undefined &&
+    network.egressReach === "OK" &&
+    network.egressDrop === "enforced" &&
+    network.ingress > 0 &&
+    network.ingressPort !== undefined &&
+    network.ingressDeniedPort !== undefined &&
+    network.ingressReach === "OK" &&
+    network.ingressDrop === "enforced";
+}
+
 function capsuleVolumeStatus(status: CapsuleExecuteStatus): CapsuleVolumeStatus | undefined {
   for (let index = 0; index < status.volumes.length; index += 1) {
     const volume = status.volumes[index];
@@ -1876,6 +2031,32 @@ async function readCapsuleNetnsState(
           last.status.network.ingressDeniedPort !== undefined
         )
       )
+    ) {
+      return last;
+    }
+    await delay(250);
+  }
+
+  return last;
+}
+
+async function readCapsuleNetLimitsState(
+  client: Pick<AgentClient, "getState">,
+): Promise<CapsuleExecuteReadResult> {
+  const deadline = Date.now() + 5000;
+  let last: CapsuleExecuteReadResult = { ok: false };
+
+  while (Date.now() <= deadline) {
+    last = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+    if (
+      last.ok &&
+      last.status.id === HOSTILE_NET_CAPSULE_ENTRY.id &&
+      last.status.netLimits !== undefined &&
+      last.status.netLimits.egress === "enforced" &&
+      last.status.netLimits.ingress === "enforced" &&
+      last.status.netLimits.isolation === "enforced" &&
+      last.status.netLimits.status === "OK" &&
+      capsuleNetworkMeasured(last.status.network)
     ) {
       return last;
     }

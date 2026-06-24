@@ -510,6 +510,10 @@ func (m *recordingNetnsManager) Check(ctx context.Context, netns capsuleNetns) (
 				Drop:        capsuleEgressDropEnforced,
 				Status:      capsuleEgressStatusOK,
 				Ingress:     ingressCheck,
+				Table:       string(renderCapsuleEgressRuleset(*netns.Egress)),
+			}
+			if netns.Egress.Ingress != nil {
+				egressCheck.HostTable = string(renderCapsuleIngressHostRuleset(*netns.Egress.Ingress))
 			}
 			return capsuleNetnsCheck{
 				Interfaces: []string{"lo", netns.Egress.CapsuleInterface},

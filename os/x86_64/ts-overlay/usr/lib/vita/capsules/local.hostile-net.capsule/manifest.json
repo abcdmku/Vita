@@ -1,0 +1,51 @@
+{
+  "id": "local.hostile-net.capsule",
+  "version": "1.0.0",
+  "integrity": "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+  "packageClass": "ts-service",
+  "runtime": {
+    "typescript": {
+      "entrypoint": "main.ts"
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  },
+  "network": {
+    "ingress": [
+      {
+        "name": "health",
+        "protocol": "tcp",
+        "port": 8787,
+        "sourceCidr": "127.0.0.1/32",
+        "interface": "lo",
+        "public": false
+      }
+    ],
+    "egress": [
+      {
+        "name": "api",
+        "protocol": "tcp",
+        "destinations": [
+          "203.0.113.10"
+        ],
+        "ports": [
+          443
+        ],
+        "interface": "eth0"
+      }
+    ]
+  },
+  "healthChecks": [
+    {
+      "name": "lifecycle",
+      "type": "lifecycle",
+      "target": "self",
+      "intervalSeconds": 5,
+      "timeoutSeconds": 2
+    }
+  ]
+}
