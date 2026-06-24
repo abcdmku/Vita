@@ -108,11 +108,21 @@ rm -f "$MNT/@data/under.bin" "$MNT/@data/over.bin"
 btrfs qgroup limit none "$MNT/@data"
 
 printf 'B\n' >"$MNT/@data/sentinel.txt"
+data_rootid_before="$(btrfs inspect-internal rootid "$MNT/@data")"
 btrfs subvolume snapshot "$MNT/@snapshots/snap-a" "$MNT/@snapshots/restore" >/dev/null
+# Forward swap: @data now references the restored (A) subvolume — the measured
+# rollback. This mirrors agentd's RENAME_EXCHANGE rollback commit point.
 mv --exchange "$MNT/@data" "$MNT/@snapshots/restore"
 grep -Fxq 'A' "$MNT/@data/sentinel.txt" || fail "rollback did not restore A"
 if grep -Fxq 'B' "$MNT/@data/sentinel.txt" 2>/dev/null; then
   fail "rollback left B in @data"
 fi
+# The original (B) subvolume is now parked under @snapshots/restore — exactly
+# where the marker reconciles from. Swap it back so @data references the same
+# subvolume a live /var would be pinned to (no diverged @data).
+mv --exchange "$MNT/@data" "$MNT/@snapshots/restore"
+data_rootid_after="$(btrfs inspect-internal rootid "$MNT/@data")"
+[ "$data_rootid_before" = "$data_rootid_after" ] || fail "reconcile did not restore @data subvolume identity"
+grep -Fxq 'B' "$MNT/@data/sentinel.txt" || fail "reconcile did not restore live @data"
 
-echo "PASS: Btrfs subvol=@data snapshot=OK rollback=restored quota=enforced"
+echo "PASS: Btrfs subvol=@data snapshot=OK rollback=restored reconcile=consistent quota=enforced"

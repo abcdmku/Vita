@@ -337,14 +337,32 @@ func (c *Capability) SnapshotBeforeApply(ctx context.Context, tag string) (Snaps
 		}
 	}
 	name := c.nextSnapshotName(tag)
+	snapshot, err := c.createReadOnly(ctx, name)
+	if err != nil {
+		return SnapshotInfo{}, err
+	}
+	return cloneSnapshotInfo(snapshot), nil
+}
+
+// createReadOnly takes a read-only snapshot and enforces the read-only
+// invariant transactionally: if the backend returns a snapshot that is not
+// read-only, the residue is deleted before the error is returned so a failed
+// create leaves NOTHING behind (single-commit, fail-closed). The backend's own
+// CreateReadOnlySnapshot is also transactional (see btrfs_linux.go); this is
+// defense-in-depth that holds for ANY backend and is what the pure suite proves.
+func (c *Capability) createReadOnly(ctx context.Context, name string) (SnapshotInfo, error) {
 	snapshot, err := c.system.CreateReadOnlySnapshot(ctx, name)
 	if err != nil {
 		return SnapshotInfo{}, err
 	}
 	if !snapshot.ReadOnly {
-		return SnapshotInfo{}, &InvalidRequestError{Reason: "snapshot-before-apply target is not read-only"}
+		err := &InvalidRequestError{Reason: "created snapshot is not read-only"}
+		if delErr := c.system.DeleteSnapshot(ctx, snapshot.Name); delErr != nil {
+			return SnapshotInfo{}, errors.Join(err, fmt.Errorf("undo non-read-only snapshot %q: %w", snapshot.Name, delErr))
+		}
+		return SnapshotInfo{}, err
 	}
-	return cloneSnapshotInfo(snapshot), nil
+	return snapshot, nil
 }
 
 func (c *Capability) list(ctx context.Context) (ListResponse, error) {
@@ -357,12 +375,9 @@ func (c *Capability) list(ctx context.Context) (ListResponse, error) {
 
 func (c *Capability) applyCreate(ctx context.Context, tag string) (transaction.Undo, error) {
 	name := c.nextSnapshotName(tag)
-	snapshot, err := c.system.CreateReadOnlySnapshot(ctx, name)
+	snapshot, err := c.createReadOnly(ctx, name)
 	if err != nil {
 		return nil, err
-	}
-	if !snapshot.ReadOnly {
-		return nil, &InvalidRequestError{Reason: "created snapshot is not read-only"}
 	}
 	return deleteSnapshotUndo{system: c.system, name: snapshot.Name}, nil
 }
@@ -376,13 +391,14 @@ func (c *Capability) applyRollback(ctx context.Context, snapshotName string) (tr
 		return nil, &InvalidRequestError{Reason: "rollback snapshot must be read-only"}
 	}
 
+	// Snapshot the rollback TARGET first so the rollback is itself reversible. The
+	// pre-rollback target is a durable, named safety snapshot (the prior @data made
+	// recoverable) — it is intentionally retained even if a later step fails, so it
+	// is created via createReadOnly (which only enforces the read-only invariant
+	// and reclaims a non-read-only result, never a successful one).
 	rollbackTargetName := c.nextSnapshotName("pre-rollback")
-	rollbackTarget, err := c.system.CreateReadOnlySnapshot(ctx, rollbackTargetName)
-	if err != nil {
+	if _, err := c.createReadOnly(ctx, rollbackTargetName); err != nil {
 		return nil, err
-	}
-	if !rollbackTarget.ReadOnly {
-		return nil, &InvalidRequestError{Reason: "rollback target snapshot is not read-only"}
 	}
 
 	restoreName := c.nextSnapshotName("rollback-restore")
@@ -391,6 +407,8 @@ func (c *Capability) applyRollback(ctx context.Context, snapshotName string) (tr
 	}
 
 	undo := rollbackUndo{system: c.system, restoreName: restoreName}
+	// SwapDataWithSnapshot is the single commit point. No fallible work runs after
+	// it returns nil; a failure here leaves live @data byte-unchanged.
 	if err := c.system.SwapDataWithSnapshot(ctx, restoreName); err != nil {
 		return nil, err
 	}

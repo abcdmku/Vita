@@ -1,8 +1,24 @@
 #!/bin/bash
-# Measured VITA-BTRFS marker. Rollback is tested through agentd's
-# storage.snapshot apply path against the top-level @data subvolume path; a live
-# /var mount may need a reboot/remount to observe the swapped subvolume, but the
-# on-disk @data rollback target is measured here.
+# Measured VITA-BTRFS marker.
+#
+# Rollback is a real, byte-measured ROUND-TRIP driven through agentd's
+# storage.snapshot apply path against the top-level @data subvolume entry:
+#   write sentinel A (node.config prior) -> agentd snapshots @data BEFORE the
+#   apply (the keystone read-only rollback target) -> node.config apply mutates
+#   @data (sentinel B) -> agentd rollback swaps @data to the keystone (A restored,
+#   B gone) -> we MEASURE that the restored @data byte-matches the prior state.
+#
+# The booted /var is mounted on the @data subvolume by inode, not by name, so a
+# bare RENAME_EXCHANGE of the top-level @data entry would leave the live /var
+# pinned to the post-apply subvolume while @data points at the rolled-back one —
+# a DIVERGED /var. To avoid that, after measuring the rollback we RECONCILE: the
+# top-level @data entry is swapped back to the very subvolume /var is pinned to
+# (so @data and /var reference the SAME subvolume again) and the node.config
+# bytes are restored to their pre-marker value. All swaps act on the top-level
+# btrfs mount at $TOP — the live /var mount handle is NEVER unmounted or
+# remounted, so the boot is left consistent for every later unit. (A production
+# rollback that must persist takes effect on the next boot, when /var re-resolves
+# @data; the marker proves the mechanism without tearing the running /var.)
 set -euo pipefail
 
 TOP="${VITA_BTRFS_TOP:-/run/vita-btrfs-marker}"
@@ -219,6 +235,12 @@ done
 ro="$(btrfs property get -ts "$TOP/@snapshots/$preapply_snap" ro 2>/dev/null)" || fail_marker "preapply_snapshot_ro_probe" "$?"
 printf '%s\n' "$ro" | grep -Fq "ro=true" || fail_marker "preapply_snapshot_not_readonly" 1
 
+# Record the subvolume /var is pinned to BEFORE the rollback swap. /var is mounted
+# on the @data subvolume by inode; this id lets us prove afterwards that @data was
+# reconciled back to the very subvolume /var still references (no diverged /var).
+var_subvol_id="$(btrfs inspect-internal rootid /var 2>/dev/null)" || fail_marker "var_rootid_probe" "$?"
+[ -n "$var_subvol_id" ] || fail_marker "var_rootid_empty" 1
+
 rollback_payload='{"operations":[{"capability":"storage.snapshot","request":{"desired":{"op":"rollback","name":"'"$preapply_snap"'"}}}]}'
 rollback_output="$WORKDIR/rollback-apply.response.json"
 set +e
@@ -228,11 +250,51 @@ set -e
 [ "$rc" -eq 0 ] || fail_marker "agent_apply_rollback" "$rc"
 grep -Fq '"outcome":"committed"' "$rollback_output" || fail_marker "agent_rollback_not_committed" 1
 
+# MEASURE the rollback restored the prior bytes on the top-level @data entry (the
+# subvolume @data now points at after agentd's RENAME_EXCHANGE). This is the real
+# rollback round-trip: A was snapshotted, B was applied, the swap restored A.
 restored_node="$TOP/@data/lib/vita-agent/node-config.env"
 if [ "$prior_exists" -eq 1 ]; then
   cmp -s "$prior_node" "$restored_node" || fail_marker "rollback_mismatch" 1
 else
   [ ! -e "$restored_node" ] || fail_marker "rollback_left_node_config" 1
+fi
+
+# RECONCILE so the boot is left consistent (no diverged /var). After agentd's
+# swap, the top-level @data entry points at the restored (pre-apply) subvolume,
+# but /var is still pinned to the post-apply subvolume — which agentd's swap moved
+# under @snapshots/<...-rollback-restore>. Swap @data back to that subvolume so
+# @data and /var reference the SAME subvolume again. This acts only on the
+# top-level mount at $TOP; the live /var mount is never unmounted/remounted.
+restore_snap=""
+for candidate in "$TOP"/@snapshots/vita-*-rollback-restore; do
+  [ -d "$candidate" ] || continue
+  [ "$candidate" -nt "$WORKDIR/preapply-start.stamp" ] || continue
+  restore_snap="$(basename -- "$candidate")"
+done
+[ -n "$restore_snap" ] || fail_marker "reconcile_restore_snapshot_missing" 1
+run_step "reconcile_swap_back" mv --exchange "$TOP/@data" "$TOP/@snapshots/$restore_snap"
+
+# Prove the reconciliation: the top-level @data entry must now reference the exact
+# subvolume /var is pinned to (same rootid) — i.e. /var and @data are no longer
+# diverged. A unique sentinel written through the live /var mount must therefore
+# appear under $TOP/@data, and disappear from both when removed.
+data_subvol_id="$(btrfs inspect-internal rootid "$TOP/@data" 2>/dev/null)" || fail_marker "data_rootid_probe" "$?"
+[ "$data_subvol_id" = "$var_subvol_id" ] || fail_marker "var_data_diverged" 1
+sentinel="$WORKDIR/.reconcile-sentinel-$stamp"
+recon_token="reconciled-$stamp"
+run_step "reconcile_sentinel_write" sh -c 'printf "%s\n" "$2" > "$1"' _ "$sentinel" "$recon_token"
+sentinel_in_data="$TOP/@data/lib/vita/btrfs-marker/$(basename -- "$sentinel")"
+grep -Fxq "$recon_token" "$sentinel_in_data" || fail_marker "var_data_not_same_subvolume" 1
+rm -f "$sentinel"
+[ ! -e "$sentinel_in_data" ] || fail_marker "var_data_sentinel_residue" 1
+
+# Restore node.config to its true pre-marker bytes so the live system is left
+# exactly as the marker found it (the marker's node.config mutation is undone).
+if [ "$prior_exists" -eq 1 ]; then
+  run_step "node_config_restore" cp "$prior_node" "$NODE_CONFIG"
+else
+  rm -f "$NODE_CONFIG"
 fi
 
 echo "VITA-BTRFS: subvol=@data snapshot=OK rollback=restored quota=enforced status=OK"

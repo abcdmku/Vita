@@ -80,7 +80,34 @@ func (b *btrfsCLI) CreateReadOnlySnapshot(ctx context.Context, name string) (Sna
 	if _, err := b.run(ctx, b.btrfs, "subvolume", "snapshot", "-r", b.dataPath(), dest); err != nil {
 		return SnapshotInfo{}, fmt.Errorf("create read-only btrfs snapshot %q: %w", name, err)
 	}
-	return b.SnapshotInfo(ctx, name)
+	// Transactional create (R3 single-commit): the snapshot subvolume now exists
+	// on disk. Any post-create probe failure (SnapshotInfo, read-only verify)
+	// must undo it so an error NEVER leaves residue behind. Only a fully
+	// successful, read-only create returns success.
+	info, err := b.SnapshotInfo(ctx, name)
+	if err != nil {
+		return SnapshotInfo{}, b.undoCreate(ctx, name, fmt.Errorf("inspect read-only snapshot %q: %w", name, err))
+	}
+	if !info.ReadOnly {
+		return SnapshotInfo{}, b.undoCreate(ctx, name, &InvalidRequestError{Reason: "created snapshot is not read-only"})
+	}
+	return info, nil
+}
+
+// undoCreate deletes a just-created snapshot subvolume after a post-create
+// failure so the create is all-or-nothing. The original cause is preserved; a
+// cleanup (delete) failure is joined so neither error is lost (the leak is
+// surfaced rather than swallowed). A best-effort context is used for the delete
+// so a cancelled/timed-out parent context cannot block the undo.
+func (b *btrfsCLI) undoCreate(ctx context.Context, name string, cause error) error {
+	cleanupCtx := ctx
+	if ctx.Err() != nil {
+		cleanupCtx = context.Background()
+	}
+	if delErr := b.DeleteSnapshot(cleanupCtx, name); delErr != nil {
+		return errors.Join(cause, fmt.Errorf("undo orphaned snapshot %q: %w", name, delErr))
+	}
+	return cause
 }
 
 func (b *btrfsCLI) CreateWritableSnapshotFrom(ctx context.Context, sourceName string, targetName string) (SnapshotInfo, error) {
@@ -103,7 +130,15 @@ func (b *btrfsCLI) CreateWritableSnapshotFrom(ctx context.Context, sourceName st
 	if _, err := b.run(ctx, b.btrfs, "subvolume", "snapshot", source, target); err != nil {
 		return SnapshotInfo{}, fmt.Errorf("create writable btrfs snapshot %q from %q: %w", targetName, sourceName, err)
 	}
-	return b.SnapshotInfo(ctx, targetName)
+	// Transactional create (R3 single-commit): the writable restore subvolume now
+	// exists. A post-create inspect failure must undo it so a failed rollback
+	// preparation leaves NO residue (the swap has not happened yet, so this is
+	// still fully reversible).
+	info, err := b.SnapshotInfo(ctx, targetName)
+	if err != nil {
+		return SnapshotInfo{}, b.undoCreate(ctx, targetName, fmt.Errorf("inspect writable snapshot %q: %w", targetName, err))
+	}
+	return info, nil
 }
 
 func (b *btrfsCLI) DeleteSnapshot(ctx context.Context, name string) error {

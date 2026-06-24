@@ -331,6 +331,58 @@ func TestCreateAndQuotaApplyUndo(t *testing.T) {
 	}
 }
 
+func TestCreateIsTransactionalOnPostCreateProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	// applyCreate: a non-read-only created snapshot is reclaimed (no residue) and
+	// the error is returned. A no-op/always-ok impl that left the snapshot behind
+	// fails this assertion.
+	t.Run("applyCreate", func(t *testing.T) {
+		system := newFakeBtrfs("live")
+		system.forceNonReadOnlyCreate = true
+		capability := newCapability(system, fixedNow)
+
+		undo, err := capability.Apply(ctx, ApplyRequest{Desired: &Desired{Op: OpCreate, Tag: stringPtr("manual")}})
+		if undo != nil {
+			t.Fatalf("Apply returned undo %v, want nil", undo)
+		}
+		var invalid *InvalidRequestError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("Apply error = %T %v, want InvalidRequestError", err, err)
+		}
+		name := "vita-20260624T120000Z-000001-manual"
+		if _, ok := system.snapshots[name]; ok {
+			t.Fatalf("non-read-only create left residue snapshot %q", name)
+		}
+		if len(system.deleteCalls) != 1 || system.deleteCalls[0] != name {
+			t.Fatalf("deleteCalls = %v, want exactly [%q]", system.deleteCalls, name)
+		}
+	})
+
+	// SnapshotBeforeApply (the keystone): the pre-apply rollback target must also
+	// be transactional — a non-read-only result is reclaimed so a failed pre-apply
+	// snapshot blocks the apply WITHOUT leaving a stray snapshot.
+	t.Run("snapshotBeforeApply", func(t *testing.T) {
+		system := newFakeBtrfs("before")
+		system.forceNonReadOnlyCreate = true
+		capability := newCapability(system, fixedNow)
+
+		info, err := capability.SnapshotBeforeApply(ctx, "apply")
+		if err == nil {
+			t.Fatal("SnapshotBeforeApply returned nil error for non-read-only target")
+		}
+		if info != (SnapshotInfo{}) {
+			t.Fatalf("SnapshotBeforeApply returned %#v, want zero value", info)
+		}
+		if len(system.snapshots) != 0 {
+			t.Fatalf("non-read-only pre-apply snapshot left residue: %#v", system.snapshots)
+		}
+		if len(system.deleteCalls) != 1 {
+			t.Fatalf("deleteCalls = %v, want exactly one reclaim", system.deleteCalls)
+		}
+	})
+}
+
 func TestCapabilityRegisteredUnderClosedName(t *testing.T) {
 	capability := newCapability(newFakeBtrfs("live"), fixedNow)
 	registry, err := capabilities.NewRegistry(capability)
@@ -480,6 +532,13 @@ type fakeBtrfs struct {
 	failCreateWritable bool
 	swapCalls          int
 
+	// forceNonReadOnlyCreate makes the next CreateReadOnlySnapshot land a snapshot
+	// that is NOT read-only (modelling a backend that created the subvolume but a
+	// post-create read-only probe came back false). The capability must reclaim it
+	// so a failed create leaves no residue.
+	forceNonReadOnlyCreate bool
+	deleteCalls            []string
+
 	quota           QuotaLimit
 	verifiedBytes   uint64
 	failVerifyQuota bool
@@ -501,7 +560,12 @@ func (f *fakeBtrfs) CreateReadOnlySnapshot(_ context.Context, name string) (Snap
 		return SnapshotInfo{}, &InvalidRequestError{Reason: "snapshot already exists"}
 	}
 	f.nextID++
-	info := snapshotInfo(name, f.nextID, true)
+	readOnly := true
+	if f.forceNonReadOnlyCreate {
+		f.forceNonReadOnlyCreate = false
+		readOnly = false
+	}
+	info := snapshotInfo(name, f.nextID, readOnly)
 	f.snapshots[name] = fakeSnapshot{info: info, content: f.live}
 	return info, nil
 }
@@ -525,6 +589,7 @@ func (f *fakeBtrfs) CreateWritableSnapshotFrom(_ context.Context, sourceName str
 }
 
 func (f *fakeBtrfs) DeleteSnapshot(_ context.Context, name string) error {
+	f.deleteCalls = append(f.deleteCalls, name)
 	if _, ok := f.snapshots[name]; !ok {
 		return os.ErrNotExist
 	}
