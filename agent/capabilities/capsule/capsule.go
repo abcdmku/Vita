@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	capsulestorage "github.com/vita/agent/storage/capsules"
 	"github.com/vita/agent/transaction"
@@ -675,49 +676,16 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure capsule registry state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".installed-capsule-registry-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create capsule registry temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		registryFileMode,
+		".installed-capsule-registry-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write capsule registry: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(registryFileMode); err != nil {
-		return fmt.Errorf("secure capsule registry temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write capsule registry temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write capsule registry temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync capsule registry temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close capsule registry temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace capsule registry: %w", err)
-	}
-	cleanupTemp = false
 	return nil
 }
 

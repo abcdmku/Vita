@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/vita/agent/internal/atomicfile"
 )
 
 const (
@@ -60,46 +61,16 @@ func (fs linuxConfigFileSystem) AtomicWrite(ctx context.Context, content []byte)
 		return fmt.Errorf("secure node config state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".node-config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create node config temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		configFileMode,
+		".node-config-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write node config: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			_ = tmp.Close()
-		}
-		_ = os.Remove(tmpName)
-	}()
-
-	if err := tmp.Chmod(configFileMode); err != nil {
-		return fmt.Errorf("secure node config temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write node config temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write node config temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync node config temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close node config temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Rename is the single commit point: callers only receive an undo after nil error.
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace node config: %w", err)
-	}
-
 	return nil
 }
 

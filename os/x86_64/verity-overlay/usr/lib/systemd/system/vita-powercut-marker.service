@@ -1,0 +1,12 @@
+# Emits the measured VITA-POWERCUT marker only after persistent /var state
+# survives a prior boot and the agentd durable-write state parses canonically.
+[Unit]
+Description=Vita power-cut persistence measured marker
+After=var.mount vita-agentd.service
+Wants=var.mount vita-agentd.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/lib/vita/powercut/vita-powercut-marker.sh
+StandardOutput=journal+console
+StandardError=journal+console

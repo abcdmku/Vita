@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/internal/jsonsafe"
 	"github.com/vita/agent/transaction"
 )
@@ -243,48 +243,16 @@ func (fs defaultFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 		return fmt.Errorf("secure network policy state root: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(fs.stateRoot, ".network-policy-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create network policy temp file: %w", err)
+	if err := atomicfile.WriteWithPatternAndBeforeCommit(
+		atomicfile.OSFileSystem{},
+		fs.path,
+		content,
+		policyFileMode,
+		".network-policy-*.tmp",
+		ctx.Err,
+	); err != nil {
+		return fmt.Errorf("write network policy: %w", err)
 	}
-	tmpName := tmp.Name()
-	closed := false
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			if !closed {
-				_ = tmp.Close()
-			}
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(policyFileMode); err != nil {
-		return fmt.Errorf("secure network policy temp file: %w", err)
-	}
-	written, err := tmp.Write(content)
-	if err != nil {
-		return fmt.Errorf("write network policy temp file: %w", err)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write network policy temp file: %w", io.ErrShortWrite)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync network policy temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return fmt.Errorf("close network policy temp file: %w", err)
-	}
-	closed = true
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, fs.path); err != nil {
-		return fmt.Errorf("replace network policy: %w", err)
-	}
-	cleanupTemp = false
 	return nil
 }
 

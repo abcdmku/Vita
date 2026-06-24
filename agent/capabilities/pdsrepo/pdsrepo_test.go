@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/internal/atomicfile"
 	"github.com/vita/agent/transaction"
 )
 
@@ -419,6 +421,97 @@ func TestDefaultAtomicWriteDoesNotFollowPreplantedPredictableSymlink(t *testing.
 	}
 }
 
+func TestDefaultAtomicWriteSyncsParentDirAfterRename(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	atomicFS := newTrackingAtomicFS()
+	fs := defaultFileSystem{
+		stateRoot: dir,
+		path:      filepath.Join(dir, defaultRepoStateFilename),
+		atomicFS:  atomicFS,
+	}
+
+	if err := fs.AtomicWrite(ctx, renderRepoState(repoState(42, []RepoRecord{postRecord()}))); err != nil {
+		t.Fatalf("AtomicWrite returned error: %v", err)
+	}
+
+	if len(atomicFS.createdTmp) != 1 {
+		t.Fatalf("created temp count = %d, want 1", len(atomicFS.createdTmp))
+	}
+	tmpName := atomicFS.createdTmp[0]
+	wantOrder := []string{
+		"create-temp:" + dir + ":.pds-repo-*.tmp",
+		"chmod:" + tmpName,
+		"write:" + tmpName,
+		"sync-file:" + tmpName,
+		"close-file:" + tmpName,
+		"rename:" + tmpName + "->" + fs.path,
+		"sync-dir:" + dir,
+	}
+	if !reflect.DeepEqual(atomicFS.order, wantOrder) {
+		t.Fatalf("atomic write order = %#v, want %#v", atomicFS.order, wantOrder)
+	}
+	if got := atomicFS.modes[tmpName]; got != repoStateFileMode {
+		t.Fatalf("temp mode = %#o, want %#o", got, repoStateFileMode)
+	}
+}
+
+func TestDefaultAtomicWriteContextCancellationAbortsBeforeRename(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	dir := t.TempDir()
+	prior := renderRepoState(repoState(42, []RepoRecord{postRecord()}))
+	path := filepath.Join(dir, defaultRepoStateFilename)
+	if err := os.WriteFile(path, prior, repoStateFileMode); err != nil {
+		t.Fatalf("write prior state: %v", err)
+	}
+	atomicFS := newTrackingAtomicFS()
+	atomicFS.closeHook = cancel
+	fs := defaultFileSystem{
+		stateRoot: dir,
+		path:      path,
+		atomicFS:  atomicFS,
+	}
+
+	err := fs.AtomicWrite(ctx, renderRepoState(repoState(43, []RepoRecord{profileRecord()})))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AtomicWrite error = %v, want context.Canceled", err)
+	}
+	if atomicFS.sawPrefix("rename:") {
+		t.Fatalf("atomic write order = %#v, want cancellation before rename", atomicFS.order)
+	}
+	if got := mustReadFile(t, path); !reflect.DeepEqual(got, prior) {
+		t.Fatalf("live state after canceled AtomicWrite = %q, want unchanged %q", got, prior)
+	}
+}
+
+func TestHandleRejectsTornRepoStateFailClosed(t *testing.T) {
+	ctx := context.Background()
+	prior := renderRepoState(repoState(42, []RepoRecord{postRecord()}))
+	torn := prior[:len(prior)/2]
+	fs := newMemoryFileSystem(torn)
+	capability := newCapability(fs)
+
+	response, err := capability.Handle(ctx, ReadRequest{})
+	if err == nil {
+		t.Fatalf("Handle returned response %#v, want fail-closed parse error", response)
+	}
+	var parseErr *ParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("Handle error = %T %v, want ParseError", err, err)
+	}
+
+	undo, err := capability.Apply(ctx, applyState(desiredState(43, []RepoRecord{profileRecord()})))
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil on torn prior state", undo)
+	}
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("Apply error = %T %v, want ParseError", err, err)
+	}
+	if got := fs.mustLiveBytes(t); !reflect.DeepEqual(got, torn) {
+		t.Fatalf("torn live state changed: got %q, want %q", got, torn)
+	}
+}
+
 func TestTransactionApplyRollsBackRepoWhenLaterOperationFails(t *testing.T) {
 	ctx := context.Background()
 	prior := renderRepoState(repoState(42, []RepoRecord{postRecord()}))
@@ -678,4 +771,94 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatalf("ReadFile(%q) returned error: %v", path, err)
 	}
 	return content
+}
+
+var _ atomicfile.FileSystem = (*trackingAtomicFS)(nil)
+
+type trackingAtomicFS struct {
+	files      map[string][]byte
+	modes      map[string]fs.FileMode
+	order      []string
+	createdTmp []string
+	closeHook  func()
+}
+
+func newTrackingAtomicFS() *trackingAtomicFS {
+	return &trackingAtomicFS{
+		files: map[string][]byte{},
+		modes: map[string]fs.FileMode{},
+	}
+}
+
+func (fsys *trackingAtomicFS) CreateTemp(dir, pattern string) (atomicfile.TempFile, error) {
+	fsys.order = append(fsys.order, "create-temp:"+dir+":"+pattern)
+	name := filepath.Join(dir, strings.Replace(pattern, "*", "1", 1))
+	if _, exists := fsys.files[name]; exists {
+		return nil, &fs.PathError{Op: "createtemp", Path: name, Err: fs.ErrExist}
+	}
+	fsys.files[name] = []byte{}
+	fsys.createdTmp = append(fsys.createdTmp, name)
+	return &trackingTempFile{fsys: fsys, name: name}, nil
+}
+
+func (fsys *trackingAtomicFS) Rename(oldPath, newPath string) error {
+	fsys.order = append(fsys.order, "rename:"+oldPath+"->"+newPath)
+	data, ok := fsys.files[oldPath]
+	if !ok {
+		return &fs.PathError{Op: "rename", Path: oldPath, Err: fs.ErrNotExist}
+	}
+	fsys.files[newPath] = cloneBytes(data)
+	delete(fsys.files, oldPath)
+	return nil
+}
+
+func (fsys *trackingAtomicFS) Remove(name string) error {
+	delete(fsys.files, name)
+	return nil
+}
+
+func (fsys *trackingAtomicFS) SyncDir(dir string) error {
+	fsys.order = append(fsys.order, "sync-dir:"+dir)
+	return nil
+}
+
+func (fsys *trackingAtomicFS) sawPrefix(prefix string) bool {
+	for _, op := range fsys.order {
+		if strings.HasPrefix(op, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+type trackingTempFile struct {
+	fsys *trackingAtomicFS
+	name string
+}
+
+func (f *trackingTempFile) Name() string { return f.name }
+
+func (f *trackingTempFile) Chmod(mode fs.FileMode) error {
+	f.fsys.order = append(f.fsys.order, "chmod:"+f.name)
+	f.fsys.modes[f.name] = mode
+	return nil
+}
+
+func (f *trackingTempFile) Write(data []byte) (int, error) {
+	f.fsys.order = append(f.fsys.order, "write:"+f.name)
+	f.fsys.files[f.name] = append(f.fsys.files[f.name], data...)
+	return len(data), nil
+}
+
+func (f *trackingTempFile) Sync() error {
+	f.fsys.order = append(f.fsys.order, "sync-file:"+f.name)
+	return nil
+}
+
+func (f *trackingTempFile) Close() error {
+	f.fsys.order = append(f.fsys.order, "close-file:"+f.name)
+	if f.fsys.closeHook != nil {
+		f.fsys.closeHook()
+	}
+	return nil
 }

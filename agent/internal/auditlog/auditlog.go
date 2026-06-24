@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/vita/agent/internal/atomicfile"
 )
 
 type ActorKind string
@@ -68,13 +70,7 @@ type Event struct {
 
 // TempFile is the subset of *os.File the store needs to write a fresh,
 // exclusively-created temp file before committing it with a rename.
-type TempFile interface {
-	Name() string
-	Chmod(mode fs.FileMode) error
-	Write(data []byte) (int, error)
-	Sync() error
-	Close() error
-}
+type TempFile = atomicfile.TempFile
 
 // FileSystem abstracts the filesystem operations the store performs. The
 // atomic-write contract requires a fresh, exclusively-created temp file
@@ -87,6 +83,7 @@ type FileSystem interface {
 	CreateTemp(dir, pattern string) (TempFile, error)
 	Rename(oldPath, newPath string) error
 	Remove(name string) error
+	SyncDir(dir string) error
 }
 
 type OSFileSystem struct{}
@@ -109,6 +106,10 @@ func (OSFileSystem) Rename(oldPath, newPath string) error {
 
 func (OSFileSystem) Remove(name string) error {
 	return os.Remove(name)
+}
+
+func (OSFileSystem) SyncDir(dir string) error {
+	return atomicfile.OSFileSystem{}.SyncDir(dir)
 }
 
 type Store struct {
@@ -281,11 +282,10 @@ func (s *Store) load() ([]Event, error) {
 // persist writes the canonical log atomically. It uses a fresh,
 // exclusively-created temp file (O_CREATE|O_EXCL via CreateTemp) in the log's
 // own directory so a pre-planted symlink/hardlink at a predictable path can
-// never be followed or clobbered. The Rename is the single commit point: no
-// fallible work runs after it, and on any earlier error the temp is removed
-// (best-effort) and the live log is left UNCHANGED. Guarantees exactly two
-// outcomes: success with the new log committed, or error with the live log
-// byte-identical to before.
+// never be followed or clobbered. The Rename is the single commit point, and
+// the parent directory is fsynced afterward so the commit survives power loss.
+// On any pre-commit error the temp is removed (best-effort) and the live log is
+// left byte-identical to before.
 func (s *Store) persist(events []Event) error {
 	data, err := canonicalBytes(events)
 	if err != nil {
@@ -297,48 +297,7 @@ func (s *Store) persist(events []Event) error {
 		return err
 	}
 
-	tmp, err := s.fs.CreateTemp(targetDir, ".auditlog-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	closed := false
-	committed := false
-	defer func() {
-		if !closed {
-			_ = tmp.Close()
-		}
-		if !committed {
-			_ = s.fs.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		return err
-	}
-	written, err := tmp.Write(data)
-	if err != nil {
-		return err
-	}
-	if written != len(data) {
-		return io.ErrShortWrite
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		closed = true
-		return err
-	}
-	closed = true
-
-	// Rename is the single commit point: no fallible work may run after it.
-	if err := s.fs.Rename(tmpName, s.path); err != nil {
-		return err
-	}
-	committed = true
-
-	return nil
+	return atomicfile.WriteWithPattern(s.fs, s.path, data, 0o600, ".auditlog-*.tmp")
 }
 
 type wireActor struct {

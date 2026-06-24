@@ -1826,6 +1826,8 @@ func (m *auditMemoryFS) Remove(name string) error {
 	return nil
 }
 
+func (m *auditMemoryFS) SyncDir(string) error { return nil }
+
 type auditMemTempFile struct {
 	fsys *auditMemoryFS
 	name string

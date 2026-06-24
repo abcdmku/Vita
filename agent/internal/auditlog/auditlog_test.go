@@ -234,6 +234,30 @@ func TestAtomicRenameFailureLeavesLiveLogUnchanged(t *testing.T) {
 	}
 }
 
+func TestAppendSyncsParentDirAfterRename(t *testing.T) {
+	fileSystem := newMemoryFS()
+	store := mustStore(t, fileSystem, 10)
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("initial Append returned error: %v", err)
+	}
+	fileSystem.resetOps()
+
+	if _, err := store.Append(validEvent()); err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	if len(fileSystem.ops) != 2 {
+		t.Fatalf("filesystem ops = %#v, want rename then sync-dir", fileSystem.ops)
+	}
+	if !strings.HasPrefix(fileSystem.ops[0], "rename:") {
+		t.Fatalf("first filesystem op = %q, want rename", fileSystem.ops[0])
+	}
+	if fileSystem.ops[1] != "sync-dir:/audit" {
+		t.Fatalf("second filesystem op = %q, want sync-dir:/audit", fileSystem.ops[1])
+	}
+}
+
 // TestAppendIgnoresPrePlantedPredictableTemp proves the random-temp +
 // O_EXCL atomic-write pattern is immune to a TOCTOU/symlink attack at the OLD
 // predictable temp path. An attacker who pre-plants an entry at path+".tmp"
@@ -491,7 +515,9 @@ type memoryFS struct {
 	createErr  error
 	renameErr  error
 	syncErr    error
+	syncDirErr error
 	createdTmp []string
+	ops        []string
 }
 
 func newMemoryFS() *memoryFS {
@@ -557,6 +583,12 @@ func (m *memoryFS) failNextSync(err error) {
 	m.syncErr = err
 }
 
+func (m *memoryFS) failNextSyncDir(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncDirErr = err
+}
+
 func (m *memoryFS) failNextMkdir(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -607,6 +639,7 @@ func (f *memTempFile) Close() error { return nil }
 func (m *memoryFS) Rename(oldPath, newPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.ops = append(m.ops, "rename:"+oldPath+"->"+newPath)
 
 	if m.renameErr != nil {
 		err := m.renameErr
@@ -626,6 +659,19 @@ func (m *memoryFS) Rename(oldPath, newPath string) error {
 	return nil
 }
 
+func (m *memoryFS) SyncDir(dir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ops = append(m.ops, "sync-dir:"+filepath.ToSlash(dir))
+
+	if m.syncDirErr != nil {
+		err := m.syncDirErr
+		m.syncDirErr = nil
+		return err
+	}
+	return nil
+}
+
 func (m *memoryFS) Remove(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -639,6 +685,13 @@ func (m *memoryFS) failNextRename(err error) {
 	defer m.mu.Unlock()
 
 	m.renameErr = err
+}
+
+func (m *memoryFS) resetOps() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.ops = nil
 }
 
 func (m *memoryFS) writeRaw(name string, data []byte) {
