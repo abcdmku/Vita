@@ -38,6 +38,7 @@ import (
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
+	"github.com/vita/agent/internal/storagehealth"
 	"github.com/vita/agent/status"
 	"github.com/vita/agent/transaction"
 )
@@ -83,6 +84,7 @@ type Config struct {
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
 	CapsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	StorageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
 type ErrorResponse struct {
@@ -166,6 +168,7 @@ type handler struct {
 	files            *filecap.Handler
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
 type applyRequest struct {
@@ -470,6 +473,13 @@ func NewHandler(config Config) (http.Handler, error) {
 		}
 	}
 
+	storageHealthSnapshot := config.StorageHealth
+	if storageHealthSnapshot == nil {
+		storageHealthSnapshot = func(ctx context.Context) (storagehealth.Report, error) {
+			return storagehealth.Collect(ctx, storagehealth.Roots{Discoverer: discoverer})
+		}
+	}
+
 	filesHandler, err := filecap.NewHandler(filecap.Options{
 		StateRoot: config.FilesStateRoot,
 		Grants:    config.FilesGrants,
@@ -495,6 +505,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		files:            filesHandler,
 		auditStore:       config.AuditStore,
 		capsuleWorkloads: capsuleWorkloads,
+		storageHealth:    storageHealthSnapshot,
 	}, nil
 }
 
@@ -740,6 +751,39 @@ func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Write(workloads)
+	report, storageErr := h.storageHealthSnapshot(r.Context())
+	body.WriteString(",\"storageHealth\":")
+	if storageErr != nil {
+		raw, err := encodeJSONValue(stateCapabilityError{Error: "storage_health_unavailable"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	} else {
+		raw, err := encodeJSONValue(report.StorageHealth)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	}
+	body.WriteString(",\"hardwareInventory\":")
+	if storageErr != nil {
+		raw, err := encodeJSONValue(stateCapabilityError{Error: "storage_health_unavailable"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	} else {
+		raw, err := encodeJSONValue(report.HardwareInventory)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "state_encode_failed", "state response could not be encoded")
+			return
+		}
+		body.Write(raw)
+	}
 	body.WriteString("}\n")
 
 	writeRawJSON(w, http.StatusOK, body.Bytes())
@@ -750,6 +794,13 @@ func (h *handler) capsuleWorkloadSnapshot() []capsuleruntime.WorkloadStatus {
 		return []capsuleruntime.WorkloadStatus{}
 	}
 	return normalizeCapsuleWorkloads(h.capsuleWorkloads())
+}
+
+func (h *handler) storageHealthSnapshot(ctx context.Context) (storagehealth.Report, error) {
+	if h.storageHealth == nil {
+		return storagehealth.Report{}, errors.New("storage health snapshot unavailable")
+	}
+	return h.storageHealth(ctx)
 }
 
 func (h *handler) readCapabilityJSON(ctx context.Context, name string) ([]byte, *requestError) {

@@ -4,7 +4,9 @@ package hardware
 
 import (
 	"context"
+	"os"
 	"runtime"
+	"strings"
 )
 
 type unsupportedDiscoverer struct{}
@@ -15,4 +17,12 @@ func NewDiscoverer() Discoverer {
 
 func (unsupportedDiscoverer) Discover(context.Context) (Capabilities, error) {
 	return Capabilities{}, &UnsupportedPlatformError{GOOS: runtime.GOOS}
+}
+
+func ReadSysfsBool(path string) bool {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(content)) == "1"
 }
