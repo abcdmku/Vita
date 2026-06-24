@@ -109,6 +109,30 @@ test("POST /api/preview returns diff counts and evaluator rejections without mut
   assert.deepEqual(applyCalls, []);
 });
 
+test("POST /api/preview reports a currently configured capability omitted by proposal as removed", async () => {
+  const ports = mockPorts({
+    hostname: "vita-node-7",
+    operations: ["hostname.set", "node.config"],
+  });
+
+  const response = await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  });
+  const body = parseJsonObject(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body["ok"], true);
+  assert.deepEqual(body["added"], []);
+  assert.deepEqual(body["changed"], []);
+  assert.deepEqual(body["removed"], ["node.config"]);
+});
+
 test("POST /api/preview fails closed on duplicate-key, accessor, and cyclic bodies", async () => {
   const ports = mockPorts();
   const duplicate = await handleControllerShellRequest(ports, {

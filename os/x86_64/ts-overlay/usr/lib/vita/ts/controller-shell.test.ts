@@ -70,7 +70,7 @@ test("VITA-UI status, preview, and apply markers are measured from mock agent re
   }));
   assert.equal(preview["ok"], true);
   assert.deepEqual(preview["added"], []);
-  assert.deepEqual(preview["removed"], []);
+  assert.deepEqual(preview["removed"], ["node.config"]);
   assert.deepEqual(preview["changed"], ["hostname.set"]);
 
   const apply = parseJsonObject(await handleVendored(ports, {
@@ -105,7 +105,7 @@ test("VITA-UI status, preview, and apply markers are measured from mock agent re
       assertPreview(preview),
       assertApply(apply),
     ),
-    "VITA-UI: status=OK route=status hostname=vita-node-7 caps=2 preview=added=0,removed=0,changed=1 apply=committed status=OK",
+    "VITA-UI: status=OK route=status hostname=vita-node-7 caps=2 preview=added=0,removed=1,changed=1 apply=committed status=OK",
   );
 });
 

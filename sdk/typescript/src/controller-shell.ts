@@ -380,7 +380,7 @@ async function previewControllerShellPlan(
     };
   }
 
-  const current = await readCurrentPlanForDesiredCapabilities(ports.agent, desired.plan);
+  const current = await readCurrentPlan(ports.agent);
 
   if (!current.ok) {
     return previewFailure("CURRENT_STATE_UNAVAILABLE", current.reason, []);
@@ -516,33 +516,41 @@ async function applyControllerShellPlan(
   };
 }
 
-async function readCurrentPlanForDesiredCapabilities(
+async function readCurrentPlan(
   agent: ControllerShellAgent,
-  desired: ControllerShellTransactionPlan,
 ): Promise<ValidationResult<ControllerShellTransactionPlan>> {
+  const currentCapabilities = await readOperations(agent);
+
+  if (!currentCapabilities.ok) {
+    return reject(currentCapabilities.reason);
+  }
+
   const operations: ControllerShellPlanOperation[] = [];
 
-  for (let index = 0; index < desired.operations.length; index += 1) {
-    const operation = desired.operations[index];
+  for (let index = 0; index < currentCapabilities.value.length; index += 1) {
+    const capability = currentCapabilities.value[index];
 
-    if (operation === undefined) {
-      return reject(`desired operation ${index} is missing.`);
+    if (capability === undefined) {
+      return reject(`current capability ${index} is missing.`);
     }
 
-    const state = await readCapabilityState(agent, operation.capability);
+    const state = await readCapabilityState(agent, capability);
 
     if (!state.ok) {
       return reject(state.reason);
     }
 
-    const request = projectCurrentStateToRequest(state.value, operation.capability);
+    const request = projectCurrentStateToRequest(state.value, capability);
 
     if (!request.ok) {
       return request;
     }
+    if (request.value === null) {
+      continue;
+    }
 
     operations.push(Object.freeze({
-      capability: operation.capability,
+      capability,
       request: request.value,
     }));
   }
@@ -647,22 +655,64 @@ async function readCapabilityState(
 function projectCurrentStateToRequest(
   state: PlainJsonObject,
   capability: string,
-): ValidationResult<PlainJsonObject> {
+): ValidationResult<PlainJsonObject | null> {
   const current = field(state, "current");
 
-  if (current === undefined) {
-    return reject(`state for ${capability} is missing current.`);
+  if (current !== undefined) {
+    return accept(desiredRequest(current));
   }
 
+  const exists = field(state, "exists");
+
+  if (exists === undefined) {
+    return accept(null);
+  }
+  if (typeof exists !== "boolean") {
+    return reject(`state for ${capability} has malformed exists.`);
+  }
+  if (!exists) {
+    return accept(null);
+  }
+
+  const desired = readDesiredStatePayload(state);
+
+  if (!desired.ok) {
+    return reject(`state for ${capability} is missing current desired payload.`);
+  }
+
+  return accept(desiredRequest(desired.value));
+}
+
+function readDesiredStatePayload(state: PlainJsonObject): ValidationResult<PlainJson> {
+  const keys = ["config", "policy", "layout", "attestation", "plan", "state", "registry"] as const;
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined) {
+      continue;
+    }
+
+    const value = field(state, key);
+
+    if (value !== undefined) {
+      return accept(value);
+    }
+  }
+
+  return reject("current desired payload is absent.");
+}
+
+function desiredRequest(desired: PlainJson): PlainJsonObject {
   const request: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
   Object.defineProperty(request, "desired", {
     configurable: true,
     enumerable: true,
-    value: current,
+    value: desired,
     writable: false,
   });
 
-  return accept(Object.freeze(request));
+  return Object.freeze(request);
 }
 
 async function safeEvaluate(
