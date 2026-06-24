@@ -80,6 +80,7 @@ const expectedPackageAllowlist = [
   "bash",
   "ca-certificates",
   "coreutils",
+  "cryptsetup-bin",
   "dbus",
   "initramfs-tools",
   "iproute2",

@@ -13,6 +13,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "bash",
   "ca-certificates",
   "coreutils",
+  "cryptsetup-bin",
   "dbus",
   "initramfs-tools",
   "iproute2",
@@ -76,6 +77,25 @@ Architecture=x86-64
 
 [Output]
 Output=vita-debian-trixie-x86_64-root
+
+[Content]
+Packages=
+    bash
+    ca-certificates
+    coreutils
+    cryptsetup-bin
+    dbus
+    initramfs-tools
+    iproute2
+    kmod
+    linux-image-amd64
+    nftables
+    systemd
+    systemd-boot
+    systemd-boot-efi
+    systemd-sysv
+    udev
+    util-linux
 `;
 
 const DEFAULT_ROOT_BUILD_INPUT = Object.freeze({
@@ -353,6 +373,7 @@ function resolveMkosiConfig(commonConfig, archConfig) {
     Include: ["Include"],
     Distribution: ["Architecture"],
     Output: ["Output"],
+    Content: ["Packages"],
   });
 
   const include = getSingleValue(archConfig, "Include", "Include");
@@ -374,7 +395,8 @@ function resolveMkosiConfig(commonConfig, archConfig) {
   const bootable = getNoBoolean(commonConfig, "Content", "Bootable");
   const cleanPackageMetadata = getYesBoolean(commonConfig, "Content", "CleanPackageMetadata");
   const withNetwork = getNoBoolean(commonConfig, "Content", "WithNetwork");
-  const packages = getListValue(commonConfig, "Content", "Packages");
+  const packages = getOptionalListValue(archConfig, "Content", "Packages") ??
+    getListValue(commonConfig, "Content", "Packages");
   const environment = getEnvironment(commonConfig);
 
   assertEquals(distribution, "debian", "Distribution.Distribution");
@@ -446,6 +468,14 @@ function getListValue(config, sectionName, key) {
     throw new ConfigValidationError(`${config.label} requires at least one value for ${sectionName}.${key}`);
   }
   return tokens;
+}
+
+function getOptionalListValue(config, sectionName, key) {
+  const section = config.sections.get(sectionName);
+  if (section === undefined || !section.has(key)) {
+    return undefined;
+  }
+  return getListValue(config, sectionName, key);
 }
 
 function getRawValues(config, sectionName, key) {

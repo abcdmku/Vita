@@ -441,7 +441,7 @@ test("GPT partitions have pinned sizes, GUIDs, labels, and non-overlapping byte 
   assert.equal(plan.image.imageSizeBytes, lastPartition.endExclusiveByte + plan.image.alignmentBytes);
 });
 
-test("persistent data partition is explicitly mounted as /var by label", async () => {
+test("persistent data partition is explicitly mounted as /var through the LUKS mapper", async () => {
   const imageLayout = await loadImageLayoutModule();
   const plan = imageLayout.planImageLayout(await readPlanInput());
   const data = findPartition(plan, "data");
@@ -464,7 +464,7 @@ test("persistent data partition is explicitly mounted as /var by label", async (
     unit: "var.mount",
     unitPath: "/usr/lib/systemd/system/var.mount",
     sourcePartition: "data",
-    what: "/dev/disk/by-label/vita-data",
+    what: "/dev/mapper/vita-data",
     where: "/var",
     type: "ext4",
     options: ["nofail", "x-systemd.device-timeout=5s", "x-systemd.growfs"],
@@ -476,14 +476,16 @@ test("persistent data partition is explicitly mounted as /var by label", async (
     enablePath: "/usr/lib/systemd/system/local-fs.target.d/10-vita-var.conf",
     requiredBy: "local-fs.target",
   });
-  assert.equal(varMount.what, data.byLabel);
+  assert.equal(varMount.what, "/dev/mapper/vita-data");
   assert.equal(varMount.where, data.mountPoint);
   assert.equal(varMount.type, data.filesystem);
 
   const repartText = await readFile(repartDataUrl, "utf8");
   assert.match(repartText, /^Type=linux-generic$/mu);
   assert.match(repartText, /^Label=vita-data$/mu);
-  assert.match(repartText, /^Format=ext4$/mu);
+  assert.doesNotMatch(repartText, /^Format=ext4$/mu);
+  assert.doesNotMatch(repartText, /^FileSystemLabel=vita-data$/mu);
+  assert.match(repartText, /OUTER partition is an opaque LUKS2 container/u);
   assert.match(repartText, /^SizeMinBytes=512M$/mu);
   assert.match(repartText, /^Weight=1000$/mu);
   assert.match(repartText, /^FactoryReset=no$/mu);
@@ -491,12 +493,15 @@ test("persistent data partition is explicitly mounted as /var by label", async (
 
   const unitText = await readFile(varMountUnitUrl, "utf8");
   assert.match(unitText, /^DefaultDependencies=no$/mu);
+  assert.match(unitText, /^Requires=vita-data-luks\.service$/mu);
+  assert.match(unitText, /^BindsTo=vita-data-luks\.service$/mu);
+  assert.match(unitText, /^After=vita-data-luks\.service$/mu);
   assert.match(unitText, /^Before=local-fs\.target umount\.target$/mu);
   assert.match(unitText, /^Conflicts=umount\.target$/mu);
-  // var.mount is verity-only + must SKIP (not fail) when the device is absent, else RequiresMountsFor=/var/...
-  // dependents (vita-agentd's StateDirectory) get cancelled — so the device condition is load-bearing.
-  assert.match(unitText, /^ConditionPathExists=\/dev\/disk\/by-label\/vita-data$/mu);
-  assert.match(unitText, /^What=\/dev\/disk\/by-label\/vita-data$/mu);
+  assert.doesNotMatch(unitText, /^Wants=vita-data-luks\.service$/mu);
+  assert.match(unitText, /^ConditionPathExists=\/usr\/lib\/vita\/luks\/enabled$/mu);
+  assert.match(unitText, /^What=\/dev\/mapper\/vita-data$/mu);
+  assert.doesNotMatch(unitText, /^What=\/dev\/disk\/by-label\/vita-data$/mu);
   assert.match(unitText, /^Where=\/var$/mu);
   assert.match(unitText, /^Type=ext4$/mu);
   assert.match(unitText, /^Options=nofail,x-systemd\.device-timeout=5s,x-systemd\.growfs$/mu);

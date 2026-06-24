@@ -1,0 +1,13 @@
+# Emits the measured VITA-LUKS boot marker only after real checks: LUKS2 outer
+# container, mapper-backed /var mount, and a sentinel that survives a reboot.
+[Unit]
+Description=Vita LUKS data-volume measured marker
+After=var.mount vita-data-luks.service
+Wants=var.mount
+ConditionPathExists=/usr/lib/vita/luks/enabled
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/lib/vita/luks/vita-luks-marker.sh
+StandardOutput=journal+console
+StandardError=journal+console
