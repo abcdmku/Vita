@@ -223,10 +223,156 @@ func TestHandlerRejectsUnknownGrantReadOnlyWriteTraversalAndSymlink(t *testing.T
 	assertFilesErrorCode(t, err, "path_traversal")
 }
 
+func TestHandlerSharedGrantRoleGate(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	shared := true
+	handler, err := NewHandler(Options{
+		StateRoot: stateRoot,
+		Grants: []Grant{
+			{
+				Name:   "shared-rw",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner:           AccessReadWrite,
+					RoleHouseholdMember: AccessReadOnly,
+				},
+			},
+			{
+				Name:   "shared-ro",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner:           AccessReadOnly,
+					RoleHouseholdMember: AccessReadOnly,
+				},
+			},
+			{Name: "flat-ro", Root: "scope", Access: AccessReadOnly},
+		},
+		Principals: []Principal{
+			{PrincipalKey: "peer-owner", Role: RoleOwner},
+			{PrincipalKey: "peer-member", Role: RoleHouseholdMember},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+
+	ownerCtx := ContextWithPrincipalKey(ctx, "peer-owner")
+	memberCtx := ContextWithPrincipalKey(ctx, "peer-member")
+	encoded := base64.StdEncoding.EncodeToString([]byte("shared data"))
+
+	if _, err := handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "shared-rw",
+		Path:  "note.txt",
+		Data:  &encoded,
+	}); err != nil {
+		t.Fatalf("owner write returned error: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(stateRoot, "scope", "shared-rw", "note.txt"))
+	if err != nil {
+		t.Fatalf("Stat shared write target returned error: %v", err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != fileMode {
+		t.Fatalf("shared write mode = %o, want %o", gotMode, fileMode)
+	}
+
+	sharedROBase := filepath.Join(stateRoot, "scope", "shared-ro")
+	if err := os.MkdirAll(filepath.Join(sharedROBase, "docs"), directoryMode); err != nil {
+		t.Fatalf("MkdirAll shared-ro base returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedROBase, "docs", "seed.txt"), []byte("seed"), fileMode); err != nil {
+		t.Fatalf("WriteFile seed returned error: %v", err)
+	}
+
+	for _, op := range []Operation{OperationRead, OperationList, OperationStat} {
+		t.Run(string(op), func(t *testing.T) {
+			path := "docs/seed.txt"
+			if op == OperationList {
+				path = "docs"
+			}
+			_, err := handler.Handle(memberCtx, Request{
+				Op:    op,
+				Grant: "shared-ro",
+				Path:  path,
+			})
+			if err != nil {
+				t.Fatalf("member %s returned error: %v", op, err)
+			}
+		})
+	}
+
+	_, err = handler.Handle(memberCtx, Request{
+		Op:    OperationWrite,
+		Grant: "shared-ro",
+		Path:  "denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "role_forbidden")
+
+	_, err = handler.Handle(ContextWithPrincipalKey(ctx, "unbound-peer"), Request{
+		Op:    OperationWrite,
+		Grant: "shared-rw",
+		Path:  "default-denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "role_forbidden")
+
+	_, err = handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "shared-ro",
+		Path:  "owner-denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "role_forbidden")
+
+	_, err = handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "flat-ro",
+		Path:  "flat-denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "read_only_grant")
+}
+
+func TestHandlerRejectsEveryOperationWhenSharedRoleHasNoEntry(t *testing.T) {
+	ctx := ContextWithPrincipalKey(context.Background(), "peer-member")
+	handler := &Handler{
+		stateRoot: t.TempDir(),
+		grants: map[string]resolvedGrant{
+			"owner-only": {
+				name:  "owner-only",
+				rel:   "scope/owner-only",
+				roles: RoleAccessMap{RoleOwner: AccessReadWrite},
+			},
+		},
+		principals: map[string]Role{"peer-member": RoleHouseholdMember},
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte("data"))
+
+	for _, req := range []Request{
+		{Op: OperationList, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationRead, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationStat, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationWrite, Grant: "owner-only", Path: "note.txt", Data: &encoded},
+	} {
+		t.Run(string(req.Op), func(t *testing.T) {
+			_, err := handler.Handle(ctx, req)
+			assertFilesErrorCode(t, err, "role_forbidden")
+		})
+	}
+}
+
 func TestDecodeRequestRejectsDuplicateKeysAndMalformedShapes(t *testing.T) {
 	tests := []string{
 		`{"op":"read","op":"write","grant":"rw","path":"note.txt","data":"AA=="}`,
 		`{"op":"read","grant":"rw","path":"note.txt","extra":true}`,
+		`{"op":"read","grant":"rw","path":"note.txt","role":"owner"}`,
+		`{"op":"read","grant":"rw","path":"note.txt","principal":"peer-owner"}`,
+		`{"op":"read","grant":"rw","path":"note.txt","as":"owner"}`,
 		`{"op":["read"],"grant":"rw","path":"note.txt"}`,
 		`{"op":"read","grant":"rw","path":`,
 	}

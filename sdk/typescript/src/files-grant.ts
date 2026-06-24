@@ -1,10 +1,25 @@
 export type FilesGrantAccess = "read-only" | "read-write";
+export type FilesRole = "owner" | "household-member";
 
-export interface FilesGrant {
+export type FilesGrantRoles = Readonly<Record<FilesRole, FilesGrantAccess>>;
+
+export interface FilesFlatGrant {
   readonly name: string;
   readonly root: string;
   readonly access: FilesGrantAccess;
+  readonly shared?: never;
+  readonly roles?: never;
 }
+
+export interface FilesSharedGrant {
+  readonly name: string;
+  readonly root: string;
+  readonly access?: never;
+  readonly shared?: true;
+  readonly roles: FilesGrantRoles;
+}
+
+export type FilesGrant = FilesFlatGrant | FilesSharedGrant;
 
 export type FilesOperation = "list" | "read" | "write" | "stat";
 

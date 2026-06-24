@@ -79,6 +79,7 @@ type Config struct {
 	Now             func() time.Time
 	FilesStateRoot  string
 	FilesGrants     []filecap.Grant
+	FilesPrincipals []filecap.Principal
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
@@ -210,6 +211,7 @@ type UnixPeerAuthConfig struct {
 type authenticatedUnixListener struct {
 	net.Listener
 	groupID      uint32
+	principalKey string
 	auditStore   AuditStore
 	now          func() time.Time
 	readPeerInfo func(net.Conn) (unixPeerInfo, error)
@@ -226,6 +228,17 @@ type unixPeerInfo struct {
 	Groups      []uint32
 	GroupSource string
 }
+
+type unixPeerPrincipalConn struct {
+	net.Conn
+	principalKey string
+}
+
+type unixPeerPrincipalProvider interface {
+	UnixPeerPrincipalKey() string
+}
+
+type unixPeerPrincipalContextKey struct{}
 
 func ListenUnixSocket(path string) (net.Listener, error) {
 	return ListenUnixSocketMode(path, DefaultUnixSocketMode)
@@ -298,6 +311,7 @@ func AuthenticateUnixSocketListener(listener net.Listener, config UnixPeerAuthCo
 	return &authenticatedUnixListener{
 		Listener:     listener,
 		groupID:      groupID,
+		principalKey: unixPeerAuthPrincipalKey(config, groupID),
 		auditStore:   config.AuditStore,
 		now:          now,
 		readPeerInfo: readPeerInfo,
@@ -326,12 +340,24 @@ func (l *authenticatedUnixListener) Accept() (net.Conn, error) {
 
 		peer, authErr := l.readPeerInfo(conn)
 		if authErr == nil && peerAuthorizedForGroup(peer, l.groupID) {
-			return conn, nil
+			return &unixPeerPrincipalConn{Conn: conn, principalKey: l.principalKey}, nil
 		}
 
 		l.recordPeerUnauthorized(peer)
 		_ = conn.Close()
 	}
+}
+
+func (c *unixPeerPrincipalConn) UnixPeerPrincipalKey() string {
+	return c.principalKey
+}
+
+func UnixPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
+	provider, ok := conn.(unixPeerPrincipalProvider)
+	if !ok {
+		return ctx
+	}
+	return contextWithUnixPeerPrincipalKey(ctx, provider.UnixPeerPrincipalKey())
 }
 
 func (l *authenticatedUnixListener) recordPeerUnauthorized(peer unixPeerInfo) {
@@ -372,6 +398,39 @@ func unixPeerAuthGroupID(config UnixPeerAuthConfig) (uint32, error) {
 		return 0, fmt.Errorf("parse unix peer auth group %q gid %q: %w", groupName, group.Gid, err)
 	}
 	return uint32(gid), nil
+}
+
+func UnixPeerGroupPrincipalKey(groupName string) string {
+	if groupName == "" {
+		groupName = DefaultUnixPeerGroupName
+	}
+	return "unix:group:" + groupName
+}
+
+func unixPeerGroupIDPrincipalKey(groupID uint32) string {
+	return fmt.Sprintf("unix:gid:%d", groupID)
+}
+
+func unixPeerAuthPrincipalKey(config UnixPeerAuthConfig, groupID uint32) string {
+	if config.GroupID != nil && config.GroupName == "" {
+		return unixPeerGroupIDPrincipalKey(groupID)
+	}
+	return UnixPeerGroupPrincipalKey(config.GroupName)
+}
+
+func contextWithUnixPeerPrincipalKey(ctx context.Context, principalKey string) context.Context {
+	if principalKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, unixPeerPrincipalContextKey{}, principalKey)
+}
+
+func unixPeerPrincipalKeyFromContext(ctx context.Context) (string, bool) {
+	principalKey, ok := ctx.Value(unixPeerPrincipalContextKey{}).(string)
+	if !ok || principalKey == "" {
+		return "", false
+	}
+	return principalKey, true
 }
 
 func peerAuthorizedForGroup(peer unixPeerInfo, groupID uint32) bool {
@@ -471,8 +530,9 @@ func NewHandler(config Config) (http.Handler, error) {
 	}
 
 	filesHandler, err := filecap.NewHandler(filecap.Options{
-		StateRoot: config.FilesStateRoot,
-		Grants:    config.FilesGrants,
+		StateRoot:  config.FilesStateRoot,
+		Grants:     config.FilesGrants,
+		Principals: config.FilesPrincipals,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build files handler: %w", err)
@@ -647,7 +707,12 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := h.files.Handle(r.Context(), request)
+	ctx := r.Context()
+	if principalKey, ok := unixPeerPrincipalKeyFromContext(ctx); ok {
+		ctx = filecap.ContextWithPrincipalKey(ctx, principalKey)
+	}
+
+	response, err := h.files.Handle(ctx, request)
 	if err != nil {
 		writeFilesError(w, err)
 		return

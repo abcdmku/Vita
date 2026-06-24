@@ -156,11 +156,15 @@ func TestAuthenticatedUnixSocketListenerRejectsUnauthorizedAndServesAuthorizedPe
 	defer listener.Close()
 
 	var served atomic.Int32
+	principalKeys := make(chan string, 1)
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			served.Add(1)
+			principalKey, _ := unixPeerPrincipalKeyFromContext(r.Context())
+			principalKeys <- principalKey
 			writeJSON(w, http.StatusOK, status.Status{Version: "test-version", Healthy: true})
 		}),
+		ConnContext:       UnixPeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)
@@ -235,6 +239,14 @@ func TestAuthenticatedUnixSocketListenerRejectsUnauthorizedAndServesAuthorizedPe
 	client.CloseIdleConnections()
 	if got := served.Load(); got != 1 {
 		t.Fatalf("served requests after authorized peer = %d, want 1", got)
+	}
+	select {
+	case principalKey := <-principalKeys:
+		if principalKey != unixPeerGroupIDPrincipalKey(targetGID) {
+			t.Fatalf("authorized principal key = %q, want %q", principalKey, unixPeerGroupIDPrincipalKey(targetGID))
+		}
+	default:
+		t.Fatal("authorized request did not report a principal key")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

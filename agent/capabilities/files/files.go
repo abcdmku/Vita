@@ -50,19 +50,15 @@ const (
 )
 
 type Grant struct {
-	Name   string `json:"name"`
-	Root   string `json:"root"`
-	Access Access `json:"access"`
-}
+	Name   string        `json:"name"`
+	Root   string        `json:"root"`
+	Access Access        `json:"access,omitempty"`
+	Shared *bool         `json:"shared,omitempty"`
+	Roles  RoleAccessMap `json:"roles,omitempty"`
 
-func (g *Grant) UnmarshalJSON(raw []byte) error {
-	type grantJSON Grant
-	var decoded grantJSON
-	if err := jsonsafe.DecodeStrict(raw, &decoded); err != nil {
-		return err
-	}
-	*g = Grant(decoded)
-	return nil
+	accessSet bool
+	sharedSet bool
+	rolesSet  bool
 }
 
 type Request struct {
@@ -98,18 +94,21 @@ type Entry struct {
 }
 
 type Options struct {
-	StateRoot string
-	Grants    []Grant
+	StateRoot  string
+	Grants     []Grant
+	Principals []Principal
 }
 
 type Handler struct {
-	stateRoot string
-	grants    map[string]resolvedGrant
+	stateRoot  string
+	grants     map[string]resolvedGrant
+	principals map[string]Role
 }
 
 type resolvedGrant struct {
 	name   string
 	access Access
+	roles  RoleAccessMap
 	rel    string
 }
 
@@ -152,7 +151,12 @@ func NewHandler(options Options) (*Handler, error) {
 		grants[resolved.name] = resolved
 	}
 
-	return &Handler{stateRoot: stateRootAbs, grants: grants}, nil
+	principals, err := buildPrincipalRoles(options.Principals)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Handler{stateRoot: stateRootAbs, grants: grants, principals: principals}, nil
 }
 
 func DecodeRequest(raw []byte) (Request, error) {
@@ -213,8 +217,16 @@ func (h *Handler) Handle(ctx context.Context, request Request) (Response, error)
 	if !ok {
 		return Response{}, filesError(404, "unknown_grant", "unknown files grant")
 	}
-	if request.Op == OperationWrite && grant.access != AccessReadWrite {
-		return Response{}, filesError(403, "read_only_grant", "files grant is read-only")
+	role := h.roleForContext(ctx)
+	effectiveAccess, ok := EffectiveAccess(grant, role)
+	if !ok {
+		return Response{}, filesError(403, "role_forbidden", "files role is not allowed for this grant")
+	}
+	if request.Op == OperationWrite && effectiveAccess != AccessReadWrite {
+		if grant.roles == nil {
+			return Response{}, filesError(403, "read_only_grant", "files grant is read-only")
+		}
+		return Response{}, filesError(403, "role_forbidden", "files role is not allowed to write this grant")
 	}
 
 	base, err := h.ensureGrantRoot(grant)
@@ -408,6 +420,17 @@ func (h *Handler) ensureGrantRoot(grant resolvedGrant) (string, error) {
 	return abs, nil
 }
 
+func (h *Handler) roleForContext(ctx context.Context) Role {
+	principalKey, ok := PrincipalKeyFromContext(ctx)
+	if ok {
+		role, exists := h.principals[principalKey]
+		if exists {
+			return role
+		}
+	}
+	return DefaultRole
+}
+
 func ensureDirectory(path string) error {
 	if err := os.MkdirAll(path, directoryMode); err != nil {
 		return err
@@ -492,16 +515,16 @@ func resolveGrant(stateRoot string, grant Grant) (resolvedGrant, error) {
 	if !validGrantKey(grant.Root) {
 		return resolvedGrant{}, errors.New("root must be a non-empty agent-resolved key")
 	}
-	switch grant.Access {
-	case AccessReadOnly, AccessReadWrite:
-	default:
-		return resolvedGrant{}, errors.New("access must be read-only or read-write")
+	access, roles, err := validateGrantAccess(grant)
+	if err != nil {
+		return resolvedGrant{}, err
 	}
 
 	rel := grant.Root + "/" + grant.Name
 	return resolvedGrant{
 		name:   grant.Name,
-		access: grant.Access,
+		access: access,
+		roles:  roles,
 		rel:    rel,
 	}, nil
 }

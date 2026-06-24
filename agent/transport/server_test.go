@@ -1333,6 +1333,68 @@ func TestFilesRouteDispatchesToHandler(t *testing.T) {
 	}
 }
 
+func TestFilesRouteUsesPeerPrincipalFromContext(t *testing.T) {
+	stateRoot := t.TempDir()
+	shared := true
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: stateRoot,
+		filesGrants: []filecap.Grant{
+			{
+				Name:   "shared",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: filecap.RoleAccessMap{
+					filecap.RoleOwner:           filecap.AccessReadWrite,
+					filecap.RoleHouseholdMember: filecap.AccessReadOnly,
+				},
+			},
+		},
+		filesPrincipals: []filecap.Principal{
+			{PrincipalKey: "peer-owner", Role: filecap.RoleOwner},
+		},
+	})
+
+	data := []byte("context principal data")
+	body := fmt.Sprintf(
+		`{"op":"write","grant":"shared","path":"note.txt","data":%q}`,
+		base64.StdEncoding.EncodeToString(data),
+	)
+
+	defaultResponse := perform(handler, http.MethodPost, "/files", body)
+	if defaultResponse.Code != http.StatusForbidden {
+		t.Fatalf("default status code = %d, want %d; body=%s", defaultResponse.Code, http.StatusForbidden, defaultResponse.Body.String())
+	}
+	var defaultError ErrorResponse
+	decodeResponse(t, defaultResponse, &defaultError)
+	if defaultError.Error.Code != "role_forbidden" {
+		t.Fatalf("default error code = %q, want role_forbidden", defaultError.Error.Code)
+	}
+
+	ownerCtx := contextWithUnixPeerPrincipalKey(context.Background(), "peer-owner")
+	writeResponse := performWithContext(handler, ownerCtx, http.MethodPost, "/files", body)
+	if writeResponse.Code != http.StatusOK {
+		t.Fatalf("owner write status code = %d, want %d; body=%s", writeResponse.Code, http.StatusOK, writeResponse.Body.String())
+	}
+
+	readResponse := performWithContext(handler, ownerCtx, http.MethodPost, "/files", `{"op":"read","grant":"shared","path":"note.txt"}`)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("owner read status code = %d, want %d; body=%s", readResponse.Code, http.StatusOK, readResponse.Body.String())
+	}
+	var readResult filecap.Response
+	decodeResponse(t, readResponse, &readResult)
+	if readResult.Data == nil {
+		t.Fatalf("read result = %#v, want data", readResult)
+	}
+	got, err := base64.StdEncoding.DecodeString(*readResult.Data)
+	if err != nil {
+		t.Fatalf("read data is not base64: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("read data = %q, want %q", got, data)
+	}
+}
+
 func TestFilesRouteReturnsTypedErrors(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{
 		registry:       mustRegistry(t),
@@ -1351,6 +1413,9 @@ func TestFilesRouteReturnsTypedErrors(t *testing.T) {
 		{name: "method", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
 		{name: "shape", method: http.MethodPost, body: `{}`, wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
 		{name: "unknown op", method: http.MethodPost, body: `{"op":"remove","grant":"rw","path":"note.txt"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_op"},
+		{name: "role field", method: http.MethodPost, body: `{"op":"read","grant":"rw","path":"note.txt","role":"owner"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_field"},
+		{name: "principal field", method: http.MethodPost, body: `{"op":"read","grant":"rw","path":"note.txt","principal":"peer-owner"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_field"},
+		{name: "as field", method: http.MethodPost, body: `{"op":"read","grant":"rw","path":"note.txt","as":"owner"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_field"},
 	}
 
 	for _, tt := range tests {
@@ -1460,6 +1525,7 @@ type handlerConfig struct {
 	maxBodyBytes     int64
 	filesStateRoot   string
 	filesGrants      []filecap.Grant
+	filesPrincipals  []filecap.Principal
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
@@ -1487,6 +1553,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		MaxBodyBytes:     config.maxBodyBytes,
 		FilesStateRoot:   config.filesStateRoot,
 		FilesGrants:      config.filesGrants,
+		FilesPrincipals:  config.filesPrincipals,
 		AuditStore:       config.auditStore,
 		CapsuleWorkloads: config.capsuleWorkloads,
 		Now: func() time.Time {
@@ -1500,6 +1567,10 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 }
 
 func perform(handler http.Handler, method string, path string, body string) *httptest.ResponseRecorder {
+	return performWithContext(handler, context.Background(), method, path, body)
+}
+
+func performWithContext(handler http.Handler, ctx context.Context, method string, path string, body string) *httptest.ResponseRecorder {
 	var reader *strings.Reader
 	if body == "" {
 		reader = strings.NewReader("")
@@ -1508,6 +1579,7 @@ func perform(handler http.Handler, method string, path string, body string) *htt
 	}
 
 	request := httptest.NewRequest(method, path, reader)
+	request = request.WithContext(ctx)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

@@ -79,12 +79,13 @@ func main() {
 	}
 
 	handler, err := transport.NewHandler(transport.Config{
-		Version:     agentVersion,
-		StartedAt:   startedAt,
-		Registry:    registry,
-		Discoverer:  hardware.NewDiscoverer(),
-		FilesGrants: files.DefaultGrants(),
-		AuditStore:  auditStore,
+		Version:         agentVersion,
+		StartedAt:       startedAt,
+		Registry:        registry,
+		Discoverer:      hardware.NewDiscoverer(),
+		FilesGrants:     runtimeFilesGrants(),
+		FilesPrincipals: runtimeFilesPrincipals(),
+		AuditStore:      auditStore,
 	})
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)
@@ -107,6 +108,7 @@ func main() {
 	}()
 	unixServer := &http.Server{
 		Handler:           handler,
+		ConnContext:       transport.UnixPeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -114,6 +116,40 @@ func main() {
 
 	if err := serveUntilStopped(tcpServer, unixServer, unixListener); err != nil {
 		log.Fatalf("serve agent: %v", err)
+	}
+}
+
+func runtimeFilesGrants() []files.Grant {
+	shared := true
+	grants := files.DefaultGrants()
+	return append(grants,
+		files.Grant{
+			Name:   "runtime-files-shared-rw",
+			Root:   "shared-owner",
+			Shared: &shared,
+			Roles: files.RoleAccessMap{
+				files.RoleOwner:           files.AccessReadWrite,
+				files.RoleHouseholdMember: files.AccessReadOnly,
+			},
+		},
+		files.Grant{
+			Name:   "runtime-files-shared-ro",
+			Root:   "shared-member",
+			Shared: &shared,
+			Roles: files.RoleAccessMap{
+				files.RoleOwner:           files.AccessReadOnly,
+				files.RoleHouseholdMember: files.AccessReadOnly,
+			},
+		},
+	)
+}
+
+func runtimeFilesPrincipals() []files.Principal {
+	return []files.Principal{
+		{
+			PrincipalKey: transport.UnixPeerGroupPrincipalKey(transport.DefaultUnixPeerGroupName),
+			Role:         files.RoleOwner,
+		},
 	}
 }
 
