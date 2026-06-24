@@ -7,9 +7,17 @@ import (
 )
 
 func TestSharedGrantDecodeValidate(t *testing.T) {
-	shared := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","household-member":"read-only"}}`)
+	// A shared grant over an arbitrary SUBSET of the six roles parses; absent
+	// roles simply have no access (least-privilege), not a misconfiguration.
+	shared := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","member":"read-only"}}`)
 	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{shared}}); err != nil {
 		t.Fatalf("NewHandler valid shared grant returned error: %v", err)
+	}
+
+	// A shared grant listing ALL six roles parses.
+	allSix := decodeGrant(t, `{"name":"all","root":"scope","shared":true,"roles":{"owner":"read-write","administrator":"read-write","member":"read-only","restricted-member":"read-only","guest":"forbidden","service":"read-only"}}`)
+	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{allSix}}); err != nil {
+		t.Fatalf("NewHandler six-role shared grant returned error: %v", err)
 	}
 
 	flat := decodeGrant(t, `{"name":"flat","root":"scope","access":"read-only"}`)
@@ -29,7 +37,7 @@ func TestSharedGrantDecodeValidate(t *testing.T) {
 	}{
 		{
 			name: "access and roles",
-			raw:  `{"name":"shared","root":"scope","access":"read-write","roles":{"owner":"read-write","household-member":"read-only"}}`,
+			raw:  `{"name":"shared","root":"scope","access":"read-write","roles":{"owner":"read-write","member":"read-only"}}`,
 			want: "both access and roles",
 		},
 		{
@@ -38,29 +46,39 @@ func TestSharedGrantDecodeValidate(t *testing.T) {
 			want: "shared grant must declare roles",
 		},
 		{
-			name: "unknown role",
-			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","household-member":"read-only","guest":"read-only"}}`,
+			name: "empty roles map",
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{}}`,
+			want: "shared grant roles must not be empty",
+		},
+		{
+			name: "unknown role (prior household-member name)",
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","household-member":"read-only"}}`,
+			want: "unknown role",
+		},
+		{
+			name: "unknown role (root)",
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","root":"read-only"}}`,
+			want: "unknown role",
+		},
+		{
+			name: "unknown role (7th value)",
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","superuser":"read-only"}}`,
 			want: "unknown role",
 		},
 		{
 			name: "bad role value",
-			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"admin","household-member":"read-only"}}`,
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"admin","member":"read-only"}}`,
 			want: "access must be read-only or read-write",
 		},
 		{
-			name: "missing required role",
-			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write"}}`,
-			want: "roles must include household-member",
-		},
-		{
 			name: "shared false",
-			raw:  `{"name":"shared","root":"scope","shared":false,"roles":{"owner":"read-write","household-member":"read-only"}}`,
+			raw:  `{"name":"shared","root":"scope","shared":false,"roles":{"owner":"read-write","member":"read-only"}}`,
 			want: "shared must be true",
 		},
 		{
 			name: "roles null",
 			raw:  `{"name":"shared","root":"scope","shared":true,"roles":null}`,
-			want: "roles must include owner and household-member",
+			want: "shared grant roles must not be empty",
 		},
 	}
 
@@ -87,65 +105,86 @@ func TestSharedGrantDecodeRejectsDuplicateKeys(t *testing.T) {
 	if !strings.Contains(err.Error(), "duplicate JSON object key") {
 		t.Fatalf("duplicate-key error = %q, want duplicate key rejection", err.Error())
 	}
+
+	// Duplicate keys inside the roles map are likewise rejected by the strict
+	// decoder.
+	var dupRole Grant
+	err = json.Unmarshal([]byte(`{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","owner":"read-only"}}`), &dupRole)
+	if err == nil {
+		t.Fatal("json.Unmarshal accepted duplicate role key")
+	}
+	if !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("duplicate role-key error = %q, want duplicate key rejection", err.Error())
+	}
 }
 
 func TestEffectiveAccess(t *testing.T) {
+	// Flat grant: every role gets the flat access (no roles map).
 	flat := resolvedGrant{name: "flat", access: AccessReadOnly}
-	for _, role := range []Role{RoleOwner, RoleHouseholdMember, Role("guest")} {
+	for _, role := range []Role{RoleOwner, RoleMember, RoleGuest, RoleService, Role("nonexistent")} {
 		access, ok := EffectiveAccess(flat, role)
 		if !ok || access != AccessReadOnly {
 			t.Fatalf("flat role %q access = %q, %v; want read-only true", role, access, ok)
 		}
 	}
 
+	// Shared grant over a subset of the six. Listed roles get exactly their
+	// entry; UNLISTED roles (guest/restricted-member/service here) get NO access.
 	shared := resolvedGrant{
 		name: "shared",
 		roles: RoleAccessMap{
-			RoleOwner:           AccessReadWrite,
-			RoleHouseholdMember: AccessReadOnly,
+			RoleOwner:         AccessReadWrite,
+			RoleAdministrator: AccessReadOnly,
+			RoleMember:        AccessReadOnly,
 		},
 	}
 	access, ok := EffectiveAccess(shared, RoleOwner)
 	if !ok || access != AccessReadWrite {
 		t.Fatalf("owner access = %q, %v; want read-write true", access, ok)
 	}
-	access, ok = EffectiveAccess(shared, RoleHouseholdMember)
+	access, ok = EffectiveAccess(shared, RoleMember)
 	if !ok || access != AccessReadOnly {
-		t.Fatalf("household-member access = %q, %v; want read-only true", access, ok)
+		t.Fatalf("member access = %q, %v; want read-only true", access, ok)
 	}
 
-	missing := resolvedGrant{
-		name:  "missing",
-		roles: RoleAccessMap{RoleOwner: AccessReadWrite},
-	}
-	access, ok = EffectiveAccess(missing, RoleHouseholdMember)
-	if ok || access != "" {
-		t.Fatalf("missing role access = %q, %v; want empty false", access, ok)
+	// NO implicit hierarchy: administrator is listed read-only and does NOT
+	// inherit member's (or owner's) access.
+	access, ok = EffectiveAccess(shared, RoleAdministrator)
+	if !ok || access != AccessReadOnly {
+		t.Fatalf("administrator access = %q, %v; want read-only true (no hierarchy inheritance)", access, ok)
 	}
 
+	// Unlisted roles -> no access (fail closed) for every op.
+	for _, role := range []Role{RoleGuest, RoleRestrictedMember, RoleService} {
+		access, ok := EffectiveAccess(shared, role)
+		if ok || access != "" {
+			t.Fatalf("unlisted role %q access = %q, %v; want empty false", role, access, ok)
+		}
+	}
+
+	// An explicit forbidden entry is also no-access.
 	forbidden := resolvedGrant{
 		name: "forbidden",
 		roles: RoleAccessMap{
-			RoleOwner:           AccessReadWrite,
-			RoleHouseholdMember: AccessForbidden,
+			RoleOwner: AccessReadWrite,
+			RoleGuest: AccessForbidden,
 		},
 	}
-	access, ok = EffectiveAccess(forbidden, RoleHouseholdMember)
+	access, ok = EffectiveAccess(forbidden, RoleGuest)
 	if ok || access != "" {
 		t.Fatalf("forbidden role access = %q, %v; want empty false (no access)", access, ok)
 	}
 	access, ok = EffectiveAccess(forbidden, RoleOwner)
 	if !ok || access != AccessReadWrite {
-		t.Fatalf("owner access on member-forbidden grant = %q, %v; want read-write true", access, ok)
+		t.Fatalf("owner access on guest-forbidden grant = %q, %v; want read-write true", access, ok)
 	}
 }
 
 func TestSharedGrantForbiddenRoleValidatesAndAflatForbiddenRejects(t *testing.T) {
-	// A shared grant may declare a role forbidden (denied even read); both roles
-	// remain listed, so exclusion is intentional, not an accidental omission.
-	forbidden := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","household-member":"forbidden"}}`)
+	// A shared grant may declare a role forbidden (denied even read).
+	forbidden := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","guest":"forbidden"}}`)
 	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{forbidden}}); err != nil {
-		t.Fatalf("NewHandler member-forbidden shared grant returned error: %v", err)
+		t.Fatalf("NewHandler guest-forbidden shared grant returned error: %v", err)
 	}
 
 	// "forbidden" is NOT a valid flat grant access.
