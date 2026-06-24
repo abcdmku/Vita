@@ -76,6 +76,34 @@ declare namespace Deno {
     options?: { append?: boolean },
   ): void;
 
+  /** Subset of CommandOptions used to spawn the household-member uid helper. */
+  interface CommandOptions {
+    readonly args?: readonly string[];
+    readonly stdin?: "null" | "inherit" | "piped";
+    readonly stdout?: "null" | "inherit" | "piped";
+    readonly stderr?: "null" | "inherit" | "piped";
+  }
+
+  /** Subset of CommandOutput read by the household-member uid helper attempt. */
+  interface CommandOutput {
+    readonly success: boolean;
+    readonly code: number;
+    readonly stdout: Uint8Array;
+    readonly stderr: Uint8Array;
+  }
+
+  /**
+   * Subprocess builder. Used ONLY to attempt presenting a different authenticated
+   * unix peer (uid 65540) for the household-member role_forbidden proof. The
+   * runtime is granted no --allow-run, so .output() fails closed (PermissionDenied)
+   * on the locked-down vita-ts.service sandbox; the attempt is genuine and its
+   * failure is observed, never assumed.
+   */
+  class Command {
+    constructor(command: string | URL, options?: CommandOptions);
+    output(): Promise<CommandOutput>;
+  }
+
   /** Terminate the process with the given exit code. */
   function exit(code?: number): never;
 }
