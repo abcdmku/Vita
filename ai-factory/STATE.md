@@ -4,9 +4,18 @@
 > not a log (git history + the Done list below are the log).
 
 ## Current phase
-**Phase 1 — Bootable immutable foundation** (spec §21), actively building via Docker/Go (host Go + the
-golang:1.26 container lane both working; `golang.org/x/sys` vendored for offline syscalls). Phase 0
-complete. Control-plane (SDK/controller/broker/capsules/catalog) built in Phase 0/portable work.
+**Phase 4 — Application platform** (spec §21), networking arc. **Phases 0–2 COMPLETE + boot-verified:**
+Phase 1 (Secure Boot + dm-verity + A/B/RAUC + real-disk installer + persistent /var + Go agent), Phase 2
+(Deno deterministic evaluator + SDK + plan/transaction engine + capability API + on-device
+self-reconfiguration EVAL→PREVIEW→EXPLAIN→APPLY, fail-closed). **Phase 4 ~60%:** 3 capsule runtimes
+(ts-service/OCI-RootDirectory/WASM-wasmtime, hardened + cgroup-gated; crun+microVM deferred) + per-capsule
+networking S1–S3 DONE (grants validated → netns loopback-isolation → default-deny egress, all MEASURED),
+S4 host-local ingress IN FLIGHT; **S5 hostile-capsule enforcement gate = the Phase-4 exit (FR-011).**
+Phase-2 gaps still open: owner passkey enrollment, controller UI shell, developer CLI. NEXT arcs after
+networking: **signed app catalog + npm/JSR mirror** (the largest Phase-4 gap — no app supply chain yet),
+then **Phase 5 data product** (files/folders, backup+restore UI, remote-access mesh, AT-Proto PDS, export)
+and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
+power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
 ## Status: RUNNING — Codex restored (~00:30 UTC); switched back from the Opus stopgap. Build green.
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** +
