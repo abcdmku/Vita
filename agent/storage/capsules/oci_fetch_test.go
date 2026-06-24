@@ -66,6 +66,7 @@ func TestFetchOCIImageVerifiesDigestGraphAssemblesRootfsAndReturnsRuntimeConfig(
 	}
 	if !strings.Contains(logs.String(), "VITA-CAPSULE-OCI-FETCH: id=local.test.oci") ||
 		!strings.Contains(logs.String(), "image-digest="+ShortOCIDigest(fixture.imageDigest)) ||
+		!strings.Contains(logs.String(), "arch=linux/amd64") ||
 		!strings.Contains(logs.String(), "layers=1 verified=OK status=OK") {
 		t.Fatalf("fetch log = %q, want verified OCI marker", logs.String())
 	}
@@ -360,6 +361,310 @@ func TestFetchOCIImageRejectsTraversalAndLinksWithoutStaging(t *testing.T) {
 	}
 }
 
+func TestSelectOCIPlatformManifestSelectsMatchingManifestAndSkipsArtifacts(t *testing.T) {
+	attestationDigest := digestBytes([]byte("attestation"))
+	arm64Digest := digestBytes([]byte("arm64-manifest"))
+	amd64FirstDigest := digestBytes([]byte("amd64-manifest-first"))
+	amd64SecondDigest := digestBytes([]byte("amd64-manifest-second"))
+	index := ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests: []ociDescriptor{
+			{
+				MediaType: "application/vnd.in-toto+json",
+				Digest:    attestationDigest,
+				Size:      1,
+				Platform: &ociPlatform{
+					Architecture: "amd64",
+					OS:           "linux",
+				},
+			},
+			testOCIPlatformDescriptor(arm64Digest, "linux", "arm64"),
+			testOCIPlatformDescriptor(amd64FirstDigest, "linux", "amd64"),
+			testOCIPlatformDescriptor(amd64SecondDigest, "linux", "amd64"),
+		},
+	}
+
+	got, err := selectOCIPlatformManifest(index, nodePlatform{OS: "linux", Architecture: "amd64"})
+	if err != nil {
+		t.Fatalf("selectOCIPlatformManifest returned error: %v", err)
+	}
+	if got.Digest != amd64FirstDigest {
+		t.Fatalf("selected digest = %s, want first linux/amd64 image manifest %s", got.Digest, amd64FirstDigest)
+	}
+}
+
+func TestSelectOCIPlatformManifestRejectsUnsupportedArch(t *testing.T) {
+	index := ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests: []ociDescriptor{
+			testOCIPlatformDescriptor(digestBytes([]byte("arm64-manifest")), "linux", "arm64"),
+		},
+	}
+
+	got, err := selectOCIPlatformManifest(index, nodePlatform{OS: "linux", Architecture: "amd64"})
+	if got.Digest != "" {
+		t.Fatalf("selected digest = %s, want none", got.Digest)
+	}
+	if !errors.Is(err, ErrOCIArchUnsupported) {
+		t.Fatalf("selectOCIPlatformManifest error = %v, want ErrOCIArchUnsupported", err)
+	}
+}
+
+func TestSelectOCIPlatformManifestRejectsMalformedImageManifestChild(t *testing.T) {
+	validLater := testOCIPlatformDescriptor(digestBytes([]byte("valid-amd64")), "linux", "amd64")
+	tests := []struct {
+		name       string
+		descriptor ociDescriptor
+	}{
+		{
+			name: "missing digest",
+			descriptor: ociDescriptor{
+				MediaType: ociMediaTypeImageManifest,
+				Size:      1,
+				Platform: &ociPlatform{
+					Architecture: "amd64",
+					OS:           "linux",
+				},
+			},
+		},
+		{
+			name: "negative size",
+			descriptor: ociDescriptor{
+				MediaType: ociMediaTypeImageManifest,
+				Digest:    digestBytes([]byte("negative-size")),
+				Size:      -1,
+				Platform: &ociPlatform{
+					Architecture: "amd64",
+					OS:           "linux",
+				},
+			},
+		},
+		{
+			name: "missing platform",
+			descriptor: ociDescriptor{
+				MediaType: ociMediaTypeImageManifest,
+				Digest:    digestBytes([]byte("missing-platform")),
+				Size:      1,
+			},
+		},
+		{
+			name: "empty platform arch",
+			descriptor: ociDescriptor{
+				MediaType: ociMediaTypeImageManifest,
+				Digest:    digestBytes([]byte("empty-platform-arch")),
+				Size:      1,
+				Platform: &ociPlatform{
+					OS: "linux",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index := ociIndex{
+				SchemaVersion: 2,
+				MediaType:     ociMediaTypeImageIndex,
+				Manifests:     []ociDescriptor{tt.descriptor, validLater},
+			}
+
+			got, err := selectOCIPlatformManifest(index, nodePlatform{OS: "linux", Architecture: "amd64"})
+			if got.Digest != "" {
+				t.Fatalf("selected digest = %s, want none for malformed child", got.Digest)
+			}
+			if !errors.Is(err, ErrOCIDigestMismatch) {
+				t.Fatalf("selectOCIPlatformManifest error = %v, want ErrOCIDigestMismatch", err)
+			}
+		})
+	}
+}
+
+func TestSelectOCIPlatformManifestNeverSelectsNonImageManifestMediaType(t *testing.T) {
+	index := ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests: []ociDescriptor{
+			{
+				MediaType: "application/vnd.in-toto+json",
+				Digest:    digestBytes([]byte("matching-attestation")),
+				Size:      1,
+				Platform: &ociPlatform{
+					Architecture: "amd64",
+					OS:           "linux",
+				},
+			},
+		},
+	}
+
+	got, err := selectOCIPlatformManifest(index, nodePlatform{OS: "linux", Architecture: "amd64"})
+	if got.Digest != "" {
+		t.Fatalf("selected digest = %s, want no non-manifest selection", got.Digest)
+	}
+	if !errors.Is(err, ErrOCIArchUnsupported) {
+		t.Fatalf("selectOCIPlatformManifest error = %v, want ErrOCIArchUnsupported", err)
+	}
+}
+
+func TestSelectOCIPlatformManifestHonorsVariantWhenBothPresent(t *testing.T) {
+	first := testOCIPlatformDescriptor(digestBytes([]byte("arm64-v7")), "linux", "arm64")
+	first.Platform.Variant = "v7"
+	second := testOCIPlatformDescriptor(digestBytes([]byte("arm64-v8")), "linux", "arm64")
+	second.Platform.Variant = "v8"
+	index := ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests:     []ociDescriptor{first, second},
+	}
+
+	got, err := selectOCIPlatformManifest(index, nodePlatform{OS: "linux", Architecture: "arm64", Variant: "v8"})
+	if err != nil {
+		t.Fatalf("selectOCIPlatformManifest returned error: %v", err)
+	}
+	if got.Digest != second.Digest {
+		t.Fatalf("selected digest = %s, want exact variant %s", got.Digest, second.Digest)
+	}
+}
+
+func TestFetchOCIImageResolvesMultiArchIndexAndReportsSelectedDigest(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	node, err := nodeOCIPlatform()
+	if err != nil {
+		t.Skipf("node OCI platform unsupported for this test host: %v", err)
+	}
+
+	fixture := newMultiArchOCILayoutFixture(t, []ociTestLayer{
+		{entries: []ociLayerEntry{
+			{name: "bin/vita-oci-test", body: "#!/bin/sh\necho ok\n", mode: 0o755},
+			{name: "etc/config", body: "multi-arch\n"},
+		}},
+	})
+	source := writeArtifact(t, fixture.archive)
+	logs := captureLogs(t)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageIndexDigest)
+	if err != nil {
+		t.Fatalf("FetchOCIImageFor returned error: %v", err)
+	}
+
+	wantDigest := fixture.imageDigest
+	if node.Architecture == "arm64" {
+		wantDigest = fixture.arm64ImageDigest
+	}
+	if result.ImageDigest != wantDigest {
+		t.Fatalf("result ImageDigest = %s, want selected child %s", result.ImageDigest, wantDigest)
+	}
+	if result.ImageDigest == fixture.imageIndexDigest {
+		t.Fatalf("result ImageDigest = pinned index digest %s, want resolved child digest", result.ImageDigest)
+	}
+	if got := readFile(t, filepath.Join(result.RootFSPath, "etc/config")); got != "multi-arch\n" {
+		t.Fatalf("assembled config = %q, want selected child rootfs", got)
+	}
+	if !strings.Contains(logs.String(), "image-digest="+ShortOCIDigest(wantDigest)) ||
+		!strings.Contains(logs.String(), "arch="+node.OS+"/"+node.Architecture) ||
+		!strings.Contains(logs.String(), "layers=1 verified=OK status=OK") {
+		t.Fatalf("fetch log = %q, want resolved OCI marker", logs.String())
+	}
+}
+
+func TestFetchOCIImageRejectsTamperedSelectedChildFromIndexWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	node, err := nodeOCIPlatform()
+	if err != nil {
+		t.Skipf("node OCI platform unsupported for this test host: %v", err)
+	}
+
+	fixture := newMultiArchOCILayoutFixture(t, []ociTestLayer{
+		{entries: []ociLayerEntry{{name: "bin/vita-oci-test", body: "#!/bin/sh\n", mode: 0o755}}},
+	})
+	selectedDigest := fixture.imageDigest
+	if node.Architecture == "arm64" {
+		selectedDigest = fixture.arm64ImageDigest
+	}
+	selectedBlob := blobName(selectedDigest)
+	tampered := append([]byte(nil), fixture.files[selectedBlob]...)
+	if len(tampered) == 0 {
+		t.Fatalf("selected child blob %s is empty", selectedDigest)
+	}
+	tampered[len(tampered)/2] ^= 0xff
+	fixture.files[selectedBlob] = tampered
+	fixture.archive = archiveOCILayout(t, fixture.files)
+	source := writeArtifact(t, fixture.archive)
+	logs := captureLogs(t)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageIndexDigest)
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on tampered selected child", result)
+	}
+	if !errors.Is(err, ErrOCIDigestMismatch) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIDigestMismatch", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+	if !strings.Contains(logs.String(), "VITA-CAPSULE-OCI-FETCH-REJECT: reason=digest_mismatch status=OK") {
+		t.Fatalf("fetch log = %q, want digest mismatch reject", logs.String())
+	}
+}
+
+func TestFetchOCIImageRejectsUnsupportedIndexArchWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	unsupportedArch := unsupportedOCIArchForNode(t)
+	fixture := newSingleArchImageIndexOCILayoutFixture(t, unsupportedArch, []ociTestLayer{
+		{entries: []ociLayerEntry{{name: "bin/vita-oci-test", body: "#!/bin/sh\n", mode: 0o755}}},
+	})
+	source := writeArtifact(t, fixture.archive)
+	logs := captureLogs(t)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageIndexDigest)
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on unsupported arch", result)
+	}
+	if !errors.Is(err, ErrOCIArchUnsupported) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIArchUnsupported", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+	if !strings.Contains(logs.String(), "VITA-CAPSULE-OCI-FETCH-REJECT: reason=arch_unsupported status=OK") {
+		t.Fatalf("fetch log = %q, want arch unsupported reject", logs.String())
+	}
+}
+
+func TestFetchOCIImageRejectsDuplicateKeyImageIndexWithoutStaging(t *testing.T) {
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv(cacheRootEnv, cacheRoot)
+	fixture := newOCILayoutFixture(t, []ociTestLayer{
+		{entries: []ociLayerEntry{{name: "bin/vita-oci-test", body: "#!/bin/sh\n", mode: 0o755}}},
+	})
+	duplicateIndex := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[],"manifests":[]}`)
+	fixture.imageIndexDigest = digestBytes(duplicateIndex)
+	fixture.files[blobName(fixture.imageIndexDigest)] = duplicateIndex
+	topIndexRaw := mustJSON(t, ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests: []ociDescriptor{
+			{
+				MediaType: ociMediaTypeImageIndex,
+				Digest:    fixture.imageIndexDigest,
+				Size:      int64(len(duplicateIndex)),
+			},
+		},
+	})
+	fixture.files[ociIndexFile] = topIndexRaw
+	fixture.archive = archiveOCILayout(t, fixture.files)
+	source := writeArtifact(t, fixture.archive)
+
+	result, err := FetchOCIImageFor(context.Background(), source, sriFor(fixture.archive), "local.test.oci", "1.0.0", fixture.imageIndexDigest)
+	if result.CapsulePath != "" || result.RootFSPath != "" {
+		t.Fatalf("result = %#v, want empty on malformed image index", result)
+	}
+	if !errors.Is(err, ErrOCIDigestMismatch) {
+		t.Fatalf("FetchOCIImageFor error = %v, want ErrOCIDigestMismatch", err)
+	}
+	assertCacheRootEmpty(t, cacheRoot)
+}
+
 type ociTestLayer struct {
 	entries []ociLayerEntry
 	archive []byte
@@ -376,11 +681,13 @@ type ociLayerEntry struct {
 }
 
 type ociLayoutFixture struct {
-	files        map[string][]byte
-	archive      []byte
-	imageDigest  string
-	configDigest string
-	layerDigests []string
+	files            map[string][]byte
+	archive          []byte
+	imageDigest      string
+	imageIndexDigest string
+	arm64ImageDigest string
+	configDigest     string
+	layerDigests     []string
 }
 
 func newOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture {
@@ -390,7 +697,48 @@ func newOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture 
 		ociLayoutFile: []byte(`{"imageLayoutVersion":"1.0.0"}`),
 	}
 
-	config := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["VITA_TEST=1"],"Entrypoint":["/bin/vita-oci-test"],"Cmd":["--serve"],"WorkingDir":"/"}}`)
+	imageDigest, configDigest, layerDigests := addOCIImage(t, files, "amd64", layers)
+
+	indexRaw := mustJSON(t, ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests: []ociDescriptor{
+			{
+				MediaType: ociMediaTypeImageManifest,
+				Digest:    imageDigest,
+				Size:      int64(len(files[blobName(imageDigest)])),
+				Platform: &ociPlatform{
+					Architecture: "amd64",
+					OS:           "linux",
+				},
+			},
+		},
+	})
+	files[ociIndexFile] = indexRaw
+
+	fixture := &ociLayoutFixture{
+		files:        files,
+		imageDigest:  imageDigest,
+		configDigest: configDigest,
+		layerDigests: layerDigests,
+	}
+	fixture.archive = archiveOCILayout(t, files)
+	return fixture
+}
+
+func addOCIImage(t *testing.T, files map[string][]byte, arch string, layers []ociTestLayer) (string, string, []string) {
+	t.Helper()
+
+	config := mustJSON(t, ociImageConfig{
+		Architecture: arch,
+		OS:           "linux",
+		Config: ociRuntimeConfig{
+			Env:        []string{"VITA_TEST=1"},
+			Entrypoint: []string{"/bin/vita-oci-test"},
+			Cmd:        []string{"--serve"},
+			WorkingDir: "/",
+		},
+	})
 	configDigest := digestBytes(config)
 	files[blobName(configDigest)] = config
 
@@ -413,7 +761,7 @@ func newOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture 
 
 	manifestRaw := mustJSON(t, ociImageManifest{
 		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
+		MediaType:     ociMediaTypeImageManifest,
 		Config: ociDescriptor{
 			MediaType: "application/vnd.oci.image.config.v1+json",
 			Digest:    configDigest,
@@ -423,32 +771,124 @@ func newOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture 
 	})
 	imageDigest := digestBytes(manifestRaw)
 	files[blobName(imageDigest)] = manifestRaw
+	return imageDigest, configDigest, layerDigests
+}
+
+func newMultiArchOCILayoutFixture(t *testing.T, layers []ociTestLayer) *ociLayoutFixture {
+	t.Helper()
+
+	return newImageIndexOCILayoutFixture(t, layers, true, "arm64", "amd64")
+}
+
+func newSingleArchImageIndexOCILayoutFixture(t *testing.T, arch string, layers []ociTestLayer) *ociLayoutFixture {
+	t.Helper()
+
+	return newImageIndexOCILayoutFixture(t, layers, false, arch)
+}
+
+func newImageIndexOCILayoutFixture(t *testing.T, layers []ociTestLayer, includeAttestation bool, arches ...string) *ociLayoutFixture {
+	t.Helper()
+	if len(arches) == 0 {
+		t.Fatal("newImageIndexOCILayoutFixture requires at least one architecture")
+	}
+
+	files := map[string][]byte{
+		ociLayoutFile: []byte(`{"imageLayoutVersion":"1.0.0"}`),
+	}
+	descriptors := make([]ociDescriptor, 0, len(arches)+1)
+	if includeAttestation {
+		attestationRaw := []byte(`{"_type":"https://in-toto.io/Statement/v1"}`)
+		attestationDigest := digestBytes(attestationRaw)
+		files[blobName(attestationDigest)] = attestationRaw
+		descriptors = append(descriptors, ociDescriptor{
+			MediaType: "application/vnd.in-toto+json",
+			Digest:    attestationDigest,
+			Size:      int64(len(attestationRaw)),
+			Platform: &ociPlatform{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		})
+	}
+
+	fixture := &ociLayoutFixture{files: files}
+	for _, arch := range arches {
+		imageDigest, configDigest, layerDigests := addOCIImage(t, files, arch, layers)
+		if arch == "amd64" || fixture.imageDigest == "" {
+			fixture.imageDigest = imageDigest
+			fixture.configDigest = configDigest
+			fixture.layerDigests = layerDigests
+		}
+		if arch == "arm64" {
+			fixture.arm64ImageDigest = imageDigest
+		}
+		descriptors = append(descriptors, imageManifestDescriptor(t, files, imageDigest, arch))
+	}
 
 	indexRaw := mustJSON(t, ociIndex{
 		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.index.v1+json",
+		MediaType:     ociMediaTypeImageIndex,
+		Manifests:     descriptors,
+	})
+	fixture.imageIndexDigest = digestBytes(indexRaw)
+	files[blobName(fixture.imageIndexDigest)] = indexRaw
+	topIndexRaw := mustJSON(t, ociIndex{
+		SchemaVersion: 2,
+		MediaType:     ociMediaTypeImageIndex,
 		Manifests: []ociDescriptor{
 			{
-				MediaType: "application/vnd.oci.image.manifest.v1+json",
-				Digest:    imageDigest,
-				Size:      int64(len(manifestRaw)),
-				Platform: &ociPlatform{
-					Architecture: "amd64",
-					OS:           "linux",
-				},
+				MediaType: ociMediaTypeImageIndex,
+				Digest:    fixture.imageIndexDigest,
+				Size:      int64(len(indexRaw)),
 			},
 		},
 	})
-	files[ociIndexFile] = indexRaw
-
-	fixture := &ociLayoutFixture{
-		files:        files,
-		imageDigest:  imageDigest,
-		configDigest: configDigest,
-		layerDigests: layerDigests,
-	}
+	files[ociIndexFile] = topIndexRaw
 	fixture.archive = archiveOCILayout(t, files)
 	return fixture
+}
+
+func imageManifestDescriptor(t *testing.T, files map[string][]byte, digest string, arch string) ociDescriptor {
+	t.Helper()
+
+	raw, ok := files[blobName(digest)]
+	if !ok {
+		t.Fatalf("missing image manifest blob %s", digest)
+	}
+	return ociDescriptor{
+		MediaType: ociMediaTypeImageManifest,
+		Digest:    digest,
+		Size:      int64(len(raw)),
+		Platform: &ociPlatform{
+			Architecture: arch,
+			OS:           "linux",
+		},
+	}
+}
+
+func testOCIPlatformDescriptor(digest string, osName string, arch string) ociDescriptor {
+	return ociDescriptor{
+		MediaType: ociMediaTypeImageManifest,
+		Digest:    digest,
+		Size:      1,
+		Platform: &ociPlatform{
+			Architecture: arch,
+			OS:           osName,
+		},
+	}
+}
+
+func unsupportedOCIArchForNode(t *testing.T) string {
+	t.Helper()
+
+	node, err := nodeOCIPlatform()
+	if err != nil {
+		t.Skipf("node OCI platform unsupported for this test host: %v", err)
+	}
+	if node.Architecture == "amd64" {
+		return "arm64"
+	}
+	return "amd64"
 }
 
 func gzipLayerArchive(t *testing.T, entries []ociLayerEntry) []byte {
