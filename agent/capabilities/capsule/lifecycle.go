@@ -394,8 +394,12 @@ func (c *LifecycleCapability) applyUpdate(ctx context.Context, desired Lifecycle
 		return nil, lifecycleOpError("capsule_lifecycle_backup_failed", err)
 	}
 
-	if err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
-		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", err)
+	if stopped, err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
+		var rollbackErr error
+		if stopped {
+			rollbackErr = c.restartPrior(ctx, current)
+		}
+		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", errors.Join(err, rollbackErr))
 	}
 	newUndo, newStatus, err := c.startManifest(ctx, targetEntry, targetManifest)
 	if err != nil {
@@ -454,8 +458,12 @@ func (c *LifecycleCapability) applyRestart(ctx context.Context, desired Lifecycl
 		return nil, lifecycleInvalid(err.Error())
 	}
 
-	if err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
-		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", err)
+	if stopped, err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
+		var rollbackErr error
+		if stopped {
+			rollbackErr = c.restartPrior(ctx, current)
+		}
+		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", errors.Join(err, rollbackErr))
 	}
 	newUndo, status, err := c.startManifest(ctx, current.entry, current.manifest)
 	if err != nil {
@@ -489,8 +497,12 @@ func (c *LifecycleCapability) applyStop(ctx context.Context, desired LifecycleDe
 	if err := validateLifecycleOwnUnit(current.status.Unit, unit); err != nil {
 		return nil, err
 	}
-	if err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
-		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", err)
+	if stopped, err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
+		var rollbackErr error
+		if stopped {
+			rollbackErr = c.restartPrior(ctx, current)
+		}
+		return nil, lifecycleOpError("capsule_lifecycle_stop_failed", errors.Join(err, rollbackErr))
 	}
 
 	c.setLast(LifecycleStatus{
@@ -552,8 +564,12 @@ func (c *LifecycleCapability) applyRemediate(ctx context.Context, desired Lifecy
 		if err := validateLifecycleOwnUnit(current.status.Unit, unit); err != nil {
 			return nil, err
 		}
-		if err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
-			return nil, lifecycleOpError("capsule_lifecycle_stop_failed", err)
+		if stopped, err := c.stopManifest(ctx, current.manifest, current.status.Unit); err != nil {
+			var rollbackErr error
+			if stopped {
+				rollbackErr = c.restartPrior(ctx, current)
+			}
+			return nil, lifecycleOpError("capsule_lifecycle_stop_failed", errors.Join(err, rollbackErr))
 		}
 		c.setLast(LifecycleStatus{
 			Op:      lifecycleOpRemediate,
@@ -622,27 +638,28 @@ func (c *ExecuteCapability) currentExecution() (ExecuteStatus, ExecutionManifest
 	return status, cloneExecutionManifest(*c.lastManifest), true
 }
 
-func (c *LifecycleCapability) stopManifest(ctx context.Context, manifest ExecutionManifest, runningUnit string) error {
+func (c *LifecycleCapability) stopManifest(ctx context.Context, manifest ExecutionManifest, runningUnit string) (bool, error) {
 	unit, err := composeTransientUnit(manifest)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := validateLifecycleOwnUnit(runningUnit, unit); err != nil {
-		return err
+		return false, err
+	}
+	if unit.NetNS != nil && c.execute.netns == nil {
+		return false, lifecycleInvalid("missing capsule netns manager")
 	}
 	stopErr := stopAndUnlinkTransientUnit(ctx, c.execute.launcher, unit.Name)
 	var teardownErr error
 	if unit.NetNS != nil {
-		if c.execute.netns == nil {
-			return lifecycleInvalid("missing capsule netns manager")
-		}
 		teardownErr = c.execute.netns.Teardown(ctx, *unit.NetNS)
 	}
-	if stopErr == nil {
-		c.execute.stopWorkload(unit.Name)
-		c.execute.clearLast(unit.Name)
+	if err := errors.Join(stopErr, teardownErr); err != nil {
+		return true, err
 	}
-	return errors.Join(stopErr, teardownErr)
+	c.execute.stopWorkload(unit.Name)
+	c.execute.clearLast(unit.Name)
+	return true, nil
 }
 
 func (c *LifecycleCapability) startManifest(ctx context.Context, entry CapsuleEntry, manifest ExecutionManifest) (transaction.Undo, ExecuteStatus, error) {

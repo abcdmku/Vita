@@ -229,6 +229,60 @@ func TestLifecycleUpdateBackupFailureAbortsBeforeStopStart(t *testing.T) {
 	}
 }
 
+func TestLifecycleUpdateStartFailureRestoresBackupAndPriorRunningInstance(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	next := lifecycleEntry("2.0.0")
+	calls := []string{}
+	launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+	execute := lifecycleExecute(t, entry, lifecycleManifest(t, entry, lifecyclePolicyFail), launcher)
+	archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
+	lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+		return []capsuleruntime.WorkloadStatus{{
+			ID:     next.ID,
+			Unit:   capsuleUnitName(next.ID),
+			Status: capsuleruntime.StatusOK,
+			Health: capsuleruntime.StatusOK,
+		}}
+	})
+	calls = nil
+	launcher.calls = &calls
+	archive.calls = &calls
+	launcher.startErrs = []error{errors.New("new version start failed"), nil}
+
+	undo, err := lifecycle.Apply(ctx, lifecycleUpdateRequest(next, lifecycleManifest(t, next, lifecyclePolicyFail)))
+	if err == nil {
+		t.Fatal("Apply returned nil error, want start failure")
+	}
+	if undo != nil {
+		t.Fatalf("Apply returned undo %#v, want nil on rejected update", undo)
+	}
+	var opErr *LifecycleOperationError
+	if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_start_failed" {
+		t.Fatalf("Apply error = %T %v, want capsule_lifecycle_start_failed", err, err)
+	}
+
+	wantOrder := []string{
+		"backup.create",
+		"backup.verify",
+		"stop:" + capsuleUnitName(entry.ID),
+		"reset:" + capsuleUnitName(entry.ID),
+		"start:" + capsuleUnitName(entry.ID),
+		"backup.restore",
+		"start:" + capsuleUnitName(entry.ID),
+	}
+	if !reflect.DeepEqual(calls, wantOrder) {
+		t.Fatalf("call order = %#v, want %#v", calls, wantOrder)
+	}
+	if len(archive.restores) != 1 || archive.restores[0].BackupID != lifecycleBackupID {
+		t.Fatalf("restore requests = %#v, want same backup id", archive.restores)
+	}
+	status, _, ok := execute.currentExecution()
+	if !ok || status.Version != entry.Version {
+		t.Fatalf("current execution = %#v ok=%v, want prior version restarted", status, ok)
+	}
+}
+
 func TestLifecycleRejectsFailClosedWithoutSideEffects(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -417,6 +471,91 @@ func TestLifecycleRestartFailureRestoresPriorRunningInstance(t *testing.T) {
 	})
 }
 
+func TestLifecycleStopTeardownFailureRestoresPriorRunningInstance(t *testing.T) {
+	ctx := context.Background()
+	entry := executeEntry()
+	next := lifecycleEntry("2.0.0")
+
+	tests := []struct {
+		name    string
+		policy  string
+		request LifecycleApplyRequest
+		archive bool
+	}{
+		{
+			name:    "update",
+			policy:  lifecyclePolicyFail,
+			request: lifecycleUpdateRequest(next, lifecycleNetworkManifest(t, next, lifecyclePolicyFail)),
+			archive: true,
+		},
+		{
+			name:    "restart",
+			policy:  lifecyclePolicyFail,
+			request: LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpRestart, ID: entry.ID}},
+		},
+		{
+			name:    "stop",
+			policy:  lifecyclePolicyFail,
+			request: LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpStop, ID: entry.ID}},
+		},
+		{
+			name:    "remediate fail",
+			policy:  lifecyclePolicyFail,
+			request: LifecycleApplyRequest{Desired: &LifecycleDesired{Op: lifecycleOpRemediate, ID: entry.ID}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := []string{}
+			launcher := &orderedLifecycleLauncher{calls: &calls, status: transientUnitStatus{DynamicUID: "61408"}}
+			netns := &recordingNetnsManager{tearErr: errors.New("teardown failed")}
+			manifest := lifecycleNetworkManifest(t, entry, tt.policy)
+			execute := lifecycleNetworkExecute(t, entry, manifest, launcher, netns)
+			archive := &recordingLifecycleArchive{calls: &calls, backupID: lifecycleBackupID}
+			lifecycle := lifecycleCapabilityForTest(execute, archive, func() []capsuleruntime.WorkloadStatus {
+				return []capsuleruntime.WorkloadStatus{{
+					ID:     entry.ID,
+					Unit:   capsuleUnitName(entry.ID),
+					Status: capsuleruntime.StatusOK,
+					Health: capsuleruntime.StatusOK,
+				}}
+			})
+			calls = nil
+			launcher.calls = &calls
+			archive.calls = &calls
+
+			undo, err := lifecycle.Apply(ctx, tt.request)
+			if err == nil {
+				t.Fatal("Apply returned nil error, want teardown failure")
+			}
+			if undo != nil {
+				t.Fatalf("Apply returned undo %#v, want nil on rejected lifecycle op", undo)
+			}
+			var opErr *LifecycleOperationError
+			if !errors.As(err, &opErr) || opErr.ApplyErrorCode() != "capsule_lifecycle_stop_failed" {
+				t.Fatalf("Apply error = %T %v, want capsule_lifecycle_stop_failed", err, err)
+			}
+
+			wantOrder := []string{
+				"stop:" + capsuleUnitName(entry.ID),
+				"reset:" + capsuleUnitName(entry.ID),
+				"start:" + capsuleUnitName(entry.ID),
+			}
+			if tt.archive {
+				wantOrder = append([]string{"backup.create", "backup.verify"}, wantOrder...)
+			}
+			if !reflect.DeepEqual(calls, wantOrder) {
+				t.Fatalf("call order = %#v, want %#v", calls, wantOrder)
+			}
+			status, _, ok := execute.currentExecution()
+			if !ok || status.Version != entry.Version {
+				t.Fatalf("current execution = %#v ok=%v, want prior version restarted", status, ok)
+			}
+		})
+	}
+}
+
 func TestLifecycleRemediateHonorsManifestPolicy(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
@@ -525,6 +664,22 @@ func lifecycleExecute(t *testing.T, entry CapsuleEntry, manifest ExecutionManife
 	return execute
 }
 
+func lifecycleNetworkExecute(t *testing.T, entry CapsuleEntry, manifest ExecutionManifest, launcher *orderedLifecycleLauncher, netns capsuleNetnsManager) *ExecuteCapability {
+	t.Helper()
+	fs := newMemoryFileSystem(mustRenderRegistry(t, registryWithCapsules([]CapsuleEntry{entry})))
+	execute := newExecuteCapabilityWithNetns(
+		fs,
+		memoryExecutionManifestStore{entry.ID: manifest},
+		launcher,
+		netns,
+		nil,
+	)
+	if _, err := execute.Apply(context.Background(), executeApply(entry)); err != nil {
+		t.Fatalf("seed execute Apply returned error: %v", err)
+	}
+	return execute
+}
+
 func lifecycleCapabilityForTest(execute *ExecuteCapability, archive lifecycleArchive, snapshot func() []capsuleruntime.WorkloadStatus) *LifecycleCapability {
 	lifecycle := newLifecycleCapability(execute, archive, snapshot)
 	now := time.Unix(0, 0)
@@ -568,6 +723,13 @@ func lifecycleManifest(t *testing.T, entry CapsuleEntry, onUnhealthy string) Exe
 	if onUnhealthy != "" {
 		manifest.LifecyclePolicy = LifecyclePolicy{OnUnhealthy: onUnhealthy}
 	}
+	return manifest
+}
+
+func lifecycleNetworkManifest(t *testing.T, entry CapsuleEntry, onUnhealthy string) ExecutionManifest {
+	t.Helper()
+	manifest := lifecycleManifest(t, entry, onUnhealthy)
+	manifest.Network = validExecutionNetworkNoGrants()
 	return manifest
 }
 
@@ -655,6 +817,9 @@ func (l *orderedLifecycleLauncher) StartTransientUnit(ctx context.Context, unit 
 	status := l.status
 	if status.DynamicUID == "" {
 		status.DynamicUID = "61408"
+	}
+	if unit.NetNS != nil && status.NetworkNamespacePath == "" {
+		status.NetworkNamespacePath = "/proc/123/ns/net"
 	}
 	return status, nil
 }
