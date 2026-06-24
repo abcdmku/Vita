@@ -1,5 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
+import { posix as posixPath } from "node:path";
 import { TextDecoder, types as nodeTypes } from "node:util";
 import { zstdDecompressSync } from "node:zlib";
 
@@ -133,12 +135,67 @@ const EXECUTION_MANIFEST_FIELDS = new Set([
 const EXECUTION_PACKAGE_CLASSES = new Set(["ts-service", "oci-service", "wasm-service"]);
 const EXECUTION_RUNTIME_FIELDS = new Set(["typescript", "oci", "wasm"]);
 const TYPESCRIPT_RUNTIME_FIELDS = new Set(["entrypoint"]);
+const OCI_RUNTIME_FIELDS = new Set(["image"]);
+const OCI_IMAGE_FIELDS = new Set(["digest", "entrypoint"]);
+const WASM_RUNTIME_FIELDS = new Set(["module"]);
 const RESOURCE_LIMIT_FIELDS = new Set(["cpuCores", "ramMiB", "storageMiB", "tasksMax"]);
-const OPTIONAL_EXECUTION_OBJECT_FIELDS = new Set(["data", "lifecyclePolicy", "network"]);
+const EXECUTION_DATA_FIELDS = new Set(["classes", "volumes"]);
+const EXECUTION_NETWORK_FIELDS = new Set(["egress", "ingress"]);
+const EXECUTION_NETWORK_INGRESS_FIELDS = new Set([
+  "direction",
+  "interface",
+  "name",
+  "port",
+  "protocol",
+  "public",
+  "sourceCidr",
+  "unsafeWideOpen",
+]);
+const EXECUTION_NETWORK_EGRESS_FIELDS = new Set([
+  "destinations",
+  "direction",
+  "interface",
+  "name",
+  "ports",
+  "protocol",
+  "unsafeWideOpen",
+]);
+const HEALTH_CHECK_FIELDS = new Set(["intervalSeconds", "name", "target", "timeoutSeconds", "type"]);
+const LIFECYCLE_POLICY_FIELDS = new Set(["onUnhealthy"]);
+const VOLUME_FIELDS = new Set(["access", "backup", "class", "mountPath", "name", "persistence", "sizeMiB"]);
+const EXECUTION_DATA_CLASSES = new Set([
+  "app-state",
+  "cache",
+  "configuration",
+  "logs",
+  "telemetry",
+  "user-content",
+]);
+const VOLUME_ACCESS = new Set(["read-only", "read-write"]);
+const VOLUME_PERSISTENCE = new Set(["persistent"]);
+const MAX_CPU_QUOTA_CORES = 64;
+const MAX_MEMORY_MIB = 1024 * 1024;
+const MAX_STORAGE_MIB = 1024 * 1024;
+const MAX_TASKS = 16_384;
+const PORT_ALL = -1;
 const REVERSE_DNS_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/u;
 const EXECUTION_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/u;
+const PRIVATE_KEY_PATTERN =
+  /\b(?:private[-_\s]?key|openssh\s+private\s+key|age-secret-key|xprv|seed[-_\s]?phrase|mnemonic|recovery[-_\s]?phrase)\b/i;
+const SECRET_ASSIGNMENT_PATTERN =
+  /\b(?:private[-_\s]?key|api[-_\s]?key|access[-_\s]?token|refresh[-_\s]?token|password|secret)\s*[:=]/i;
+const SEED_WORDS_PATTERN = /\b[a-z]{3,12}(?:\s+[a-z]{3,12}){11,23}\b/i;
+const LONG_HEX_PATTERN = /(?:0x)?[A-Fa-f0-9]{32,}/u;
+const LONG_BASE64_PATTERN = /[A-Za-z0-9+/]{48,}={0,2}|[A-Za-z0-9_-]{48,}/u;
+const INLINE_REFERENCE_SCHEMES = new Set(["data", "inline", "literal"]);
+const NETWORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const NETWORK_META_CHARACTER = /[\\'"`$;&|<>()[\]{}!*?%]/u;
+const INTERFACE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u;
+const VOLUME_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
+const OCI_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const INTEGER_LITERAL_PATTERN = /^-?(?:0|[1-9][0-9]*)$/u;
 
 export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
   try {
@@ -184,13 +241,6 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
     const artifact = parsePackageArtifact(artifactBytes.value);
     if (!artifact.ok) return reject([artifact.error]);
 
-    const manifestMatch = verifySelectedManifest(
-      artifact.value.manifest,
-      request.value.appId,
-      request.value.version,
-    );
-    if (!manifestMatch.ok) return reject([manifestMatch.error]);
-
     const metadata = readCatalogInstallMetadata(
       located.value.entry,
       ["catalog", "apps", String(located.value.appIndex), "versions", String(located.value.versionIndex)],
@@ -206,6 +256,14 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
       request.value.version,
     );
     if (!contractMatch.ok) return reject([contractMatch.error]);
+
+    const manifestMatch = verifySelectedManifest(
+      artifact.value.manifest,
+      request.value.appId,
+      request.value.version,
+      contract.value.packageClass,
+    );
+    if (!manifestMatch.ok) return reject([manifestMatch.error]);
 
     const mirrorResult = resolveFromMirror(metadata.value.lockfile, request.value.mirrorStore);
     if (!mirrorResult.ok) {
@@ -607,8 +665,8 @@ function capsuleTarBytes(bytes: Uint8Array):
     } {
   if (!hasZstdMagic(bytes)) {
     return {
-      ok: true,
-      value: bytes,
+      error: error("POLICY_REJECTED", [], "Catalog package artifact must be a zstd-compressed capsule tar."),
+      ok: false,
     };
   }
 
@@ -686,8 +744,7 @@ function readCapsuleFiles(bytes: Uint8Array):
         };
       }
 
-      const basename = basenameFromPath(path);
-      if (basename === CAPSULE_MANIFEST_BASENAME) {
+      if (path === CAPSULE_MANIFEST_BASENAME) {
         if (manifest !== undefined) {
           return {
             error: error("POLICY_REJECTED", [CAPSULE_MANIFEST_BASENAME], "Capsule artifact contains ambiguous manifests."),
@@ -696,6 +753,11 @@ function readCapsuleFiles(bytes: Uint8Array):
         }
 
         manifest = bytes.slice(dataStart, dataEnd);
+      } else if (path.endsWith(`/${CAPSULE_MANIFEST_BASENAME}`)) {
+        return {
+          error: error("POLICY_REJECTED", [path], "Capsule artifact manifest.json must be at the capsule root."),
+          ok: false,
+        };
       }
     }
 
@@ -754,10 +816,17 @@ function parseArtifactJson(bytes: Uint8Array, path: Path):
     };
   }
 
-  const duplicateKey = findDuplicateJsonObjectKey(text);
-  if (duplicateKey !== undefined) {
+  const structure = scanArtifactJsonStructure(text);
+  if (structure.duplicateKey !== undefined) {
     return {
-      error: error("POLICY_REJECTED", path, `Capsule artifact JSON file contains duplicate object key ${duplicateKey}.`),
+      error: error("POLICY_REJECTED", path, `Capsule artifact JSON file contains duplicate object key ${structure.duplicateKey}.`),
+      ok: false,
+    };
+  }
+
+  if (structure.invalidIntegerPath !== undefined) {
+    return {
+      error: error("POLICY_REJECTED", [...path, ...structure.invalidIntegerPath], "Capsule artifact JSON integer field must use an integer literal."),
       ok: false,
     };
   }
@@ -790,30 +859,38 @@ interface JsonKeyCursor {
   index: number;
   duplicate: string | undefined;
   failed: boolean;
+  invalidIntegerPath: Path | undefined;
 }
 
-function findDuplicateJsonObjectKey(text: string): string | undefined {
+function scanArtifactJsonStructure(text: string): {
+  readonly duplicateKey: string | undefined;
+  readonly invalidIntegerPath: Path | undefined;
+} {
   const cursor: JsonKeyCursor = {
     duplicate: undefined,
     failed: false,
     index: 0,
+    invalidIntegerPath: undefined,
     text,
   };
 
-  parseJsonValue(cursor);
-  return cursor.duplicate;
+  parseJsonValue(cursor, []);
+  return {
+    duplicateKey: cursor.duplicate,
+    invalidIntegerPath: cursor.invalidIntegerPath,
+  };
 }
 
-function parseJsonValue(cursor: JsonKeyCursor): void {
-  if (cursor.duplicate !== undefined || cursor.failed) return;
+function parseJsonValue(cursor: JsonKeyCursor, path: Path): void {
+  if (cursor.duplicate !== undefined || cursor.invalidIntegerPath !== undefined || cursor.failed) return;
 
   skipJsonWhitespace(cursor);
   const char = cursor.text[cursor.index];
 
   if (char === "{") {
-    parseJsonObject(cursor);
+    parseJsonObject(cursor, path);
   } else if (char === "[") {
-    parseJsonArray(cursor);
+    parseJsonArray(cursor, path);
   } else if (char === "\"") {
     parseJsonString(cursor);
   } else if (char === "t") {
@@ -823,11 +900,11 @@ function parseJsonValue(cursor: JsonKeyCursor): void {
   } else if (char === "n") {
     consumeJsonLiteral(cursor, "null");
   } else {
-    consumeJsonNumber(cursor);
+    consumeJsonNumber(cursor, path);
   }
 }
 
-function parseJsonObject(cursor: JsonKeyCursor): void {
+function parseJsonObject(cursor: JsonKeyCursor, path: Path): void {
   cursor.index += 1;
   skipJsonWhitespace(cursor);
 
@@ -854,8 +931,8 @@ function parseJsonObject(cursor: JsonKeyCursor): void {
     }
     cursor.index += 1;
 
-    parseJsonValue(cursor);
-    if (cursor.duplicate !== undefined || cursor.failed) return;
+    parseJsonValue(cursor, [...path, key]);
+    if (cursor.duplicate !== undefined || cursor.invalidIntegerPath !== undefined || cursor.failed) return;
 
     skipJsonWhitespace(cursor);
     const delimiter = cursor.text[cursor.index];
@@ -874,7 +951,7 @@ function parseJsonObject(cursor: JsonKeyCursor): void {
   cursor.failed = true;
 }
 
-function parseJsonArray(cursor: JsonKeyCursor): void {
+function parseJsonArray(cursor: JsonKeyCursor, path: Path): void {
   cursor.index += 1;
   skipJsonWhitespace(cursor);
 
@@ -883,9 +960,10 @@ function parseJsonArray(cursor: JsonKeyCursor): void {
     return;
   }
 
+  let itemIndex = 0;
   while (cursor.index < cursor.text.length) {
-    parseJsonValue(cursor);
-    if (cursor.duplicate !== undefined || cursor.failed) return;
+    parseJsonValue(cursor, [...path, String(itemIndex)]);
+    if (cursor.duplicate !== undefined || cursor.invalidIntegerPath !== undefined || cursor.failed) return;
 
     skipJsonWhitespace(cursor);
     const delimiter = cursor.text[cursor.index];
@@ -898,6 +976,7 @@ function parseJsonArray(cursor: JsonKeyCursor): void {
       return;
     }
     cursor.index += 1;
+    itemIndex += 1;
   }
 
   cursor.failed = true;
@@ -974,7 +1053,7 @@ function consumeJsonLiteral(cursor: JsonKeyCursor, literal: string): void {
   cursor.failed = true;
 }
 
-function consumeJsonNumber(cursor: JsonKeyCursor): void {
+function consumeJsonNumber(cursor: JsonKeyCursor, path: Path): void {
   const start = cursor.index;
   while (cursor.index < cursor.text.length) {
     const char = cursor.text[cursor.index];
@@ -992,6 +1071,12 @@ function consumeJsonNumber(cursor: JsonKeyCursor): void {
 
   if (cursor.index === start) {
     cursor.failed = true;
+    return;
+  }
+
+  const token = cursor.text.slice(start, cursor.index);
+  if (integerNumberPath(path) && !INTEGER_LITERAL_PATTERN.test(token)) {
+    cursor.invalidIntegerPath = path;
   }
 }
 
@@ -1005,6 +1090,24 @@ function skipJsonWhitespace(cursor: JsonKeyCursor): void {
 
 function jsonWhitespace(char: string): boolean {
   return char === " " || char === "\n" || char === "\r" || char === "\t";
+}
+
+function integerNumberPath(path: Path): boolean {
+  const last = path[path.length - 1];
+  if (
+    last === "ramMiB" ||
+    last === "storageMiB" ||
+    last === "tasksMax" ||
+    last === "intervalSeconds" ||
+    last === "timeoutSeconds" ||
+    last === "sizeMiB" ||
+    last === "port"
+  ) {
+    return true;
+  }
+
+  const parent = path[path.length - 2];
+  return parent === "ports";
 }
 
 function readExecutionManifest(
@@ -1160,11 +1263,29 @@ function readExecutionRuntime(
     };
   }
 
-  if (runtimeKind !== "typescript") {
-    return { ok: true };
+  if (runtimeKind === "typescript") {
+    return readTypeScriptRuntime(runtimeValue, [...path, runtimeKind]);
   }
 
-  const runtimeUnknown = unknownField(runtimeValue, TYPESCRIPT_RUNTIME_FIELDS, [...path, runtimeKind]);
+  if (runtimeKind === "oci") {
+    return readOciRuntime(runtimeValue, [...path, runtimeKind]);
+  }
+
+  return readWasmRuntime(runtimeValue, [...path, runtimeKind]);
+}
+
+function readTypeScriptRuntime(
+  value: PlainJsonObject,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  const runtimeUnknown = unknownField(value, TYPESCRIPT_RUNTIME_FIELDS, path);
   if (runtimeUnknown !== undefined) {
     return {
       error: runtimeUnknown,
@@ -1172,11 +1293,107 @@ function readExecutionRuntime(
     };
   }
 
-  const entrypoint = requiredString(runtimeValue, "entrypoint", [...path, runtimeKind]);
+  const entrypoint = requiredString(value, "entrypoint", path);
   if (!entrypoint.ok) return { error: entrypoint.error, ok: false };
   if (entrypoint.value !== "main.ts") {
     return {
-      error: error("POLICY_REJECTED", [...path, runtimeKind, "entrypoint"], "TypeScript capsule entrypoint must be main.ts."),
+      error: error("POLICY_REJECTED", [...path, "entrypoint"], "TypeScript capsule entrypoint must be main.ts."),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function readOciRuntime(
+  value: PlainJsonObject,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  const runtimeUnknown = unknownField(value, OCI_RUNTIME_FIELDS, path);
+  if (runtimeUnknown !== undefined) {
+    return {
+      error: runtimeUnknown,
+      ok: false,
+    };
+  }
+
+  const image = value.image;
+  if (!plainObject(image)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "image"], "OCI capsule image runtime is required."),
+      ok: false,
+    };
+  }
+
+  const imageUnknown = unknownField(image, OCI_IMAGE_FIELDS, [...path, "image"]);
+  if (imageUnknown !== undefined) {
+    return {
+      error: imageUnknown,
+      ok: false,
+    };
+  }
+
+  const digest = requiredString(image, "digest", [...path, "image"]);
+  if (!digest.ok) return { error: digest.error, ok: false };
+  if (!OCI_DIGEST_PATTERN.test(digest.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "image", "digest"], "OCI capsule image digest must be sha256 lowercase hex."),
+      ok: false,
+    };
+  }
+
+  const entrypoint = image.entrypoint;
+  if (!Array.isArray(entrypoint) || entrypoint.length === 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "image", "entrypoint"], "OCI capsule image entrypoint is required."),
+      ok: false,
+    };
+  }
+
+  for (let index = 0; index < entrypoint.length; index += 1) {
+    const item = entrypoint[index];
+    if (typeof item !== "string" || !validOciArgvElement(item, index === 0)) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "image", "entrypoint", String(index)], "OCI capsule image entrypoint item is invalid."),
+        ok: false,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+function readWasmRuntime(
+  value: PlainJsonObject,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  const runtimeUnknown = unknownField(value, WASM_RUNTIME_FIELDS, path);
+  if (runtimeUnknown !== undefined) {
+    return {
+      error: runtimeUnknown,
+      ok: false,
+    };
+  }
+
+  const module = requiredString(value, "module", path);
+  if (!module.ok) return { error: module.error, ok: false };
+  if (module.value !== "component.wasm") {
+    return {
+      error: error("POLICY_REJECTED", [...path, "module"], "WASM capsule module must be component.wasm."),
       ok: false,
     };
   }
@@ -1212,9 +1429,9 @@ function readExecutionResourceLimits(
 
   const cpu = requiredNumber(value, "cpuCores", path);
   if (!cpu.ok) return { error: cpu.error, ok: false };
-  if (!Number.isFinite(cpu.value) || cpu.value <= 0) {
+  if (!Number.isFinite(cpu.value) || cpu.value <= 0 || cpu.value > MAX_CPU_QUOTA_CORES) {
     return {
-      error: error("POLICY_REJECTED", [...path, "cpuCores"], "ExecutionManifest cpuCores must be positive."),
+      error: error("POLICY_REJECTED", [...path, "cpuCores"], "ExecutionManifest cpuCores must be positive and bounded."),
       ok: false,
     };
   }
@@ -1226,9 +1443,10 @@ function readExecutionResourceLimits(
 
     const valueResult = requiredNumber(value, field, path);
     if (!valueResult.ok) return { error: valueResult.error, ok: false };
-    if (!Number.isSafeInteger(valueResult.value) || valueResult.value <= 0) {
+    const max = field === "tasksMax" ? MAX_TASKS : field === "ramMiB" ? MAX_MEMORY_MIB : MAX_STORAGE_MIB;
+    if (!Number.isSafeInteger(valueResult.value) || valueResult.value <= 0 || valueResult.value > max) {
       return {
-        error: error("POLICY_REJECTED", [...path, field], "ExecutionManifest resource limit must be a positive integer."),
+        error: error("POLICY_REJECTED", [...path, field], "ExecutionManifest resource limit must be a positive bounded integer."),
         ok: false,
       };
     }
@@ -1248,25 +1466,616 @@ function validateOptionalExecutionObjects(
       readonly ok: false;
       readonly error: ResolveFromCatalogError;
     } {
-  const keys = sortedKeys(value);
-  for (let index = 0; index < keys.length; index += 1) {
-    const key = keys[index];
-    if (key === undefined) continue;
+  const data = readExecutionData(value.data, [...path, "data"]);
+  if (!data.ok) return { error: data.error, ok: false };
 
-    const child = value[key];
-    if (key === "healthChecks") {
-      if (!Array.isArray(child)) {
-        return {
-          error: error("POLICY_REJECTED", [...path, key], "ExecutionManifest healthChecks must be an array when present."),
-          ok: false,
-        };
-      }
-    } else if (OPTIONAL_EXECUTION_OBJECT_FIELDS.has(key) && !plainObject(child)) {
+  const healthChecks = readExecutionHealthChecks(value.healthChecks, [...path, "healthChecks"]);
+  if (!healthChecks.ok) return { error: healthChecks.error, ok: false };
+
+  const network = readExecutionNetwork(value.network, [...path, "network"]);
+  if (!network.ok) return { error: network.error, ok: false };
+
+  const lifecyclePolicy = readLifecyclePolicy(value.lifecyclePolicy, [...path, "lifecyclePolicy"]);
+  if (!lifecyclePolicy.ok) return { error: lifecyclePolicy.error, ok: false };
+
+  return { ok: true };
+}
+
+function readExecutionData(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest data must be an object when present."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_DATA_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const classes = value.classes;
+  if (!Array.isArray(classes)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "classes"], "ExecutionManifest data.classes is required."),
+      ok: false,
+    };
+  }
+
+  const seenClasses = new Map<string, number>();
+  for (let index = 0; index < classes.length; index += 1) {
+    const item = classes[index];
+    if (typeof item !== "string" || !EXECUTION_DATA_CLASSES.has(item)) {
       return {
-        error: error("POLICY_REJECTED", [...path, key], "ExecutionManifest optional field must be an object when present."),
+        error: error("POLICY_REJECTED", [...path, "classes", String(index)], "ExecutionManifest data class is unsupported."),
         ok: false,
       };
     }
+    if (seenClasses.has(item)) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "classes", String(index)], "ExecutionManifest data class is duplicated."),
+        ok: false,
+      };
+    }
+    seenClasses.set(item, index);
+  }
+
+  const volumes = value.volumes;
+  if (!Array.isArray(volumes)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "volumes"], "ExecutionManifest data.volumes is required."),
+      ok: false,
+    };
+  }
+
+  if (volumes.length > 0 && seenClasses.size === 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "classes"], "ExecutionManifest data.classes must declare volume classes."),
+      ok: false,
+    };
+  }
+
+  const seenVolumes = new Map<string, number>();
+  for (let index = 0; index < volumes.length; index += 1) {
+    const volume = readVolumeSpec(volumes[index], [...path, "volumes", String(index)], seenClasses);
+    if (!volume.ok) return { error: volume.error, ok: false };
+
+    if (seenVolumes.has(volume.name)) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "volumes", String(index), "name"], "ExecutionManifest data volume name is duplicated."),
+        ok: false,
+      };
+    }
+    seenVolumes.set(volume.name, index);
+  }
+
+  return { ok: true };
+}
+
+function readVolumeSpec(
+  value: PlainJson | undefined,
+  path: Path,
+  declaredClasses: ReadonlyMap<string, number>,
+):
+  | {
+      readonly ok: true;
+      readonly name: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest data volume must be an object."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, VOLUME_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const name = requiredString(value, "name", path);
+  if (!name.ok) return { error: name.error, ok: false };
+  if (!VOLUME_NAME_PATTERN.test(name.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "name"], "ExecutionManifest data volume name is invalid."),
+      ok: false,
+    };
+  }
+
+  const mountPath = requiredString(value, "mountPath", path);
+  if (!mountPath.ok) return { error: mountPath.error, ok: false };
+  if (!validAbsoluteVolumePath(mountPath.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "mountPath"], "ExecutionManifest data volume mountPath is invalid."),
+      ok: false,
+    };
+  }
+
+  const classValue = requiredString(value, "class", path);
+  if (!classValue.ok) return { error: classValue.error, ok: false };
+  if (!EXECUTION_DATA_CLASSES.has(classValue.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "class"], "ExecutionManifest data volume class is unsupported."),
+      ok: false,
+    };
+  }
+  if (declaredClasses.size > 0 && !declaredClasses.has(classValue.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "class"], "ExecutionManifest data volume class is not declared."),
+      ok: false,
+    };
+  }
+
+  const access = requiredString(value, "access", path);
+  if (!access.ok) return { error: access.error, ok: false };
+  if (!VOLUME_ACCESS.has(access.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "access"], "ExecutionManifest data volume access is unsupported."),
+      ok: false,
+    };
+  }
+
+  const persistence = requiredString(value, "persistence", path);
+  if (!persistence.ok) return { error: persistence.error, ok: false };
+  if (!VOLUME_PERSISTENCE.has(persistence.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "persistence"], "ExecutionManifest data volume persistence is unsupported."),
+      ok: false,
+    };
+  }
+
+  const backup = requiredBoolean(value, "backup", path);
+  if (!backup.ok) return { error: backup.error, ok: false };
+
+  const sizeMiB = requiredNumber(value, "sizeMiB", path);
+  if (!sizeMiB.ok) return { error: sizeMiB.error, ok: false };
+  if (!Number.isSafeInteger(sizeMiB.value) || sizeMiB.value <= 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "sizeMiB"], "ExecutionManifest data volume sizeMiB must be positive."),
+      ok: false,
+    };
+  }
+
+  return {
+    name: name.value,
+    ok: true,
+  };
+}
+
+function readExecutionHealthChecks(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!Array.isArray(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest healthChecks must be an array when present."),
+      ok: false,
+    };
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const check = readHealthCheck(value[index], [...path, String(index)]);
+    if (!check.ok) return { error: check.error, ok: false };
+  }
+
+  return { ok: true };
+}
+
+function readHealthCheck(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest health check must be an object."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, HEALTH_CHECK_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const name = requiredString(value, "name", path);
+  if (!name.ok) return { error: name.error, ok: false };
+  if (!validCheckName(name.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "name"], "ExecutionManifest health check name is invalid."),
+      ok: false,
+    };
+  }
+
+  const type = requiredString(value, "type", path);
+  if (!type.ok) return { error: type.error, ok: false };
+
+  const target = requiredString(value, "target", path);
+  if (!target.ok) return { error: target.error, ok: false };
+
+  if (!validHealthTarget(type.value, target.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "target"], "ExecutionManifest health check target is invalid."),
+      ok: false,
+    };
+  }
+
+  const interval = requiredNumber(value, "intervalSeconds", path);
+  if (!interval.ok) return { error: interval.error, ok: false };
+  if (!Number.isSafeInteger(interval.value) || interval.value <= 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "intervalSeconds"], "ExecutionManifest health check intervalSeconds must be positive."),
+      ok: false,
+    };
+  }
+
+  const timeout = requiredNumber(value, "timeoutSeconds", path);
+  if (!timeout.ok) return { error: timeout.error, ok: false };
+  if (!Number.isSafeInteger(timeout.value) || timeout.value <= 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "timeoutSeconds"], "ExecutionManifest health check timeoutSeconds must be positive."),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function readExecutionNetwork(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest network must be an object when present."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_NETWORK_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const ingress = value.ingress;
+  if (!Array.isArray(ingress)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "ingress"], "ExecutionManifest network.ingress is required."),
+      ok: false,
+    };
+  }
+
+  for (let index = 0; index < ingress.length; index += 1) {
+    const rule = readNetworkIngressRule(ingress[index], [...path, "ingress", String(index)]);
+    if (!rule.ok) return { error: rule.error, ok: false };
+  }
+
+  const egress = value.egress;
+  if (!Array.isArray(egress)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "egress"], "ExecutionManifest network.egress is required."),
+      ok: false,
+    };
+  }
+
+  for (let index = 0; index < egress.length; index += 1) {
+    const rule = readNetworkEgressRule(egress[index], [...path, "egress", String(index)]);
+    if (!rule.ok) return { error: rule.error, ok: false };
+  }
+
+  return { ok: true };
+}
+
+function readNetworkIngressRule(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest network ingress rule must be an object."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_NETWORK_INGRESS_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const direction = optionalString(value, "direction");
+  if (direction !== undefined && direction !== "ingress") {
+    return {
+      error: error("POLICY_REJECTED", [...path, "direction"], "ExecutionManifest network ingress direction must be ingress."),
+      ok: false,
+    };
+  }
+
+  const name = optionalString(value, "name");
+  if (name !== undefined && !validExecutionNetworkName(name)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "name"], "ExecutionManifest network ingress name is invalid."),
+      ok: false,
+    };
+  }
+
+  const protocol = requiredString(value, "protocol", path);
+  if (!protocol.ok) return { error: protocol.error, ok: false };
+  if (!validNetworkProtocol(protocol.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "protocol"], "ExecutionManifest network protocol must be tcp or udp."),
+      ok: false,
+    };
+  }
+
+  const port = requiredNumber(value, "port", path);
+  if (!port.ok) return { error: port.error, ok: false };
+  if (!Number.isSafeInteger(port.value) || !validNetworkPort(port.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "port"], "ExecutionManifest network port is invalid."),
+      ok: false,
+    };
+  }
+
+  const source = requiredString(value, "sourceCidr", path);
+  if (!source.ok) return { error: source.error, ok: false };
+  const sourcePrefix = parseCidrPrefix(source.value);
+  if (sourcePrefix === undefined) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "sourceCidr"], "ExecutionManifest network sourceCidr is invalid."),
+      ok: false,
+    };
+  }
+
+  const iface = requiredString(value, "interface", path);
+  if (!iface.ok) return { error: iface.error, ok: false };
+  if (!validExecutionNetworkInterface(iface.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "interface"], "ExecutionManifest network interface is invalid."),
+      ok: false,
+    };
+  }
+
+  const publicValue = requiredBoolean(value, "public", path);
+  if (!publicValue.ok) return { error: publicValue.error, ok: false };
+
+  const unsafeWideOpen = optionalBoolean(value, "unsafeWideOpen", path);
+  if (!unsafeWideOpen.ok) return { error: unsafeWideOpen.error, ok: false };
+
+  if (sourceCoversAll(sourcePrefix) && !unsafeWideOpen.value) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "sourceCidr"], "ExecutionManifest network ingress opens all sources without unsafeWideOpen."),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function readNetworkEgressRule(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest network egress rule must be an object."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, EXECUTION_NETWORK_EGRESS_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  const direction = optionalString(value, "direction");
+  if (direction !== undefined && direction !== "egress") {
+    return {
+      error: error("POLICY_REJECTED", [...path, "direction"], "ExecutionManifest network egress direction must be egress."),
+      ok: false,
+    };
+  }
+
+  const name = optionalString(value, "name");
+  if (name !== undefined && !validExecutionNetworkName(name)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "name"], "ExecutionManifest network egress name is invalid."),
+      ok: false,
+    };
+  }
+
+  const protocol = requiredString(value, "protocol", path);
+  if (!protocol.ok) return { error: protocol.error, ok: false };
+  if (!validNetworkProtocol(protocol.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "protocol"], "ExecutionManifest network protocol must be tcp or udp."),
+      ok: false,
+    };
+  }
+
+  const destinations = value.destinations;
+  if (!Array.isArray(destinations) || destinations.length === 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "destinations"], "ExecutionManifest network egress destinations must not be empty."),
+      ok: false,
+    };
+  }
+
+  const unsafeWideOpen = optionalBoolean(value, "unsafeWideOpen", path);
+  if (!unsafeWideOpen.ok) return { error: unsafeWideOpen.error, ok: false };
+
+  for (let index = 0; index < destinations.length; index += 1) {
+    const destination = destinations[index];
+    if (typeof destination !== "string") {
+      return {
+        error: error("POLICY_REJECTED", [...path, "destinations", String(index)], "ExecutionManifest network destination must be a string."),
+        ok: false,
+      };
+    }
+
+    const prefix = parseNetworkDestination(destination);
+    if (prefix === undefined) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "destinations", String(index)], "ExecutionManifest network destination is invalid."),
+        ok: false,
+      };
+    }
+
+    if (sourceCoversAll(prefix) && !unsafeWideOpen.value) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "destinations", String(index)], "ExecutionManifest network egress opens all destinations without unsafeWideOpen."),
+        ok: false,
+      };
+    }
+  }
+
+  const ports = value.ports;
+  if (!Array.isArray(ports) || ports.length === 0) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "ports"], "ExecutionManifest network egress ports must not be empty."),
+      ok: false,
+    };
+  }
+
+  for (let index = 0; index < ports.length; index += 1) {
+    const port = ports[index];
+    if (typeof port !== "number" || !Number.isSafeInteger(port) || !validNetworkPort(port)) {
+      return {
+        error: error("POLICY_REJECTED", [...path, "ports", String(index)], "ExecutionManifest network egress port is invalid."),
+        ok: false,
+      };
+    }
+  }
+
+  const iface = requiredString(value, "interface", path);
+  if (!iface.ok) return { error: iface.error, ok: false };
+  if (!validExecutionNetworkInterface(iface.value)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, "interface"], "ExecutionManifest network interface is invalid."),
+      ok: false,
+    };
+  }
+
+  return { ok: true };
+}
+
+function readLifecyclePolicy(
+  value: PlainJson | undefined,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (value === undefined || value === null) {
+    return { ok: true };
+  }
+
+  if (!plainObject(value)) {
+    return {
+      error: error("POLICY_REJECTED", path, "ExecutionManifest lifecyclePolicy must be an object when present."),
+      ok: false,
+    };
+  }
+
+  const unknown = unknownField(value, LIFECYCLE_POLICY_FIELDS, path);
+  if (unknown !== undefined) {
+    return {
+      error: unknown,
+      ok: false,
+    };
+  }
+
+  if (!Object.hasOwn(value, "onUnhealthy")) {
+    return { ok: true };
+  }
+
+  const onUnhealthy = value.onUnhealthy;
+  if (onUnhealthy !== "fail" && onUnhealthy !== "restart") {
+    return {
+      error: error("POLICY_REJECTED", [...path, "onUnhealthy"], "ExecutionManifest lifecyclePolicy.onUnhealthy must be restart or fail."),
+      ok: false,
+    };
   }
 
   return { ok: true };
@@ -1311,6 +2120,7 @@ function verifySelectedManifest(
   manifest: ExecutionManifest,
   appId: string,
   version: string,
+  packageClass: PackageContract["packageClass"],
 ):
   | {
       readonly ok: true;
@@ -1336,6 +2146,17 @@ function verifySelectedManifest(
         "POLICY_REJECTED",
         [CAPSULE_MANIFEST_BASENAME, "version"],
         "Resolved capsule manifest version does not match the selected catalog version.",
+      ),
+      ok: false,
+    };
+  }
+
+  if (manifest.packageClass !== packageClass) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        [CAPSULE_MANIFEST_BASENAME, "packageClass"],
+        "Resolved capsule manifest packageClass does not match the selected catalog package contract.",
       ),
       ok: false,
     };
@@ -1412,6 +2233,79 @@ function requiredNumber(
   };
 }
 
+function requiredBoolean(
+  value: PlainJsonObject,
+  key: string,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!Object.hasOwn(value, key)) {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Required field is missing."),
+      ok: false,
+    };
+  }
+
+  const child = value[key];
+  if (typeof child !== "boolean") {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Expected boolean."),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: child,
+  };
+}
+
+function optionalString(value: PlainJsonObject, key: string): string | undefined {
+  const child = value[key];
+  return typeof child === "string" ? child : undefined;
+}
+
+function optionalBoolean(
+  value: PlainJsonObject,
+  key: string,
+  path: Path,
+):
+  | {
+      readonly ok: true;
+      readonly value: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ResolveFromCatalogError;
+    } {
+  if (!Object.hasOwn(value, key)) {
+    return {
+      ok: true,
+      value: false,
+    };
+  }
+
+  const child = value[key];
+  if (typeof child !== "boolean") {
+    return {
+      error: error("POLICY_REJECTED", [...path, key], "Expected boolean."),
+      ok: false,
+    };
+  }
+
+  return {
+    ok: true,
+    value: child,
+  };
+}
+
 function unknownField(
   value: PlainJsonObject,
   allowed: ReadonlySet<string>,
@@ -1464,10 +2358,296 @@ function findUnsafeObjectKey(value: PlainJson, path: Path): Path | undefined {
   return undefined;
 }
 
-function validExecutionID(value: string): boolean {
-  return value.length <= 160 &&
+function validOciArgvElement(value: string, entrypoint: boolean): boolean {
+  if (value === "" || /[\u0000-\u001f\u007f]/u.test(value) || !safeOciArgvToken(value)) {
+    return false;
+  }
+
+  if (!entrypoint) {
+    return true;
+  }
+
+  return posixPath.isAbsolute(value) && value !== "/" && posixPath.normalize(value) === value;
+}
+
+function safeOciArgvToken(value: string): boolean {
+  for (const char of value) {
+    if (
+      (char >= "A" && char <= "Z") ||
+      (char >= "a" && char <= "z") ||
+      (char >= "0" && char <= "9") ||
+      "/._-:=+,".includes(char)
+    ) {
+      continue;
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+function validAbsoluteVolumePath(value: string): boolean {
+  return value !== "" &&
+    value.startsWith("/") &&
+    !value.includes("\0") &&
+    !value.includes("\\") &&
+    value !== "/" &&
+    posixPath.normalize(value) === value &&
+    !value.includes("/../") &&
+    !value.endsWith("/..");
+}
+
+function validCheckName(value: string): boolean {
+  if (value === "" || value.length > 128 || value !== value.trim() || /[\u0000-\u001f\u007f]/u.test(value)) {
+    return false;
+  }
+
+  for (const char of value) {
+    if (
+      (char >= "A" && char <= "Z") ||
+      (char >= "a" && char <= "z") ||
+      (char >= "0" && char <= "9") ||
+      char === "." ||
+      char === "_" ||
+      char === "-"
+    ) {
+      continue;
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+function validHealthTarget(type: string, target: string): boolean {
+  if (type === "http") {
+    return validHttpHealthTarget(target);
+  }
+
+  if (type === "tcp") {
+    return validTcpHealthTarget(target);
+  }
+
+  if (type === "lifecycle") {
+    return target === "self" || target === "unit" || validLifecycleTarget(target);
+  }
+
+  return false;
+}
+
+function validHttpHealthTarget(target: string): boolean {
+  if (!validTargetString(target)) return false;
+
+  try {
+    const parsed = new URL(target);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.host !== "" &&
+      isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validTcpHealthTarget(target: string): boolean {
+  if (!validTargetString(target)) return false;
+
+  try {
+    const parsed = new URL(`tcp://${target}`);
+    return parsed.hostname !== "" && parsed.port !== "" && isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validLifecycleTarget(target: string): boolean {
+  if (
+    !validTargetString(target) ||
+    target.includes("/") ||
+    target.includes("\\") ||
+    target.startsWith(".") ||
+    target.includes("..") ||
+    !target.endsWith(".service")
+  ) {
+    return false;
+  }
+
+  for (const char of target) {
+    if (
+      (char >= "A" && char <= "Z") ||
+      (char >= "a" && char <= "z") ||
+      (char >= "0" && char <= "9") ||
+      char === ":" ||
+      char === "." ||
+      char === "_" ||
+      char === "@" ||
+      char === "-"
+    ) {
+      continue;
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+function validTargetString(value: string): boolean {
+  return value !== "" &&
+    value.length <= 2048 &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validNetworkProtocol(value: string): boolean {
+  return value === "tcp" || value === "udp";
+}
+
+function validNetworkPort(value: number): boolean {
+  return value === PORT_ALL || (value > 0 && value <= 65_535);
+}
+
+function validExecutionNetworkName(value: string): boolean {
+  return safeExecutionNetworkString(value) && NETWORK_NAME_PATTERN.test(value);
+}
+
+function validExecutionNetworkInterface(value: string): boolean {
+  return safeExecutionNetworkString(value) &&
+    value.length <= 15 &&
+    INTERFACE_NAME_PATTERN.test(value);
+}
+
+function safeExecutionNetworkString(value: string): boolean {
+  return value !== "" &&
     value === value.trim() &&
     !/[\u0000-\u001f\u007f]/u.test(value) &&
+    !NETWORK_META_CHARACTER.test(value) &&
+    !containsInlineCapsuleMaterial(value) &&
+    !hasInlineReferenceScheme(value);
+}
+
+interface ParsedNetworkPrefix {
+  readonly family: 4 | 6;
+  readonly address: string;
+  readonly bits: number;
+  readonly ipv4: number | undefined;
+}
+
+function parseNetworkDestination(value: string): ParsedNetworkPrefix | undefined {
+  if (!safeExecutionNetworkString(value)) return undefined;
+  if (value.includes("/")) return parseCidrPrefix(value);
+
+  const address = parseIpAddress(value);
+  if (address === undefined) return undefined;
+
+  return {
+    address: value,
+    bits: address.family === 4 ? 32 : 128,
+    family: address.family,
+    ipv4: address.ipv4,
+  };
+}
+
+function parseCidrPrefix(value: string): ParsedNetworkPrefix | undefined {
+  if (!safeExecutionNetworkString(value)) return undefined;
+
+  const slash = value.indexOf("/");
+  if (slash <= 0 || value.indexOf("/", slash + 1) !== -1) return undefined;
+
+  const addressValue = value.slice(0, slash);
+  const bitsValue = value.slice(slash + 1);
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(bitsValue)) return undefined;
+
+  const address = parseIpAddress(addressValue);
+  if (address === undefined) return undefined;
+
+  const bits = Number(bitsValue);
+  const maxBits = address.family === 4 ? 32 : 128;
+  if (!Number.isSafeInteger(bits) || bits < 0 || bits > maxBits) return undefined;
+
+  if (address.family === 4 && address.ipv4 !== undefined) {
+    const hostBits = 32 - bits;
+    const mask = hostBits === 32 ? 0 : (0xffffffff << hostBits) >>> 0;
+    if (((address.ipv4 & mask) >>> 0) !== address.ipv4) return undefined;
+  }
+
+  return {
+    address: addressValue,
+    bits,
+    family: address.family,
+    ipv4: address.ipv4,
+  };
+}
+
+function parseIpAddress(value: string): ParsedNetworkPrefix | undefined {
+  const family = isIP(value);
+  if (family === 4) {
+    const parsed = parseIpv4(value);
+    if (parsed === undefined) return undefined;
+    return {
+      address: value,
+      bits: 32,
+      family,
+      ipv4: parsed,
+    };
+  }
+
+  if (family === 6) {
+    return {
+      address: value,
+      bits: 128,
+      family,
+      ipv4: undefined,
+    };
+  }
+
+  return undefined;
+}
+
+function parseIpv4(value: string): number | undefined {
+  const parts = value.split(".");
+  if (parts.length !== 4) return undefined;
+
+  let out = 0;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === undefined || !/^(?:0|[1-9][0-9]{0,2})$/u.test(part)) return undefined;
+
+    const octet = Number(part);
+    if (!Number.isInteger(octet) || octet < 0 || octet > 255) return undefined;
+    out = (out << 8) | octet;
+  }
+
+  return out >>> 0;
+}
+
+function sourceCoversAll(prefix: ParsedNetworkPrefix): boolean {
+  if (prefix.bits !== 0) return false;
+  if (prefix.family === 4) return prefix.ipv4 === 0;
+  return prefix.address === "::" || prefix.address === "0:0:0:0:0:0:0:0";
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (normalized === "localhost") return false;
+
+  const parsed = parseIpAddress(normalized);
+  if (parsed === undefined) return false;
+
+  if (parsed.family === 4 && parsed.ipv4 !== undefined) {
+    return (parsed.ipv4 & 0xff000000) === 0x7f000000;
+  }
+
+  return normalized === "::1" || normalized === "0:0:0:0:0:0:0:1";
+}
+
+function validExecutionID(value: string): boolean {
+  return value.length <= 255 &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/u.test(value) &&
+    !containsInlineCapsuleMaterial(value) &&
+    !hasInlineReferenceScheme(value) &&
     (REVERSE_DNS_PATTERN.test(value) || OPAQUE_ID_PATTERN.test(value));
 }
 
@@ -1475,7 +2655,29 @@ function validExecutionVersion(value: string): boolean {
   return value.length <= 128 &&
     value === value.trim() &&
     !/[\u0000-\u001f\u007f]/u.test(value) &&
+    !containsInlineCapsuleMaterial(value) &&
+    !hasInlineReferenceScheme(value) &&
     EXECUTION_VERSION_PATTERN.test(value);
+}
+
+function hasInlineReferenceScheme(value: string): boolean {
+  const colon = value.indexOf(":");
+  if (colon <= 0) return false;
+
+  return INLINE_REFERENCE_SCHEMES.has(value.slice(0, colon).toLowerCase());
+}
+
+function containsInlineCapsuleMaterial(value: string): boolean {
+  if (
+    value.toUpperCase().includes("-----BEGIN") ||
+    PRIVATE_KEY_PATTERN.test(value) ||
+    SECRET_ASSIGNMENT_PATTERN.test(value) ||
+    SEED_WORDS_PATTERN.test(value)
+  ) {
+    return true;
+  }
+
+  return LONG_HEX_PATTERN.test(value) || LONG_BASE64_PATTERN.test(value);
 }
 
 function hasZstdMagic(bytes: Uint8Array): boolean {
@@ -1585,11 +2787,6 @@ function normalizeTarPath(path: string): string | undefined {
   }
 
   return normalized.length > 0 ? normalized.join("/") : undefined;
-}
-
-function basenameFromPath(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator === -1 ? path : path.slice(separator + 1);
 }
 
 function inlinePackageContract(entry: PlainJson):

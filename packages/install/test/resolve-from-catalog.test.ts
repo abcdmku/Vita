@@ -37,17 +37,17 @@ interface ExecutionManifestFixture {
   readonly version: string;
   readonly integrity: string;
   readonly packageClass: "ts-service" | "oci-service" | "wasm-service";
-  readonly runtime: {
-    readonly typescript: {
-      readonly entrypoint: string;
-    };
-  };
+  readonly runtime: PlainJsonObject;
   readonly resourceLimits: {
     readonly cpuCores: number;
     readonly ramMiB: number;
     readonly storageMiB: number;
     readonly tasksMax: number;
   };
+  readonly data?: PlainJsonObject | null;
+  readonly healthChecks?: readonly PlainJson[] | null;
+  readonly lifecyclePolicy?: PlainJsonObject | null;
+  readonly network?: PlainJsonObject | null;
 }
 
 type MutableJsonObject = { [key: string]: unknown };
@@ -194,6 +194,161 @@ test("capsule ExecutionManifest duplicate JSON keys reject before last-wins pars
   });
 
   assertRejects(result, "POLICY_REJECTED");
+});
+
+test("capsule artifact must be zstd and use a root manifest.json", () => {
+  const rawTar = tarArchive({
+    "main.ts": bytes("export default {};\n"),
+    "manifest.json": bytes(JSON.stringify(validExecutionManifest())),
+  });
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: signCatalog(validCatalog({
+        artifactIntegrity: sri(rawTar, "sha512"),
+        entry: validInstallEntry(),
+        lockfile: validNpmLockfile(),
+      })),
+      mirrorStore: validMirrorStore(rawTar),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
+
+  const nestedManifest = zstdCompressSync(tarArchive({
+    "main.ts": bytes("export default {};\n"),
+    "nested/manifest.json": bytes(JSON.stringify(validExecutionManifest())),
+  }));
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: signCatalog(validCatalog({
+        artifactIntegrity: sri(nestedManifest, "sha512"),
+        entry: validInstallEntry(),
+        lockfile: validNpmLockfile(),
+      })),
+      mirrorStore: validMirrorStore(nestedManifest),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
+});
+
+test("capsule artifact SRI mismatch rejects before install planning", () => {
+  const fixture = signedFixture();
+  const tamperedArtifact = packageArtifactBytes({
+    manifest: validExecutionManifest({ integrity: sri(bytes("tampered manifest-declared integrity"), "sha256") }),
+  });
+
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: fixture.catalog,
+      mirrorStore: validMirrorStore(tamperedArtifact),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "INTEGRITY_MISMATCH",
+  );
+});
+
+test("capsule ExecutionManifest runtime and optional sub-shapes validate fail-closed", () => {
+  const ociRuntimeMissingDigest = validExecutionManifest({
+    packageClass: "oci-service",
+    runtime: {
+      oci: {
+        image: {
+          entrypoint: ["/init"],
+        },
+      },
+    },
+  });
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: ociRuntimeMissingDigest,
+      packageContract: validPackageContract({ packageClass: "oci-service" }),
+    })),
+    "POLICY_REJECTED",
+  );
+
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        network: {},
+      }),
+    })),
+    "POLICY_REJECTED",
+  );
+
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        lifecyclePolicy: {
+          onUnhealthy: "bad",
+        },
+      }),
+    })),
+    "POLICY_REJECTED",
+  );
+
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        healthChecks: [
+          {
+            intervalSeconds: 0,
+            name: "ready",
+            target: "http://127.0.0.1:8787/health",
+            timeoutSeconds: 1,
+            type: "http",
+          },
+        ],
+      }),
+    })),
+    "POLICY_REJECTED",
+  );
+});
+
+test("capsule ExecutionManifest packageClass must match the signed package contract", () => {
+  assertRejects(
+    resolveFromCatalog(fixtureInput({
+      executionManifest: validExecutionManifest({
+        packageClass: "oci-service",
+        runtime: {
+          oci: {
+            image: {
+              digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              entrypoint: ["/init"],
+            },
+          },
+        },
+      }),
+      packageContract: validPackageContract({ packageClass: "ts-service" }),
+    })),
+    "POLICY_REJECTED",
+  );
+});
+
+test("capsule ExecutionManifest integer fields reject float and exponent tokens", () => {
+  const manifestJson = JSON.stringify(validExecutionManifest()).replace('"tasksMax":64', '"tasksMax":6.4e1');
+  const artifactBytes = packageArtifactBytesFromManifestJson(manifestJson);
+
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: signCatalog(validCatalog({
+        artifactIntegrity: sri(artifactBytes, "sha512"),
+        entry: validInstallEntry(),
+        lockfile: validNpmLockfile(),
+      })),
+      mirrorStore: validMirrorStore(artifactBytes),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
 });
 
 test("catalog install entry own __proto__ field rejects instead of mutating the candidate prototype", () => {
@@ -456,6 +611,24 @@ function signedFixture(
   };
 }
 
+function fixtureInput(
+  options: {
+    readonly requestedCapabilities?: readonly CapabilityGrant[];
+    readonly packageContract?: PackageContract;
+    readonly executionManifest?: ExecutionManifestFixture;
+  } = {},
+): Parameters<typeof resolveFromCatalog>[0] {
+  const fixture = signedFixture(options);
+
+  return {
+    appId: "com.vita.notes",
+    catalog: fixture.catalog,
+    mirrorStore: validMirrorStore(fixture.artifactBytes),
+    trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+    version: "1.2.3",
+  };
+}
+
 function packageArtifactBytes(value: {
   readonly manifest: ExecutionManifestFixture | MutableJsonObject;
 }): Uint8Array {
@@ -603,31 +776,55 @@ function validExecutionManifest(
   options: {
     readonly id?: string;
     readonly version?: string;
+    readonly integrity?: string;
+    readonly packageClass?: ExecutionManifestFixture["packageClass"];
+    readonly runtime?: PlainJsonObject;
+    readonly resourceLimits?: ExecutionManifestFixture["resourceLimits"];
+    readonly data?: PlainJsonObject | null;
+    readonly healthChecks?: readonly PlainJson[] | null;
+    readonly lifecyclePolicy?: PlainJsonObject | null;
+    readonly network?: PlainJsonObject | null;
   } = {},
 ): ExecutionManifestFixture {
-  return {
+  const manifest: MutableJsonObject = {
     id: options.id ?? "com.vita.notes",
-    integrity: sri(bytes("execution manifest declared integrity"), "sha256"),
-    packageClass: "ts-service",
-    resourceLimits: {
+    integrity: options.integrity ?? sri(bytes("execution manifest declared integrity"), "sha256"),
+    packageClass: options.packageClass ?? "ts-service",
+    resourceLimits: options.resourceLimits ?? {
       cpuCores: 1,
       ramMiB: 256,
       storageMiB: 512,
       tasksMax: 64,
     },
-    runtime: {
+    runtime: options.runtime ?? {
       typescript: {
         entrypoint: "main.ts",
       },
     },
     version: options.version ?? "1.2.3",
   };
+
+  if (Object.hasOwn(options, "data")) {
+    manifest.data = options.data;
+  }
+  if (Object.hasOwn(options, "healthChecks")) {
+    manifest.healthChecks = options.healthChecks;
+  }
+  if (Object.hasOwn(options, "lifecyclePolicy")) {
+    manifest.lifecyclePolicy = options.lifecyclePolicy;
+  }
+  if (Object.hasOwn(options, "network")) {
+    manifest.network = options.network;
+  }
+
+  return manifest as unknown as ExecutionManifestFixture;
 }
 
 function validPackageContract(
   options: {
     readonly id?: string;
     readonly version?: string;
+    readonly packageClass?: PackageContract["packageClass"];
   } = {},
 ): PackageContract {
   return {
@@ -670,7 +867,7 @@ function validPackageContract(
       egress: [],
       ingress: [{ name: "private-api", port: 8443, protocol: "https", public: false }],
     },
-    packageClass: "ts-service",
+    packageClass: options.packageClass ?? "ts-service",
     requiredSimulationProfiles: [],
     resources: {
       cpuCores: 1,
