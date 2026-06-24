@@ -127,6 +127,7 @@ func DefaultGrants() []Grant {
 	return []Grant{
 		{Name: "runtime-files", Root: "owner", Access: AccessReadWrite},
 		{Name: "runtime-files-ro", Root: "owner-ro", Access: AccessReadOnly},
+		{Name: "export", Root: "owner", Access: AccessReadWrite},
 	}
 }
 

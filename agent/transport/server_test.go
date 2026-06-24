@@ -21,6 +21,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	exportcap "github.com/vita/agent/capabilities/export"
 	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
@@ -1368,6 +1369,119 @@ func TestFilesRouteReturnsTypedErrors(t *testing.T) {
 	}
 }
 
+func TestExportRouteDispatchesToVerifier(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: t.TempDir(),
+		filesGrants: []filecap.Grant{
+			{Name: "rw", Root: "scope", Access: filecap.AccessReadWrite},
+		},
+	})
+	contents := map[string][]byte{
+		"note.txt":   []byte("owner file\n"),
+		"state.json": []byte(`{"hostname":"vita-node-7"}` + "\n"),
+	}
+	manifest := exportcap.Manifest{
+		FormatVersion: exportcap.ManifestFormatVersion,
+		Entries: []exportcap.Entry{
+			{
+				Path:      "note.txt",
+				Kind:      exportcap.EntryKindFile,
+				Bytes:     int64(len(contents["note.txt"])),
+				Integrity: exportcap.SHA256Integrity(contents["note.txt"]),
+			},
+			{
+				Path:      "state.json",
+				Kind:      exportcap.EntryKindConfig,
+				Bytes:     int64(len(contents["state.json"])),
+				Integrity: exportcap.SHA256Integrity(contents["state.json"]),
+			},
+		},
+	}
+	root, err := exportcap.RootDigest(manifest.Entries)
+	if err != nil {
+		t.Fatalf("RootDigest returned error: %v", err)
+	}
+	manifest.RootDigest = root
+	manifestBytes, err := exportcap.RenderManifest(manifest)
+	if err != nil {
+		t.Fatalf("RenderManifest returned error: %v", err)
+	}
+
+	writeFilesBlob(t, handler, "rw", "note.txt", contents["note.txt"])
+	writeFilesBlob(t, handler, "rw", "state.json", contents["state.json"])
+	writeFilesBlob(t, handler, "rw", exportcap.ManifestFilename, manifestBytes)
+
+	response := perform(handler, http.MethodPost, "/export", `{"op":"verify","grant":"rw","manifestPath":"export-manifest.json"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var result exportcap.VerifyResult
+	decodeResponse(t, response, &result)
+	if !result.Verified || result.Entries != 2 || result.Bytes != int64(len(contents["note.txt"])+len(contents["state.json"])) || result.RootDigest != root {
+		t.Fatalf("verify result = %#v, want verified export root %q", result, root)
+	}
+}
+
+func TestExportRouteReturnsTypedErrors(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: t.TempDir(),
+		filesGrants: []filecap.Grant{
+			{Name: "rw", Root: "scope", Access: filecap.AccessReadWrite},
+		},
+	})
+	manifest := exportcap.Manifest{
+		FormatVersion: exportcap.ManifestFormatVersion,
+		Entries: []exportcap.Entry{{
+			Path:      "note.txt",
+			Kind:      exportcap.EntryKindFile,
+			Bytes:     int64(len("untampered")),
+			Integrity: exportcap.SHA256Integrity([]byte("untampered")),
+		}},
+	}
+	root, err := exportcap.RootDigest(manifest.Entries)
+	if err != nil {
+		t.Fatalf("RootDigest returned error: %v", err)
+	}
+	manifest.RootDigest = root
+	manifestBytes, err := exportcap.RenderManifest(manifest)
+	if err != nil {
+		t.Fatalf("RenderManifest returned error: %v", err)
+	}
+	writeFilesBlob(t, handler, "rw", "note.txt", []byte("tampered"))
+	writeFilesBlob(t, handler, "rw", exportcap.ManifestFilename, manifestBytes)
+
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "method", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
+		{name: "shape", method: http.MethodPost, body: `{}`, wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "unknown op", method: http.MethodPost, body: `{"op":"remove","grant":"rw","manifestPath":"export-manifest.json"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_op"},
+		{name: "unknown grant", method: http.MethodPost, body: `{"op":"verify","grant":"missing","manifestPath":"export-manifest.json"}`, wantStatus: http.StatusNotFound, wantCode: "unknown_grant"},
+		{name: "path traversal", method: http.MethodPost, body: `{"op":"verify","grant":"rw","manifestPath":"../export-manifest.json"}`, wantStatus: http.StatusBadRequest, wantCode: "path_traversal"},
+		{name: "integrity mismatch", method: http.MethodPost, body: `{"op":"verify","grant":"rw","manifestPath":"export-manifest.json"}`, wantStatus: http.StatusBadRequest, wantCode: "integrity_mismatch"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := perform(handler, tt.method, "/export", tt.body)
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status code = %d, want %d; body=%s", response.Code, tt.wantStatus, response.Body.String())
+			}
+			var errorResponse ErrorResponse
+			decodeResponse(t, response, &errorResponse)
+			if errorResponse.Error.Code != tt.wantCode {
+				t.Fatalf("error code = %q, want %q", errorResponse.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
 func TestMethodAndPathGuards(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t, &mockTxCapability{name: "test.apply"})})
 	tests := []struct {
@@ -1383,6 +1497,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "state rejects non GET", method: http.MethodPost, path: "/state", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "files rejects non POST", method: http.MethodGet, path: "/files", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
+		{name: "export rejects non POST", method: http.MethodGet, path: "/export", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "read rejects non GET", method: http.MethodPost, path: "/read/test.apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "read base rejects non GET", method: http.MethodPost, path: "/read", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "unknown path", method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound},
@@ -1518,6 +1633,21 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, target in
 
 	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
 		t.Fatalf("response body is not expected JSON: %v; body=%s", err, response.Body.String())
+	}
+}
+
+func writeFilesBlob(t *testing.T, handler http.Handler, grant string, path string, data []byte) {
+	t.Helper()
+
+	body := fmt.Sprintf(
+		`{"op":"write","grant":%q,"path":%q,"data":%q}`,
+		grant,
+		path,
+		base64.StdEncoding.EncodeToString(data),
+	)
+	response := perform(handler, http.MethodPost, "/files", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("files write %q status code = %d, want %d; body=%s", path, response.Code, http.StatusOK, response.Body.String())
 	}
 }
 
