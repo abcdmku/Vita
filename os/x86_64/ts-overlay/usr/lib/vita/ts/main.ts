@@ -36,6 +36,12 @@ import {
   isFilesClientError,
 } from "./vita/files-client.ts";
 import {
+  formatControllerShellErrorMarker,
+  formatControllerShellRejectMarker,
+  formatControllerShellStatusMarker,
+  handleControllerShellRequest,
+} from "./vita/controller-shell.ts";
+import {
   formatBackupArchiveMarker,
   formatBackupArchiveRejectMarker,
   rejectTamperedBackupArchive,
@@ -60,6 +66,13 @@ import type {
 } from "./vita/apply-node-config.ts";
 import type { CapsuleEntry } from "./vita/capsule-registry-model.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
+import type {
+  ControllerShellApplyRouteResult,
+  ControllerShellPorts,
+  ControllerShellPreviewResult,
+  ControllerShellResponse,
+  ControllerShellStatus,
+} from "./vita/controller-shell.ts";
 import type { TransactionPlan } from "./vita/transaction-plan-diff.ts";
 
 const TS_MARKER = "VITA-TS";
@@ -239,6 +252,29 @@ const FORCED_REJECT_PLAN = Object.freeze({
     }),
   ]),
 }) satisfies AgentApplyPlan;
+
+const UI_FORCED_REJECT_CONFIG = Object.freeze({
+  "vita.invalid.capability": Object.freeze({
+    desired: true,
+  }),
+});
+
+const UI_FORCED_REJECT_MANIFEST = Object.freeze({
+  capability: "vita.invalid.capability",
+  crossFieldRules: Object.freeze([]),
+  fields: Object.freeze({
+    desired: Object.freeze({
+      required: true,
+      type: "boolean",
+    }),
+  }),
+  version: 1,
+}) satisfies CapabilityManifest;
+
+const UI_FORCED_REJECT_REGISTRY = new Map<string, CapabilityManifest>([
+  ...CAPABILITY_REGISTRY,
+  ["vita.invalid.capability", UI_FORCED_REJECT_MANIFEST],
+]);
 
 const FORCED_INVALID_CAPSULE_PLAN = Object.freeze({
   operations: Object.freeze([
@@ -682,6 +718,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatControllerShellErrorMarker());
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
@@ -712,6 +749,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatAgentStateMarker(state.state));
     await emitDriftMarkers(client);
     await emitApplyMarkers(state.state.hostname, agentTransport);
+    await emitControllerShellMarkers(state.state.hostname, client, agentTransport);
     if (await emitCapsulePreviewMarker(client)) {
       await emitCapsuleMarkers(agentTransport);
     } else {
@@ -730,6 +768,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatControllerShellErrorMarker());
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -771,6 +810,87 @@ async function emitApplyMarkers(
   }
 
   await emitForcedRejectMarker(agentTransport);
+}
+
+async function emitControllerShellMarkers(
+  currentHostname: string,
+  client: Pick<AgentClient, "getHealth" | "getOperations" | "getState">,
+  agentTransport: AgentTransport,
+): Promise<void> {
+  try {
+    const ports = createControllerShellPorts(client, CAPABILITY_REGISTRY, agentTransport);
+    const statusPage = await handleControllerShellRequest(ports, {
+      method: "GET",
+      path: "/",
+    });
+    const status = readControllerShellStatus(await handleControllerShellRequest(ports, {
+      method: "GET",
+      path: "/api/status",
+    }));
+
+    if (
+      statusPage.status !== 200 ||
+      !statusPage.body.includes(status.hostname) ||
+      status.hostname !== currentHostname ||
+      status.caps <= 0
+    ) {
+      emit(formatControllerShellErrorMarker());
+      return;
+    }
+
+    const preview = readControllerShellPreview(await handleControllerShellRequest(ports, {
+      body: hostnameConfig(divergentHostname(currentHostname)),
+      method: "POST",
+      path: "/api/preview",
+    }));
+    const apply = readControllerShellApply(await handleControllerShellRequest(ports, {
+      body: hostnameConfig(currentHostname),
+      method: "POST",
+      path: "/api/apply",
+    }));
+    const marker = formatControllerShellStatusMarker(status, preview, apply);
+    emit(marker);
+
+    if (marker === formatControllerShellErrorMarker()) {
+      return;
+    }
+
+    const rejectPorts = createControllerShellPorts(
+      client,
+      UI_FORCED_REJECT_REGISTRY,
+      agentTransport,
+    );
+    const rejected = readControllerShellApply(await handleControllerShellRequest(rejectPorts, {
+      body: UI_FORCED_REJECT_CONFIG,
+      method: "POST",
+      path: "/api/apply",
+    }));
+    emit(formatControllerShellRejectMarker(rejected));
+  } catch {
+    emit(formatControllerShellErrorMarker());
+  }
+}
+
+function createControllerShellPorts(
+  client: Pick<AgentClient, "getHealth" | "getOperations" | "getState">,
+  registry: ReadonlyMap<string, CapabilityManifest>,
+  agentTransport: AgentTransport,
+): ControllerShellPorts {
+  const applyTransport = createApplyNodeTransport(agentTransport);
+
+  return {
+    agent: client,
+    apply: async (method, path, body) => applyTransport(
+      method,
+      path,
+      body as unknown as TransactionPlan,
+    ),
+    diff: (current, desired) => diffTransactionPlans(
+      current as unknown as TransactionPlan,
+      desired as unknown as TransactionPlan,
+    ),
+    evaluate: (config) => evaluateNodeConfig(config, registry),
+  };
 }
 
 async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
@@ -993,6 +1113,92 @@ function parseJsonOrText(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function readControllerShellStatus(response: ControllerShellResponse): ControllerShellStatus {
+  const body = readControllerShellJsonObject(response);
+  const ok = body["ok"];
+  const hostname = body["hostname"];
+  const caps = body["caps"];
+  const reachable = body["reachable"];
+  const healthy = body["healthy"];
+  const operations = body["operations"];
+  const version = body["version"];
+  const errors = body["errors"];
+
+  if (
+    typeof ok !== "boolean" ||
+    typeof hostname !== "string" ||
+    typeof caps !== "number" ||
+    !Number.isSafeInteger(caps) ||
+    typeof reachable !== "boolean" ||
+    typeof healthy !== "boolean" ||
+    !Array.isArray(operations) ||
+    typeof version !== "string" ||
+    !Array.isArray(errors)
+  ) {
+    throw new Error("controller shell status response was malformed");
+  }
+
+  return body as unknown as ControllerShellStatus;
+}
+
+function readControllerShellPreview(response: ControllerShellResponse): ControllerShellPreviewResult {
+  const body = readControllerShellJsonObject(response);
+  const ok = body["ok"];
+  const added = body["added"];
+  const removed = body["removed"];
+  const changed = body["changed"];
+
+  if (
+    typeof ok !== "boolean" ||
+    !Array.isArray(added) ||
+    !Array.isArray(removed) ||
+    !Array.isArray(changed)
+  ) {
+    throw new Error("controller shell preview response was malformed");
+  }
+
+  return body as unknown as ControllerShellPreviewResult;
+}
+
+function readControllerShellApply(response: ControllerShellResponse): ControllerShellApplyRouteResult {
+  const body = readControllerShellJsonObject(response);
+  const ok = body["ok"];
+
+  if (typeof ok !== "boolean") {
+    throw new Error("controller shell apply response was malformed");
+  }
+
+  if (ok) {
+    if (body["outcome"] !== "committed") {
+      throw new Error("controller shell apply success response was malformed");
+    }
+  } else if (body["stage"] !== "apply" && body["stage"] !== "transport" && body["stage"] !== "evaluate") {
+    throw new Error("controller shell apply failure response was malformed");
+  }
+
+  return body as unknown as ControllerShellApplyRouteResult;
+}
+
+function readControllerShellJsonObject(response: ControllerShellResponse): Readonly<Record<string, unknown>> {
+  if (response.contentType !== "application/json; charset=utf-8") {
+    throw new Error("controller shell response was not JSON");
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    throw new Error("controller shell response body was not JSON");
+  }
+
+  if (!isJsonObject(parsed)) {
+    throw new Error("controller shell response body was not an object");
+  }
+
+  return parsed;
 }
 
 function formatApplyConfigMarker(result: ApplyNodeConfigResult): string {
