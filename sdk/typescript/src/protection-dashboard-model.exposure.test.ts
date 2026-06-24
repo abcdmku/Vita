@@ -41,6 +41,7 @@ test("capsules classify as exposed-ingress, egress-only, and network-mute with s
   assert.deepEqual(exposure.counts, {
     egressOnly: 1,
     exposedIngress: 1,
+    flagged: 0,
     networkMute: 1,
   });
 });
@@ -259,6 +260,7 @@ test("absent network policy gives an empty host surface and deterministic mute c
   assert.deepEqual(first.exposure.counts, {
     egressOnly: 0,
     exposedIngress: 0,
+    flagged: 0,
     networkMute: 1,
   });
   assert.equal(JSON.stringify(first.value), JSON.stringify(second.value));
@@ -281,6 +283,82 @@ test("absent network policy gives an empty host surface and deterministic mute c
   });
   assert.equal(registryReadState.host.wideOpen, false);
   assert.equal(registryReadState.counts.networkMute, 1);
+});
+
+test("one flagged (unreadable/invalid) capsule grant is exposure-unknown, not a whole-dashboard reject", () => {
+  const exposure = mustExposure({
+    capsuleNetworkGrants: [
+      {
+        capsuleId: "capsule.bad",
+        egressGrants: 0,
+        exposureUnknown: true,
+        flagged: "grant-invalid",
+        ingressGrants: 0,
+      },
+      {
+        capsuleId: "capsule.good",
+        egressGrants: 1,
+        ingressGrants: 0,
+      },
+    ],
+    capsuleRegistry: [
+      capsule("capsule.bad"),
+      capsule("capsule.good"),
+    ],
+  });
+
+  assert.deepEqual(
+    exposure.capsules.map((entry) => entry.capsuleId),
+    ["capsule.bad", "capsule.good"],
+  );
+  assert.deepEqual(
+    exposure.capsules.map((entry) => entry.exposure),
+    ["exposure-unknown", "egress-only"],
+  );
+  assert.equal(exposure.capsules[0]?.flagged, "grant-invalid");
+  assert.equal(exposure.capsules[1]?.flagged, undefined);
+  assert.deepEqual(exposure.counts, {
+    egressOnly: 1,
+    exposedIngress: 0,
+    flagged: 1,
+    networkMute: 0,
+  });
+});
+
+test("a flagged grant without an explicit flag defaults to exposure-unknown and tallies as flagged", () => {
+  const exposure = mustExposure({
+    capsuleNetworkGrants: [
+      {
+        capsuleId: "capsule.unreadable",
+        egressGrants: 0,
+        exposureUnknown: true,
+        ingressGrants: 0,
+      },
+    ],
+    capsuleRegistry: [capsule("capsule.unreadable")],
+  });
+
+  assert.equal(exposure.capsules[0]?.exposure, "exposure-unknown");
+  assert.equal(exposure.capsules[0]?.flagged, "exposure-unknown");
+  assert.equal(exposure.counts.flagged, 1);
+});
+
+test("an out-of-range flagged enum on a capsule grant rejects (no silent coercion)", () => {
+  assertRejected(
+    summarizeExposure({
+      capsuleNetworkGrants: [
+        {
+          capsuleId: "capsule.a",
+          egressGrants: 0,
+          exposureUnknown: true,
+          flagged: "not-a-real-flag",
+          ingressGrants: 0,
+        },
+      ],
+      capsuleRegistry: [capsule("capsule.a")],
+    }),
+    ["capsuleNetworkGrants/0/flagged"],
+  );
 });
 
 function mustExposure(input: unknown): ExposureSummary {

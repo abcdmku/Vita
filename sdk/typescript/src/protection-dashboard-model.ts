@@ -5,7 +5,8 @@ export type SnapshotTierStatus = "active" | "configured-inactive" | "absent";
 export type MirrorTierStatus = "active" | "absent";
 export type LocalBackupTierStatus = "verified" | "configured" | "absent";
 export type OffSiteBackupTierStatus = "configured" | "absent";
-export type CapsuleExposure = "exposed-ingress" | "egress-only" | "network-mute";
+export type CapsuleExposure = "exposed-ingress" | "egress-only" | "network-mute" | "exposure-unknown";
+export type CapsuleExposureFlag = "manifest-unreadable" | "grant-invalid" | "exposure-unknown";
 export type DashboardProtocol = "tcp" | "udp";
 export type BackupTargetKind =
   | "local-snapshot"
@@ -96,12 +97,14 @@ export interface CapsuleExposureSummary {
   readonly exposure: CapsuleExposure;
   readonly egressGrants: number;
   readonly ingressGrants: number;
+  readonly flagged?: CapsuleExposureFlag;
 }
 
 export interface CapsuleExposureCounts {
   readonly exposedIngress: number;
   readonly egressOnly: number;
   readonly networkMute: number;
+  readonly flagged: number;
 }
 
 export interface ExposureSummary {
@@ -206,6 +209,8 @@ interface CapsuleNetworkGrant {
   readonly capsuleId: string;
   readonly egressGrants: number;
   readonly ingressGrants: number;
+  readonly exposureUnknown?: boolean;
+  readonly flagged?: CapsuleExposureFlag;
 }
 
 const PROTECTION_INPUT_FIELDS = new Set([
@@ -315,7 +320,14 @@ const NETWORK_INTERFACE_FIELDS = new Set(["kind", "name"]);
 const NETWORK_FIREWALL_FIELDS = new Set(["allow", "unsafeWideOpen"]);
 const NETWORK_CONFIG_RULE_FIELDS = new Set(["port", "protocol", "sourceCidr"]);
 const CAPSULE_ENTRY_FIELDS = new Set(["id", "integrity", "state", "version"]);
-const CAPSULE_GRANT_FIELDS = new Set(["capsuleId", "egressGrants", "ingressGrants"]);
+const CAPSULE_GRANT_FIELDS = new Set([
+  "capsuleId",
+  "egressGrants",
+  "exposureUnknown",
+  "flagged",
+  "ingressGrants",
+]);
+const CAPSULE_EXPOSURE_FLAGS = ["manifest-unreadable", "grant-invalid", "exposure-unknown"] as const;
 
 const STORAGE_AREA_ROLES = ["system-state", "user-data", "app-state", "snapshots", "local-backup-cache"] as const;
 const REQUIRED_STORAGE_AREA_ROLES: readonly StorageAreaRole[] = [
@@ -727,13 +739,31 @@ function buildCapsuleExposureSummaries(
     const grant = grantsByCapsule.get(entry.id);
     const egressGrants = grant?.egressGrants ?? 0;
     const ingressGrants = grant?.ingressGrants ?? 0;
+    // Per-capsule resilience: a grant the driver could not read/parse/validate is carried
+    // as a flagged entry (exposureUnknown) so ONE bad capsule manifest does not reject the
+    // whole dashboard — it is classified "exposure-unknown" and tallied as flagged.
+    const flagged = grant?.exposureUnknown === true
+      ? (grant.flagged ?? "exposure-unknown")
+      : undefined;
 
-    capsules.push(Object.freeze({
+    const summary: {
+      capsuleId: string;
+      egressGrants: number;
+      exposure: CapsuleExposure;
+      ingressGrants: number;
+      flagged?: CapsuleExposureFlag;
+    } = {
       capsuleId: entry.id,
       egressGrants,
-      exposure: classifyCapsuleExposure(egressGrants, ingressGrants),
+      exposure: flagged !== undefined
+        ? "exposure-unknown"
+        : classifyCapsuleExposure(egressGrants, ingressGrants),
       ingressGrants,
-    }));
+    };
+
+    if (flagged !== undefined) summary.flagged = flagged;
+
+    capsules.push(Object.freeze(summary));
   }
 
   return Object.freeze(capsules);
@@ -773,6 +803,7 @@ function countCapsuleExposure(
   let exposedIngress = 0;
   let egressOnly = 0;
   let networkMute = 0;
+  let flagged = 0;
 
   for (let index = 0; index < capsules.length; index += 1) {
     const capsule = capsules[index];
@@ -791,12 +822,16 @@ function countCapsuleExposure(
       case "network-mute":
         networkMute += 1;
         break;
+      case "exposure-unknown":
+        flagged += 1;
+        break;
     }
   }
 
   return Object.freeze({
     egressOnly,
     exposedIngress,
+    flagged,
     networkMute,
   });
 }
@@ -2007,6 +2042,8 @@ function parseCapsuleNetworkGrant(
     [...path, "ingressGrants"],
     errors,
   );
+  const exposureUnknown = readOptionalBoolean(value, "exposureUnknown", [...path, "exposureUnknown"], errors);
+  const flagged = readOptionalEnum(value, "flagged", CAPSULE_EXPOSURE_FLAGS, [...path, "flagged"], errors);
 
   if (
     errors.length > errorStart ||
@@ -2017,11 +2054,22 @@ function parseCapsuleNetworkGrant(
     return undefined;
   }
 
-  return Object.freeze({
+  const grant: {
+    capsuleId: string;
+    egressGrants: number;
+    ingressGrants: number;
+    exposureUnknown?: boolean;
+    flagged?: CapsuleExposureFlag;
+  } = {
     capsuleId,
     egressGrants,
     ingressGrants,
-  });
+  };
+
+  if (exposureUnknown !== undefined) grant.exposureUnknown = exposureUnknown;
+  if (flagged !== undefined) grant.flagged = flagged;
+
+  return Object.freeze(grant);
 }
 
 function normalizeInputObject(input: unknown):
@@ -2141,6 +2189,27 @@ function readRequiredEnum<T extends string>(
   }
 
   if (!isStringMember(child, allowed)) {
+    addError(errors, path, `Expected one of: ${allowed.join(", ")}.`);
+    return undefined;
+  }
+
+  return child;
+}
+
+function readOptionalEnum<T extends string>(
+  value: JsonRecord,
+  key: string,
+  allowed: readonly T[],
+  path: Path,
+  errors: DashboardValidationError[],
+): T | undefined {
+  if (!hasOwn(value, key)) {
+    return undefined;
+  }
+
+  const child = value[key];
+
+  if (child === undefined || !isStringMember(child, allowed)) {
     addError(errors, path, `Expected one of: ${allowed.join(", ")}.`);
     return undefined;
   }

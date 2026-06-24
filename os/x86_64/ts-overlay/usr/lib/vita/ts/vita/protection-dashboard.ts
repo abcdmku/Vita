@@ -182,6 +182,7 @@ export function formatProtectionDashboardMarker(result: ProtectionDashboardReadR
     `exposed=${exposure.counts.exposedIngress} ` +
     `mute=${exposure.counts.networkMute} ` +
     `wideOpen=${exposure.host.wideOpen ? "yes" : "no"} ` +
+    `flagged=${exposure.counts.flagged} ` +
     "status=OK"
   );
 }
@@ -389,7 +390,20 @@ async function buildCapsuleNetworkGrants(
     const grant = await readCapsuleNetworkGrant(entry);
 
     if (!grant.ok) {
-      return grant;
+      // Per-capsule resilience: an unreadable manifest or an invalid grant on ONE installed
+      // capsule must NOT reject the whole dashboard. Classify THAT capsule as exposure-unknown
+      // (flagged) and keep summarizing the rest; the dashboard still emits a MEASURED
+      // VITA-PROTECT-DASH with this capsule counted in the flagged tally. Whole-dashboard REJECT
+      // is reserved for genuinely malformed CORE inputs (storage.layout / backup.policy /
+      // network.policy / capsule.registry), not an individual capsule manifest problem.
+      grants.push(Object.freeze({
+        capsuleId: entry.id,
+        egressGrants: 0,
+        exposureUnknown: true,
+        flagged: classifyCapsuleFlag(grant.reason),
+        ingressGrants: 0,
+      }));
+      continue;
     }
 
     if (grant.grant.egressGrants === 0 && grant.grant.ingressGrants === 0) {
@@ -407,6 +421,10 @@ async function buildCapsuleNetworkGrants(
     grants: Object.freeze(grants),
     ok: true,
   };
+}
+
+function classifyCapsuleFlag(reason: string): "manifest-unreadable" | "grant-invalid" {
+  return reason === "capsule_manifest_unreadable" ? "manifest-unreadable" : "grant-invalid";
 }
 
 function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistryEntryForDashboard | undefined {
