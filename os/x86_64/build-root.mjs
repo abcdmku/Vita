@@ -18,6 +18,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "iproute2",
   "kmod",
   "linux-image-amd64",
+  "nftables",
   "systemd",
   "systemd-boot",
   "systemd-boot-efi",
@@ -54,6 +55,7 @@ Packages=
     iproute2
     kmod
     linux-image-amd64
+    nftables
     systemd
     systemd-boot
     systemd-boot-efi

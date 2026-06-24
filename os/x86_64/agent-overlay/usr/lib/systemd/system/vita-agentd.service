@@ -1,6 +1,7 @@
 # Vita privileged system agent (agentd) — P1-026.
 # Loopback-only control surface on 127.0.0.1:8786. Runs as root with exactly the two ambient
-# capabilities it needs (sethostname -> CAP_SYS_ADMIN, clock_settime -> CAP_SYS_TIME). No
+# capabilities it needs (netns/nft -> CAP_NET_ADMIN, sethostname -> CAP_SYS_ADMIN,
+# clock_settime -> CAP_SYS_TIME). No
 # privilege-separated user yet (a later hardening slice); the surface binds loopback only.
 [Unit]
 Description=Vita system agent
@@ -18,7 +19,7 @@ RestartSec=5s
 # without making the privileged socket world-accessible.
 Group=vita-agent
 UMask=0007
-AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TIME
 StateDirectory=vita-agent
 StateDirectoryMode=0700
 RuntimeDirectory=vita-agent

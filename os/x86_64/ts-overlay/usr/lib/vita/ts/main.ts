@@ -79,6 +79,9 @@ const CAPSULE_NET_REJECT_MARKER = "VITA-CAPSULE-NET-REJECT";
 const CAPSULE_NET_NS_MARKER = "VITA-CAPSULE-NET-NS";
 const CAPSULE_NET_NS_REJECT_MARKER = "VITA-CAPSULE-NET-NS-REJECT";
 const CAPSULE_NET_NS_ERROR_MARKER = "VITA-CAPSULE-NET-NS-ERROR";
+const CAPSULE_NET_EGRESS_MARKER = "VITA-CAPSULE-NET-EGRESS";
+const CAPSULE_NET_EGRESS_REJECT_MARKER = "VITA-CAPSULE-NET-EGRESS-REJECT";
+const CAPSULE_NET_EGRESS_ERROR_MARKER = "VITA-CAPSULE-NET-EGRESS-ERROR";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
@@ -1012,6 +1015,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
       const reason = agentApplyResultReason(result);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+      emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
@@ -1023,6 +1027,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     if (!state.ok) {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
+      emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
@@ -1034,8 +1039,10 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     const netnsState = await readCapsuleNetnsState(client, state.status.id);
     if (netnsState.ok) {
       emit(formatCapsuleNetnsMarker(netnsState.status));
+      emit(formatCapsuleNetEgressMarker(netnsState.status));
     } else {
       emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=netns_unverified status=FAILSAFE`);
+      emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=egress_unverified status=FAILSAFE`);
     }
     const volume = capsuleVolumeStatus(state.status);
     if (volume === undefined) {
@@ -1054,6 +1061,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     const reason = agentClientErrorReason(cause, "transport_failed");
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+    emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -1073,6 +1081,7 @@ async function emitForcedCapsuleNetworkRejectMarker(
       const reason = agentApplyResultReason(registryResult);
       emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+      emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       return;
     }
 
@@ -1082,6 +1091,7 @@ async function emitForcedCapsuleNetworkRejectMarker(
       const reason = agentApplyResultReason(result);
       emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=OK`);
       emit(`${CAPSULE_NET_NS_REJECT_MARKER}: reason=${reason} status=OK`);
+      emit(`${CAPSULE_NET_EGRESS_REJECT_MARKER}: reason=${reason} status=OK`);
       return;
     }
   } catch (cause) {
@@ -1095,12 +1105,14 @@ async function emitForcedCapsuleNetworkRejectMarker(
       const reason = markerToken(cause.agentError.code);
       emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=OK`);
       emit(`${CAPSULE_NET_NS_REJECT_MARKER}: reason=${reason} status=OK`);
+      emit(`${CAPSULE_NET_EGRESS_REJECT_MARKER}: reason=${reason} status=OK`);
       return;
     }
   }
 
   emit(`${CAPSULE_NET_REJECT_MARKER}: reason=not_rejected status=FAILSAFE`);
   emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
+  emit(`${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
 }
 
 async function emitForcedCapsuleExecuteRejectMarker(
@@ -1323,6 +1335,10 @@ interface CapsuleExecuteStatus {
 interface CapsuleNetworkStatus {
   readonly ingress: number;
   readonly egress: number;
+  readonly egressAllowed?: string;
+  readonly egressDenied?: string;
+  readonly egressDrop?: "enforced";
+  readonly egressReach?: "OK";
   readonly isolation?: "enforced";
   readonly loopback?: "OK";
   readonly netns?: string;
@@ -1437,6 +1453,10 @@ function parseCapsuleNetworkStatus(value: unknown): CapsuleNetworkStatus | undef
   const netns = readOptionalStringField(value, "netns");
   const loopback = readOptionalStringField(value, "loopback");
   const isolation = readOptionalStringField(value, "isolation");
+  const egressAllowed = readOptionalStringField(value, "egressAllowed");
+  const egressReach = readOptionalStringField(value, "egressReach");
+  const egressDenied = readOptionalStringField(value, "egressDenied");
+  const egressDrop = readOptionalStringField(value, "egressDrop");
 
   if (ingress === undefined || egress === undefined) {
     return undefined;
@@ -1451,6 +1471,10 @@ function parseCapsuleNetworkStatus(value: unknown): CapsuleNetworkStatus | undef
     ...status,
     ...(isolation === "enforced" ? { isolation } : {}),
     ...(loopback === "OK" ? { loopback } : {}),
+    ...(egressAllowed === undefined ? {} : { egressAllowed }),
+    ...(egressDenied === undefined ? {} : { egressDenied }),
+    ...(egressDrop === "enforced" ? { egressDrop } : {}),
+    ...(egressReach === "OK" ? { egressReach } : {}),
     ...(netns === undefined ? {} : { netns }),
   };
 }
@@ -1591,6 +1615,30 @@ function formatCapsuleNetnsMarker(status: CapsuleExecuteStatus): string {
     `netns=${markerToken(network.netns)} ` +
     `loopback=${network.loopback} ` +
     `isolation=${network.isolation} ` +
+    "status=OK"
+  );
+}
+
+function formatCapsuleNetEgressMarker(status: CapsuleExecuteStatus): string {
+  const network = status.network;
+  if (
+    network === undefined ||
+    network.egress <= 0 ||
+    network.egressAllowed === undefined ||
+    network.egressDenied === undefined ||
+    network.egressReach !== "OK" ||
+    network.egressDrop !== "enforced"
+  ) {
+    return `${CAPSULE_NET_EGRESS_ERROR_MARKER}: reason=egress_unverified status=FAILSAFE`;
+  }
+
+  return (
+    `${CAPSULE_NET_EGRESS_MARKER}: ` +
+    `id=${status.id} ` +
+    `allowed=${network.egressAllowed} ` +
+    `reach=${network.egressReach} ` +
+    `denied=${network.egressDenied} ` +
+    `drop=${network.egressDrop} ` +
     "status=OK"
   );
 }
@@ -1761,7 +1809,16 @@ async function readCapsuleNetnsState(
       last.status.network !== undefined &&
       last.status.network.netns !== undefined &&
       last.status.network.loopback === "OK" &&
-      last.status.network.isolation === "enforced"
+      last.status.network.isolation === "enforced" &&
+      (
+        last.status.network.egress === 0 ||
+        (
+          last.status.network.egressReach === "OK" &&
+          last.status.network.egressDrop === "enforced" &&
+          last.status.network.egressAllowed !== undefined &&
+          last.status.network.egressDenied !== undefined
+        )
+      )
     ) {
       return last;
     }

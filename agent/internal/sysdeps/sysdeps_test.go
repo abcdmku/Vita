@@ -17,4 +17,12 @@ func TestPackageContract(t *testing.T) {
 	var _ func(int64, int64) error = SetRealtimeClock
 	var _ func() (int64, int64, error) = RealtimeClock
 	var _ func(string) error = SetHostname
+	var _ func(string, string) error = CreateVeth
+	var _ func(string) error = DeleteLink
+	var _ func(string, int) error = MoveLinkToNetns
+	var _ func(string, string) error = AddIPv4Address
+	var _ func(string, string) error = AddDefaultIPv4Route
+	var _ func([]byte) error = ApplyNftRuleset
+	var _ func(string, string) ([]byte, error) = ListNftTable
+	var _ func(string, string) error = DeleteNftTable
 }

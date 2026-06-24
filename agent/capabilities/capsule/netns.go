@@ -39,19 +39,22 @@ type capsuleNetns struct {
 	Dir       string
 	ProofPath string
 	Private   bool
+	Egress    *capsuleEgressConfig
 }
 
 type capsuleNetnsCheck struct {
 	Interfaces []string
 	Isolation  string
 	Status     string
+	Egress     *capsuleEgressCheck
 }
 
 type capsuleNetnsProof struct {
-	ID       string `json:"id"`
-	Loopback string `json:"loopback"`
-	External string `json:"external"`
-	Status   string `json:"status"`
+	ID       string              `json:"id"`
+	Loopback string              `json:"loopback"`
+	External string              `json:"external"`
+	Egress   *capsuleEgressProof `json:"egress,omitempty"`
+	Status   string              `json:"status"`
 }
 
 type capsuleNetnsManager interface {
@@ -63,10 +66,11 @@ type capsuleNetnsManager interface {
 type defaultCapsuleNetnsManager struct {
 	root       string
 	interfaces func() ([]net.Interface, error)
+	egress     capsuleEgressConfigurator
 }
 
 func newDefaultCapsuleNetnsManager() capsuleNetnsManager {
-	return defaultCapsuleNetnsManager{root: defaultNetnsRoot}
+	return defaultCapsuleNetnsManager{root: defaultNetnsRoot, egress: defaultCapsuleEgressConfigurator{}}
 }
 
 func capsuleNetnsForUnit(unitName string, proofPath string) capsuleNetns {
@@ -76,6 +80,20 @@ func capsuleNetnsForUnit(unitName string, proofPath string) capsuleNetns {
 		ProofPath: proofPath,
 		Private:   true,
 	}
+}
+
+func capsuleNetnsForNetwork(unitName string, proofPath string, policy *ExecutionNetwork) (capsuleNetns, error) {
+	netns := capsuleNetnsForUnit(unitName, proofPath)
+	egress, err := capsuleEgressConfigForUnit(unitName, policy)
+	if err != nil {
+		return capsuleNetns{}, err
+	}
+	if egress != nil {
+		netns.Private = false
+		netns.Egress = egress
+		setCapsuleNetnsPaths(defaultNetnsRoot, &netns)
+	}
+	return netns, nil
 }
 
 func capsuleNetnsName(unitName string) string {
@@ -92,20 +110,29 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	if err := ctx.Err(); err != nil {
 		return capsuleNetns{}, err
 	}
-	if err := validateCapsuleNetns(netns); err != nil {
-		return capsuleNetns{}, err
-	}
 	if netns.Private {
+		if err := validateCapsuleNetns(netns); err != nil {
+			return capsuleNetns{}, err
+		}
 		return netns, nil
+	}
+	if netns.Name == "" || netns.Name != capsuleNetnsName(netns.Name) {
+		return capsuleNetns{}, &ExecuteInvalidRequestError{Reason: "capsule netns name is unsafe"}
 	}
 
 	root := m.root
 	if root == "" {
 		root = defaultNetnsRoot
 	}
-	dir := path.Join(root, netns.Name)
-	netns.Dir = dir
-	netns.Path = path.Join(dir, capsuleNetnsFileName)
+	if netns.Dir != "" || netns.Path != "" {
+		if err := validateCapsuleNetns(netns); err != nil {
+			return capsuleNetns{}, err
+		}
+	}
+	setCapsuleNetnsPaths(root, &netns)
+	if err := validateCapsuleNetns(netns); err != nil {
+		return capsuleNetns{}, err
+	}
 
 	if err := os.MkdirAll(root, capsuleNetnsDirMode); err != nil {
 		return capsuleNetns{}, capsuleNetnsStepError("mkdir_root", err)
@@ -113,14 +140,14 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	if err := os.Chmod(root, capsuleNetnsDirMode); err != nil {
 		return capsuleNetns{}, capsuleNetnsStepError("chmod_root", err)
 	}
-	if err := os.Mkdir(dir, capsuleNetnsDirMode); err != nil {
+	if err := os.Mkdir(netns.Dir, capsuleNetnsDirMode); err != nil {
 		return capsuleNetns{}, capsuleNetnsStepError("mkdir_netns", err)
 	}
 	createdDir := true
 	committed := false
 	defer func() {
 		if !committed && createdDir {
-			_ = os.RemoveAll(dir)
+			_ = os.RemoveAll(netns.Dir)
 		}
 	}()
 
@@ -195,6 +222,17 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 		mounted = false
 		return capsuleNetns{}, err
 	}
+	if netns.Egress != nil {
+		egress := m.egress
+		if egress == nil {
+			egress = defaultCapsuleEgressConfigurator{}
+		}
+		if err := egress.Setup(ctx, &netns); err != nil {
+			_ = sysdeps.UnmountDetach(netns.Path)
+			mounted = false
+			return capsuleNetns{}, err
+		}
+	}
 
 	committed = true
 	return netns, nil
@@ -238,6 +276,26 @@ func (m defaultCapsuleNetnsManager) Check(ctx context.Context, netns capsuleNetn
 			onlyLoopback = false
 		}
 	}
+	if netns.Egress != nil {
+		egress := m.egress
+		if egress == nil {
+			egress = defaultCapsuleEgressConfigurator{}
+		}
+		egressCheck, err := egress.Check(ctx, netns, interfaces)
+		if err != nil {
+			return capsuleNetnsCheck{
+				Interfaces: names,
+				Isolation:  "not_enforced",
+				Status:     capsuleNetnsMeasuredStatusFail,
+			}, err
+		}
+		return capsuleNetnsCheck{
+			Interfaces: names,
+			Isolation:  capsuleNetnsIsolationEnforced,
+			Status:     capsuleNetnsMeasuredStatusOK,
+			Egress:     &egressCheck,
+		}, nil
+	}
 	if !onlyLoopback {
 		return capsuleNetnsCheck{
 			Interfaces: names,
@@ -264,6 +322,15 @@ func (m defaultCapsuleNetnsManager) Teardown(ctx context.Context, netns capsuleN
 	}
 
 	var teardownErr error
+	if netns.Egress != nil {
+		egress := m.egress
+		if egress == nil {
+			egress = defaultCapsuleEgressConfigurator{}
+		}
+		if err := egress.Teardown(ctx, netns); err != nil {
+			teardownErr = errors.Join(teardownErr, err)
+		}
+	}
 	if err := sysdeps.UnmountDetach(netns.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("unmount", err))
 	}
@@ -317,6 +384,9 @@ func validateCapsuleNetns(netns capsuleNetns) error {
 		return &ExecuteInvalidRequestError{Reason: "capsule netns name is unsafe"}
 	}
 	if netns.Private {
+		if netns.Egress != nil {
+			return &ExecuteInvalidRequestError{Reason: "capsule private netns cannot carry egress"}
+		}
 		if netns.Dir != "" {
 			return &ExecuteInvalidRequestError{Reason: "capsule private netns dir must be empty"}
 		}
@@ -331,7 +401,21 @@ func validateCapsuleNetns(netns capsuleNetns) error {
 	if netns.Path != path.Join(netns.Dir, capsuleNetnsFileName) {
 		return &ExecuteInvalidRequestError{Reason: "capsule netns path is unsafe"}
 	}
+	if netns.Egress != nil {
+		if err := validateCapsuleEgressConfig(*netns.Egress); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func setCapsuleNetnsPaths(root string, netns *capsuleNetns) {
+	if root == "" {
+		root = defaultNetnsRoot
+	}
+	dir := path.Join(root, netns.Name)
+	netns.Dir = dir
+	netns.Path = path.Join(dir, capsuleNetnsFileName)
 }
 
 func validProcNetnsPath(value string) bool {

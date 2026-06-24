@@ -70,7 +70,7 @@ EnablePath=/usr/lib/systemd/system/multi-user.target.wants/vita-agentd.service
 EnableTarget=../vita-agentd.service
 ExecStart=/usr/lib/vita/agentd
 Type=simple
-AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_TIME
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TIME
 ListenAddress=127.0.0.1:8786
 
 [Tmpfiles]
@@ -89,7 +89,7 @@ const DEFAULT_AGENT_IMAGE_PLAN_INPUT = Object.freeze({
 const AGENT_IMAGE_CONFIG_PATH = "os/x86_64/agent-image.conf";
 const AGENT_IMAGE_BUILDER = "tools/build/go-in-docker.mjs";
 const AGENT_OVERLAY_RELATIVE_PATH = "os/x86_64/agent-overlay";
-const AGENT_AMBIENT_CAPABILITIES = Object.freeze(["CAP_SYS_ADMIN", "CAP_SYS_TIME"]);
+const AGENT_AMBIENT_CAPABILITIES = Object.freeze(["CAP_NET_ADMIN", "CAP_SYS_ADMIN", "CAP_SYS_TIME"]);
 const CONTROL_CHAR_PATTERN = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F]", "u");
 const PATH_CONTROL_CHAR_PATTERN = new RegExp("[\\u0000-\\u001F\\u007F]", "u");
 

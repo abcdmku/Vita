@@ -159,12 +159,16 @@ type ExecuteStatus struct {
 }
 
 type ExecuteNetworkStatus struct {
-	Ingress   int    `json:"ingress"`
-	Egress    int    `json:"egress"`
-	NetNS     string `json:"netns,omitempty"`
-	Loopback  string `json:"loopback,omitempty"`
-	Isolation string `json:"isolation,omitempty"`
-	ProofPath string `json:"-"`
+	Ingress       int    `json:"ingress"`
+	Egress        int    `json:"egress"`
+	NetNS         string `json:"netns,omitempty"`
+	Loopback      string `json:"loopback,omitempty"`
+	Isolation     string `json:"isolation,omitempty"`
+	EgressAllowed string `json:"egressAllowed,omitempty"`
+	EgressReach   string `json:"egressReach,omitempty"`
+	EgressDenied  string `json:"egressDenied,omitempty"`
+	EgressDrop    string `json:"egressDrop,omitempty"`
+	ProofPath     string `json:"-"`
 }
 
 type ExecuteVolumeStatus struct {
@@ -370,6 +374,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			return nil, &ExecuteStartError{Code: reason, Err: err}
 		}
 		unit.NetNS = &netns
+		unit.Properties = replaceCapsuleNetnsProperties(unit.Properties, unit.NetNS)
 		createdNetns = &netns
 	}
 
@@ -390,7 +395,7 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		}
 		return nil, &ExecuteStartError{Code: code, Err: err}
 	}
-	if unit.NetNS != nil {
+	if unit.NetNS != nil && unit.NetNS.Private {
 		if status.NetworkNamespacePath == "" {
 			limitErr := capsuleNetnsStepError("join_unit", errors.New("systemd did not report a capsule network namespace path"))
 			cleanupErr := errors.Join(
@@ -539,6 +544,18 @@ func (c *ExecuteCapability) refreshNetworkProof(ctx context.Context, status *Exe
 		return
 	}
 	status.Network.Loopback = capsuleNetnsLoopbackOK
+	if proof.Egress != nil {
+		check := capsuleEgressCheck{
+			AllowedCIDR: status.Network.EgressAllowed,
+			DeniedCIDR:  status.Network.EgressDenied,
+			Drop:        status.Network.EgressDrop,
+			Status:      capsuleEgressStatusOK,
+		}
+		if measuredCapsuleEgressProof(*proof.Egress, check) {
+			status.Network.EgressReach = capsuleEgressReachOK
+			status.Network.EgressDrop = capsuleEgressDropEnforced
+		}
+	}
 }
 
 func (c *ExecuteCapability) startWorkload(id string, unit string, checks []capsuleruntime.Check) {
@@ -1784,7 +1801,10 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 	var netns *capsuleNetns
 	if manifest.Network != nil {
 		networkProofPath = "/run/" + runtimeDir + "/netns-proof.json"
-		unitNetns := capsuleNetnsForUnit(unitName, networkProofPath)
+		unitNetns, err := capsuleNetnsForNetwork(unitName, networkProofPath, manifest.Network)
+		if err != nil {
+			return transientUnit{}, err
+		}
 		netns = &unitNetns
 	}
 	limits := manifest.ResourceLimits
@@ -1797,6 +1817,13 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 	environment := "DENO_DIR=/run/" + runtimeDir + " DENO_NO_UPDATE_CHECK=1 NO_COLOR=1"
 	if networkProofPath != "" {
 		environment += " VITA_CAPSULE_NETNS_PROOF=" + networkProofPath
+	}
+	if netns != nil && netns.Egress != nil && netns.Egress.ProbeAllowedAddr != "" {
+		environment += " VITA_CAPSULE_EGRESS_ALLOWED_ADDR=" + netns.Egress.ProbeAllowedAddr
+		environment += " VITA_CAPSULE_EGRESS_ALLOWED_CIDR=" + netns.Egress.ProbeAllowedCIDR
+		environment += " VITA_CAPSULE_EGRESS_ALLOWED_PORT=" + strconv.Itoa(netns.Egress.ProbeAllowedPort)
+		environment += " VITA_CAPSULE_EGRESS_DENIED_ADDR=" + netns.Egress.ProbeDeniedAddr
+		environment += " VITA_CAPSULE_EGRESS_DENIED_CIDR=" + netns.Egress.ProbeDeniedCIDR
 	}
 	properties = append(properties,
 		systemdProperty{Name: "Environment", Value: environment},
@@ -1875,6 +1902,17 @@ func appendCapsuleNetnsProperties(properties []systemdProperty, netns *capsuleNe
 	return append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
 }
 
+func replaceCapsuleNetnsProperties(properties []systemdProperty, netns *capsuleNetns) []systemdProperty {
+	out := make([]systemdProperty, 0, len(properties)+1)
+	for _, property := range properties {
+		if property.Name == "PrivateNetwork" || property.Name == "NetworkNamespacePath" {
+			continue
+		}
+		out = append(out, property)
+	}
+	return appendCapsuleNetnsProperties(out, netns)
+}
+
 func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount, networkProofPath string) []string {
 	argv := []string{
 		defaultDenoPath,
@@ -1887,7 +1925,7 @@ func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount, networkPr
 	if networkProofPath != "" {
 		argv = append(argv,
 			"--allow-net",
-			"--allow-env=VITA_CAPSULE_NETNS_PROOF",
+			"--allow-env=VITA_CAPSULE_NETNS_PROOF,VITA_CAPSULE_EGRESS_ALLOWED_ADDR,VITA_CAPSULE_EGRESS_ALLOWED_CIDR,VITA_CAPSULE_EGRESS_ALLOWED_PORT,VITA_CAPSULE_EGRESS_DENIED_ADDR,VITA_CAPSULE_EGRESS_DENIED_CIDR",
 		)
 	}
 	readPaths, writePaths := volumePermissionPaths(volumes)
@@ -2406,6 +2444,11 @@ func executeNetworkStatus(networkPolicy *ExecutionNetwork, netns *capsuleNetns, 
 	}
 	if check != nil && check.Status == capsuleNetnsMeasuredStatusOK && check.Isolation == capsuleNetnsIsolationEnforced {
 		status.Isolation = capsuleNetnsIsolationEnforced
+		if check.Egress != nil && check.Egress.Status == capsuleEgressStatusOK {
+			status.EgressAllowed = check.Egress.AllowedCIDR
+			status.EgressDenied = check.Egress.DeniedCIDR
+			status.EgressDrop = check.Egress.Drop
+		}
 	}
 	return status
 }
