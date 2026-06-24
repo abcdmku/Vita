@@ -112,6 +112,39 @@ type RuntimeConfigSummary = {
   };
 };
 
+type PlannedRootfsEntry =
+  | {
+      readonly kind: "file";
+      readonly path: string;
+      readonly source: string;
+      readonly content: string;
+    }
+  | {
+      readonly kind: "symlink";
+      readonly path: string;
+      readonly source: string;
+      readonly target: string;
+    }
+  | {
+      readonly kind: "planned-binary";
+      readonly path: string;
+      readonly source: string;
+      readonly mode: string;
+      readonly owner: string;
+      readonly sha256?: string;
+      readonly os?: string;
+      readonly arch?: string;
+    };
+
+type ExpectedRootfsBinary = {
+  readonly source: string;
+  readonly mode: string;
+  readonly owner: string;
+  readonly sha256?: string;
+  readonly os?: string;
+  readonly arch?: string;
+};
+
 type ParsedConfig = ReadonlyMap<string, ReadonlyMap<string, string>>;
 
 const buildRootModuleUrl = new URL("../build-root.mjs", import.meta.url);
@@ -119,6 +152,8 @@ const agentImageConfigUrl = new URL("../agent-image.conf", import.meta.url);
 const runtimeImageConfigUrl = new URL("../ts-image.conf", import.meta.url);
 const sharedTsOverlayUrl = new URL("../../x86_64/ts-overlay/", import.meta.url);
 const arm64AgentOverlayUrl = new URL("../agent-overlay/", import.meta.url);
+const expectedDenoArm64Sha256 = "d4589cc1ffcbf1995c92a0127d932aaf832ac70cfdcc6d5b7bf38043cf303575";
+const expectedWasmtimeArm64Sha256 = "9c89562963feada8f095bd6ce2e526f699914aaea333b9b00540f0a90365c780";
 
 test("arm64 root plan applies real Vita TS source, runtime, and agent extra trees", async () => {
   const buildRoot = await loadBuildRootModule();
@@ -163,10 +198,15 @@ test("arm64 root plan applies real Vita TS source, runtime, and agent extra tree
 });
 
 test("Vita overlay content exists on disk, not only in build-root metadata", async () => {
+  const buildRoot = await loadBuildRootModule();
+  const plan = buildRoot.planRootBuild();
+  assertVitaOverlaysPresent(plan);
+
   await assertSharedTsOverlayContent();
   await assertArm64AgentOverlayContent();
 
   const runtime = assertArm64RuntimeConfig(await readFile(runtimeImageConfigUrl, "utf8"));
+  const agent = assertArm64AgentConfig(await readAgentConfigText());
   assert.deepEqual(runtime.paths, {
     workRoot: "/work",
     overlayRoot: "/work/os/arm64/ts-runtime-overlay",
@@ -183,6 +223,57 @@ test("Vita overlay content exists on disk, not only in build-root metadata", asy
   assert.equal(runtime.install.binaryMode, "0755");
   assert.equal(runtime.wasmtime.asset, "wasmtime-v36.0.11-aarch64-linux.tar.xz");
   assert.equal(runtime.wasmtime.binary, "/usr/lib/vita/bin/wasmtime");
+
+  const plannedRootfs = await buildPlannedRootfsEntries(plan, runtime, agent);
+  assertRootfsFileContains(plannedRootfs, "/usr/lib/vita/ts/main.ts", "const TS_MARKER = \"VITA-TS\";");
+  assertRootfsFileContains(
+    plannedRootfs,
+    "/usr/lib/systemd/system/vita-ts.service",
+    "ExecStart=/usr/lib/vita/deno run",
+  );
+  assertRootfsSymlink(plannedRootfs, "/usr/lib/systemd/system/multi-user.target.wants/vita-ts.service", "../vita-ts.service");
+  assertRootfsPlannedBinary(plannedRootfs, "/usr/lib/vita/deno", {
+    source: "archive:deno-aarch64-unknown-linux-gnu.zip#deno",
+    sha256: expectedDenoArm64Sha256,
+    mode: "0755",
+    owner: "root:root",
+  });
+  assertRootfsPlannedBinary(plannedRootfs, "/usr/lib/vita/bin/wasmtime", {
+    source: "archive:wasmtime-v36.0.11-aarch64-linux.tar.xz#wasmtime-v36.0.11-aarch64-linux/wasmtime",
+    sha256: expectedWasmtimeArm64Sha256,
+    mode: "0755",
+    owner: "root:root",
+  });
+  assertRootfsPlannedBinary(plannedRootfs, "/usr/lib/vita/agentd", {
+    source: "/work/os/arm64/out/agent/agentd",
+    mode: "0755",
+    owner: "root:root",
+    os: "linux",
+    arch: "arm64",
+  });
+  assertRootfsSymlink(plannedRootfs, "/usr/bin/vita-agentd", "/usr/lib/vita/agentd");
+  assertRootfsFileContains(
+    plannedRootfs,
+    "/usr/lib/systemd/system/vita-agentd.service",
+    "ExecStart=/usr/lib/vita/agentd",
+  );
+
+  const declarationsOnlyRootfs = new Map<string, PlannedRootfsEntry>();
+  assert.throws(
+    () => assertRootfsFileContains(declarationsOnlyRootfs, "/usr/lib/vita/ts/main.ts", "VITA-TS"),
+    /planned rootfs missing \/usr\/lib\/vita\/ts\/main\.ts/u,
+  );
+  assert.throws(
+    () =>
+      assertRootfsPlannedBinary(declarationsOnlyRootfs, "/usr/lib/vita/agentd", {
+        source: "/work/os/arm64/out/agent/agentd",
+        mode: "0755",
+        owner: "root:root",
+        os: "linux",
+        arch: "arm64",
+      }),
+    /planned rootfs missing \/usr\/lib\/vita\/agentd/u,
+  );
 });
 
 test("arm64 agent-image.conf pins the cross-build envelope and install surface", async () => {
@@ -388,6 +479,172 @@ async function loadBuildRootModule(): Promise<BuildRootModule> {
   };
 }
 
+async function buildPlannedRootfsEntries(
+  plan: RootBuildPlan,
+  runtime: RuntimeConfigSummary,
+  agent: AgentConfigSummary,
+): Promise<ReadonlyMap<string, PlannedRootfsEntry>> {
+  assertVitaOverlaysPresent(plan);
+
+  const entries = new Map<string, PlannedRootfsEntry>();
+  await addOverlayEntry(entries, sharedTsOverlayUrl, "/usr/lib/vita/ts/main.ts", "os/x86_64/ts-overlay");
+  await addOverlayEntry(
+    entries,
+    sharedTsOverlayUrl,
+    "/usr/lib/systemd/system/vita-ts.service",
+    "os/x86_64/ts-overlay",
+  );
+  await addOverlayEntry(
+    entries,
+    sharedTsOverlayUrl,
+    "/usr/lib/systemd/system/multi-user.target.wants/vita-ts.service",
+    "os/x86_64/ts-overlay",
+  );
+  await addOverlayEntry(
+    entries,
+    arm64AgentOverlayUrl,
+    "/usr/lib/systemd/system/vita-agentd.service",
+    "os/arm64/agent-overlay",
+  );
+  await addOverlayEntry(
+    entries,
+    arm64AgentOverlayUrl,
+    "/usr/lib/systemd/system/multi-user.target.wants/vita-agentd.service",
+    "os/arm64/agent-overlay",
+  );
+  await addOverlayEntry(entries, arm64AgentOverlayUrl, "/usr/lib/sysusers.d/vita-agent.conf", "os/arm64/agent-overlay");
+  await addOverlayEntry(entries, arm64AgentOverlayUrl, "/usr/lib/tmpfiles.d/vita-agent.conf", "os/arm64/agent-overlay");
+
+  putRootfsEntry(entries, {
+    kind: "planned-binary",
+    path: runtime.install.binary,
+    source: `archive:${runtime.runtime.asset}#${runtime.runtime.archiveMember}`,
+    mode: runtime.install.binaryMode,
+    owner: runtime.install.binaryOwner,
+    sha256: runtime.runtime.sha256,
+  });
+  putRootfsEntry(entries, {
+    kind: "planned-binary",
+    path: runtime.wasmtime.binary,
+    source: `archive:${runtime.wasmtime.asset}#${runtime.wasmtime.archiveMember}`,
+    mode: runtime.wasmtime.binaryMode,
+    owner: runtime.wasmtime.binaryOwner,
+    sha256: runtime.wasmtime.sha256,
+  });
+  putRootfsEntry(entries, {
+    kind: "planned-binary",
+    path: agent.install.binary,
+    source: agent.build.output,
+    mode: agent.install.binaryMode,
+    owner: agent.install.binaryOwner,
+    os: agent.build.goOS,
+    arch: agent.build.goArch,
+  });
+  putRootfsEntry(entries, {
+    kind: "symlink",
+    path: agent.install.symlink,
+    source: "os/arm64/agent-image.conf",
+    target: agent.install.symlinkTarget,
+  });
+
+  return entries;
+}
+
+async function addOverlayEntry(
+  entries: Map<string, PlannedRootfsEntry>,
+  overlayUrl: URL,
+  rootfsPath: string,
+  sourceOverlay: string,
+): Promise<void> {
+  const overlayPath = new URL(rootfsPath.replace(/^\//u, ""), overlayUrl);
+  const stats = await lstat(overlayPath);
+  if (stats.isSymbolicLink()) {
+    putRootfsEntry(entries, {
+      kind: "symlink",
+      path: rootfsPath,
+      source: sourceOverlay,
+      target: await readlink(overlayPath),
+    });
+    return;
+  }
+  const content = await readFile(overlayPath, "utf8");
+  if (rootfsPath.includes("/multi-user.target.wants/")) {
+    putRootfsEntry(entries, {
+      kind: "symlink",
+      path: rootfsPath,
+      source: sourceOverlay,
+      target: content.trim(),
+    });
+    return;
+  }
+  putRootfsEntry(entries, {
+    kind: "file",
+    path: rootfsPath,
+    source: sourceOverlay,
+    content,
+  });
+}
+
+function putRootfsEntry(entries: Map<string, PlannedRootfsEntry>, entry: PlannedRootfsEntry): void {
+  if (entries.has(entry.path)) {
+    assert.fail(`planned rootfs repeats ${entry.path}`);
+  }
+  entries.set(entry.path, entry);
+}
+
+function assertRootfsFileContains(
+  entries: ReadonlyMap<string, PlannedRootfsEntry>,
+  path: string,
+  expectedText: string,
+): void {
+  const entry = entries.get(path);
+  if (entry === undefined) {
+    assert.fail(`planned rootfs missing ${path}`);
+  }
+  if (entry.kind !== "file") {
+    assert.fail(`planned rootfs ${path} must be a file`);
+  }
+  assert.ok(entry.content.includes(expectedText), `${path} must contain ${expectedText}`);
+}
+
+function assertRootfsSymlink(entries: ReadonlyMap<string, PlannedRootfsEntry>, path: string, target: string): void {
+  const entry = entries.get(path);
+  if (entry === undefined) {
+    assert.fail(`planned rootfs missing ${path}`);
+  }
+  if (entry.kind !== "symlink") {
+    assert.fail(`planned rootfs ${path} must be a symlink`);
+  }
+  assert.equal(entry.target, target);
+}
+
+function assertRootfsPlannedBinary(
+  entries: ReadonlyMap<string, PlannedRootfsEntry>,
+  path: string,
+  expected: ExpectedRootfsBinary,
+): void {
+  const entry = entries.get(path);
+  if (entry === undefined) {
+    assert.fail(`planned rootfs missing ${path}`);
+  }
+  if (entry.kind !== "planned-binary") {
+    assert.fail(`planned rootfs ${path} must be a planned binary`);
+  }
+  assert.equal(entry.source, expected.source);
+  assert.equal(entry.mode, expected.mode);
+  assert.equal(entry.owner, expected.owner);
+  if (expected.sha256 !== undefined) {
+    assert.equal(entry.sha256, expected.sha256);
+    assert.match(entry.sha256, /^[0-9a-f]{64}$/u);
+  }
+  if (expected.os !== undefined) {
+    assert.equal(entry.os, expected.os);
+  }
+  if (expected.arch !== undefined) {
+    assert.equal(entry.arch, expected.arch);
+  }
+}
+
 function assertArm64RuntimeConfig(configText: string): RuntimeConfigSummary {
   const config = parseKeyValueConfig(configText, "ts-image.conf");
   const summary = {
@@ -441,8 +698,10 @@ function assertArm64RuntimeConfig(configText: string): RuntimeConfigSummary {
   assertExpected(summary.install.binary, "/usr/lib/vita/deno", "Install.Binary");
   assertExpected(summary.install.binaryMode, "0755", "Install.BinaryMode");
   assertExpected(summary.install.binaryOwner, "root:root", "Install.BinaryOwner");
-  assert.ok(summary.runtime.sha256.length > 0, "Runtime.Sha256 must be present");
-  assert.ok(summary.wasmtime.sha256.length > 0, "Wasmtime.Sha256 must be present");
+  assert.match(summary.runtime.sha256, /^[0-9a-f]{64}$/u, "Runtime.Sha256 must be a real 64-hex pin");
+  assert.match(summary.wasmtime.sha256, /^[0-9a-f]{64}$/u, "Wasmtime.Sha256 must be a real 64-hex pin");
+  assertExpected(summary.runtime.sha256, expectedDenoArm64Sha256, "Runtime.Sha256");
+  assertExpected(summary.wasmtime.sha256, expectedWasmtimeArm64Sha256, "Wasmtime.Sha256");
 
   return summary;
 }

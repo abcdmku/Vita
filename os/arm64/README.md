@@ -15,10 +15,10 @@ This slice is a deterministic build plan and structural verification floor:
 - `mkosi.conf` builds an aarch64 Debian trixie rootfs from the shared `os/common/mkosi.conf` baseline.
 - `build-root.mjs` plans the root build with `--pull=never`, `--network none`, fixed locale/timezone, fixed `SOURCE_DATE_EPOCH`, the arm64 package allowlist, and concrete Vita overlays:
   - shared TS source/service content from `os/x86_64/ts-overlay` because that tree is architecture-independent,
-  - arm64 runtime binaries from `os/arm64/ts-runtime-overlay`, staged by `ts-image.conf`,
+  - arm64 runtime binaries from `os/arm64/ts-runtime-overlay`, staged by `ts-image.mjs` from the pins in `ts-image.conf`,
   - arm64 agent service/tmpfiles/sysusers content from `os/arm64/agent-overlay`.
 - `agent-image.conf` plans a native Linux arm64 `vita-agentd` cross-build using `GOARCH=arm64`, `GOOS=linux`, `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, and `-ldflags=-s -w -buildid=`.
-- `ts-image.conf` records the aarch64 Deno and Wasmtime release assets that populate the runtime overlay. The binaries are build artifacts and are not committed.
+- `ts-image.conf` records the aarch64 Deno and Wasmtime release assets plus their 64-hex sha256 pins. The binaries are build artifacts and are not committed.
 
 ## Owner Boot-Verify Gate
 
