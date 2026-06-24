@@ -17,6 +17,7 @@
     "storage/**/*.ts",
     "simulation/**/*.ts",
     "accelerators/**/*.ts",
+    "cli/**/*.ts",
     "os/**/*.ts",
     "agent/**/*.ts"
   ],
