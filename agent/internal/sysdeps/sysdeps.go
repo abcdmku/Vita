@@ -19,6 +19,28 @@ import (
 // ErrUnsupported is returned by the non-Linux stubs.
 var ErrUnsupported = errors.New("sysdeps: operation not supported on this platform")
 
+// WireGuardPeer is the narrow typed peer configuration accepted by the
+// WireGuard sysdeps helpers. Keys are raw 32-byte WireGuard keys; callers own
+// all validation and must not pass untrusted text through this boundary.
+type WireGuardPeer struct {
+	PublicKey           []byte
+	AllowedIPs          []string
+	Endpoint            string
+	PersistentKeepalive *int
+}
+
+type WireGuardPeerStatus struct {
+	PublicKey         []byte
+	AllowedIPs        []string
+	LastHandshakeUnix int64
+}
+
+type WireGuardDeviceStatus struct {
+	Name       string
+	ListenPort int
+	Peers      []WireGuardPeerStatus
+}
+
 // ErrnoCode returns a stable errno token from a wrapped syscall failure.
 func ErrnoCode(err error) string {
 	var errno syscall.Errno
@@ -38,6 +60,8 @@ func ErrnoCode(err error) string {
 		return "ENODEV"
 	case syscall.ENOSYS:
 		return "ENOSYS"
+	case syscall.EOPNOTSUPP:
+		return "EOPNOTSUPP"
 	case syscall.EPERM:
 		return "EPERM"
 	default:

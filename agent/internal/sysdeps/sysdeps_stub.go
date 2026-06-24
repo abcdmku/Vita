@@ -44,8 +44,35 @@ func MoveLinkToNetns(name string, netnsFD int) error { return ErrUnsupported }
 // AddIPv4Address is unsupported off Linux.
 func AddIPv4Address(name string, cidr string) error { return ErrUnsupported }
 
+// AddIPAddress is unsupported off Linux.
+func AddIPAddress(name string, cidr string) error { return ErrUnsupported }
+
 // AddDefaultIPv4Route is unsupported off Linux.
 func AddDefaultIPv4Route(name string, gateway string) error { return ErrUnsupported }
+
+// CreateWireGuardLink is unsupported off Linux.
+func CreateWireGuardLink(name string) error { return ErrUnsupported }
+
+// SetWireGuardPrivateKey is unsupported off Linux.
+func SetWireGuardPrivateKey(name string, privateKey []byte, listenPort int) error {
+	return ErrUnsupported
+}
+
+// AddWireGuardPeer is unsupported off Linux.
+func AddWireGuardPeer(name string, peer WireGuardPeer) error { return ErrUnsupported }
+
+// SetWireGuardPeerAllowedIPs is unsupported off Linux.
+func SetWireGuardPeerAllowedIPs(name string, publicKey []byte, allowedIPs []string) error {
+	return ErrUnsupported
+}
+
+// ReplaceWireGuardPeers is unsupported off Linux.
+func ReplaceWireGuardPeers(name string, peers []WireGuardPeer) error { return ErrUnsupported }
+
+// WireGuardDevice is unsupported off Linux.
+func WireGuardDevice(name string) (WireGuardDeviceStatus, error) {
+	return WireGuardDeviceStatus{}, ErrUnsupported
+}
 
 // ApplyNftRuleset is unsupported off Linux.
 func ApplyNftRuleset(ruleset []byte) error { return ErrUnsupported }

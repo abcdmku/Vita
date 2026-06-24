@@ -28,7 +28,14 @@ func TestPackageContract(t *testing.T) {
 	var _ func(string) error = DeleteLink
 	var _ func(string, int) error = MoveLinkToNetns
 	var _ func(string, string) error = AddIPv4Address
+	var _ func(string, string) error = AddIPAddress
 	var _ func(string, string) error = AddDefaultIPv4Route
+	var _ func(string) error = CreateWireGuardLink
+	var _ func(string, []byte, int) error = SetWireGuardPrivateKey
+	var _ func(string, WireGuardPeer) error = AddWireGuardPeer
+	var _ func(string, []byte, []string) error = SetWireGuardPeerAllowedIPs
+	var _ func(string, []WireGuardPeer) error = ReplaceWireGuardPeers
+	var _ func(string) (WireGuardDeviceStatus, error) = WireGuardDevice
 	var _ func([]byte) error = ApplyNftRuleset
 	var _ func(string, string) ([]byte, error) = ListNftTable
 	var _ func(string, string) error = DeleteNftTable

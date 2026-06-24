@@ -24,6 +24,7 @@ import (
 	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/mesh"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	"github.com/vita/agent/capabilities/pdssync"
@@ -991,7 +992,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{registry: registry})
 
 	// GET /capabilities reports HARDWARE discovery (P1-005/P1-008), not registered operation
-	// names. Registration is proven below: /operations lists and /apply routes all fifteen registered
+	// names. Registration is proven below: /operations lists and /apply routes all registered
 	// capabilities and commits them in order.
 	operationsResponse := perform(handler, http.MethodGet, "/operations", "")
 	if operationsResponse.Code != http.StatusOK {
@@ -999,7 +1000,7 @@ func TestRegisteredAgentCapabilitiesAreApplicable(t *testing.T) {
 	}
 	var operations OperationsResponse
 	decodeResponse(t, operationsResponse, &operations)
-	wantOperations := []string{accounts.Name, backup.Name, capsule.ExecuteName, capsule.FetchName, capsule.Name, hostname.Name, identity.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
+	wantOperations := []string{accounts.Name, backup.Name, capsule.ExecuteName, capsule.FetchName, capsule.Name, hostname.Name, identity.Name, mesh.Name, network.Name, nodeconfig.Name, pdssync.Name, services.Name, storage.Name, nodetime.Name, timesync.Name, update.Name}
 	if !reflect.DeepEqual(operations.Operations, wantOperations) {
 		t.Fatalf("operations = %v, want %v", operations.Operations, wantOperations)
 	}

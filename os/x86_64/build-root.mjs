@@ -26,6 +26,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "systemd-sysv",
   "udev",
   "util-linux",
+  "wireguard-tools",
 ]);
 
 const COMMON_CONFIG_TEXT = `# Vita immutable Debian root baseline.
@@ -63,6 +64,7 @@ Packages=
     systemd-sysv
     udev
     util-linux
+    wireguard-tools
 Environment=
     SOURCE_DATE_EPOCH=1781308800
     TZ=UTC
@@ -96,6 +98,7 @@ Packages=
     systemd-sysv
     udev
     util-linux
+    wireguard-tools
 `;
 
 const DEFAULT_ROOT_BUILD_INPUT = Object.freeze({

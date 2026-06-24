@@ -46,6 +46,13 @@ import {
   rejectInvalidPdsRepoCreate,
 } from "./vita/pds-repo.ts";
 import {
+  formatMeshErrorMarker,
+  formatMeshMarker,
+  formatMeshRejectMarker,
+  MESH_CAPABILITY,
+  parseMeshState,
+} from "./vita/mesh-marker.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
   createDenoUnixSocketFilesAgentTransport,
@@ -648,6 +655,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
+    emit(formatMeshErrorMarker("agentd_connect_failed"));
     return;
   }
 
@@ -700,6 +708,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   }
   await emitFilesMarkers(filesTransport);
   await emitBackupArchiveMarkers(agentTransport);
+  await emitMeshMarkers(client, agentTransport);
 }
 
 async function emitApplyMarkers(
@@ -1294,6 +1303,95 @@ async function emitForcedCapsuleExecuteRejectMarker(
 
   emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
   emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function emitMeshMarkers(
+  readClient: Pick<AgentClient, "getState">,
+  agentTransport: AgentTransport,
+): Promise<void> {
+  const applyClient = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    emit(formatMeshMarker(parseMeshState(await readClient.getState(MESH_CAPABILITY))));
+  } catch (cause) {
+    emit(formatMeshErrorMarker(agentClientErrorReason(cause, "mesh_state_unreadable")));
+  }
+
+  await emitForcedMeshRejectMarker(applyClient);
+}
+
+async function emitForcedMeshRejectMarker(
+  client: Pick<AgentClient, "apply">,
+): Promise<void> {
+  try {
+    const result = await client.apply(forcedInvalidMeshPlan(randomWireGuardPublicKeyText()));
+
+    if (result.outcome !== "committed") {
+      emit(formatMeshRejectMarker(agentApplyResultReason(result)));
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(formatMeshRejectMarker(cause.agentError.code));
+      return;
+    }
+  }
+
+  emit(formatMeshErrorMarker("mesh_invalid_not_rejected"));
+}
+
+function forcedInvalidMeshPlan(publicKey: string): AgentApplyPlan {
+  return {
+    operations: [
+      {
+        capability: MESH_CAPABILITY,
+        request: {
+          desired: {
+            interfaceCidr: "10.221.75.1/24",
+            listenPort: 51820,
+            peers: [
+              {
+                allowedIps: ["0.0.0.0/0"],
+                publicKey,
+                services: [
+                  {
+                    port: 2222,
+                    proto: "tcp",
+                  },
+                ],
+              },
+            ],
+            privateKeyRef: "/var/lib/vita-agent/mesh/keys/test-node.key",
+          },
+        },
+      },
+    ],
+  };
+}
+
+function randomWireGuardPublicKeyText(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+
+  let binary = "";
+  for (let index = 0; index < bytes.byteLength; index += 1) {
+    const byte = bytes[index];
+
+    if (byte !== undefined) {
+      binary += String.fromCharCode(byte);
+    }
+  }
+
+  return btoa(binary);
 }
 
 async function emitOCICapsuleMarkers(agentTransport: AgentTransport): Promise<void> {

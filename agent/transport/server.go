@@ -25,6 +25,7 @@ import (
 	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/mesh"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	"github.com/vita/agent/capabilities/pdsrepo"
@@ -510,6 +511,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		nodetime.Name:       DecodeJSONRequest[nodetime.ApplyRequest],
 		hostname.Name:       DecodeJSONRequest[hostname.ApplyRequest],
 		identity.Name:       DecodeJSONRequest[identity.ApplyRequest],
+		mesh.Name:           DecodeJSONRequest[mesh.ApplyRequest],
 		network.Name:        DecodeJSONRequest[network.ApplyRequest],
 		pdsrepo.Name:        DecodeJSONRequest[pdsrepo.ApplyRequest],
 		pdssync.Name:        DecodeJSONRequest[pdssync.ApplyRequest],
@@ -532,6 +534,7 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		nodetime.Name:       func() capabilities.TypedRequest { return nodetime.ReadRequest{} },
 		hostname.Name:       func() capabilities.TypedRequest { return hostname.ReadRequest{} },
 		identity.Name:       func() capabilities.TypedRequest { return identity.ReadRequest{} },
+		mesh.Name:           func() capabilities.TypedRequest { return mesh.ReadRequest{} },
 		network.Name:        func() capabilities.TypedRequest { return network.ReadRequest{} },
 		pdsrepo.Name:        func() capabilities.TypedRequest { return pdsrepo.ReadRequest{} },
 		pdssync.Name:        func() capabilities.TypedRequest { return pdssync.ReadRequest{} },

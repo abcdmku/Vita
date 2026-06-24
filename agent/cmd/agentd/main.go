@@ -19,6 +19,7 @@ import (
 	"github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
+	"github.com/vita/agent/capabilities/mesh"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
 	"github.com/vita/agent/capabilities/pdsrepo"
@@ -59,6 +60,7 @@ func main() {
 		capsule.NewCapability(),
 		hostname.NewCapability(),
 		identity.NewCapability(),
+		mesh.NewCapability(),
 		network.NewCapability(),
 		nodeconfig.NewCapability(),
 		pdsrepo.NewCapability(),
