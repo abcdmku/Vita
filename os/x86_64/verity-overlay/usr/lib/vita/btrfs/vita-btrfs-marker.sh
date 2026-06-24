@@ -155,8 +155,22 @@ agent_apply() {
     "$WORKDIR/agent-apply.mjs" "$AGENTD_SOCKET" "$payload" >"$output"
 }
 
+# The quota exercise runs against a DEDICATED throwaway subvolume the marker
+# creates and destroys (never the live @data/S0 data plane), so the live /var
+# quota state is left exactly as found. QUOTA_TEST_SUBVOL is set once that
+# subvolume exists so cleanup can tear it down on EVERY exit path (success,
+# fail_marker, or an unexpected set -e abort).
+QUOTA_TEST_SUBVOL=""
+
 cleanup() {
   set +e
+  if [ -n "$QUOTA_TEST_SUBVOL" ] && [ -d "$QUOTA_TEST_SUBVOL" ]; then
+    # Clear the limit defensively, then delete the throwaway subvolume. Neither
+    # call touches @data — the qgroup limit was only ever set on this test
+    # subvolume, so the live /var quota is left exactly as the marker found it.
+    btrfs qgroup limit none "$QUOTA_TEST_SUBVOL" >/dev/null 2>&1
+    btrfs subvolume delete "$QUOTA_TEST_SUBVOL" >/dev/null 2>&1
+  fi
   mountpoint -q "$TOP" && umount "$TOP" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -192,12 +206,28 @@ run_step "snapshot_create" btrfs subvolume snapshot -r "$TOP/@data" "$TOP/@snaps
 ro="$(btrfs property get -ts "$TOP/@snapshots/$snap" ro 2>/dev/null)" || fail_marker "snapshot_ro_probe" "$?"
 printf '%s\n' "$ro" | grep -Fq "ro=true" || fail_marker "snapshot_not_readonly" 1
 
-run_step "quota_limit" btrfs qgroup limit 32M "$TOP/@data"
-run_step "quota_under_write" dd if=/dev/zero of="$WORKDIR/quota-under.bin" bs=1M count=1 conv=fsync status=none
-if dd if=/dev/zero of="$WORKDIR/quota-over.bin" bs=1M count=64 conv=fsync status=none >/dev/null 2>&1; then
+# MEASURE quota enforcement against a DEDICATED throwaway subvolume, never the
+# live @data/S0 data plane. A qgroup limit set on @data would (a) permanently
+# cap the real /var, and (b) EDQUOT-failsafe on any non-fresh /var already over
+# the cap. Instead create a fresh sibling subvolume on the SAME btrfs filesystem
+# (so qgroups behave identically), set the limit there, prove an under-limit
+# write succeeds and an over-limit write fails (EDQUOT/ENOSPC), then clear the
+# limit and destroy the subvolume. The cleanup trap also tears it down on any
+# early exit, so the live /var quota is left EXACTLY as found on every path.
+quota_test="$TOP/@quota-test-$stamp"
+run_step "quota_test_subvol_create" btrfs subvolume create "$quota_test"
+QUOTA_TEST_SUBVOL="$quota_test"
+run_step "quota_limit" btrfs qgroup limit 32M "$quota_test"
+run_step "quota_under_write" dd if=/dev/zero of="$quota_test/quota-under.bin" bs=1M count=1 conv=fsync status=none
+if dd if=/dev/zero of="$quota_test/quota-over.bin" bs=1M count=64 conv=fsync status=none >/dev/null 2>&1; then
   fail_marker "quota_not_enforced" 1
 fi
-rm -f "$WORKDIR/quota-under.bin" "$WORKDIR/quota-over.bin"
+run_step "quota_under_cleanup" rm -f "$quota_test/quota-under.bin" "$quota_test/quota-over.bin"
+# Clear the limit and destroy the throwaway subvolume now (cleanup trap is the
+# belt-and-suspenders for early exits); leave nothing behind on the data plane.
+run_step "quota_limit_clear" btrfs qgroup limit none "$quota_test"
+run_step "quota_test_subvol_delete" btrfs subvolume delete "$quota_test"
+QUOTA_TEST_SUBVOL=""
 
 prior_node="$WORKDIR/node-config.before"
 prior_exists=0
