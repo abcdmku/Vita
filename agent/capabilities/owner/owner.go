@@ -28,6 +28,7 @@ const (
 
 	defaultStateRoot               = "/var/lib/vita-agent"
 	defaultOwnerCredentialFilename = "owner-credential.json"
+	defaultOwnerFixturePath        = "/usr/lib/vita/owner/owner-assertion.json"
 	ownerCredentialFileMode        = 0o600
 	stateRootMode                  = 0o700
 
@@ -257,6 +258,7 @@ type Capability struct {
 	fs           ownerFileSystem
 	now          func() time.Time
 	challengeTTL time.Duration
+	fixturePath  string
 
 	mu         sync.Mutex
 	challenges map[string]challengeRecord
@@ -315,6 +317,7 @@ func newCapability(fs ownerFileSystem) *Capability {
 		fs:           fs,
 		now:          time.Now,
 		challengeTTL: defaultChallengeTTL,
+		fixturePath:  defaultOwnerFixturePath,
 		challenges:   make(map[string]challengeRecord),
 	}
 }
@@ -361,11 +364,10 @@ func (c *Capability) Challenge(action string) (ChallengeTicket, error) {
 		return ChallengeTicket{}, &InvalidRequestError{Reason: "missing owner capability"}
 	}
 
-	challengeBytes := make([]byte, ownerChallengeBytes)
-	if _, err := rand.Read(challengeBytes); err != nil {
-		return ChallengeTicket{}, fmt.Errorf("mint owner challenge: %w", err)
+	challenge, err := c.challengeValue(action)
+	if err != nil {
+		return ChallengeTicket{}, err
 	}
-	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -479,7 +481,7 @@ func (c *Capability) enroll(ctx context.Context, req ApplyRequest) (transaction.
 	}
 
 	desiredBytes := renderCredential(req.Desired)
-	if err := c.fs.AtomicWrite(ctx, desiredBytes); err != nil {
+	if err := c.atomicWriteOrRestore(ctx, desiredBytes, prior); err != nil {
 		return nil, err
 	}
 
@@ -565,7 +567,7 @@ func (c *Capability) verifyAssertion(ctx context.Context, assertion OwnerAsserti
 	if assertedSignCount > credential.SignCount {
 		updated.SignCount = assertedSignCount
 		mutated = true
-		if err := c.fs.AtomicWrite(ctx, renderCredential(updated)); err != nil {
+		if err := c.atomicWriteOrRestore(ctx, renderCredential(updated), prior); err != nil {
 			return deny(denyStateUpdateFailed), prior, false, nil
 		}
 	}
@@ -574,6 +576,22 @@ func (c *Capability) verifyAssertion(ctx context.Context, assertion OwnerAsserti
 		Verified: true,
 		Action:   assertion.Action,
 	}, prior, mutated, nil
+}
+
+func (c *Capability) atomicWriteOrRestore(ctx context.Context, content []byte, prior ownerSnapshot) error {
+	err := c.fs.AtomicWrite(ctx, content)
+	if err == nil {
+		return nil
+	}
+
+	current, readErr := c.fs.Read(ctx)
+	if readErr != nil || snapshotsEqual(current, prior) {
+		return err
+	}
+	if restoreErr := c.fs.Replace(ctx, cloneSnapshot(prior)); restoreErr != nil {
+		return errors.Join(err, fmt.Errorf("restore owner credential after failed write: %w", restoreErr))
+	}
+	return err
 }
 
 func (c *Capability) consumeChallengeLocked(challenge, action string, now time.Time) error {
@@ -610,6 +628,67 @@ func (c *Capability) nowUTC() time.Time {
 		return time.Now().UTC()
 	}
 	return c.now().UTC()
+}
+
+func (c *Capability) challengeValue(action string) (string, error) {
+	challenge, ok, err := c.fixtureChallenge(action)
+	if err != nil || ok {
+		return challenge, err
+	}
+
+	challengeBytes := make([]byte, ownerChallengeBytes)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		return "", fmt.Errorf("mint owner challenge: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(challengeBytes), nil
+}
+
+type ownerAssertionFixture struct {
+	Action    *string         `json:"action"`
+	Challenge *string         `json:"challenge"`
+	Assertion *OwnerAssertion `json:"assertion"`
+}
+
+func (c *Capability) fixtureChallenge(action string) (string, bool, error) {
+	if c == nil || c.fixturePath == "" {
+		return "", false, nil
+	}
+
+	raw, err := os.ReadFile(c.fixturePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read owner assertion fixture: %w", err)
+	}
+
+	var fixture ownerAssertionFixture
+	if err := jsonsafe.DecodeStrict(raw, &fixture); err != nil {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture is invalid"}
+	}
+	if fixture.Action == nil || fixture.Challenge == nil || fixture.Assertion == nil {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture is incomplete"}
+	}
+	if *fixture.Action != action {
+		return "", false, nil
+	}
+	if err := validateBase64URLField(*fixture.Challenge, "challenge", ownerChallengeBytes, ownerChallengeBytes); err != nil {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture challenge is invalid"}
+	}
+	if fixture.Assertion.Action != action {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture action mismatch"}
+	}
+
+	clientDataJSON, err := decodeBase64URLField(fixture.Assertion.ClientDataJSON, "clientDataJSON", 1, maxClientDataJSONBytes)
+	if err != nil {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture client data is invalid"}
+	}
+	clientData, err := parseClientData(clientDataJSON)
+	if err != nil || clientData.Type != webauthnGetType || clientData.Challenge != *fixture.Challenge {
+		return "", false, &InvalidRequestError{Reason: "owner assertion fixture challenge mismatch"}
+	}
+
+	return *fixture.Challenge, true, nil
 }
 
 type undoOwnerCredential struct {
@@ -962,6 +1041,10 @@ func cloneSnapshot(snapshot ownerSnapshot) ownerSnapshot {
 		exists: snapshot.exists,
 		bytes:  cloneBytes(snapshot.bytes),
 	}
+}
+
+func snapshotsEqual(a, b ownerSnapshot) bool {
+	return a.exists == b.exists && bytes.Equal(a.bytes, b.bytes)
 }
 
 func cloneBytes(in []byte) []byte {

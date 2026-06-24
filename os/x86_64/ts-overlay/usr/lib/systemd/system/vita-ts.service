@@ -16,9 +16,9 @@
 #     capabilities. The [Service] block below enforces that with DynamicUser + an empty capability
 #     bounding/ambient set + NoNewPrivileges, plus the standard systemd sandbox knobs. A oneshot
 #     that only reads /usr/lib/vita/ts and prints a marker needs nothing more.
-#   - `deno run` grants only read/write access to agentd's unix socket path. There is still NO
-#     --allow-net and systemd keeps this unit AF_UNIX-only; privileged host mutation remains solely
-#     in agentd.
+#   - `deno run` grants read/write access to agentd's unix socket path plus read-only access to the
+#     public owner smoke fixture. There is still NO --allow-net and systemd keeps this unit AF_UNIX-only;
+#     privileged host mutation remains solely in agentd.
 #   - --no-remote forbids any network module fetch; --cached-only forbids touching the module
 #     cache. Combined with the vendored relative imports this guarantees no remote imports at boot.
 #   - The Deno binary itself is staged from a verified, pinned download at BUILD time, never fetched
@@ -37,7 +37,7 @@ RemainAfterExit=yes
 # Invoke the pinned, vendored runtime explicitly (not a PATH lookup) so we run exactly the staged
 # binary. The only --allow-* grants are scoped to agentd.sock; --no-remote/--cached-only forbid any
 # network or cache module resolution so only the vendored relative imports under /usr/lib/vita/ts can load.
-ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet --allow-read=/run/vita-agent/agentd.sock --allow-write=/run/vita-agent/agentd.sock /usr/lib/vita/ts/main.ts
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet --allow-read=/run/vita-agent/agentd.sock,/usr/lib/vita/owner --allow-write=/run/vita-agent/agentd.sock /usr/lib/vita/ts/main.ts
 StandardOutput=journal+console
 StandardError=journal+console
 

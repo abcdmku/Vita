@@ -19,9 +19,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/vita/agent/capabilities"
-	"github.com/vita/agent/transaction"
 )
 
 const (
@@ -31,7 +28,6 @@ const (
 
 var (
 	errSimulatedWrite = errors.New("simulated write failure")
-	errSimulatedApply = errors.New("simulated apply failure")
 )
 
 func TestEnrollValidES256CredentialPersistsAndRoundTripsPublicOnly(t *testing.T) {
@@ -153,40 +149,26 @@ func TestAtomicWriteFailureLeavesLiveCredentialUnchanged(t *testing.T) {
 	}
 }
 
-func TestCommitPointMutationIsTrackedWithUndo(t *testing.T) {
+func TestCommitPointReportedFailureRestoresPriorWithoutUndo(t *testing.T) {
 	ctx := context.Background()
 	prior := renderCredential(newES256Fixture(t, 1).credential)
 	fs := newMemoryFileSystem(prior)
 	fs.failNextAtomicWriteAtCommitPoint = true
-	ownerCapability := newCapability(fs)
-	registry := mustRegistry(t, ownerCapability, failingTxCapability{name: "test.later"})
+	capability := newCapability(fs)
 
-	result := transaction.Apply(ctx, registry, transaction.Plan{
-		{Capability: Name, Request: ApplyRequest{Desired: newEd25519Fixture(t, 0).credential}},
-		{Capability: "test.later", Request: testRequest{}},
-	}, func(context.Context) error {
-		return nil
-	})
+	undo, err := capability.Apply(ctx, ApplyRequest{Desired: newEd25519Fixture(t, 0).credential})
 
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil on reported commit-point failure", undo)
+	}
+	if !errors.Is(err, errSimulatedWrite) {
+		t.Fatalf("Apply error = %v, want simulated write failure", err)
+	}
 	if !fs.observedCommitPointMutation {
 		t.Fatal("test did not inject a mutation at the atomic commit point")
 	}
-	if !result.WasRolledBack() {
-		t.Fatalf("Outcome = %q, want rolledBack; err=%v", result.Outcome, result.Err)
-	}
-	wantApplied := []transaction.AppliedOperation{{Index: 0, Capability: Name}}
-	if !reflect.DeepEqual(result.Applied, wantApplied) {
-		t.Fatalf("Applied = %v, want %v", result.Applied, wantApplied)
-	}
 	if got := fs.mustLiveBytes(t); !reflect.DeepEqual(got, prior) {
-		t.Fatalf("live credential after rollback = %q, want exact prior bytes %q", got, prior)
-	}
-	wantRolledBack := []transaction.RolledBackOperation{{Index: 0, Capability: Name}}
-	if !reflect.DeepEqual(result.RolledBack, wantRolledBack) {
-		t.Fatalf("RolledBack = %v, want %v", result.RolledBack, wantRolledBack)
-	}
-	if len(result.RollbackErrors) != 0 {
-		t.Fatalf("RollbackErrors = %v, want none", result.RollbackErrors)
+		t.Fatalf("live credential after reported commit-point failure = %q, want exact prior bytes %q", got, prior)
 	}
 }
 
@@ -225,6 +207,34 @@ func TestVerifyAssertionAcceptsSignedEdDSA(t *testing.T) {
 	updated := mustReadCredential(t, fs)
 	if updated.SignCount != 0 {
 		t.Fatalf("stored signCount = %d, want zero-counter authenticator to remain zero", updated.SignCount)
+	}
+}
+
+func TestChallengeUsesPublicAssertionFixture(t *testing.T) {
+	ctx := context.Background()
+	fixture := newES256Fixture(t, 0)
+	fs := newMemoryFileSystem(renderCredential(fixture.credential))
+	capability := newCapability(fs)
+	challenge := base64URL(bytes.Repeat([]byte{0x42}, ownerChallengeBytes))
+	assertion := fixture.assertion(t, ChallengeTicket{Challenge: challenge, Action: testAction}, assertionOptions{counter: 1})
+	fixturePath := filepath.Join(t.TempDir(), "owner-assertion.json")
+	if err := os.WriteFile(fixturePath, mustJSON(t, map[string]any{
+		"action":    testAction,
+		"challenge": challenge,
+		"assertion": assertion,
+	}), 0o600); err != nil {
+		t.Fatalf("WriteFile fixture returned error: %v", err)
+	}
+	capability.fixturePath = fixturePath
+
+	ticket := mustChallenge(t, capability, testAction)
+	if ticket.Challenge != challenge {
+		t.Fatalf("Challenge = %q, want fixture challenge %q", ticket.Challenge, challenge)
+	}
+
+	response := mustVerify(t, capability, ctx, assertion)
+	if !response.Verified || response.Action != testAction {
+		t.Fatalf("VerifyResponse = %#v, want verified fixture assertion", response)
 	}
 }
 
@@ -604,6 +614,7 @@ func (fs *memoryFileSystem) AtomicWrite(ctx context.Context, content []byte) err
 	if fs.failNextAtomicWriteAtCommitPoint {
 		fs.failNextAtomicWriteAtCommitPoint = false
 		fs.observedCommitPointMutation = true
+		return errSimulatedWrite
 	}
 	return nil
 }
@@ -914,38 +925,4 @@ func assertSanitizedReason(t *testing.T, response VerifyResponse, assertion Owne
 			t.Fatalf("deny reason %q echoed assertion material", response.Reason)
 		}
 	}
-}
-
-type testRequest struct{}
-
-func (testRequest) CapabilityRequest() {}
-
-type testResponse struct{}
-
-func (testResponse) CapabilityResponse() {}
-
-type failingTxCapability struct {
-	name string
-}
-
-func (c failingTxCapability) Name() string {
-	return c.name
-}
-
-func (c failingTxCapability) Handle(context.Context, capabilities.TypedRequest) (capabilities.TypedResponse, error) {
-	return testResponse{}, nil
-}
-
-func (c failingTxCapability) Apply(context.Context, capabilities.TypedRequest) (transaction.Undo, error) {
-	return nil, errSimulatedApply
-}
-
-func mustRegistry(t *testing.T, registered ...capabilities.Capability) *capabilities.Registry {
-	t.Helper()
-
-	registry, err := capabilities.NewRegistry(registered...)
-	if err != nil {
-		t.Fatalf("NewRegistry returned error: %v", err)
-	}
-	return registry
 }

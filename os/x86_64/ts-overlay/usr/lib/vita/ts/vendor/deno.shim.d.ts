@@ -76,6 +76,9 @@ declare namespace Deno {
     options?: { append?: boolean },
   ): void;
 
+  /** Read a UTF-8 text file. */
+  function readTextFile(path: string | URL): Promise<string>;
+
   /** Terminate the process with the given exit code. */
   function exit(code?: number): never;
 }

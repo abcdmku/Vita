@@ -23,7 +23,7 @@
 // instead of downloading (still sha256-verified against the pins).
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign as signBytes } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,6 +33,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const CONFIG_PATH = join(HERE, "ts-image.conf");
 const OVERLAY_ROOT = join(HERE, "ts-overlay");
+const OWNER_FIXTURE_DIR = join(OVERLAY_ROOT, "usr", "lib", "vita", "owner");
+const OWNER_CREDENTIAL_PATH = join(OWNER_FIXTURE_DIR, "owner-credential.json");
+const OWNER_ASSERTION_PATH = join(OWNER_FIXTURE_DIR, "owner-assertion.json");
+const OWNER_FIXTURE_RP_ID = "owner.example.com";
+const OWNER_FIXTURE_ACTION = "vita.owner.test-action";
 const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs"),
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.hostile-oci.capsule", "rootfs"),
@@ -189,6 +194,7 @@ async function stageWasmtime(pin) {
 async function stage(pins) {
   await stageDeno(pins.deno);
   await stageWasmtime(pins.wasmtime);
+  stageOwnerFixture();
   stageBakedOCIRootfs();
   stageBakedWasmCapsules();
 }
@@ -219,6 +225,106 @@ function stageBakedWasmCapsules() {
   }
 }
 
+function stageOwnerFixture() {
+  mkdirSync(OWNER_FIXTURE_DIR, { recursive: true });
+
+  const { publicKey, privateKey: signingKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicJWK = publicKey.export({ format: "jwk" });
+  const x = base64URLDecode(publicJWK.x);
+  const y = base64URLDecode(publicJWK.y);
+  const credentialId = base64URLEncode(randomBytes(32));
+  const challenge = base64URLEncode(randomBytes(32));
+  const publicKeyCose = base64URLEncode(coseEC2PublicKey(x, y));
+
+  const credential = {
+    credentialId,
+    publicKeyCose,
+    signCount: 0,
+    aaguid: "00000000-0000-0000-0000-000000000000",
+    transports: ["internal"],
+    rpId: OWNER_FIXTURE_RP_ID,
+    userHandle: base64URLEncode(Buffer.from("owner", "utf8")),
+  };
+
+  const authenticatorData = authenticatorDataBytes(OWNER_FIXTURE_RP_ID, 0x01, 1);
+  const clientDataJSON = Buffer.from(JSON.stringify({
+    challenge,
+    origin: `https://${OWNER_FIXTURE_RP_ID}`,
+    type: "webauthn.get",
+  }), "utf8");
+  const signatureBase = Buffer.concat([
+    authenticatorData,
+    createHash("sha256").update(clientDataJSON).digest(),
+  ]);
+  const assertion = {
+    credentialId,
+    authenticatorData: base64URLEncode(authenticatorData),
+    clientDataJSON: base64URLEncode(clientDataJSON),
+    signature: base64URLEncode(signBytes("sha256", signatureBase, signingKey)),
+    action: OWNER_FIXTURE_ACTION,
+  };
+
+  writeFileSync(OWNER_CREDENTIAL_PATH, `${JSON.stringify(credential, null, 2)}\n`, { mode: 0o644 });
+  writeFileSync(OWNER_ASSERTION_PATH, `${JSON.stringify({
+    action: OWNER_FIXTURE_ACTION,
+    challenge,
+    assertion,
+  }, null, 2)}\n`, { mode: 0o644 });
+  log(`   staged owner public credential + signed assertion fixture (${OWNER_FIXTURE_DIR})`);
+}
+
+function authenticatorDataBytes(rpId, flags, counter) {
+  const out = Buffer.alloc(37);
+  createHash("sha256").update(rpId).digest().copy(out, 0);
+  out[32] = flags & 0xff;
+  out.writeUInt32BE(counter, 33);
+  return out;
+}
+
+function coseEC2PublicKey(x, y) {
+  return Buffer.concat([
+    cborHeader(5, 5),
+    cborInt(1),
+    cborInt(2),
+    cborInt(3),
+    cborInt(-7),
+    cborInt(-1),
+    cborInt(1),
+    cborInt(-2),
+    cborBytes(x),
+    cborInt(-3),
+    cborBytes(y),
+  ]);
+}
+
+function cborInt(value) {
+  return value >= 0 ? cborHeader(0, value) : cborHeader(1, -1 - value);
+}
+
+function cborBytes(value) {
+  return Buffer.concat([cborHeader(2, value.length), Buffer.from(value)]);
+}
+
+function cborHeader(major, value) {
+  const prefix = major << 5;
+  if (value < 24) return Buffer.from([prefix | value]);
+  if (value <= 0xff) return Buffer.from([prefix | 24, value]);
+  if (value <= 0xffff) return Buffer.from([prefix | 25, (value >>> 8) & 0xff, value & 0xff]);
+  return Buffer.from([prefix | 26, (value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff]);
+}
+
+function base64URLEncode(value) {
+  return Buffer.from(value).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function base64URLDecode(value) {
+  if (typeof value !== "string" || value.length === 0) fail("generated owner public key is missing a coordinate");
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const decoded = Buffer.from(padded, "base64");
+  if (decoded.length !== 32) fail("generated owner public key coordinate has invalid length");
+  return decoded;
+}
+
 function chmodDirectories(root) {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.isDirectory()) chmodDirectories(join(root, entry.name));
@@ -239,6 +345,7 @@ async function main() {
   if (argv.includes("--check")) {
     checkStagedBinary(pins.deno);
     checkStagedBinary(pins.wasmtime);
+    stageOwnerFixture();
     stageBakedWasmCapsules();
     return;
   }
