@@ -338,6 +338,110 @@ func TestHandlerSharedGrantRoleGate(t *testing.T) {
 	assertFilesErrorCode(t, err, "read_only_grant")
 }
 
+func TestHandlerMemberForbiddenGrantDeniesEveryMemberOpButAllowsOwner(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	shared := true
+	handler, err := NewHandler(Options{
+		StateRoot: stateRoot,
+		Grants: []Grant{
+			{
+				Name:   "owner-only",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner:           AccessReadWrite,
+					RoleHouseholdMember: AccessForbidden,
+				},
+			},
+		},
+		Principals: []Principal{
+			{PrincipalKey: "peer-owner", Role: RoleOwner},
+			{PrincipalKey: "peer-member", Role: RoleHouseholdMember},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("owner-only data"))
+	ownerCtx := ContextWithPrincipalKey(ctx, "peer-owner")
+	if _, err := handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "owner-only",
+		Path:  "note.txt",
+		Data:  &encoded,
+	}); err != nil {
+		t.Fatalf("owner write to member-forbidden grant returned error: %v", err)
+	}
+
+	// A genuinely forbidden household-member is denied EVERY op (denied even
+	// read), with role_forbidden — distinct from a read-only denial.
+	memberCtx := ContextWithPrincipalKey(ctx, "peer-member")
+	for _, req := range []Request{
+		{Op: OperationList, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationRead, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationStat, Grant: "owner-only", Path: "note.txt"},
+		{Op: OperationWrite, Grant: "owner-only", Path: "note.txt", Data: &encoded},
+	} {
+		t.Run(string(req.Op), func(t *testing.T) {
+			_, err := handler.Handle(memberCtx, req)
+			assertFilesErrorCode(t, err, "role_forbidden")
+		})
+	}
+}
+
+func TestHandlerResolvesRoleFromFirstBoundPrincipalKeyCandidate(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	shared := true
+	handler, err := NewHandler(Options{
+		StateRoot: stateRoot,
+		Grants: []Grant{
+			{
+				Name:   "owner-only",
+				Root:   "scope",
+				Shared: &shared,
+				Roles: RoleAccessMap{
+					RoleOwner:           AccessReadWrite,
+					RoleHouseholdMember: AccessForbidden,
+				},
+			},
+		},
+		Principals: []Principal{
+			{PrincipalKey: "unix:gid:4242", Role: RoleOwner},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("data"))
+
+	// uid key is unbound, group key is bound to owner -> owner wins (the most
+	// specific BOUND candidate). The unbound uid must NOT block the group binding.
+	ownerCtx := ContextWithPrincipalKeys(ctx, []string{"unix:uid:99999", "unix:gid:4242"})
+	if _, err := handler.Handle(ownerCtx, Request{
+		Op:    OperationWrite,
+		Grant: "owner-only",
+		Path:  "note.txt",
+		Data:  &encoded,
+	}); err != nil {
+		t.Fatalf("owner-via-group write returned error: %v", err)
+	}
+
+	// No candidate is bound -> least-privileged default (household-member), which
+	// is forbidden on this grant. Never owner-by-absence.
+	defaultCtx := ContextWithPrincipalKeys(ctx, []string{"unix:uid:99999", "unix:gid:1"})
+	_, err = handler.Handle(defaultCtx, Request{
+		Op:    OperationWrite,
+		Grant: "owner-only",
+		Path:  "default-denied.txt",
+		Data:  &encoded,
+	})
+	assertFilesErrorCode(t, err, "role_forbidden")
+}
+
 func TestHandlerRejectsEveryOperationWhenSharedRoleHasNoEntry(t *testing.T) {
 	ctx := ContextWithPrincipalKey(context.Background(), "peer-member")
 	handler := &Handler{

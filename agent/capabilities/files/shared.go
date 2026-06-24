@@ -29,19 +29,47 @@ type RoleAccessMap map[Role]Access
 
 type principalKeyContextKey struct{}
 
+// ContextWithPrincipalKey binds a single agentd-resolved principal key for the
+// request. It is shorthand for ContextWithPrincipalKeys with one candidate.
 func ContextWithPrincipalKey(ctx context.Context, principalKey string) context.Context {
-	if principalKey == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, principalKeyContextKey{}, principalKey)
+	return ContextWithPrincipalKeys(ctx, []string{principalKey})
 }
 
+// ContextWithPrincipalKeys binds the ordered set of principal-key candidates the
+// transport derived from the authenticated peer (most specific first). The role
+// is resolved from the FIRST candidate with a configured binding; an unbound
+// peer falls through to the least-privileged DefaultRole. The keys come only
+// from agentd-side connection context, never from request content.
+func ContextWithPrincipalKeys(ctx context.Context, principalKeys []string) context.Context {
+	cleaned := make([]string, 0, len(principalKeys))
+	for _, key := range principalKeys {
+		if key != "" {
+			cleaned = append(cleaned, key)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, principalKeyContextKey{}, cleaned)
+}
+
+// PrincipalKeyFromContext returns the most specific bound principal-key
+// candidate, if any. Retained for the single-key callers; role resolution uses
+// the full ordered set via PrincipalKeysFromContext.
 func PrincipalKeyFromContext(ctx context.Context) (string, bool) {
-	principalKey, ok := ctx.Value(principalKeyContextKey{}).(string)
-	if !ok || principalKey == "" {
+	keys, ok := PrincipalKeysFromContext(ctx)
+	if !ok {
 		return "", false
 	}
-	return principalKey, true
+	return keys[0], true
+}
+
+func PrincipalKeysFromContext(ctx context.Context) ([]string, bool) {
+	principalKeys, ok := ctx.Value(principalKeyContextKey{}).([]string)
+	if !ok || len(principalKeys) == 0 {
+		return nil, false
+	}
+	return principalKeys, true
 }
 
 func (g *Grant) UnmarshalJSON(raw []byte) error {
@@ -94,6 +122,12 @@ func EffectiveAccess(grant resolvedGrant, role Role) (Access, bool) {
 		return grant.access, true
 	}
 	access, ok := grant.roles[role]
+	if !ok || access == AccessForbidden {
+		// No entry, or an explicit forbidden entry: the role has NO access at
+		// all. Fail closed for every op (role_forbidden), distinct from a
+		// read-only role (which may read) and from a flat read-only grant.
+		return "", false
+	}
 	return access, ok
 }
 
@@ -161,7 +195,7 @@ func validateRoleAccessMap(roles RoleAccessMap) (RoleAccessMap, error) {
 		if !validRole(role) {
 			return nil, fmt.Errorf("unknown role %q", role)
 		}
-		if !validAccess(access) {
+		if !validRoleAccess(access) {
 			return nil, fmt.Errorf("role %q access must be read-only or read-write", role)
 		}
 	}
@@ -206,6 +240,14 @@ func validAccess(access Access) bool {
 	default:
 		return false
 	}
+}
+
+// validRoleAccess accepts the values a per-role grant entry may hold: read-only,
+// read-write, or forbidden (no access). Forbidden is valid ONLY inside a shared
+// grant's roles map, never as a flat grant access (validateGrantAccess keeps the
+// flat access restricted to read-only/read-write).
+func validRoleAccess(access Access) bool {
+	return access == AccessForbidden || validAccess(access)
 }
 
 func isJSONNull(raw json.RawMessage) bool {

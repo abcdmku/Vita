@@ -30,6 +30,13 @@ type Access string
 const (
 	AccessReadOnly  Access = "read-only"
 	AccessReadWrite Access = "read-write"
+	// AccessForbidden lets a shared grant declare that a role has NO access at
+	// all (denied even read). It is distinct from a read-only role (which may
+	// read/list/stat) and from a flat read-only grant (which rejects writes with
+	// read_only_grant): a forbidden role is rejected role_forbidden for EVERY op.
+	// A grant still lists every role explicitly, so exclusion is intentional and
+	// fail-closed, never an accidental omission.
+	AccessForbidden Access = "forbidden"
 )
 
 type Operation string
@@ -421,11 +428,14 @@ func (h *Handler) ensureGrantRoot(grant resolvedGrant) (string, error) {
 }
 
 func (h *Handler) roleForContext(ctx context.Context) Role {
-	principalKey, ok := PrincipalKeyFromContext(ctx)
-	if ok {
-		role, exists := h.principals[principalKey]
-		if exists {
-			return role
+	// Resolve the role from the FIRST authenticated-peer key that agentd has a
+	// binding for (most specific first). A peer with no bound key gets the
+	// least-privileged DefaultRole — never owner-by-absence.
+	if keys, ok := PrincipalKeysFromContext(ctx); ok {
+		for _, key := range keys {
+			if role, exists := h.principals[key]; exists {
+				return role
+			}
 		}
 	}
 	return DefaultRole

@@ -122,6 +122,37 @@ func TestEffectiveAccess(t *testing.T) {
 	if ok || access != "" {
 		t.Fatalf("missing role access = %q, %v; want empty false", access, ok)
 	}
+
+	forbidden := resolvedGrant{
+		name: "forbidden",
+		roles: RoleAccessMap{
+			RoleOwner:           AccessReadWrite,
+			RoleHouseholdMember: AccessForbidden,
+		},
+	}
+	access, ok = EffectiveAccess(forbidden, RoleHouseholdMember)
+	if ok || access != "" {
+		t.Fatalf("forbidden role access = %q, %v; want empty false (no access)", access, ok)
+	}
+	access, ok = EffectiveAccess(forbidden, RoleOwner)
+	if !ok || access != AccessReadWrite {
+		t.Fatalf("owner access on member-forbidden grant = %q, %v; want read-write true", access, ok)
+	}
+}
+
+func TestSharedGrantForbiddenRoleValidatesAndAflatForbiddenRejects(t *testing.T) {
+	// A shared grant may declare a role forbidden (denied even read); both roles
+	// remain listed, so exclusion is intentional, not an accidental omission.
+	forbidden := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","household-member":"forbidden"}}`)
+	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{forbidden}}); err != nil {
+		t.Fatalf("NewHandler member-forbidden shared grant returned error: %v", err)
+	}
+
+	// "forbidden" is NOT a valid flat grant access.
+	flat := decodeGrant(t, `{"name":"flat","root":"scope","access":"forbidden"}`)
+	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{flat}}); err == nil {
+		t.Fatal("NewHandler accepted flat access=forbidden, want rejection")
+	}
 }
 
 func decodeGrant(t *testing.T, raw string) Grant {

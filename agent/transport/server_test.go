@@ -1371,7 +1371,7 @@ func TestFilesRouteUsesPeerPrincipalFromContext(t *testing.T) {
 		t.Fatalf("default error code = %q, want role_forbidden", defaultError.Error.Code)
 	}
 
-	ownerCtx := contextWithUnixPeerPrincipalKey(context.Background(), "peer-owner")
+	ownerCtx := contextWithUnixPeerPrincipalKeys(context.Background(), []string{"peer-owner"})
 	writeResponse := performWithContext(handler, ownerCtx, http.MethodPost, "/files", body)
 	if writeResponse.Code != http.StatusOK {
 		t.Fatalf("owner write status code = %d, want %d; body=%s", writeResponse.Code, http.StatusOK, writeResponse.Body.String())
