@@ -183,10 +183,7 @@ func runtimeFilesGrants() []files.Grant {
 			Name:   "runtime-files-shared-member-forbidden",
 			Root:   "shared-owner-only",
 			Shared: &shared,
-			Roles: files.RoleAccessMap{
-				files.RoleOwner:  files.AccessReadWrite,
-				files.RoleMember: files.AccessForbidden,
-			},
+			Roles:  files.RoleAccessMap{files.RoleOwner: files.AccessReadWrite},
 		},
 		// Member-only shared folder: the OWNER role is ABSENT (no entry), so the
 		// runtime's own bound role (owner, via the vita-agent group) is GENUINELY

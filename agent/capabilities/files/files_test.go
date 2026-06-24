@@ -235,7 +235,7 @@ func TestHandlerSharedGrantRoleGate(t *testing.T) {
 				Root:   "scope",
 				Shared: &shared,
 				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
+					RoleOwner:  AccessReadWrite,
 					RoleMember: AccessReadOnly,
 				},
 			},
@@ -244,7 +244,7 @@ func TestHandlerSharedGrantRoleGate(t *testing.T) {
 				Root:   "scope",
 				Shared: &shared,
 				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadOnly,
+					RoleOwner:  AccessReadOnly,
 					RoleMember: AccessReadOnly,
 				},
 			},
@@ -349,10 +349,7 @@ func TestHandlerMemberForbiddenGrantDeniesEveryMemberOpButAllowsOwner(t *testing
 				Name:   "owner-only",
 				Root:   "scope",
 				Shared: &shared,
-				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
-					RoleMember: AccessForbidden,
-				},
+				Roles:  RoleAccessMap{RoleOwner: AccessReadWrite},
 			},
 		},
 		Principals: []Principal{
@@ -402,10 +399,7 @@ func TestHandlerResolvesRoleFromFirstBoundPrincipalKeyCandidate(t *testing.T) {
 				Name:   "owner-only",
 				Root:   "scope",
 				Shared: &shared,
-				Roles: RoleAccessMap{
-					RoleOwner:           AccessReadWrite,
-					RoleMember: AccessForbidden,
-				},
+				Roles:  RoleAccessMap{RoleOwner: AccessReadWrite},
 			},
 		},
 		Principals: []Principal{

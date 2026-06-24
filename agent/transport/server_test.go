@@ -34,6 +34,7 @@ import (
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
+	identityroles "github.com/vita/agent/identity/roles"
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/storagehealth"
@@ -639,6 +640,29 @@ func TestOperationsEmptyRegistryReturnsEmptyArray(t *testing.T) {
 	}
 	if len(got.Operations) != 0 {
 		t.Fatalf("operations = %v, want empty", got.Operations)
+	}
+}
+
+func TestRolesRouteReturnsClosedSixRoleVocabulary(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t)})
+
+	response := perform(handler, http.MethodGet, "/roles", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	var got RolesResponse
+	decodeResponse(t, response, &got)
+	want := []identityroles.Role{
+		identityroles.RoleOwner,
+		identityroles.RoleAdministrator,
+		identityroles.RoleMember,
+		identityroles.RoleRestrictedMember,
+		identityroles.RoleGuest,
+		identityroles.RoleService,
+	}
+	if !reflect.DeepEqual(got.Roles, want) {
+		t.Fatalf("roles = %v, want %v", got.Roles, want)
 	}
 }
 
@@ -1748,6 +1772,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "health rejects non GET", method: http.MethodPost, path: "/healthz", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "capabilities rejects non GET", method: http.MethodPost, path: "/capabilities", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
+		{name: "roles rejects non GET", method: http.MethodPost, path: "/roles", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "state rejects non GET", method: http.MethodPost, path: "/state", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "files rejects non POST", method: http.MethodGet, path: "/files", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},

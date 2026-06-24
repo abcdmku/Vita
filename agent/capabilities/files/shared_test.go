@@ -14,8 +14,9 @@ func TestSharedGrantDecodeValidate(t *testing.T) {
 		t.Fatalf("NewHandler valid shared grant returned error: %v", err)
 	}
 
-	// A shared grant listing ALL six roles parses.
-	allSix := decodeGrant(t, `{"name":"all","root":"scope","shared":true,"roles":{"owner":"read-write","administrator":"read-write","member":"read-only","restricted-member":"read-only","guest":"forbidden","service":"read-only"}}`)
+	// A shared grant listing ALL six roles parses. Denial is represented by
+	// omitting a role, not by a third access value.
+	allSix := decodeGrant(t, `{"name":"all","root":"scope","shared":true,"roles":{"owner":"read-write","administrator":"read-write","member":"read-only","restricted-member":"read-only","guest":"read-only","service":"read-only"}}`)
 	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{allSix}}); err != nil {
 		t.Fatalf("NewHandler six-role shared grant returned error: %v", err)
 	}
@@ -68,6 +69,11 @@ func TestSharedGrantDecodeValidate(t *testing.T) {
 		{
 			name: "bad role value",
 			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"admin","member":"read-only"}}`,
+			want: "access must be read-only or read-write",
+		},
+		{
+			name: "forbidden role value",
+			raw:  `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","guest":"forbidden"}}`,
 			want: "access must be read-only or read-write",
 		},
 		{
@@ -162,29 +168,23 @@ func TestEffectiveAccess(t *testing.T) {
 		}
 	}
 
-	// An explicit forbidden entry is also no-access.
-	forbidden := resolvedGrant{
-		name: "forbidden",
-		roles: RoleAccessMap{
-			RoleOwner: AccessReadWrite,
-			RoleGuest: AccessForbidden,
-		},
+	malformed := resolvedGrant{
+		name:  "malformed",
+		roles: RoleAccessMap{RoleGuest: Access("forbidden")},
 	}
-	access, ok = EffectiveAccess(forbidden, RoleGuest)
+	access, ok = EffectiveAccess(malformed, RoleGuest)
 	if ok || access != "" {
-		t.Fatalf("forbidden role access = %q, %v; want empty false (no access)", access, ok)
-	}
-	access, ok = EffectiveAccess(forbidden, RoleOwner)
-	if !ok || access != AccessReadWrite {
-		t.Fatalf("owner access on guest-forbidden grant = %q, %v; want read-write true", access, ok)
+		t.Fatalf("malformed role access = %q, %v; want empty false", access, ok)
 	}
 }
 
-func TestSharedGrantForbiddenRoleValidatesAndAflatForbiddenRejects(t *testing.T) {
-	// A shared grant may declare a role forbidden (denied even read).
+func TestSharedGrantRejectsForbiddenRoleValueAndFlatForbidden(t *testing.T) {
+	// "forbidden" is not a valid shared per-role value; omit the role to deny it.
 	forbidden := decodeGrant(t, `{"name":"shared","root":"scope","shared":true,"roles":{"owner":"read-write","guest":"forbidden"}}`)
-	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{forbidden}}); err != nil {
-		t.Fatalf("NewHandler guest-forbidden shared grant returned error: %v", err)
+	if _, err := NewHandler(Options{StateRoot: t.TempDir(), Grants: []Grant{forbidden}}); err == nil {
+		t.Fatal("NewHandler accepted shared role access=forbidden, want rejection")
+	} else if !strings.Contains(err.Error(), "access must be read-only or read-write") {
+		t.Fatalf("NewHandler error = %q, want forbidden-value rejection", err.Error())
 	}
 
 	// "forbidden" is NOT a valid flat grant access.

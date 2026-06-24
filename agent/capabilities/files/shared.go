@@ -135,10 +135,11 @@ func EffectiveAccess(grant resolvedGrant, role Role) (Access, bool) {
 		return grant.access, true
 	}
 	access, ok := grant.roles[role]
-	if !ok || access == AccessForbidden {
-		// No entry, or an explicit forbidden entry: the role has NO access at
-		// all. Fail closed for every op (role_forbidden), distinct from a
-		// read-only role (which may read) and from a flat read-only grant.
+	if !ok || !validAccess(access) {
+		// No entry means this role has NO access at all. Invalid resolved access
+		// values are also fail-closed so a malformed in-memory grant cannot become
+		// read permission. Both cases produce role_forbidden, distinct from a
+		// read-only role and from a flat read-only grant.
 		return "", false
 	}
 	return access, ok
@@ -206,7 +207,7 @@ func validatePrincipal(principal Principal) error {
 //     role; an empty map could otherwise be read as "open to all" — it is not);
 //   - an UNKNOWN role key (anything outside the six, e.g. "household-member",
 //     "root", a 7th value) is rejected;
-//   - a role VALUE that is not read-only/read-write/forbidden is rejected.
+//   - a role VALUE that is not read-only/read-write is rejected.
 //
 // There is NO "must include owner and member" requirement: a role simply ABSENT
 // from the map has NO access (role_forbidden for every op) — exclusion by
@@ -260,12 +261,11 @@ func validAccess(access Access) bool {
 	}
 }
 
-// validRoleAccess accepts the values a per-role grant entry may hold: read-only,
-// read-write, or forbidden (no access). Forbidden is valid ONLY inside a shared
-// grant's roles map, never as a flat grant access (validateGrantAccess keeps the
-// flat access restricted to read-only/read-write).
+// validRoleAccess accepts the values a per-role grant entry may hold: read-only
+// or read-write. Denial is expressed by omitting the role from the map, not by a
+// third grant value.
 func validRoleAccess(access Access) bool {
-	return access == AccessForbidden || validAccess(access)
+	return validAccess(access)
 }
 
 func isJSONNull(raw json.RawMessage) bool {

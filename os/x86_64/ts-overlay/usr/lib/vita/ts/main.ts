@@ -189,8 +189,8 @@ const EXPORT_GRANT = "export";
 //     read-write. The runtime authenticates through the vita-agent group, which
 //     agentd binds to the owner role, so an owner write -> list -> read-back ->
 //     stat round-trip succeeds and is MEASURED below (never synthesized).
-//   - FILES_SHARED_MEMBER_FORBIDDEN_GRANT: a shared folder whose roles map binds
-//     household-member -> forbidden (no access at all). agentd binds that role to
+//   - FILES_SHARED_MEMBER_FORBIDDEN_GRANT: a shared folder whose roles map omits
+//     member (no access at all). agentd binds that role to
 //     the AUTHENTICATED uid below, so the role_forbidden denial comes from a real
 //     per-peer decision — it cannot be reached by the owner-role runtime peer.
 const FILES_SHARED_RW_GRANT = "runtime-files-shared-rw";
@@ -211,18 +211,8 @@ const ROLES_BOUND_ROLE = "owner";
 const ROLES_OWNER_FORBIDDEN_GRANT = "runtime-files-shared-owner-forbidden";
 const ROLES_ROUNDTRIP_PATH = "roles-roundtrip.txt";
 const ROLES_REJECT_PATH = "roles-owner-denied.txt";
-// The closed six-role set (spec §11) the agentd build enforces, mirrored from the
-// single SDK role source. VITA-ROLES asserts the count is exactly six; the Go
-// suite proves the SET itself (all six parse, a 7th is rejected, each role's
-// grant access is enforced). roles=6 is gated on this length, never a literal.
-const ROLES_ALL = Object.freeze([
-  "owner",
-  "administrator",
-  "member",
-  "restricted-member",
-  "guest",
-  "service",
-] as const);
+// VITA-ROLES measures the closed six-role set from agentd's GET /roles response.
+// roles=N is emitted from that response length, never from a local tuple.
 const ROLES_EXPECTED_COUNT = 6;
 // The authenticated uid agentd binds to the household-member role. To exercise the
 // member-forbidden REJECT against a REAL agentd per-peer decision, a peer must
@@ -841,6 +831,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${FILES_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${EXPORT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${FILES_SHARED_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
 
@@ -2166,6 +2157,82 @@ async function presentHouseholdMemberPeer(): Promise<PresentedPeerResult> {
   }
 }
 
+type AgentRolesReadResult =
+  | { readonly ok: true; readonly roles: readonly string[] }
+  | { readonly ok: false };
+
+async function readAgentRoles(agentTransport: AgentTransport): Promise<AgentRolesReadResult> {
+  try {
+    const response = await agentTransport(new URL("/roles", AGENTD_BASE_URL).toString(), {
+      headers: STATE_JSON_HEADERS,
+      method: "GET",
+    });
+
+    if (!response.ok) {
+      return { ok: false };
+    }
+
+    return parseAgentRoles(parseJsonOrText(await response.text()));
+  } catch {
+    return { ok: false };
+  }
+}
+
+function parseAgentRoles(value: unknown): AgentRolesReadResult {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const roles = value["roles"];
+  if (!Array.isArray(roles)) {
+    return { ok: false };
+  }
+
+  const parsed: string[] = [];
+  for (let index = 0; index < roles.length; index += 1) {
+    const role = roles[index];
+    if (typeof role !== "string") {
+      return { ok: false };
+    }
+    parsed[index] = role;
+  }
+
+  return { ok: true, roles: Object.freeze(parsed) };
+}
+
+function agentRolesAreExactlySix(roles: readonly string[]): boolean {
+  if (roles.length !== ROLES_EXPECTED_COUNT) {
+    return false;
+  }
+
+  for (let index = 0; index < roles.length; index += 1) {
+    if (roles[index] !== expectedAgentRoleAt(index)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function expectedAgentRoleAt(index: number): string | undefined {
+  switch (index) {
+    case 0:
+      return "owner";
+    case 1:
+      return "administrator";
+    case 2:
+      return "member";
+    case 3:
+      return "restricted-member";
+    case 4:
+      return "guest";
+    case 5:
+      return "service";
+    default:
+      return undefined;
+  }
+}
+
 // Six-role household model proof (P1-087). Both halves are MEASURED from a REAL
 // agentd per-principal decision on the runtime's OWN authenticated peer — never
 // synthesized:
@@ -2174,7 +2241,7 @@ async function presentHouseholdMemberPeer(): Promise<PresentedPeerResult> {
 //      agentd binds to the owner role (one of the six). On ROLES_RW_GRANT
 //      (owner -> read-write) a write -> list -> read-back -> stat round-trip
 //      succeeds, gated on the read-back bytes matching exactly what was written
-//      AND on agentd's role set being exactly the six (ROLES_ALL.length). This is
+//      AND on agentd's /roles response being exactly the six. This is
 //      the bound-role write the contract requires, distinct from a flat grant.
 //
 //   2) REJECT. ROLES_OWNER_FORBIDDEN_GRANT lists ONLY member (owner ABSENT), so
@@ -2190,9 +2257,10 @@ async function emitFilesRolesMarkers(agentTransport: AgentTransport): Promise<vo
   });
   const data = new TextEncoder().encode("vita six-role owner roundtrip\n");
 
-  // The closed set must be exactly six (spec §11). roles=6 is gated on this, never
-  // a hardcoded literal; the Go suite proves the SET membership + enforcement.
-  if (ROLES_ALL.length !== ROLES_EXPECTED_COUNT) {
+  // The closed set must be exactly six as exposed by agentd. roles=N is emitted
+  // from the agentd response length; enforcement is proven by the probes below.
+  const agentRoles = await readAgentRoles(agentTransport);
+  if (!agentRoles.ok || !agentRolesAreExactlySix(agentRoles.roles)) {
     emit(`${ROLES_ERROR_MARKER}: status=FAILSAFE`);
     return;
   }
@@ -2220,7 +2288,7 @@ async function emitFilesRolesMarkers(agentTransport: AgentTransport): Promise<vo
       rolesOK = true;
       emit(
         `${ROLES_MARKER}: ` +
-          `roles=${ROLES_ALL.length} ` +
+          `roles=${agentRoles.roles.length} ` +
           "enforced=OK " +
           `role=${ROLES_BOUND_ROLE} ` +
           `grant=${ROLES_RW_GRANT} ` +

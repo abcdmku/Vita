@@ -5,20 +5,17 @@ export type FilesGrantAccess = "read-only" | "read-write";
 // FilesRole is the closed six-role household set (spec §11), re-exported from the
 // single role source (roles.ts) so the literals are never duplicated here. A
 // role ABSENT from a shared grant's roles map has NO access (the least-privilege
-// default), distinct from an explicit "forbidden" entry — both deny every op.
+// default); denial is represented by omission, not by a third access value.
 export type FilesRole = Role;
 export type { Role };
 
-// A per-role grant entry may additionally be "forbidden": the role has NO access
-// at all (denied even read), distinct from a read-only role. Forbidden is valid
-// only inside a shared grant's roles map, never as a flat grant access.
-export type FilesRoleAccess = FilesGrantAccess | "forbidden";
+export type FilesRoleAccess = FilesGrantAccess;
 
 // A shared grant's roles map is PARTIAL over the six roles: a role may be listed
-// (read-only / read-write / forbidden) or simply ABSENT (no access at all, the
+// (read-only / read-write) or simply ABSENT (no access at all, the
 // least-privilege default). At least one role must be present (an empty map is
 // rejected by agentd), but no specific role is required and there is NO implicit
-// hierarchy — each listed role's access is exactly its entry.
+// hierarchy - each listed role's access is exactly its entry.
 export type FilesGrantRoles = Readonly<Partial<Record<FilesRole, FilesRoleAccess>>>;
 
 export interface FilesFlatGrant {

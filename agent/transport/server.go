@@ -39,6 +39,7 @@ import (
 	"github.com/vita/agent/capabilities/timesync"
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
+	identityroles "github.com/vita/agent/identity/roles"
 	"github.com/vita/agent/internal/auditlog"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/jsonsafe"
@@ -128,6 +129,10 @@ type ResultError struct {
 
 type OperationsResponse struct {
 	Operations []string `json:"operations"`
+}
+
+type RolesResponse struct {
+	Roles []identityroles.Role `json:"roles"`
 }
 
 // AuditResponse is the read-only shape returned by GET /audit. It mirrors the
@@ -687,6 +692,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleCapabilities(w, r)
 	case "/operations":
 		h.handleOperations(w, r)
+	case "/roles":
+		h.handleRoles(w, r)
 	case "/state":
 		h.handleState(w, r)
 	case "/apply":
@@ -756,6 +763,15 @@ func (h *handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	names := h.registry.Names()
 	sort.Strings(names)
 	writeJSON(w, http.StatusOK, OperationsResponse{Operations: names})
+}
+
+func (h *handler) handleRoles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, RolesResponse{Roles: identityroles.AllRoles()})
 }
 
 func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
