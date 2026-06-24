@@ -26,6 +26,7 @@ import (
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/owner"
 	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
@@ -496,6 +497,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		identity.Name:       DecodeJSONRequest[identity.ApplyRequest],
 		network.Name:        DecodeJSONRequest[network.ApplyRequest],
 		pdssync.Name:        DecodeJSONRequest[pdssync.ApplyRequest],
+		owner.Name:          owner.DecodeRequest,
 		services.Name:       DecodeJSONRequest[services.ApplyRequest],
 		storage.Name:        DecodeJSONRequest[storage.ApplyRequest],
 		timesync.Name:       DecodeJSONRequest[timesync.ApplyRequest],
@@ -516,6 +518,7 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		identity.Name:       func() capabilities.TypedRequest { return identity.ReadRequest{} },
 		network.Name:        func() capabilities.TypedRequest { return network.ReadRequest{} },
 		pdssync.Name:        func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
+		owner.Name:          func() capabilities.TypedRequest { return owner.ReadRequest{} },
 		services.Name:       func() capabilities.TypedRequest { return services.ReadRequest{} },
 		storage.Name:        func() capabilities.TypedRequest { return storage.ReadRequest{} },
 		timesync.Name:       func() capabilities.TypedRequest { return timesync.ReadRequest{} },
@@ -555,6 +558,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleApply(w, r)
 	case "/audit":
 		h.handleAudit(w, r)
+	case "/challenge/owner.identity":
+		h.handleOwnerChallenge(w, r)
 	case "/read":
 		h.handleRead(w, r, "")
 	default:
@@ -612,6 +617,39 @@ func (h *handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	names := h.registry.Names()
 	sort.Strings(names)
 	writeJSON(w, http.StatusOK, OperationsResponse{Operations: names})
+}
+
+func (h *handler) handleOwnerChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	if action == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "action is required")
+		return
+	}
+
+	capability, ok := h.registry.Lookup(owner.Name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown_capability", fmt.Sprintf("unknown capability %q", owner.Name))
+		return
+	}
+	challenger, ok := capability.(interface {
+		Challenge(string) (owner.ChallengeTicket, error)
+	})
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "unsupported_request_type", fmt.Sprintf("capability %q cannot issue challenges", owner.Name))
+		return
+	}
+
+	challenge, err := challenger.Challenge(action)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, challenge)
 }
 
 func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {

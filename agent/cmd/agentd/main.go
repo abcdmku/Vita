@@ -20,6 +20,7 @@ import (
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/owner"
 	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
@@ -58,6 +59,7 @@ func main() {
 		identity.NewCapability(),
 		network.NewCapability(),
 		nodeconfig.NewCapability(),
+		owner.NewCapability(),
 		pdssync.NewCapability(),
 		services.NewCapability(),
 		storage.NewCapability(),

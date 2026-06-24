@@ -89,8 +89,14 @@ const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
 const CAPSULE_HEALTH_ERROR_MARKER = "VITA-CAPSULE-HEALTH-ERROR";
+const OWNER_MARKER = "VITA-OWNER";
+const OWNER_REJECT_MARKER = "VITA-OWNER-REJECT";
+const OWNER_ERROR_MARKER = "VITA-OWNER-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
+const OWNER_CAPABILITY = "owner.identity";
+const OWNER_ACTION = "vita.owner.test-action";
+const OWNER_RP_ID = "owner.example.com";
 const CAPSULE_FETCH_CAPABILITY = "capsule.fetch";
 const CAPSULE_EXECUTE_CAPABILITY = "capsule.execute";
 const CAPSULE_BUNDLE_REF = "file:///usr/lib/vita/capsule-bundles/local.test.capsule.tar.zst";
@@ -610,6 +616,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CONNECT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
@@ -633,6 +640,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   if (state.ok) {
     emit(formatAgentStateMarker(state.state));
     await emitApplyMarkers(state.state.hostname, agentTransport);
+    await emitOwnerMarkers(agentTransport);
     if (await emitCapsulePreviewMarker(client)) {
       await emitCapsuleMarkers(agentTransport);
     } else {
@@ -650,6 +658,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   } else {
     emit(`${STATE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -686,6 +695,551 @@ async function emitApplyMarkers(
   }
 
   await emitForcedRejectMarker(agentTransport);
+}
+
+interface OwnerCredential {
+  readonly credentialId: string;
+  readonly publicKeyCose: string;
+  readonly signCount: number;
+  readonly aaguid?: string;
+  readonly transports?: readonly string[];
+  readonly rpId: string;
+  readonly userHandle: string;
+}
+
+interface OwnerAssertion {
+  readonly credentialId: string;
+  readonly authenticatorData: string;
+  readonly clientDataJSON: string;
+  readonly signature: string;
+  readonly action: string;
+}
+
+interface OwnerChallenge {
+  readonly challenge: string;
+  readonly action: string;
+  readonly expiresAt: string;
+}
+
+type OwnerStateRead =
+  | {
+      readonly ok: true;
+      readonly enrolled: boolean;
+      readonly credential?: OwnerCredential;
+    }
+  | {
+      readonly ok: false;
+    };
+
+interface OwnerTestIdentity {
+  readonly credential: OwnerCredential;
+  signAssertion(challenge: OwnerChallenge, counter: number): Promise<OwnerAssertion>;
+}
+
+async function emitOwnerMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const identity = await createOwnerTestIdentity();
+    const enrollResult = await client.apply(ownerEnrollPlan(identity.credential));
+
+    if (enrollResult.outcome !== "committed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const ownerState = parseOwnerState(await client.getState(OWNER_CAPABILITY));
+    if (!ownerState.ok || !ownerState.enrolled) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const challenge = await mintOwnerChallenge(agentTransport, OWNER_ACTION);
+    if (challenge === undefined) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const assertion = await identity.signAssertion(challenge, 1);
+    const verifyResult = await client.apply(ownerVerifyPlan(assertion));
+
+    if (verifyResult.outcome !== "committed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      await emitForcedOwnerRejectMarker(client, assertion);
+      return;
+    }
+
+    emit(
+      `${OWNER_MARKER}: enrolled=OK assertion=verified action=${markerToken(OWNER_ACTION)} status=OK`,
+    );
+    await emitForcedOwnerRejectMarker(client, assertion);
+  } catch {
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+  }
+}
+
+async function emitForcedOwnerRejectMarker(
+  client: Pick<AgentClient, "apply">,
+  assertion: OwnerAssertion,
+): Promise<void> {
+  try {
+    const result = await client.apply(ownerVerifyPlan(assertion));
+
+    if (result.outcome !== "committed") {
+      emit(`${OWNER_REJECT_MARKER}: reason=${ownerRejectReason(result)} status=OK`);
+      return;
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      emit(`${OWNER_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      return;
+    }
+  }
+
+  emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+}
+
+async function createOwnerTestIdentity(): Promise<OwnerTestIdentity> {
+  const keyPair = await globalThis.crypto.subtle.generateKey(
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const publicJwk = await globalThis.crypto.subtle.exportKey("jwk", keyPair.publicKey);
+  const x = readJwkCoordinate(publicJwk, "x");
+  const y = readJwkCoordinate(publicJwk, "y");
+  const credentialId = randomBase64URL(32);
+  const publicKeyCose = base64URLEncode(coseEC2PublicKey(x, y));
+
+  return {
+    credential: {
+      aaguid: "00000000-0000-0000-0000-000000000000",
+      credentialId,
+      publicKeyCose,
+      rpId: OWNER_RP_ID,
+      signCount: 0,
+      transports: Object.freeze(["internal"]),
+      userHandle: base64URLEncode(new TextEncoder().encode("owner")),
+    },
+    async signAssertion(challenge: OwnerChallenge, counter: number): Promise<OwnerAssertion> {
+      const authenticatorData = await ownerAuthenticatorData(OWNER_RP_ID, 0x01, counter);
+      const clientDataJSON = new TextEncoder().encode(JSON.stringify({
+        challenge: challenge.challenge,
+        origin: `https://${OWNER_RP_ID}`,
+        type: "webauthn.get",
+      }));
+      const signed = await ownerSignatureBase(authenticatorData, clientDataJSON);
+      const signature = new Uint8Array(await globalThis.crypto.subtle.sign(
+        {
+          hash: "SHA-256",
+          name: "ECDSA",
+        },
+        keyPair.privateKey,
+        toArrayBuffer(signed),
+      ));
+
+      return {
+        action: challenge.action,
+        authenticatorData: base64URLEncode(authenticatorData),
+        clientDataJSON: base64URLEncode(clientDataJSON),
+        credentialId,
+        signature: base64URLEncode(ecdsaSignatureToDER(signature)),
+      };
+    },
+  };
+}
+
+async function mintOwnerChallenge(
+  agentTransport: AgentTransport,
+  action: string,
+): Promise<OwnerChallenge | undefined> {
+  try {
+    const response = await agentTransport(
+      new URL(`/challenge/${OWNER_CAPABILITY}?action=${encodeURIComponent(action)}`, AGENTD_BASE_URL).toString(),
+      {
+        headers: STATE_JSON_HEADERS,
+        method: "GET",
+      },
+    );
+
+    if (!response.ok) {
+      return undefined;
+    }
+
+    return parseOwnerChallenge(parseJsonOrText(await response.text()));
+  } catch {
+    return undefined;
+  }
+}
+
+function ownerEnrollPlan(credential: OwnerCredential): AgentApplyPlan {
+  return {
+    operations: [
+      {
+        capability: OWNER_CAPABILITY,
+        request: {
+          desired: ownerCredentialJSON(credential),
+        },
+      },
+    ],
+  };
+}
+
+function ownerVerifyPlan(assertion: OwnerAssertion): AgentApplyPlan {
+  return {
+    operations: [
+      {
+        capability: OWNER_CAPABILITY,
+        request: {
+          assertion: {
+            action: assertion.action,
+            authenticatorData: assertion.authenticatorData,
+            clientDataJSON: assertion.clientDataJSON,
+            credentialId: assertion.credentialId,
+            signature: assertion.signature,
+          },
+        },
+      },
+    ],
+  };
+}
+
+function ownerCredentialJSON(credential: OwnerCredential): Readonly<Record<string, string | number | readonly string[]>> {
+  return {
+    ...(credential.aaguid === undefined ? {} : { aaguid: credential.aaguid }),
+    credentialId: credential.credentialId,
+    publicKeyCose: credential.publicKeyCose,
+    rpId: credential.rpId,
+    signCount: credential.signCount,
+    ...(credential.transports === undefined ? {} : { transports: credential.transports }),
+    userHandle: credential.userHandle,
+  };
+}
+
+function parseOwnerState(value: unknown): OwnerStateRead {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const exists = readBooleanField(value, "exists");
+  const enrolled = readBooleanField(value, "enrolled");
+  if (exists === undefined || enrolled === undefined) {
+    return { ok: false };
+  }
+  if (!exists || !enrolled) {
+    return { ok: true, enrolled: false };
+  }
+
+  const credentialValue = value["credential"];
+  if (!isJsonObject(credentialValue)) {
+    return { ok: false };
+  }
+
+  const credential = parseOwnerCredential(credentialValue);
+  if (credential === undefined) {
+    return { ok: false };
+  }
+
+  return {
+    credential,
+    enrolled: true,
+    ok: true,
+  };
+}
+
+function parseOwnerCredential(value: Readonly<Record<string, unknown>>): OwnerCredential | undefined {
+  const credentialId = readStringField(value, "credentialId");
+  const publicKeyCose = readStringField(value, "publicKeyCose");
+  const signCount = readNonNegativeIntegerField(value, "signCount");
+  const rpId = readStringField(value, "rpId");
+  const userHandle = readStringField(value, "userHandle");
+  const aaguid = readOptionalStringField(value, "aaguid");
+  const transports = parseOwnerTransports(value["transports"]);
+
+  if (
+    credentialId === undefined ||
+    publicKeyCose === undefined ||
+    signCount === undefined ||
+    rpId === undefined ||
+    userHandle === undefined ||
+    transports === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(aaguid === undefined ? {} : { aaguid }),
+    credentialId,
+    publicKeyCose,
+    rpId,
+    signCount,
+    ...(transports.length === 0 ? {} : { transports }),
+    userHandle,
+  };
+}
+
+function parseOwnerTransports(value: unknown): readonly string[] | undefined {
+  if (value === undefined) {
+    return Object.freeze([]);
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const transports: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+    if (typeof item !== "string" || item.length === 0) {
+      return undefined;
+    }
+    transports[index] = item;
+  }
+  return Object.freeze(transports);
+}
+
+function parseOwnerChallenge(value: unknown): OwnerChallenge | undefined {
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const challenge = readStringField(value, "challenge");
+  const action = readStringField(value, "action");
+  const expiresAt = readStringField(value, "expiresAt");
+  if (challenge === undefined || action === undefined || expiresAt === undefined) {
+    return undefined;
+  }
+
+  return {
+    action,
+    challenge,
+    expiresAt,
+  };
+}
+
+function ownerRejectReason(result: AgentApplyResult): string {
+  const message = result.error?.message ?? "";
+  const marker = "owner assertion denied:";
+  const markerIndex = message.indexOf(marker);
+  if (markerIndex >= 0) {
+    return markerToken(message.slice(markerIndex + marker.length).trim());
+  }
+  return agentApplyResultReason(result);
+}
+
+function readJwkCoordinate(jwk: { readonly x?: string; readonly y?: string }, key: "x" | "y"): Uint8Array {
+  const value = jwk[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("generated owner public key is missing a coordinate");
+  }
+  const decoded = base64URLDecode(value);
+  if (decoded.length !== 32) {
+    throw new Error("generated owner public key coordinate has invalid length");
+  }
+  return decoded;
+}
+
+async function ownerAuthenticatorData(rpId: string, flags: number, counter: number): Promise<Uint8Array> {
+  const output = new Uint8Array(37);
+  const rpIdHash = await sha256Bytes(new TextEncoder().encode(rpId));
+  output.set(rpIdHash, 0);
+  output[32] = flags & 0xff;
+  output[33] = (counter >>> 24) & 0xff;
+  output[34] = (counter >>> 16) & 0xff;
+  output[35] = (counter >>> 8) & 0xff;
+  output[36] = counter & 0xff;
+  return output;
+}
+
+async function ownerSignatureBase(authenticatorData: Uint8Array, clientDataJSON: Uint8Array): Promise<Uint8Array> {
+  return concatBytes([authenticatorData, await sha256Bytes(clientDataJSON)]);
+}
+
+function coseEC2PublicKey(x: Uint8Array, y: Uint8Array): Uint8Array {
+  return concatBytes([
+    cborMapHeader(5),
+    cborInt(1),
+    cborInt(2),
+    cborInt(3),
+    cborInt(-7),
+    cborInt(-1),
+    cborInt(1),
+    cborInt(-2),
+    cborBytes(x),
+    cborInt(-3),
+    cborBytes(y),
+  ]);
+}
+
+function cborMapHeader(length: number): Uint8Array {
+  return cborHeader(5, length);
+}
+
+function cborInt(value: number): Uint8Array {
+  if (value >= 0) {
+    return cborHeader(0, value);
+  }
+  return cborHeader(1, -1 - value);
+}
+
+function cborBytes(value: Uint8Array): Uint8Array {
+  return concatBytes([cborHeader(2, value.length), value]);
+}
+
+function cborHeader(major: number, value: number): Uint8Array {
+  const prefix = major << 5;
+  if (value < 24) {
+    return new Uint8Array([prefix | value]);
+  }
+  if (value <= 0xff) {
+    return new Uint8Array([prefix | 24, value]);
+  }
+  if (value <= 0xffff) {
+    return new Uint8Array([prefix | 25, (value >>> 8) & 0xff, value & 0xff]);
+  }
+  return new Uint8Array([
+    prefix | 26,
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ]);
+}
+
+function ecdsaSignatureToDER(signature: Uint8Array): Uint8Array {
+  if (signature.length !== 64) {
+    if (signature[0] === 0x30) {
+      return copyBytes(signature);
+    }
+    throw new Error("generated ECDSA signature has invalid length");
+  }
+
+  const r = derInteger(signature.slice(0, 32));
+  const s = derInteger(signature.slice(32));
+  const body = concatBytes([r, s]);
+  if (body.length > 127) {
+    throw new Error("generated ECDSA signature is too large");
+  }
+  return concatBytes([new Uint8Array([0x30, body.length]), body]);
+}
+
+function derInteger(value: Uint8Array): Uint8Array {
+  let offset = 0;
+  while (offset < value.length - 1 && value[offset] === 0) {
+    offset += 1;
+  }
+  let body: Uint8Array = value.slice(offset);
+  if ((body[0] ?? 0) & 0x80) {
+    body = concatBytes([new Uint8Array([0]), body]);
+  }
+  if (body.length > 127) {
+    throw new Error("generated ECDSA integer is too large");
+  }
+  return concatBytes([new Uint8Array([0x02, body.length]), body]);
+}
+
+function randomBase64URL(length: number): string {
+  const bytes = new Uint8Array(length);
+  globalThis.crypto.getRandomValues(bytes);
+  return base64URLEncode(bytes);
+}
+
+function base64URLEncode(value: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  let output = "";
+
+  for (let index = 0; index < value.length; index += 3) {
+    const first = value[index] ?? 0;
+    const second = value[index + 1];
+    const third = value[index + 2];
+
+    output += alphabet[first >> 2] ?? "";
+    if (second === undefined) {
+      output += alphabet[(first & 0x03) << 4] ?? "";
+      continue;
+    }
+
+    output += alphabet[((first & 0x03) << 4) | (second >> 4)] ?? "";
+    if (third === undefined) {
+      output += alphabet[(second & 0x0f) << 2] ?? "";
+      continue;
+    }
+
+    output += alphabet[((second & 0x0f) << 2) | (third >> 6)] ?? "";
+    output += alphabet[third & 0x3f] ?? "";
+  }
+
+  return output;
+}
+
+function base64URLDecode(value: string): Uint8Array {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === undefined) {
+      continue;
+    }
+    const sixBits = alphabet.indexOf(char);
+    if (sixBits < 0) {
+      throw new Error("invalid base64url character");
+    }
+    buffer = (buffer << 6) | sixBits;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+      buffer &= (1 << bits) - 1;
+    }
+  }
+
+  return new Uint8Array(bytes);
+}
+
+async function sha256Bytes(value: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", toArrayBuffer(value)));
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
+  let total = 0;
+  for (let index = 0; index < chunks.length; index += 1) {
+    total += chunks[index]?.length ?? 0;
+  }
+
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    if (chunk !== undefined) {
+      output.set(chunk, offset);
+      offset += chunk.length;
+    }
+  }
+  return output;
+}
+
+function toArrayBuffer(value: Uint8Array): ArrayBuffer {
+  return copyBytes(value).buffer;
+}
+
+function copyBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {
+  const output = new Uint8Array(value.length);
+  output.set(value);
+  return output;
 }
 
 async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
@@ -1968,6 +2522,19 @@ function readStringField(
   const child = value[key];
 
   if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
+}
+
+function readBooleanField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): boolean | undefined {
+  const child = value[key];
+
+  if (typeof child !== "boolean") {
     return undefined;
   }
 
