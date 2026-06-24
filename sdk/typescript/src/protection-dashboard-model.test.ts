@@ -35,11 +35,6 @@ test("snapshots distinguish active, configured-inactive, and absent from declare
 
   const absent = mustProtection({
     measuredSnapshotCount: 99,
-    storageLayout: storageLayout({
-      cadence: "daily",
-      retentionCount: 7,
-      snapshotsArea: false,
-    }),
   });
   assert.equal(absent.snapshots.status, "absent");
   assert.equal(absent.snapshots.evidence.measuredSnapshotCount, 99);
@@ -207,6 +202,13 @@ test("protection model rejects malformed, cyclic, proxy, unknown, wrong-type, an
     }),
     ["storageLayout/snapshotPolicy/cadence"],
   );
+
+  assertRejectedIncludes(
+    summarizeProtection({
+      storageLayout: storageLayoutWithOnlySnapshotsArea(),
+    }),
+    "storageLayout/subvolumes",
+  );
 });
 
 test("missing capability state is absent, output is frozen, and repeated inputs are deterministic", () => {
@@ -256,6 +258,20 @@ function assertRejected(result: ProtectionSummaryResult, paths: readonly string[
   }
 
   assert.deepEqual(result.errors.map((error) => error.path).sort(), [...paths].sort());
+}
+
+function assertRejectedIncludes(result: ProtectionSummaryResult, path: string): void {
+  assert.doesNotThrow(() => {
+    if (result.ok) {
+      assert.fail(`expected rejection, got ${JSON.stringify(result.value)}`);
+    }
+  });
+
+  if (result.ok) {
+    assert.fail("expected rejection");
+  }
+
+  assert.equal(result.errors.some((error) => error.path === path), true);
 }
 
 function storageLayout(options: {
@@ -319,6 +335,41 @@ function storageLayout(options: {
       retentionCount: options.retentionCount,
     },
     subvolumes,
+    version: 1,
+  };
+}
+
+function storageLayoutWithOnlySnapshotsArea(): unknown {
+  return {
+    dataVolume: {
+      encryption: "luks2",
+      filesystem: "btrfs",
+      recoveryKeyRequired: true,
+      tpmUnlock: true,
+    },
+    diskHealth: {
+      checksumErrors: 0,
+      freeBytes: 500_000,
+      smart: {
+        reallocatedSectors: 0,
+        status: "passed",
+      },
+      status: "healthy",
+      totalBytes: 1_000_000,
+      usedBytes: 400_000,
+    },
+    snapshotPolicy: {
+      cadence: "daily",
+      readOnlySnapshots: true,
+      retentionCount: 7,
+    },
+    subvolumes: [
+      {
+        id: "snapshots",
+        path: "/vita/snapshots",
+        role: "snapshots",
+      },
+    ],
     version: 1,
   };
 }

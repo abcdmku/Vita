@@ -1,4 +1,5 @@
 import { summarizeDashboard } from "./protection-dashboard-model.ts";
+import { ON_DEVICE_CAPSULE_ENTRY } from "./capsule-preview.ts";
 import type { AgentCapabilityState, AgentClient } from "./agent-client.ts";
 import type { PlainJson, PlainJsonObject } from "./safe-normalize.ts";
 import type {
@@ -52,6 +53,41 @@ type UnwrapRegistryResult =
       readonly ok: false;
       readonly reason: string;
     };
+
+interface CapsuleRegistryEntryForDashboard {
+  readonly id: string;
+  readonly version: string;
+  readonly integrity: string;
+  readonly state: string;
+}
+
+interface CapsuleNetworkGrantSummary {
+  readonly capsuleId: string;
+  readonly egressGrants: number;
+  readonly ingressGrants: number;
+}
+
+interface BundledCapsuleNetworkManifest {
+  readonly id: string;
+  readonly version: string;
+  readonly integrity: string;
+  readonly network: {
+    readonly egress: readonly unknown[];
+    readonly ingress: readonly unknown[];
+  };
+}
+
+const BUNDLED_CAPSULE_NETWORK_MANIFESTS = Object.freeze([
+  Object.freeze({
+    id: ON_DEVICE_CAPSULE_ENTRY.id,
+    integrity: ON_DEVICE_CAPSULE_ENTRY.integrity,
+    network: Object.freeze({
+      egress: Object.freeze([Object.freeze({})]),
+      ingress: Object.freeze([Object.freeze({})]),
+    }),
+    version: ON_DEVICE_CAPSULE_ENTRY.version,
+  }),
+]) satisfies readonly BundledCapsuleNetworkManifest[];
 
 export async function readProtectionDashboard(
   client: Pick<AgentClient, "getState">,
@@ -328,30 +364,41 @@ function buildCapsuleNetworkGrants(
   registry: readonly PlainJson[] | undefined,
   executeState: AgentCapabilityState | undefined,
 ): readonly PlainJsonObject[] {
-  const grant = readCapsuleExecuteGrant(executeState);
-
-  if (grant === undefined || !registryContainsCapsule(registry, grant.capsuleId)) {
+  if (registry === undefined) {
     return Object.freeze([]);
   }
 
-  return Object.freeze([
-    Object.freeze({
-      capsuleId: grant.capsuleId,
+  const measuredGrant = readCapsuleExecuteGrant(executeState);
+  const grants: PlainJsonObject[] = [];
+
+  for (let index = 0; index < registry.length; index += 1) {
+    const entry = readCapsuleRegistryEntry(registry[index]);
+
+    if (entry === undefined || entry.state !== "installed") {
+      continue;
+    }
+
+    const grant = measuredGrant?.capsuleId === entry.id
+      ? measuredGrant
+      : readBundledCapsuleNetworkGrant(entry);
+
+    if (grant === undefined || (grant.egressGrants === 0 && grant.ingressGrants === 0)) {
+      continue;
+    }
+
+    grants.push(Object.freeze({
+      capsuleId: entry.id,
       egressGrants: grant.egressGrants,
       ingressGrants: grant.ingressGrants,
-    }),
-  ]);
+    }));
+  }
+
+  return Object.freeze(grants);
 }
 
 function readCapsuleExecuteGrant(
   state: AgentCapabilityState | undefined,
-):
-  | {
-      readonly capsuleId: string;
-      readonly egressGrants: number;
-      readonly ingressGrants: number;
-    }
-  | undefined {
+): CapsuleNetworkGrantSummary | undefined {
   if (state === undefined) {
     return undefined;
   }
@@ -382,27 +429,54 @@ function readCapsuleExecuteGrant(
   };
 }
 
-function registryContainsCapsule(
-  registry: readonly PlainJson[] | undefined,
-  capsuleId: string,
-): boolean {
-  if (registry === undefined) {
-    return false;
+function readCapsuleRegistryEntry(value: PlainJson | undefined): CapsuleRegistryEntryForDashboard | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
   }
 
-  for (let index = 0; index < registry.length; index += 1) {
-    const entry = registry[index];
+  const id = field(value, "id");
+  const version = field(value, "version");
+  const integrity = field(value, "integrity");
+  const state = field(value, "state");
 
-    if (!isPlainObject(entry)) {
-      continue;
-    }
+  if (
+    typeof id !== "string" ||
+    typeof version !== "string" ||
+    typeof integrity !== "string" ||
+    typeof state !== "string"
+  ) {
+    return undefined;
+  }
 
-    if (field(entry, "id") === capsuleId) {
-      return true;
+  return {
+    id,
+    integrity,
+    state,
+    version,
+  };
+}
+
+function readBundledCapsuleNetworkGrant(
+  entry: CapsuleRegistryEntryForDashboard,
+): CapsuleNetworkGrantSummary | undefined {
+  for (let index = 0; index < BUNDLED_CAPSULE_NETWORK_MANIFESTS.length; index += 1) {
+    const manifest = BUNDLED_CAPSULE_NETWORK_MANIFESTS[index];
+
+    if (
+      manifest !== undefined &&
+      manifest.id === entry.id &&
+      manifest.version === entry.version &&
+      manifest.integrity === entry.integrity
+    ) {
+      return {
+        capsuleId: entry.id,
+        egressGrants: manifest.network.egress.length,
+        ingressGrants: manifest.network.ingress.length,
+      };
     }
   }
 
-  return false;
+  return undefined;
 }
 
 function formatProtectionDashboardForcedRejectMarker(): string {

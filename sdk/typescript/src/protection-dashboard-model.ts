@@ -305,6 +305,19 @@ const CAPSULE_ENTRY_FIELDS = new Set(["id", "integrity", "state", "version"]);
 const CAPSULE_GRANT_FIELDS = new Set(["capsuleId", "egressGrants", "ingressGrants"]);
 
 const STORAGE_AREA_ROLES = ["system-state", "user-data", "app-state", "snapshots", "local-backup-cache"] as const;
+const REQUIRED_STORAGE_AREA_ROLES: readonly StorageAreaRole[] = [
+  "system-state",
+  "user-data",
+  "app-state",
+  "snapshots",
+  "local-backup-cache",
+];
+const SINGLETON_STORAGE_AREA_ROLES = new Set<StorageAreaRole>([
+  "system-state",
+  "user-data",
+  "snapshots",
+  "local-backup-cache",
+]);
 const SNAPSHOT_CADENCES = ["disabled", "hourly", "daily", "weekly"] as const;
 const DISK_HEALTH_STATUSES = ["healthy", "degraded", "critical", "unknown"] as const;
 const SMART_HEALTH_STATUSES = ["passed", "warning", "failed", "unknown"] as const;
@@ -859,6 +872,8 @@ function parseSubvolumes(
 
   let snapshotAreaPresent = false;
   const seenIds = new Set<string>();
+  const seenRoles = new Map<StorageAreaRole, number>();
+  const seenAppIds = new Map<string, number>();
   const errorStart = errors.length;
 
   for (let index = 0; index < value.length; index += 1) {
@@ -874,8 +889,41 @@ function parseSubvolumes(
       seenIds.add(subvolume.id);
     }
 
+    const previousRoleIndex = seenRoles.get(subvolume.role);
+    if (previousRoleIndex !== undefined && SINGLETON_STORAGE_AREA_ROLES.has(subvolume.role)) {
+      addError(
+        errors,
+        [...path, String(index), "role"],
+        `Duplicate ${subvolume.role} area also appears at subvolumes/${previousRoleIndex}/role.`,
+      );
+    } else if (previousRoleIndex === undefined) {
+      seenRoles.set(subvolume.role, index);
+    }
+
+    if (subvolume.role === "app-state" && subvolume.appId !== undefined) {
+      const previousAppIndex = seenAppIds.get(subvolume.appId);
+
+      if (previousAppIndex !== undefined) {
+        addError(
+          errors,
+          [...path, String(index), "appId"],
+          `Duplicate app-state appId also appears at subvolumes/${previousAppIndex}/appId.`,
+        );
+      } else {
+        seenAppIds.set(subvolume.appId, index);
+      }
+    }
+
     if (subvolume.role === "snapshots") {
       snapshotAreaPresent = true;
+    }
+  }
+
+  for (let index = 0; index < REQUIRED_STORAGE_AREA_ROLES.length; index += 1) {
+    const role = REQUIRED_STORAGE_AREA_ROLES[index];
+
+    if (role !== undefined && !seenRoles.has(role)) {
+      addError(errors, path, `Missing required ${role} storage area.`);
     }
   }
 
@@ -892,7 +940,7 @@ function parseSubvolume(
   value: PlainJson | undefined,
   path: Path,
   errors: DashboardValidationError[],
-): { readonly id: string; readonly role: StorageAreaRole } | undefined {
+): { readonly id: string; readonly role: StorageAreaRole; readonly appId?: string } | undefined {
   if (!isRecord(value)) {
     addError(errors, path, "Expected subvolume object.");
     return undefined;
@@ -918,6 +966,14 @@ function parseSubvolume(
 
   if (errors.length > errorStart || id === undefined || role === undefined) {
     return undefined;
+  }
+
+  if (appId !== undefined) {
+    return Object.freeze({
+      appId,
+      id,
+      role,
+    });
   }
 
   return Object.freeze({
