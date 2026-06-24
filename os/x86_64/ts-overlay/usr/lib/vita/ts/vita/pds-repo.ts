@@ -5,6 +5,7 @@ import type {
   AgentApplyPlan,
   AgentApplyResult,
   AgentClient,
+  AgentTransport,
 } from "./agent-client.ts";
 import type {
   ApplyNodeApplyResult,
@@ -44,6 +45,37 @@ export interface PdsRepoCreateConfig {
   };
 }
 
+export interface PdsRepoDeleteRecord {
+  readonly collection: string;
+  readonly rkey: string;
+}
+
+export interface PdsRepoDeleteDesired {
+  readonly repo: string;
+  readonly commit: {
+    readonly cursor: number;
+  };
+  readonly records: readonly PdsRepoRecord[];
+  readonly deletes: readonly PdsRepoDeleteRecord[];
+}
+
+export interface PdsRepoQueryRequest {
+  readonly capability: typeof PDS_REPO_CAPABILITY;
+  readonly request: {
+    readonly query: {
+      readonly collection: string;
+      readonly limit: number;
+      readonly cursor?: number;
+    };
+  };
+}
+
+export type PdsRepoReadTransport = (
+  method: "GET",
+  path: "/state",
+  body: PdsRepoQueryRequest,
+) => Promise<ApplyNodeTransportResponse>;
+
 export interface PdsRepoStateSummary {
   readonly repo: string | null;
   readonly records: number;
@@ -51,11 +83,66 @@ export interface PdsRepoStateSummary {
   readonly log: number;
 }
 
+export interface PdsRepoQueryPageSummary {
+  readonly collection: string;
+  readonly page: number;
+  readonly records: number;
+}
+
+export interface PdsRepoQueryPage {
+  readonly exists: boolean;
+  readonly collection: string;
+  readonly records: readonly PdsRepoRecord[];
+  readonly total: number;
+  readonly nextCursor: number | null;
+}
+
+export interface PdsRepoFullState {
+  readonly repo: string | null;
+  readonly records: readonly PdsRepoRecord[];
+  readonly commitCursor: number;
+  readonly log: readonly PdsRepoLogEntry[];
+}
+
+export interface PdsRepoLogEntry {
+  readonly cursor: number;
+  readonly op: "create-record" | "delete-record";
+  readonly collection: string;
+  readonly rkey: string;
+}
+
 export type PdsRepoResult =
   | {
       readonly ok: true;
       readonly outcome: "committed";
       readonly state: PdsRepoStateSummary;
+    }
+  | {
+      readonly ok: true;
+      readonly outcome: "rejected";
+      readonly reason: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    };
+
+export type PdsRepoQueryResult =
+  | {
+      readonly ok: true;
+      readonly pages: readonly PdsRepoQueryPageSummary[];
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    };
+
+export type PdsRepoDeleteResult =
+  | {
+      readonly ok: true;
+      readonly outcome: "committed";
+      readonly removed: string;
+      readonly tombstoneCursor: number;
     }
   | {
       readonly ok: true;
@@ -95,6 +182,13 @@ type ValidationResult<T> =
 export const PDS_REPO_CAPABILITY = "pds.repo";
 export const PDS_REPO_TEST_REPO = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
 export const PDS_REPO_COMMIT_CURSOR = 43;
+export const PDS_REPO_DELETE_CURSOR = PDS_REPO_COMMIT_CURSOR + 1;
+export const PDS_REPO_QUERY_COLLECTION = "app.bsky.feed.post";
+export const PDS_REPO_QUERY_LIMIT = 2;
+export const PDS_REPO_DELETE_RECORD = Object.freeze({
+  collection: PDS_REPO_QUERY_COLLECTION,
+  rkey: "p1-067-post",
+}) satisfies PdsRepoDeleteRecord;
 export const PDS_REPO_RECORDS = Object.freeze([
   Object.freeze({
     collection: "app.bsky.actor.profile",
@@ -116,6 +210,15 @@ export const PDS_REPO_CREATE_DESIRED = Object.freeze({
   repo: PDS_REPO_TEST_REPO,
 }) satisfies PdsRepoCreateDesired;
 
+export const PDS_REPO_DELETE_DESIRED = Object.freeze({
+  commit: Object.freeze({
+    cursor: PDS_REPO_DELETE_CURSOR,
+  }),
+  deletes: Object.freeze([PDS_REPO_DELETE_RECORD]),
+  records: Object.freeze([]),
+  repo: PDS_REPO_TEST_REPO,
+}) satisfies PdsRepoDeleteDesired;
+
 const READ_RESPONSE_FIELDS = Object.freeze([
   "commitCursor",
   "exists",
@@ -125,6 +228,16 @@ const READ_RESPONSE_FIELDS = Object.freeze([
 ]);
 const RECORD_FIELDS = Object.freeze(["collection", "rkey", "valueDigest"]);
 const LOG_FIELDS = Object.freeze(["collection", "cursor", "op", "rkey"]);
+const QUERY_READ_REQUEST_FIELDS = Object.freeze(["capability", "request"]);
+const QUERY_READ_REQUEST_BODY_FIELDS = Object.freeze(["query"]);
+const QUERY_FIELDS = Object.freeze(["collection", "cursor", "limit"]);
+const QUERY_RESPONSE_FIELDS = Object.freeze([
+  "collection",
+  "exists",
+  "nextCursor",
+  "records",
+  "total",
+]);
 const TRANSPORT_RESPONSE_FIELDS = Object.freeze(["status", "body"]);
 const APPLY_RESULT_REQUIRED_FIELDS = Object.freeze([
   "outcome",
@@ -137,6 +250,13 @@ const RESULT_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
 const RESULT_ERROR_OPTIONAL_FIELDS = Object.freeze(["index", "capability"]);
 const OPERATION_RESULT_FIELDS = Object.freeze(["index", "capability"]);
 const APPLY_OUTCOMES = Object.freeze(["committed", "rolledBack", "rejected"]);
+const NSID_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u;
+const RECORD_KEY_PATTERN = /^[A-Za-z0-9._~:-]+$/u;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
+const DEFAULT_AGENTD_BASE_URL = "http://agentd";
+const JSON_GET_HEADERS = Object.freeze({
+  Accept: "application/json",
+});
 const EMPTY_REPO_STATE = Object.freeze({
   commitCursor: 0,
   log: 0,
@@ -167,6 +287,78 @@ export function buildPdsRepoCreatePlan(
   }) satisfies TransactionPlan;
 }
 
+export function buildPdsRepoQueryRequest(
+  collection: string = PDS_REPO_QUERY_COLLECTION,
+  cursor?: number,
+  limit: number = PDS_REPO_QUERY_LIMIT,
+): PdsRepoQueryRequest {
+  const query: {
+    collection: string;
+    limit: number;
+    cursor?: number;
+  } = {
+    collection,
+    limit,
+  };
+
+  if (cursor !== undefined) {
+    query.cursor = cursor;
+  }
+
+  return Object.freeze({
+    capability: PDS_REPO_CAPABILITY,
+    request: Object.freeze({
+      query: Object.freeze(query),
+    }),
+  }) satisfies PdsRepoQueryRequest;
+}
+
+export function buildPdsRepoDeletePlan(
+  desired: PdsRepoDeleteDesired = PDS_REPO_DELETE_DESIRED,
+): AgentApplyPlan {
+  return Object.freeze({
+    operations: Object.freeze([
+      Object.freeze({
+        capability: PDS_REPO_CAPABILITY,
+        request: pdsRepoDeleteAgentRequest(desired),
+      }),
+    ]),
+  }) satisfies AgentApplyPlan;
+}
+
+export function createPdsRepoReadTransport(
+  agentTransport: AgentTransport,
+  baseUrl: string | URL = DEFAULT_AGENTD_BASE_URL,
+): PdsRepoReadTransport {
+  return async (method, path, body) => {
+    if (method !== "GET" || path !== "/state") {
+      throw new Error("PDS repo read transport only supports GET /state");
+    }
+
+    const query = body.request.query;
+    const params = new URLSearchParams();
+    params.set("collection", query.collection);
+    params.set("limit", String(query.limit));
+    if (query.cursor !== undefined) {
+      params.set("cursor", String(query.cursor));
+    }
+
+    const response = await agentTransport(
+      new URL(`/read/${encodeURIComponent(PDS_REPO_CAPABILITY)}?${params.toString()}`, baseUrl).toString(),
+      {
+        headers: JSON_GET_HEADERS,
+        method: "GET",
+      },
+    );
+    const text = await response.text();
+
+    return {
+      body: JSON.parse(text),
+      status: response.status,
+    };
+  };
+}
+
 export function buildInvalidPdsRepoCreatePlan(): AgentApplyPlan {
   return Object.freeze({
     operations: Object.freeze([
@@ -183,6 +375,28 @@ export function buildInvalidPdsRepoCreatePlan(): AgentApplyPlan {
   }) satisfies AgentApplyPlan;
 }
 
+export function buildInvalidPdsRepoDeletePlan(): AgentApplyPlan {
+  return Object.freeze({
+    operations: Object.freeze([
+      Object.freeze({
+        capability: PDS_REPO_CAPABILITY,
+        request: pdsRepoDeleteAgentRequest({
+          ...PDS_REPO_DELETE_DESIRED,
+          commit: Object.freeze({
+            cursor: PDS_REPO_DELETE_CURSOR + 1,
+          }),
+          deletes: Object.freeze([
+            Object.freeze({
+              collection: PDS_REPO_QUERY_COLLECTION,
+              rkey: "missing-p1-081-delete",
+            }),
+          ]),
+        }),
+      }),
+    ]),
+  }) satisfies AgentApplyPlan;
+}
+
 function pdsRepoCapabilityRequest(desired: PdsRepoCreateDesired): CapabilityObject {
   return Object.freeze({
     desired: desiredToCapabilityObject(desired),
@@ -192,6 +406,12 @@ function pdsRepoCapabilityRequest(desired: PdsRepoCreateDesired): CapabilityObje
 function pdsRepoAgentRequest(desired: PdsRepoCreateDesired): CanonicalJsonObject {
   return Object.freeze({
     desired: desiredToCapabilityObject(desired),
+  });
+}
+
+function pdsRepoDeleteAgentRequest(desired: PdsRepoDeleteDesired): CanonicalJsonObject {
+  return Object.freeze({
+    desired: deleteDesiredToCapabilityObject(desired),
   });
 }
 
@@ -213,6 +433,40 @@ function desiredToCapabilityObject(desired: PdsRepoCreateDesired): CapabilityObj
     commit: Object.freeze({
       cursor: desired.commit.cursor,
     }),
+    records: Object.freeze(records),
+    repo: desired.repo,
+  });
+}
+
+function deleteDesiredToCapabilityObject(desired: PdsRepoDeleteDesired): CapabilityObject {
+  const records: CapabilityObject[] = [];
+  const deletes: CapabilityObject[] = [];
+
+  for (let index = 0; index < desired.records.length; index += 1) {
+    const record = desired.records[index];
+    if (record !== undefined) {
+      records[records.length] = Object.freeze({
+        collection: record.collection,
+        rkey: record.rkey,
+        valueDigest: record.valueDigest,
+      });
+    }
+  }
+  for (let index = 0; index < desired.deletes.length; index += 1) {
+    const record = desired.deletes[index];
+    if (record !== undefined) {
+      deletes[deletes.length] = Object.freeze({
+        collection: record.collection,
+        rkey: record.rkey,
+      });
+    }
+  }
+
+  return Object.freeze({
+    commit: Object.freeze({
+      cursor: desired.commit.cursor,
+    }),
+    deletes: Object.freeze(deletes),
     records: Object.freeze(records),
     repo: desired.repo,
   });
@@ -247,6 +501,82 @@ export async function applyAndReadPdsRepoCreate(
   };
 }
 
+export async function queryPdsRepoCollection(
+  readTransport: PdsRepoReadTransport,
+  collection: string = PDS_REPO_QUERY_COLLECTION,
+  limit: number = PDS_REPO_QUERY_LIMIT,
+): Promise<PdsRepoQueryResult> {
+  const pages: PdsRepoQueryPageSummary[] = [];
+  let cursor: number | undefined;
+
+  for (let page = 1; page <= 64; page += 1) {
+    const result = await readPdsRepoQueryPage(readTransport, collection, limit, cursor);
+
+    if (!result.ok) {
+      return failedQuery(result.reason);
+    }
+
+    pages[pages.length] = Object.freeze({
+      collection: result.page.collection,
+      page,
+      records: result.page.records.length,
+    });
+
+    if (result.page.nextCursor === null) {
+      return {
+        ok: true,
+        pages: Object.freeze(pages),
+      };
+    }
+    if (cursor !== undefined && result.page.nextCursor <= cursor) {
+      return failedQuery("cursor");
+    }
+
+    cursor = result.page.nextCursor;
+  }
+
+  return failedQuery("pagination");
+}
+
+export async function deleteAndReadBackPdsRepoRecord(
+  client: Pick<AgentClient, "apply" | "getState">,
+  desired: PdsRepoDeleteDesired = PDS_REPO_DELETE_DESIRED,
+): Promise<PdsRepoDeleteResult> {
+  const applied = await applyPdsRepoDelete(client, desired);
+
+  if (!applied.ok || applied.outcome === "rejected") {
+    return applied;
+  }
+
+  const read = await readPdsRepoFullState(client);
+
+  if (!read.ok) {
+    return failedDelete("read");
+  }
+
+  const deleted = desired.deletes[0];
+  if (deleted === undefined) {
+    return failedDelete("delete_request");
+  }
+
+  if (containsRecord(read.state.records, deleted.collection, deleted.rkey)) {
+    return failedDelete("record_present");
+  }
+  if (read.state.commitCursor !== desired.commit.cursor) {
+    return failedDelete("cursor");
+  }
+  if (!containsTombstone(read.state.log, desired.commit.cursor, deleted.collection, deleted.rkey)) {
+    return failedDelete("tombstone");
+  }
+
+  return {
+    ok: true,
+    outcome: "committed",
+    removed: deleted.rkey,
+    tombstoneCursor: desired.commit.cursor,
+  };
+}
+
 export async function rejectInvalidPdsRepoCreate(
   client: Pick<AgentClient, "apply">,
 ): Promise<PdsRepoResult> {
@@ -271,6 +601,30 @@ export async function rejectInvalidPdsRepoCreate(
   return failedRepo("invalid PDS repo request was not rejected by agentd");
 }
 
+export async function rejectInvalidPdsRepoDelete(
+  client: Pick<AgentClient, "apply">,
+): Promise<PdsRepoDeleteResult> {
+  try {
+    const result = await client.apply(buildInvalidPdsRepoDeletePlan());
+
+    if (result.outcome === "rejected" || result.outcome === "rolledBack") {
+      return rejectedDelete(agentApplyResultReason(result));
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      return rejectedDelete(cause.agentError.code);
+    }
+  }
+
+  return failedDelete("invalid PDS repo delete request was not rejected by agentd");
+}
+
 export async function readPdsRepoStateSummary(
   client: Pick<AgentClient, "getState">,
 ): Promise<
@@ -285,6 +639,25 @@ export async function readPdsRepoStateSummary(
 > {
   try {
     return parsePdsRepoReadResponse(await client.getState(PDS_REPO_CAPABILITY));
+  } catch (cause) {
+    return rejectRead(describeError(cause));
+  }
+}
+
+export async function readPdsRepoFullState(
+  client: Pick<AgentClient, "getState">,
+): Promise<
+  | {
+      readonly ok: true;
+      readonly state: PdsRepoFullState;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    }
+> {
+  try {
+    return parsePdsRepoFullReadResponse(await client.getState(PDS_REPO_CAPABILITY));
   } catch (cause) {
     return rejectRead(describeError(cause));
   }
@@ -345,6 +718,116 @@ export function parsePdsRepoReadResponse(response: unknown): ReturnType<typeof r
   }
 }
 
+export function parsePdsRepoFullReadResponse(response: unknown): ReturnType<typeof readPdsRepoFullState> extends Promise<infer T> ? T : never {
+  try {
+    const normalized = safeNormalize(response);
+
+    if (!normalized.ok) {
+      return rejectRead(normalized.reason);
+    }
+    if (!isRecord(normalized.value)) {
+      return rejectRead("PDS repo read response must be an object.");
+    }
+
+    const fields = expectFields(normalized.value, READ_RESPONSE_FIELDS);
+    if (!fields.ok) return fields;
+
+    const exists = field(normalized.value, "exists");
+    if (typeof exists !== "boolean") {
+      return rejectRead("PDS repo read exists must be a boolean.");
+    }
+
+    const records = readRecordEntriesArray(field(normalized.value, "records"), "records");
+    const log = readLogEntriesArray(field(normalized.value, "log"), "log");
+
+    if (!records.ok) return records;
+    if (!log.ok) return log;
+
+    if (!exists) {
+      return {
+        ok: true,
+        state: {
+          commitCursor: 0,
+          log: Object.freeze([]),
+          records: Object.freeze([]),
+          repo: null,
+        },
+      };
+    }
+
+    const repo = field(normalized.value, "repo");
+    const commitCursor = field(normalized.value, "commitCursor");
+
+    if (typeof repo !== "string" || repo.length === 0) {
+      return rejectRead("PDS repo read repo must be a non-empty string.");
+    }
+    if (!isNonNegativeSafeInteger(commitCursor)) {
+      return rejectRead("PDS repo read commitCursor must be a non-negative integer.");
+    }
+
+    return {
+      ok: true,
+      state: {
+        commitCursor,
+        log: log.value,
+        records: records.value,
+        repo,
+      },
+    };
+  } catch {
+    return rejectRead("PDS repo read response validation failed.");
+  }
+}
+
+export function parsePdsRepoQueryResponse(response: unknown): ValidationResult<PdsRepoQueryPage> {
+  try {
+    const normalized = safeNormalize(response);
+
+    if (!normalized.ok) {
+      return reject(`PDS repo query response is malformed: ${normalized.reason}`);
+    }
+    if (!isRecord(normalized.value)) {
+      return reject("PDS repo query response must be an object.");
+    }
+
+    const fields = expectValidationFields(normalized.value, QUERY_RESPONSE_FIELDS);
+    if (!fields.ok) return fields;
+
+    const exists = field(normalized.value, "exists");
+    const collection = field(normalized.value, "collection");
+    const records = readRecordEntriesArray(field(normalized.value, "records"), "records");
+    const total = field(normalized.value, "total");
+    const nextCursor = field(normalized.value, "nextCursor");
+
+    if (typeof exists !== "boolean") {
+      return reject("PDS repo query exists must be a boolean.");
+    }
+    if (typeof collection !== "string" || !isNsidLike(collection)) {
+      return reject("PDS repo query collection must be an NSID-shaped string.");
+    }
+    if (!records.ok) return records;
+    if (!isNonNegativeSafeInteger(total)) {
+      return reject("PDS repo query total must be a non-negative integer.");
+    }
+    if (nextCursor !== null && !isNonNegativeSafeInteger(nextCursor)) {
+      return reject("PDS repo query nextCursor must be a non-negative integer or null.");
+    }
+    if (records.value.length > total) {
+      return reject("PDS repo query records cannot exceed total.");
+    }
+
+    return accept({
+      collection,
+      exists,
+      nextCursor,
+      records: records.value,
+      total,
+    });
+  } catch {
+    return reject("PDS repo query response validation failed.");
+  }
+}
+
 export function formatPdsRepoMarker(result: PdsRepoResult): string {
   if (!result.ok) {
     return "VITA-PDS-REPO-ERROR: status=FAILSAFE";
@@ -362,6 +845,46 @@ export function formatPdsRepoMarker(result: PdsRepoResult): string {
   );
 }
 
+export function formatPdsRepoQueryMarkers(result: PdsRepoQueryResult): readonly string[] {
+  if (!result.ok) {
+    return Object.freeze(["VITA-PDS-QUERY-ERROR: status=FAILSAFE"]);
+  }
+
+  const markers: string[] = [];
+  for (let index = 0; index < result.pages.length; index += 1) {
+    const page = result.pages[index];
+
+    if (page !== undefined) {
+      markers[markers.length] = (
+        "VITA-PDS-QUERY: " +
+        `collection=${page.collection} ` +
+        `page=${page.page} ` +
+        `records=${page.records} ` +
+        "status=OK"
+      );
+    }
+  }
+
+  return Object.freeze(markers);
+}
+
+export function formatPdsRepoDeleteMarker(result: PdsRepoDeleteResult): string {
+  if (!result.ok) {
+    return "VITA-PDS-DELETE-ERROR: status=FAILSAFE";
+  }
+
+  if (result.outcome === "rejected") {
+    return `VITA-PDS-DELETE: outcome=rejected reason=${result.reason} status=OK`;
+  }
+
+  return (
+    "VITA-PDS-DELETE: " +
+    `removed=${result.removed} ` +
+    `tombstone cursor=${result.tombstoneCursor} ` +
+    "status=OK"
+  );
+}
+
 async function applyPdsRepoCreate(
   registry: CapabilityManifestRegistry,
   transport: ApplyNodeTransport,
@@ -374,6 +897,39 @@ async function applyPdsRepoCreate(
   }
 
   return applyPdsRepoPlanDirectly(transport, buildPdsRepoCreatePlan(desired));
+}
+
+async function applyPdsRepoDelete(
+  client: Pick<AgentClient, "apply">,
+  desired: PdsRepoDeleteDesired,
+): Promise<PdsRepoDeleteResult> {
+  try {
+    const result = await client.apply(buildPdsRepoDeletePlan(desired));
+
+    if (result.outcome === "committed") {
+      return {
+        ok: true,
+        outcome: "committed",
+        removed: desired.deletes[0]?.rkey ?? "",
+        tombstoneCursor: desired.commit.cursor,
+      };
+    }
+    if (result.outcome === "rejected" || result.outcome === "rolledBack") {
+      return rejectedDelete(agentApplyResultReason(result));
+    }
+  } catch (cause) {
+    if (
+      isAgentClientError(cause) &&
+      cause.agentError !== undefined &&
+      cause.status !== undefined &&
+      cause.status >= 400 &&
+      cause.status <= 499
+    ) {
+      return rejectedDelete(cause.agentError.code);
+    }
+  }
+
+  return failedDelete("apply");
 }
 
 async function applyPdsRepoPlanDirectly(
@@ -411,6 +967,52 @@ async function applyPdsRepoPlanDirectly(
   }
 
   return failedRepo("apply");
+}
+
+async function readPdsRepoQueryPage(
+  readTransport: PdsRepoReadTransport,
+  collection: string,
+  limit: number,
+  cursor: number | undefined,
+): Promise<
+  | {
+      readonly ok: true;
+      readonly page: PdsRepoQueryPage;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    }
+> {
+  let rawResponse: ApplyNodeTransportResponse;
+
+  try {
+    rawResponse = await readTransport(
+      "GET",
+      "/state",
+      buildPdsRepoQueryRequest(collection, cursor, limit),
+    );
+  } catch {
+    return failedQuery("transport");
+  }
+
+  const response = readTransportResponse(rawResponse);
+  if (!response.ok) {
+    return failedQuery("read");
+  }
+  if (response.value.status < 200 || response.value.status >= 300) {
+    return failedQuery("read");
+  }
+
+  const page = parsePdsRepoQueryResponse(response.value.body);
+  if (!page.ok) {
+    return failedQuery(page.reason);
+  }
+
+  return {
+    ok: true,
+    page: page.value,
+  };
 }
 
 function pdsRepoApplyResultFromApplyNodeConfigResult(
@@ -611,6 +1213,105 @@ function validateResultError(
   return accept(Object.freeze(output));
 }
 
+function readRecordEntriesArray(
+  value: PlainJson | undefined,
+  path: string,
+): ValidationResult<readonly PdsRepoRecord[]> {
+  if (!Array.isArray(value)) return reject(`${path} must be an array.`);
+
+  const records: PdsRepoRecord[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+    const record = readRecordEntry(item, `${path}[${index}]`);
+    if (!record.ok) return record;
+    records[index] = record.value;
+  }
+
+  return accept(Object.freeze(records));
+}
+
+function readRecordEntry(
+  value: PlainJson | undefined,
+  path: string,
+): ValidationResult<PdsRepoRecord> {
+  if (!isRecord(value)) return reject(`${path} must be an object.`);
+
+  const fields = expectValidationFields(value, RECORD_FIELDS, [], path);
+  if (!fields.ok) return fields;
+
+  const collection = field(value, "collection");
+  const rkey = field(value, "rkey");
+  const valueDigest = field(value, "valueDigest");
+
+  if (typeof collection !== "string" || !isNsidLike(collection)) {
+    return reject(`${path}.collection must be an NSID-shaped string.`);
+  }
+  if (typeof rkey !== "string" || !isRecordKey(rkey)) {
+    return reject(`${path}.rkey must be a bounded AT Protocol record key.`);
+  }
+  if (typeof valueDigest !== "string" || !isSha256Hex(valueDigest)) {
+    return reject(`${path}.valueDigest must be a lowercase SHA-256 hex digest.`);
+  }
+
+  return accept({
+    collection,
+    rkey,
+    valueDigest,
+  });
+}
+
+function readLogEntriesArray(
+  value: PlainJson | undefined,
+  path: string,
+): ValidationResult<readonly PdsRepoLogEntry[]> {
+  if (!Array.isArray(value)) return reject(`${path} must be an array.`);
+
+  const log: PdsRepoLogEntry[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+    const entry = readLogEntry(item, `${path}[${index}]`);
+    if (!entry.ok) return entry;
+    log[index] = entry.value;
+  }
+
+  return accept(Object.freeze(log));
+}
+
+function readLogEntry(
+  value: PlainJson | undefined,
+  path: string,
+): ValidationResult<PdsRepoLogEntry> {
+  if (!isRecord(value)) return reject(`${path} must be an object.`);
+
+  const fields = expectValidationFields(value, LOG_FIELDS, [], path);
+  if (!fields.ok) return fields;
+
+  const cursor = field(value, "cursor");
+  const op = field(value, "op");
+  const collection = field(value, "collection");
+  const rkey = field(value, "rkey");
+
+  if (!isNonNegativeSafeInteger(cursor)) {
+    return reject(`${path}.cursor must be a non-negative integer.`);
+  }
+  if (op !== "create-record" && op !== "delete-record") {
+    return reject(`${path}.op must be create-record or delete-record.`);
+  }
+  if (typeof collection !== "string" || !isNsidLike(collection)) {
+    return reject(`${path}.collection must be an NSID-shaped string.`);
+  }
+  if (typeof rkey !== "string" || !isRecordKey(rkey)) {
+    return reject(`${path}.rkey must be a bounded AT Protocol record key.`);
+  }
+
+  return accept({
+    collection,
+    cursor,
+    op,
+    rkey,
+  });
+}
+
 function validateRecordArray(value: PlainJson | undefined): ValidationResult<number> {
   if (!Array.isArray(value)) return rejectRead("PDS repo records must be an array.");
 
@@ -769,6 +1470,28 @@ function failedRepo(reason: string): Extract<PdsRepoResult, { readonly ok: false
   };
 }
 
+function failedQuery(reason: string): Extract<PdsRepoQueryResult, { readonly ok: false }> {
+  return {
+    ok: false,
+    reason,
+  };
+}
+
+function rejectedDelete(reason: string): Extract<PdsRepoDeleteResult, { readonly outcome: "rejected" }> {
+  return {
+    ok: true,
+    outcome: "rejected",
+    reason: markerToken(reason),
+  };
+}
+
+function failedDelete(reason: string): Extract<PdsRepoDeleteResult, { readonly ok: false }> {
+  return {
+    ok: false,
+    reason,
+  };
+}
+
 function rejectRead(reason: string): {
   readonly ok: false;
   readonly reason: string;
@@ -803,6 +1526,83 @@ function isNonNegativeSafeInteger(value: PlainJson | undefined): value is number
 
 function isApplyOutcome(value: PlainJson | undefined): value is "committed" | "rolledBack" | "rejected" {
   return typeof value === "string" && contains(APPLY_OUTCOMES, value);
+}
+
+function isNsidLike(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 317 ||
+    value !== value.trim() ||
+    value.includes("/") ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    return false;
+  }
+
+  const segments = value.split(".");
+  if (segments.length < 3) {
+    return false;
+  }
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment === undefined || !NSID_SEGMENT_PATTERN.test(segment)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isRecordKey(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 512 &&
+    value === value.trim() &&
+    RECORD_KEY_PATTERN.test(value)
+  );
+}
+
+function isSha256Hex(value: string): boolean {
+  return SHA256_HEX_PATTERN.test(value);
+}
+
+function containsRecord(
+  records: readonly PdsRepoRecord[],
+  collection: string,
+  rkey: string,
+): boolean {
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record !== undefined && record.collection === collection && record.rkey === rkey) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function containsTombstone(
+  log: readonly PdsRepoLogEntry[],
+  cursor: number,
+  collection: string,
+  rkey: string,
+): boolean {
+  for (let index = 0; index < log.length; index += 1) {
+    const entry = log[index];
+    if (
+      entry !== undefined &&
+      entry.cursor === cursor &&
+      entry.op === "delete-record" &&
+      entry.collection === collection &&
+      entry.rkey === rkey
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function contains(values: readonly string[], value: string): boolean {

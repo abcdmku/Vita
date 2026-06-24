@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"sort"
@@ -665,7 +666,13 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 		return
 	}
 
-	response, readErr := h.readCapability(r.Context(), name)
+	var response capabilities.TypedResponse
+	var readErr *requestError
+	if name == pdsrepo.Name && hasPDSRepoQuery(r.URL.Query()) {
+		response, readErr = h.readPDSRepoQuery(r.Context(), r.URL.Query())
+	} else {
+		response, readErr = h.readCapability(r.Context(), name)
+	}
 	if readErr != nil {
 		writeRequestError(w, readErr)
 		return
@@ -697,6 +704,32 @@ func (h *handler) readCapability(ctx context.Context, name string) (capabilities
 		return nil, &requestError{
 			status:  http.StatusInternalServerError,
 			code:    "capability_read_failed",
+			message: err.Error(),
+		}
+	}
+	return response, nil
+}
+
+func (h *handler) readPDSRepoQuery(ctx context.Context, values url.Values) (capabilities.TypedResponse, *requestError) {
+	capability, ok := h.registry.Lookup(pdsrepo.Name)
+	if !ok {
+		return nil, &requestError{
+			status:  http.StatusNotFound,
+			code:    "unknown_capability",
+			message: fmt.Sprintf("unknown capability %q", pdsrepo.Name),
+		}
+	}
+
+	readRequest, requestErr := pdsRepoQueryReadRequest(values)
+	if requestErr != nil {
+		return nil, requestErr
+	}
+
+	response, err := capability.Handle(ctx, readRequest)
+	if err != nil {
+		return nil, &requestError{
+			status:  http.StatusBadRequest,
+			code:    "invalid_request",
 			message: err.Error(),
 		}
 	}
@@ -776,6 +809,81 @@ func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
 
 	request := factory()
 	return request, request != nil
+}
+
+func hasPDSRepoQuery(values url.Values) bool {
+	return values.Has("collection") || values.Has("cursor") || values.Has("limit")
+}
+
+func pdsRepoQueryReadRequest(values url.Values) (pdsrepo.ReadRequest, *requestError) {
+	for key := range values {
+		switch key {
+		case "collection", "cursor", "limit":
+		default:
+			return pdsrepo.ReadRequest{}, badRequest("unknown_field", fmt.Sprintf("unknown query parameter %q", key))
+		}
+	}
+
+	collection, requestErr := requiredSingleQueryValue(values, "collection")
+	if requestErr != nil {
+		return pdsrepo.ReadRequest{}, requestErr
+	}
+	limitText, requestErr := requiredSingleQueryValue(values, "limit")
+	if requestErr != nil {
+		return pdsrepo.ReadRequest{}, requestErr
+	}
+	limit, requestErr := parseQueryInt(limitText, "limit")
+	if requestErr != nil {
+		return pdsrepo.ReadRequest{}, requestErr
+	}
+
+	var cursor *int64
+	if values.Has("cursor") {
+		cursorText, requestErr := requiredSingleQueryValue(values, "cursor")
+		if requestErr != nil {
+			return pdsrepo.ReadRequest{}, requestErr
+		}
+		parsed, requestErr := parseQueryInt(cursorText, "cursor")
+		if requestErr != nil {
+			return pdsrepo.ReadRequest{}, requestErr
+		}
+		cursor = &parsed
+	}
+
+	request := pdsrepo.ReadRequest{Query: &pdsrepo.QueryRequest{
+		Collection: collection,
+		Cursor:     cursor,
+		Limit:      limit,
+	}}
+	if err := request.Validate(); err != nil {
+		return pdsrepo.ReadRequest{}, badRequest("invalid_request", err.Error())
+	}
+	return request, nil
+}
+
+func requiredSingleQueryValue(values url.Values, key string) (string, *requestError) {
+	items, ok := values[key]
+	if !ok || len(items) == 0 {
+		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q is required", key))
+	}
+	if len(items) != 1 {
+		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q must appear exactly once", key))
+	}
+	if items[0] == "" {
+		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q is required", key))
+	}
+	return items[0], nil
+}
+
+func parseQueryInt(value string, field string) (int64, *requestError) {
+	if strings.ContainsAny(value, ".eE") {
+		return 0, badRequest("invalid_request", fmt.Sprintf("query parameter %q must be an integer", field))
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, badRequest("invalid_request", fmt.Sprintf("query parameter %q must be an integer", field))
+	}
+	return parsed, nil
 }
 
 func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) (func() []capsuleruntime.WorkloadStatus, error) {

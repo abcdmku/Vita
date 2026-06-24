@@ -31,8 +31,10 @@ const (
 
 	maxCollectionLength = 317
 	maxRKeyLength       = 512
+	maxPageLimit        = 2
 
 	createRecordOp = "create-record"
+	deleteRecordOp = "delete-record"
 )
 
 type RepoRecord struct {
@@ -84,6 +86,49 @@ func (r *RepoRecord) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+type DeleteRecord struct {
+	Collection string `json:"collection"`
+	RKey       string `json:"rkey"`
+}
+
+func (d DeleteRecord) Validate() error {
+	return validateDeleteRecord(d)
+}
+
+func (d *DeleteRecord) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, deleteRecordFields); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	collection, err := requiredStringField(fields, "collection")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	rkey, err := requiredStringField(fields, "rkey")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	record := DeleteRecord{
+		Collection: collection,
+		RKey:       rkey,
+	}
+	if err := validateDeleteRecord(record); err != nil {
+		return err
+	}
+
+	*d = record
+	return nil
+}
+
 type Commit struct {
 	Cursor int64 `json:"cursor"`
 }
@@ -115,9 +160,10 @@ func (c *Commit) UnmarshalJSON(raw []byte) error {
 }
 
 type DesiredState struct {
-	Repo    string       `json:"repo"`
-	Commit  Commit       `json:"commit"`
-	Records []RepoRecord `json:"records"`
+	Repo    string         `json:"repo"`
+	Commit  Commit         `json:"commit"`
+	Records []RepoRecord   `json:"records"`
+	Deletes []DeleteRecord `json:"deletes,omitempty"`
 }
 
 func (s DesiredState) Validate() error {
@@ -145,7 +191,11 @@ func (s *DesiredState) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
-	records, err := requiredRecordsField(fields, "records")
+	records, err := requiredStoredRecordsField(fields, "records")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	deletes, err := optionalDeletesField(fields, "deletes")
 	if err != nil {
 		return &InvalidRequestError{Reason: err.Error()}
 	}
@@ -154,6 +204,7 @@ func (s *DesiredState) UnmarshalJSON(raw []byte) error {
 		Repo:    repo,
 		Commit:  commit,
 		Records: records,
+		Deletes: deletes,
 	}
 	if err := validateDesiredState(desired); err != nil {
 		return err
@@ -206,11 +257,98 @@ func (r ApplyRequest) Validate() error {
 	return validateDesiredState(*r.Desired)
 }
 
-type ReadRequest struct{}
+type QueryRequest struct {
+	Collection string `json:"collection"`
+	Cursor     *int64 `json:"cursor,omitempty"`
+	Limit      int64  `json:"limit"`
+}
+
+func (q QueryRequest) Validate() error {
+	return validateQueryRequest(q)
+}
+
+func (q *QueryRequest) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, queryRequestFields); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	collection, err := requiredStringField(fields, "collection")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	limit, err := requiredLimitField(fields, "limit")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	cursor, err := optionalCursorField(fields, "cursor")
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	query := QueryRequest{
+		Collection: collection,
+		Cursor:     cursor,
+		Limit:      limit,
+	}
+	if err := validateQueryRequest(query); err != nil {
+		return err
+	}
+
+	*q = query
+	return nil
+}
+
+type ReadRequest struct {
+	Query *QueryRequest `json:"query,omitempty"`
+}
 
 func (ReadRequest) CapabilityRequest() {}
 
-func (ReadRequest) Validate() error { return nil }
+func (r *ReadRequest) UnmarshalJSON(raw []byte) error {
+	if err := jsonsafe.RejectDuplicateObjectKeys(raw); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	fields, err := decodeObject(raw)
+	if err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+	if err := rejectUnknownFields(fields, readRequestFields); err != nil {
+		return &InvalidRequestError{Reason: err.Error()}
+	}
+
+	rawQuery, ok := fields["query"]
+	if !ok {
+		*r = ReadRequest{}
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(rawQuery), []byte("null")) {
+		return &InvalidRequestError{Reason: "query is required when present"}
+	}
+
+	var query QueryRequest
+	if err := json.Unmarshal(rawQuery, &query); err != nil {
+		return err
+	}
+
+	*r = ReadRequest{Query: &query}
+	return nil
+}
+
+func (r ReadRequest) Validate() error {
+	if r.Query == nil {
+		return nil
+	}
+	return validateQueryRequest(*r.Query)
+}
 
 type CommitLogEntry struct {
 	Cursor     int64  `json:"cursor"`
@@ -332,6 +470,16 @@ type ReadResponse struct {
 
 func (ReadResponse) CapabilityResponse() {}
 
+type QueryResponse struct {
+	Exists     bool         `json:"exists"`
+	Collection string       `json:"collection"`
+	Records    []RepoRecord `json:"records"`
+	Total      int64        `json:"total"`
+	NextCursor *int64       `json:"nextCursor"`
+}
+
+func (QueryResponse) CapabilityResponse() {}
+
 type Capability struct {
 	fs repoFileSystem
 	mu sync.Mutex
@@ -381,11 +529,15 @@ func (c *Capability) Name() string {
 }
 
 func (c *Capability) Handle(ctx context.Context, req capabilities.TypedRequest) (capabilities.TypedResponse, error) {
-	if _, ok := req.(ReadRequest); !ok {
+	readReq, ok := req.(ReadRequest)
+	if !ok {
 		return nil, &InvalidRequestError{Reason: "expected pdsrepo.ReadRequest"}
 	}
 	if c == nil || c.fs == nil {
 		return nil, &InvalidRequestError{Reason: "missing PDS repo filesystem"}
+	}
+	if err := readReq.Validate(); err != nil {
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -396,12 +548,23 @@ func (c *Capability) Handle(ctx context.Context, req capabilities.TypedRequest) 
 		return nil, err
 	}
 	if !snapshot.exists {
+		if readReq.Query != nil {
+			return emptyQueryResponse(*readReq.Query), nil
+		}
 		return emptyReadResponse(), nil
 	}
 
 	parsed, err := parseRepoState(snapshot.bytes)
 	if err != nil {
 		return nil, err
+	}
+
+	if readReq.Query != nil {
+		response, err := queryResponseFromState(parsed, *readReq.Query)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
 	}
 
 	return readResponseFromState(parsed), nil
@@ -575,6 +738,7 @@ var (
 	}
 	desiredStateFields = map[string]struct{}{
 		"commit":  {},
+		"deletes": {},
 		"records": {},
 		"repo":    {},
 	}
@@ -585,6 +749,18 @@ var (
 		"collection":  {},
 		"rkey":        {},
 		"valueDigest": {},
+	}
+	deleteRecordFields = map[string]struct{}{
+		"collection": {},
+		"rkey":       {},
+	}
+	readRequestFields = map[string]struct{}{
+		"query": {},
+	}
+	queryRequestFields = map[string]struct{}{
+		"collection": {},
+		"cursor":     {},
+		"limit":      {},
 	}
 	repoStateFields = map[string]struct{}{
 		"commitCursor": {},
@@ -606,6 +782,9 @@ var (
 
 func applyDesiredState(prior repoSnapshot, desired DesiredState) (RepoState, bool, error) {
 	if !prior.exists {
+		if len(desired.Deletes) > 0 {
+			return RepoState{}, false, &InvalidRequestError{Reason: "cannot delete records from an empty PDS repo"}
+		}
 		state := RepoState{
 			Repo:         desired.Repo,
 			Records:      cloneRecords(desired.Records),
@@ -642,18 +821,39 @@ func applyDesiredState(prior repoSnapshot, desired DesiredState) (RepoState, boo
 		newRecords = append(newRecords, cloneRecord(record))
 	}
 
-	if len(newRecords) == 0 {
+	deletedKeys := make(map[recordKey]struct{}, len(desired.Deletes))
+	for _, record := range desired.Deletes {
+		key := recordKeyFromDelete(record)
+		if _, ok := existing[key]; !ok {
+			return RepoState{}, false, &InvalidRequestError{Reason: "cannot delete a non-existent record"}
+		}
+		deletedKeys[key] = struct{}{}
+	}
+
+	if len(newRecords) == 0 && len(deletedKeys) == 0 {
 		if desired.Commit.Cursor > state.CommitCursor {
 			return RepoState{}, false, &InvalidRequestError{Reason: "commit cursor cannot advance without new records"}
 		}
 		return state, false, nil
 	}
 	if desired.Commit.Cursor <= state.CommitCursor {
-		return RepoState{}, false, &InvalidRequestError{Reason: "commit cursor must advance when creating records"}
+		return RepoState{}, false, &InvalidRequestError{Reason: "commit cursor must advance when changing records"}
 	}
 
-	state.Records = append(cloneRecords(state.Records), newRecords...)
-	state.Log = append(cloneLog(state.Log), logEntriesForRecords(desired.Commit.Cursor, newRecords)...)
+	nextRecords := make([]RepoRecord, 0, len(state.Records)+len(newRecords)-len(deletedKeys))
+	for _, record := range state.Records {
+		if _, deleted := deletedKeys[recordKeyFromRecord(record)]; deleted {
+			continue
+		}
+		nextRecords = append(nextRecords, cloneRecord(record))
+	}
+	nextRecords = append(nextRecords, newRecords...)
+
+	nextLog := append(cloneLog(state.Log), logEntriesForRecords(desired.Commit.Cursor, newRecords)...)
+	nextLog = append(nextLog, logEntriesForDeletes(desired.Commit.Cursor, desired.Deletes)...)
+
+	state.Records = nextRecords
+	state.Log = nextLog
 	state.CommitCursor = desired.Commit.Cursor
 	sortRepoState(&state)
 	return state, true, nil
@@ -666,8 +866,8 @@ func validateDesiredState(state DesiredState) error {
 	if err := validateCursor(state.Commit.Cursor, "commit.cursor"); err != nil {
 		return err
 	}
-	if len(state.Records) == 0 {
-		return &InvalidRequestError{Reason: "records must contain at least one record"}
+	if len(state.Records) == 0 && len(state.Deletes) == 0 {
+		return &InvalidRequestError{Reason: "records or deletes must contain at least one operation"}
 	}
 
 	seen := make(map[recordKey]RepoRecord, len(state.Records))
@@ -680,6 +880,21 @@ func validateDesiredState(state DesiredState) error {
 			return &InvalidRequestError{Reason: "records must not contain duplicate record keys"}
 		}
 		seen[key] = record
+	}
+
+	deletes := make(map[recordKey]struct{}, len(state.Deletes))
+	for _, record := range state.Deletes {
+		if err := validateDeleteRecord(record); err != nil {
+			return err
+		}
+		key := recordKeyFromDelete(record)
+		if _, ok := deletes[key]; ok {
+			return &InvalidRequestError{Reason: "deletes must not contain duplicate record keys"}
+		}
+		if _, ok := seen[key]; ok {
+			return &InvalidRequestError{Reason: "records and deletes must not contain the same record key"}
+		}
+		deletes[key] = struct{}{}
 	}
 	return nil
 }
@@ -733,18 +948,43 @@ func validateRepoRecord(record RepoRecord) error {
 	return nil
 }
 
+func validateDeleteRecord(record DeleteRecord) error {
+	if !isNSIDLike(record.Collection) {
+		return &InvalidRequestError{Reason: "delete collection must be an NSID-shaped string"}
+	}
+	if !isRecordKey(record.RKey) {
+		return &InvalidRequestError{Reason: "delete rkey must be a bounded AT Protocol record key"}
+	}
+	return nil
+}
+
 func validateCommitLogEntry(entry CommitLogEntry) error {
 	if err := validateCursor(entry.Cursor, "log.cursor"); err != nil {
 		return err
 	}
-	if entry.Op != createRecordOp {
-		return &InvalidRequestError{Reason: "commit log op must be create-record"}
+	if entry.Op != createRecordOp && entry.Op != deleteRecordOp {
+		return &InvalidRequestError{Reason: "commit log op must be create-record or delete-record"}
 	}
 	if !isNSIDLike(entry.Collection) {
 		return &InvalidRequestError{Reason: "commit log collection must be an NSID-shaped string"}
 	}
 	if !isRecordKey(entry.RKey) {
 		return &InvalidRequestError{Reason: "commit log rkey must be a bounded AT Protocol record key"}
+	}
+	return nil
+}
+
+func validateQueryRequest(query QueryRequest) error {
+	if !isNSIDLike(query.Collection) {
+		return &InvalidRequestError{Reason: "query collection must be an NSID-shaped string"}
+	}
+	if query.Limit < 1 || query.Limit > maxPageLimit {
+		return &InvalidRequestError{Reason: fmt.Sprintf("query limit must be an integer from 1 through %d", maxPageLimit)}
+	}
+	if query.Cursor != nil {
+		if err := validateCursor(*query.Cursor, "query.cursor"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -975,6 +1215,25 @@ func requiredRecordsField(fields map[string]json.RawMessage, key string) ([]Repo
 	return records, nil
 }
 
+func optionalDeletesField(fields map[string]json.RawMessage, key string) ([]DeleteRecord, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("%s must be an array", key)
+	}
+
+	var deletes []DeleteRecord
+	if err := json.Unmarshal(raw, &deletes); err != nil {
+		return nil, err
+	}
+	if len(deletes) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one delete record when present", key)
+	}
+	return cloneDeletes(deletes), nil
+}
+
 func requiredStoredRecordsField(fields map[string]json.RawMessage, key string) ([]RepoRecord, error) {
 	raw, ok := fields[key]
 	if !ok {
@@ -1013,6 +1272,60 @@ func requiredLogField(fields map[string]json.RawMessage, key string) ([]CommitLo
 	return cloneLog(log), nil
 }
 
+func optionalCursorField(fields map[string]json.RawMessage, key string) (*int64, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("%s must be a monotonic integer", key)
+	}
+
+	cursor, err := integerFieldValue(raw, key)
+	if err != nil {
+		return nil, err
+	}
+	return &cursor, nil
+}
+
+func requiredLimitField(fields map[string]json.RawMessage, key string) (int64, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return 0, fmt.Errorf("%s is required", key)
+	}
+
+	limit, err := integerFieldValue(raw, key)
+	if err != nil {
+		return 0, err
+	}
+	if limit < 1 || limit > maxPageLimit {
+		return 0, fmt.Errorf("%s must be an integer from 1 through %d", key, maxPageLimit)
+	}
+	return limit, nil
+}
+
+func integerFieldValue(raw []byte, key string) (int64, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var number json.Number
+	if err := decoder.Decode(&number); err != nil {
+		return 0, fmt.Errorf("%s must be a monotonic integer", key)
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return 0, fmt.Errorf("%s must contain exactly one JSON value", key)
+		}
+		return 0, err
+	}
+
+	value, err := parseCursorNumber(number)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a monotonic integer from 0 through 9007199254740991", key)
+	}
+	return value, nil
+}
+
 func decodeSingleJSONValue(raw []byte, target interface{}) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if err := decoder.Decode(target); err != nil {
@@ -1035,6 +1348,10 @@ type recordKey struct {
 }
 
 func recordKeyFromRecord(record RepoRecord) recordKey {
+	return recordKey{collection: record.Collection, rkey: record.RKey}
+}
+
+func recordKeyFromDelete(record DeleteRecord) recordKey {
 	return recordKey{collection: record.Collection, rkey: record.RKey}
 }
 
@@ -1063,6 +1380,19 @@ func logEntriesForRecords(cursor int64, records []RepoRecord) []CommitLogEntry {
 	return out
 }
 
+func logEntriesForDeletes(cursor int64, records []DeleteRecord) []CommitLogEntry {
+	out := make([]CommitLogEntry, 0, len(records))
+	for _, record := range records {
+		out = append(out, CommitLogEntry{
+			Cursor:     cursor,
+			Op:         deleteRecordOp,
+			Collection: record.Collection,
+			RKey:       record.RKey,
+		})
+	}
+	return out
+}
+
 func emptyReadResponse() ReadResponse {
 	return ReadResponse{
 		Exists:       false,
@@ -1070,6 +1400,16 @@ func emptyReadResponse() ReadResponse {
 		Records:      []RepoRecord{},
 		CommitCursor: 0,
 		Log:          []CommitLogEntry{},
+	}
+}
+
+func emptyQueryResponse(query QueryRequest) QueryResponse {
+	return QueryResponse{
+		Exists:     false,
+		Collection: query.Collection,
+		Records:    []RepoRecord{},
+		Total:      0,
+		NextCursor: nil,
 	}
 }
 
@@ -1083,6 +1423,47 @@ func readResponseFromState(state RepoState) ReadResponse {
 		CommitCursor: canonical.CommitCursor,
 		Log:          cloneLog(canonical.Log),
 	}
+}
+
+func queryResponseFromState(state RepoState, query QueryRequest) (QueryResponse, error) {
+	canonical := cloneRepoState(state)
+	sortRepoState(&canonical)
+
+	matches := make([]RepoRecord, 0, len(canonical.Records))
+	for _, record := range canonical.Records {
+		if record.Collection == query.Collection {
+			matches = append(matches, cloneRecord(record))
+		}
+	}
+
+	cursor := int64(0)
+	if query.Cursor != nil {
+		cursor = *query.Cursor
+	}
+	total := int64(len(matches))
+	if cursor > total {
+		return QueryResponse{}, &InvalidRequestError{Reason: "query cursor is past the end of the collection"}
+	}
+
+	start := int(cursor)
+	end := start + int(query.Limit)
+	if end > len(matches) {
+		end = len(matches)
+	}
+
+	var nextCursor *int64
+	if end < len(matches) {
+		next := int64(end)
+		nextCursor = &next
+	}
+
+	return QueryResponse{
+		Exists:     true,
+		Collection: query.Collection,
+		Records:    cloneRecords(matches[start:end]),
+		Total:      total,
+		NextCursor: nextCursor,
+	}, nil
 }
 
 func sortRepoState(state *RepoState) {
@@ -1101,6 +1482,7 @@ func cloneDesiredState(state DesiredState) DesiredState {
 		Repo:    state.Repo,
 		Commit:  Commit{Cursor: state.Commit.Cursor},
 		Records: cloneRecords(state.Records),
+		Deletes: cloneDeletes(state.Deletes),
 	}
 }
 
@@ -1128,6 +1510,24 @@ func cloneRecords(in []RepoRecord) []RepoRecord {
 	out := make([]RepoRecord, len(in))
 	for i, record := range in {
 		out[i] = cloneRecord(record)
+	}
+	return out
+}
+
+func cloneDelete(record DeleteRecord) DeleteRecord {
+	return DeleteRecord{
+		Collection: record.Collection,
+		RKey:       record.RKey,
+	}
+}
+
+func cloneDeletes(in []DeleteRecord) []DeleteRecord {
+	if in == nil {
+		return nil
+	}
+	out := make([]DeleteRecord, len(in))
+	for i, record := range in {
+		out[i] = cloneDelete(record)
 	}
 	return out
 }
