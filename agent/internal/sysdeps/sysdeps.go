@@ -10,7 +10,35 @@
 // facades; they must never call these real wrappers.
 package sysdeps
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+	"syscall"
+)
 
 // ErrUnsupported is returned by the non-Linux stubs.
 var ErrUnsupported = errors.New("sysdeps: operation not supported on this platform")
+
+// ErrnoCode returns a stable errno token from a wrapped syscall failure.
+func ErrnoCode(err error) string {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return ""
+	}
+	switch errno {
+	case syscall.EACCES:
+		return "EACCES"
+	case syscall.EEXIST:
+		return "EEXIST"
+	case syscall.EINVAL:
+		return "EINVAL"
+	case syscall.ENOENT:
+		return "ENOENT"
+	case syscall.ENOSYS:
+		return "ENOSYS"
+	case syscall.EPERM:
+		return "EPERM"
+	default:
+		return "ERRNO_" + strconv.Itoa(int(errno))
+	}
+}

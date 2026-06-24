@@ -38,6 +38,7 @@ type capsuleNetns struct {
 	Path      string
 	Dir       string
 	ProofPath string
+	Private   bool
 }
 
 type capsuleNetnsCheck struct {
@@ -60,7 +61,8 @@ type capsuleNetnsManager interface {
 }
 
 type defaultCapsuleNetnsManager struct {
-	root string
+	root       string
+	interfaces func() ([]net.Interface, error)
 }
 
 func newDefaultCapsuleNetnsManager() capsuleNetnsManager {
@@ -69,12 +71,10 @@ func newDefaultCapsuleNetnsManager() capsuleNetnsManager {
 
 func capsuleNetnsForUnit(unitName string, proofPath string) capsuleNetns {
 	name := capsuleNetnsName(unitName)
-	dir := path.Join(defaultNetnsRoot, name)
 	return capsuleNetns{
 		Name:      name,
-		Path:      path.Join(dir, capsuleNetnsFileName),
-		Dir:       dir,
 		ProofPath: proofPath,
+		Private:   true,
 	}
 }
 
@@ -95,6 +95,9 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	if err := validateCapsuleNetns(netns); err != nil {
 		return capsuleNetns{}, err
 	}
+	if netns.Private {
+		return netns, nil
+	}
 
 	root := m.root
 	if root == "" {
@@ -105,13 +108,13 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	netns.Path = path.Join(dir, capsuleNetnsFileName)
 
 	if err := os.MkdirAll(root, capsuleNetnsDirMode); err != nil {
-		return capsuleNetns{}, fmt.Errorf("create capsule netns root: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("mkdir_root", err)
 	}
 	if err := os.Chmod(root, capsuleNetnsDirMode); err != nil {
-		return capsuleNetns{}, fmt.Errorf("secure capsule netns root: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("chmod_root", err)
 	}
 	if err := os.Mkdir(dir, capsuleNetnsDirMode); err != nil {
-		return capsuleNetns{}, fmt.Errorf("create capsule netns dir: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("mkdir_netns", err)
 	}
 	createdDir := true
 	committed := false
@@ -123,10 +126,10 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 
 	file, err := os.OpenFile(netns.Path, os.O_RDWR|os.O_CREATE|os.O_EXCL, capsuleNetnsFileMode)
 	if err != nil {
-		return capsuleNetns{}, fmt.Errorf("create capsule netns bind target: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("target_create", err)
 	}
 	if closeErr := file.Close(); closeErr != nil {
-		return capsuleNetns{}, fmt.Errorf("close capsule netns bind target: %w", closeErr)
+		return capsuleNetns{}, capsuleNetnsStepError("target_close", closeErr)
 	}
 	createdTarget := true
 	mounted := false
@@ -141,12 +144,17 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 
 	prior, err := os.Open(capsuleNetnsPathBase)
 	if err != nil {
-		return capsuleNetns{}, fmt.Errorf("open current network namespace: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("open_current", err)
 	}
 	defer prior.Close()
 
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	unlockThread := true
+	defer func() {
+		if unlockThread {
+			runtime.UnlockOSThread()
+		}
+	}()
 
 	restored := false
 	restore := func() error {
@@ -154,9 +162,10 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 			return nil
 		}
 		if err := sysdeps.SetNetworkNamespace(int(prior.Fd())); err != nil {
-			return fmt.Errorf("restore agent network namespace: %w", err)
+			return capsuleNetnsStepError("restore", err)
 		}
 		restored = true
+		unlockThread = true
 		return nil
 	}
 	defer func() {
@@ -164,17 +173,19 @@ func (m defaultCapsuleNetnsManager) Create(ctx context.Context, netns capsuleNet
 	}()
 
 	if err := sysdeps.UnshareNetworkNamespace(); err != nil {
-		return capsuleNetns{}, fmt.Errorf("create capsule network namespace: %w", err)
+		return capsuleNetns{}, capsuleNetnsStepError("unshare", err)
 	}
+	restored = false
+	unlockThread = false
 	if err := sysdeps.SetLoopbackUp(); err != nil {
 		return capsuleNetns{}, errors.Join(
-			fmt.Errorf("bring capsule loopback up: %w", err),
+			capsuleNetnsStepError("check_lo", err),
 			restore(),
 		)
 	}
 	if err := sysdeps.BindMount(capsuleNetnsPathBase, netns.Path); err != nil {
 		return capsuleNetns{}, errors.Join(
-			fmt.Errorf("pin capsule network namespace: %w", err),
+			capsuleNetnsStepError("bindmount", err),
 			restore(),
 		)
 	}
@@ -196,15 +207,27 @@ func (m defaultCapsuleNetnsManager) Check(ctx context.Context, netns capsuleNetn
 	if err := validateCapsuleNetns(netns); err != nil {
 		return capsuleNetnsCheck{}, err
 	}
+	if netns.Private && netns.Path == "" {
+		return capsuleNetnsCheck{}, capsuleNetnsStepError("join_unit", errors.New("missing systemd unit network namespace path"))
+	}
 
 	var interfaces []net.Interface
-	err := withCapsuleNetns(netns.Path, func() error {
-		var err error
-		interfaces, err = net.Interfaces()
-		return err
-	})
+	var err error
+	if m.interfaces != nil {
+		interfaces, err = m.interfaces()
+	} else {
+		err = withCapsuleNetns(netns.Path, func() error {
+			var listErr error
+			interfaces, listErr = net.Interfaces()
+			return listErr
+		})
+	}
 	if err != nil {
-		return capsuleNetnsCheck{}, fmt.Errorf("inspect capsule network namespace: %w", err)
+		var stepErr *capsuleNetnsStepFailure
+		if errors.As(err, &stepErr) {
+			return capsuleNetnsCheck{}, err
+		}
+		return capsuleNetnsCheck{}, capsuleNetnsStepError("check_lo", err)
 	}
 
 	names := make([]string, 0, len(interfaces))
@@ -220,7 +243,7 @@ func (m defaultCapsuleNetnsManager) Check(ctx context.Context, netns capsuleNetn
 			Interfaces: names,
 			Isolation:  "not_enforced",
 			Status:     capsuleNetnsMeasuredStatusFail,
-		}, fmt.Errorf("capsule network namespace exposes non-loopback interfaces: %s", strings.Join(names, ","))
+		}, capsuleNetnsStepError("check_lo", fmt.Errorf("capsule network namespace exposes non-loopback interfaces: %s", strings.Join(names, ",")))
 	}
 	return capsuleNetnsCheck{
 		Interfaces: names,
@@ -236,16 +259,19 @@ func (m defaultCapsuleNetnsManager) Teardown(ctx context.Context, netns capsuleN
 	if err := validateCapsuleNetns(netns); err != nil {
 		return err
 	}
+	if netns.Private {
+		return nil
+	}
 
 	var teardownErr error
 	if err := sysdeps.UnmountDetach(netns.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		teardownErr = errors.Join(teardownErr, fmt.Errorf("unmount capsule netns: %w", err))
+		teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("unmount", err))
 	}
 	if err := os.Remove(netns.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		teardownErr = errors.Join(teardownErr, fmt.Errorf("remove capsule netns bind target: %w", err))
+		teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("target_remove", err))
 	}
 	if err := os.Remove(netns.Dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		teardownErr = errors.Join(teardownErr, fmt.Errorf("remove capsule netns dir: %w", err))
+		teardownErr = errors.Join(teardownErr, capsuleNetnsStepError("dir_remove", err))
 	}
 	return teardownErr
 }
@@ -253,26 +279,34 @@ func (m defaultCapsuleNetnsManager) Teardown(ctx context.Context, netns capsuleN
 func withCapsuleNetns(netnsPath string, fn func() error) (err error) {
 	prior, err := os.Open(capsuleNetnsPathBase)
 	if err != nil {
-		return fmt.Errorf("open current network namespace: %w", err)
+		return capsuleNetnsStepError("open_current", err)
 	}
 	defer prior.Close()
 
 	target, err := os.Open(netnsPath)
 	if err != nil {
-		return fmt.Errorf("open capsule network namespace: %w", err)
+		return capsuleNetnsStepError("join_unit", err)
 	}
 	defer target.Close()
 
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	unlockThread := true
+	defer func() {
+		if unlockThread {
+			runtime.UnlockOSThread()
+		}
+	}()
 
 	if err := sysdeps.SetNetworkNamespace(int(target.Fd())); err != nil {
-		return fmt.Errorf("enter capsule network namespace: %w", err)
+		return capsuleNetnsStepError("join_unit", err)
 	}
+	unlockThread = false
 	defer func() {
 		if restoreErr := sysdeps.SetNetworkNamespace(int(prior.Fd())); restoreErr != nil {
-			err = errors.Join(err, fmt.Errorf("restore agent network namespace: %w", restoreErr))
+			err = errors.Join(err, capsuleNetnsStepError("restore", restoreErr))
+			return
 		}
+		unlockThread = true
 	}()
 
 	return fn()
@@ -282,13 +316,81 @@ func validateCapsuleNetns(netns capsuleNetns) error {
 	if netns.Name == "" || netns.Name != capsuleNetnsName(netns.Name) {
 		return &ExecuteInvalidRequestError{Reason: "capsule netns name is unsafe"}
 	}
-	if netns.Path == "" || !strings.HasPrefix(netns.Path, defaultNetnsRoot+"/") || path.Base(netns.Path) != capsuleNetnsFileName {
-		return &ExecuteInvalidRequestError{Reason: "capsule netns path is unsafe"}
+	if netns.Private {
+		if netns.Dir != "" {
+			return &ExecuteInvalidRequestError{Reason: "capsule private netns dir must be empty"}
+		}
+		if netns.Path != "" && !validProcNetnsPath(netns.Path) {
+			return &ExecuteInvalidRequestError{Reason: "capsule private netns path is unsafe"}
+		}
+		return nil
 	}
-	if netns.Dir == "" || !strings.HasPrefix(netns.Dir, defaultNetnsRoot+"/") || path.Clean(netns.Dir) == defaultNetnsRoot {
+	if netns.Dir != path.Join(defaultNetnsRoot, netns.Name) {
 		return &ExecuteInvalidRequestError{Reason: "capsule netns dir is unsafe"}
 	}
+	if netns.Path != path.Join(netns.Dir, capsuleNetnsFileName) {
+		return &ExecuteInvalidRequestError{Reason: "capsule netns path is unsafe"}
+	}
 	return nil
+}
+
+func validProcNetnsPath(value string) bool {
+	const prefix = "/proc/"
+	const suffix = "/ns/net"
+	if value == "" || path.Clean(value) != value || !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, suffix) {
+		return false
+	}
+	pid := strings.TrimSuffix(strings.TrimPrefix(value, prefix), suffix)
+	if pid == "" {
+		return false
+	}
+	for _, r := range pid {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+type capsuleNetnsStepFailure struct {
+	Step string
+	Err  error
+}
+
+func (e *capsuleNetnsStepFailure) Error() string {
+	if e == nil {
+		return "capsule netns step failed"
+	}
+	if e.Err == nil {
+		return e.Step
+	}
+	return e.Step + ": " + e.Err.Error()
+}
+
+func (e *capsuleNetnsStepFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func capsuleNetnsStepError(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &capsuleNetnsStepFailure{Step: step, Err: err}
+}
+
+func capsuleNetnsFailureReason(err error) string {
+	var stepErr *capsuleNetnsStepFailure
+	if errors.As(err, &stepErr) && stepErr != nil {
+		reason := stepErr.Step
+		if errno := sysdeps.ErrnoCode(stepErr.Err); errno != "" {
+			reason += "_" + errno
+		}
+		return "capsule_netns_failed:" + reason
+	}
+	return "capsule_netns_failed:unknown"
 }
 
 func readCapsuleNetnsProof(ctx context.Context, proofPath string) (capsuleNetnsProof, bool) {

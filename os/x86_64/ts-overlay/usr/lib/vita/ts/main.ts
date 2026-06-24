@@ -611,7 +611,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=agentd_connect_failed status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -634,7 +634,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=capsule_preview_failed status=FAILSAFE`);
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(formatOCILimitsFailureMarker());
@@ -649,7 +649,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -690,7 +690,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=registry_config_invalid status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -710,7 +710,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=registry_apply_failed status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -724,7 +724,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     await emitCapsuleExecuteMarkers(agentTransport);
   } else {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
-    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=capsule_fetch_failed status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }

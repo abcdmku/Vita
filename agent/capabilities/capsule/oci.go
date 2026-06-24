@@ -145,9 +145,7 @@ func composeOCITransientUnit(manifest ExecutionManifest) (transientUnit, error) 
 		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
 		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	)
-	if netns != nil {
-		properties = append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
-	}
+	properties = appendCapsuleNetnsProperties(properties, netns)
 	if len(volumes) > 0 {
 		properties = append(properties,
 			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},

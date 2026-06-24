@@ -365,8 +365,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		}
 		netns, err := c.netns.Create(ctx, *unit.NetNS)
 		if err != nil {
-			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=netns_create_failed status=FAILSAFE")
-			return nil, &ExecuteStartError{Code: "capsule_netns_failed", Err: err}
+			reason := capsuleNetnsFailureReason(err)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: err}
 		}
 		unit.NetNS = &netns
 		createdNetns = &netns
@@ -375,7 +376,9 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 	status, err := c.launcher.StartTransientUnit(ctx, unit)
 	if err != nil {
 		code := executeStartFailureCode(manifest, unit, err)
-		if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
+		if createdNetns != nil {
+			code = capsuleNetnsFailureReason(capsuleNetnsStepError("join_unit", err))
+		} else if manifest.PackageClass != executePackageClassOCIService && len(unit.Volumes) > 0 {
 			code = "capsule_volume_start_failed"
 			log.Printf("VITA-CAPSULE-VOLUME-ERROR: reason=%s status=FAILSAFE", code)
 		}
@@ -383,9 +386,22 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 			if cleanupErr := c.netns.Teardown(ctx, *createdNetns); cleanupErr != nil {
 				err = errors.Join(err, cleanupErr)
 			}
-			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=unit_start_failed status=FAILSAFE")
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", code)
 		}
 		return nil, &ExecuteStartError{Code: code, Err: err}
+	}
+	if unit.NetNS != nil {
+		if status.NetworkNamespacePath == "" {
+			limitErr := capsuleNetnsStepError("join_unit", errors.New("systemd did not report a capsule network namespace path"))
+			cleanupErr := errors.Join(
+				stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name),
+				c.netns.Teardown(ctx, *unit.NetNS),
+			)
+			reason := capsuleNetnsFailureReason(limitErr)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
+		}
+		unit.NetNS.Path = status.NetworkNamespacePath
 	}
 
 	var netnsCheck *capsuleNetnsCheck
@@ -395,14 +411,15 @@ func (c *ExecuteCapability) Apply(ctx context.Context, req capabilities.TypedReq
 		if checkErr != nil || checked.Status != capsuleNetnsMeasuredStatusOK || checked.Isolation != capsuleNetnsIsolationEnforced {
 			limitErr := checkErr
 			if limitErr == nil {
-				limitErr = fmt.Errorf("capsule network namespace isolation not enforced")
+				limitErr = capsuleNetnsStepError("check_lo", fmt.Errorf("capsule network namespace isolation not enforced"))
 			}
 			cleanupErr := errors.Join(
 				stopAndUnlinkTransientUnit(ctx, c.launcher, unit.Name),
 				c.netns.Teardown(ctx, *unit.NetNS),
 			)
-			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=netns_isolation_failed status=FAILSAFE")
-			return nil, &ExecuteStartError{Code: "capsule_netns_failed", Err: errors.Join(limitErr, cleanupErr)}
+			reason := capsuleNetnsFailureReason(limitErr)
+			log.Printf("VITA-CAPSULE-NET-NS-ERROR: reason=%s status=FAILSAFE", reason)
+			return nil, &ExecuteStartError{Code: reason, Err: errors.Join(limitErr, cleanupErr)}
 		}
 	}
 
@@ -1352,7 +1369,8 @@ type transientUnit struct {
 }
 
 type transientUnitStatus struct {
-	DynamicUID string
+	DynamicUID           string
+	NetworkNamespacePath string
 }
 
 type transientUnitDiagnostics struct {
@@ -1443,7 +1461,17 @@ func (l systemdRunLauncher) StartTransientUnit(ctx context.Context, unit transie
 		return transientUnitStatus{}, errors.Join(err, cleanupErr)
 	}
 
-	return transientUnitStatus{DynamicUID: uid}, nil
+	netnsPath := ""
+	if unit.NetNS != nil {
+		pid, err := l.mainPID(ctx, unit.Name)
+		if err != nil {
+			cleanupErr := stopAndUnlinkTransientUnit(ctx, l, unit.Name)
+			return transientUnitStatus{}, errors.Join(err, cleanupErr)
+		}
+		netnsPath = path.Join("/proc", pid, "ns/net")
+	}
+
+	return transientUnitStatus{DynamicUID: uid, NetworkNamespacePath: netnsPath}, nil
 }
 
 func (l systemdRunLauncher) startError(ctx context.Context, unit string, cause error) *transientUnitStartError {
@@ -1778,9 +1806,7 @@ func composeTypeScriptTransientUnit(manifest ExecutionManifest) (transientUnit, 
 		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
 		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	)
-	if netns != nil {
-		properties = append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
-	}
+	properties = appendCapsuleNetnsProperties(properties, netns)
 	if len(volumes) > 0 {
 		properties = append(properties,
 			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
@@ -1837,6 +1863,16 @@ func restrictAddressFamilies(networkPolicy *ExecutionNetwork) string {
 		return "AF_UNIX"
 	}
 	return "AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+}
+
+func appendCapsuleNetnsProperties(properties []systemdProperty, netns *capsuleNetns) []systemdProperty {
+	if netns == nil {
+		return properties
+	}
+	if netns.Private {
+		return append(properties, systemdProperty{Name: "PrivateNetwork", Value: "yes"})
+	}
+	return append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
 }
 
 func denoArgv(entrypoint string, volumes []capsulestorage.VolumeMount, networkProofPath string) []string {

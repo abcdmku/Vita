@@ -617,7 +617,8 @@ func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 
 	props := propertyValues(launcher.starts[0].Properties)
 	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6 AF_NETLINK")
-	assertProperty(t, props, "NetworkNamespacePath", launcher.starts[0].NetNS.Path)
+	assertProperty(t, props, "PrivateNetwork", "yes")
+	assertNoProperty(t, props, "NetworkNamespacePath")
 
 	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
@@ -1160,7 +1161,11 @@ func (l *recordingTransientLauncher) StartTransientUnit(ctx context.Context, uni
 	if l.err != nil {
 		return transientUnitStatus{}, l.err
 	}
-	return l.status, nil
+	status := l.status
+	if unit.NetNS != nil && status.NetworkNamespacePath == "" {
+		status.NetworkNamespacePath = "/proc/123/ns/net"
+	}
+	return status, nil
 }
 
 func (l *recordingTransientLauncher) ConfirmOCILimits(ctx context.Context, unit string, limits ExecutionResourceLimits) (OCILimitsStatus, error) {
