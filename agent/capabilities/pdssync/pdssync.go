@@ -40,6 +40,8 @@ const (
 	cidVersion   = 1
 )
 
+const MaxCursor = maxCursor
+
 type SyncState struct {
 	Repo     string `json:"repo"`
 	Cursor   int64  `json:"cursor"`
@@ -599,6 +601,10 @@ func isSupportedDID(value string) bool {
 	return isDIDPlc(value) || isDIDWeb(value)
 }
 
+func IsSupportedDID(value string) bool {
+	return isSupportedDID(value)
+}
+
 func isDIDPlc(value string) bool {
 	if !strings.HasPrefix(value, didPlcPrefix) {
 		return false
@@ -817,6 +823,10 @@ func isSecretFieldName(value string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(value))
 	_, ok := secretFieldNameTokens[normalized]
 	return ok
+}
+
+func IsSecretFieldName(value string) bool {
+	return isSecretFieldName(value)
 }
 
 func allDigits(value string) bool {
