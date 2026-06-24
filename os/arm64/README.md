@@ -13,8 +13,12 @@ The generic ARM64 certification line is Linux 6.18.y LTS, but the Pi 5 profile i
 This slice is a deterministic build plan and structural verification floor:
 
 - `mkosi.conf` builds an aarch64 Debian trixie rootfs from the shared `os/common/mkosi.conf` baseline.
-- `build-root.mjs` plans the root build with `--pull=never`, `--network none`, fixed locale/timezone, fixed `SOURCE_DATE_EPOCH`, the arm64 package allowlist, and Vita TS plus agent overlay hooks.
+- `build-root.mjs` plans the root build with `--pull=never`, `--network none`, fixed locale/timezone, fixed `SOURCE_DATE_EPOCH`, the arm64 package allowlist, and concrete Vita overlays:
+  - shared TS source/service content from `os/x86_64/ts-overlay` because that tree is architecture-independent,
+  - arm64 runtime binaries from `os/arm64/ts-runtime-overlay`, staged by `ts-image.conf`,
+  - arm64 agent service/tmpfiles/sysusers content from `os/arm64/agent-overlay`.
 - `agent-image.conf` plans a native Linux arm64 `vita-agentd` cross-build using `GOARCH=arm64`, `GOOS=linux`, `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, and `-ldflags=-s -w -buildid=`.
+- `ts-image.conf` records the aarch64 Deno and Wasmtime release assets that populate the runtime overlay. The binaries are build artifacts and are not committed.
 
 ## Owner Boot-Verify Gate
 
@@ -23,7 +27,7 @@ No QEMU-aarch64 or real Raspberry Pi 5 boot verification is performed in this sl
 FR-002 remains owner-gated on real Raspberry Pi 5 hardware:
 
 1. Cross-build the arm64 rootfs and native arm64 `vita-agentd`.
-2. Stage the Vita TS runtime overlay and the arm64 agent overlay.
+2. Stage the shared Vita TS source overlay, arm64 Deno/Wasmtime runtime overlay, and arm64 agent overlay.
 3. Flash the image to the Pi 5 target media.
 4. Boot to multi-user.
 5. Assert the Vita TS marker is present and `vita-agentd` is active/running.

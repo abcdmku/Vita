@@ -1,0 +1,26 @@
+# Vita privileged system agent (agentd) -- P1-091 arm64 overlay.
+# Loopback-only control surface on 127.0.0.1:8786. The binary staged at
+# /usr/lib/vita/agentd is cross-built as linux/arm64 by agent-image.conf.
+[Unit]
+Description=Vita system agent
+Documentation=https://vita.local/agent
+# Loopback-only daemon (binds 127.0.0.1): deliberately NOT ordered after network-online.target.
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/vita/agentd
+Restart=on-failure
+RestartSec=5s
+# agentd still runs as UID 0, but its primary group owns /run/vita-agent and
+# agentd.sock so the DynamicUser TS runtime can connect via SupplementaryGroups
+# without making the privileged socket world-accessible.
+Group=vita-agent
+UMask=0007
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TIME
+StateDirectory=vita-agent
+StateDirectoryMode=0700
+RuntimeDirectory=vita-agent
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

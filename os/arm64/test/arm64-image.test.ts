@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, readlink } from "node:fs/promises";
 import test from "node:test";
 
 type VitaOverlay = {
-  readonly name: "ts-overlay" | "agent-overlay";
+  readonly name: "ts-overlay" | "ts-runtime-overlay" | "agent-overlay";
   readonly kind: string;
   readonly relativePath: string;
   readonly containerPath: string;
-  readonly x86Reference?: string;
+  readonly sharedFrom?: string;
   readonly configPath?: string;
   readonly requiredPaths: readonly string[];
 };
@@ -79,12 +79,48 @@ type AgentConfigSummary = {
   };
 };
 
+type RuntimeConfigSummary = {
+  readonly paths: {
+    readonly workRoot: string;
+    readonly overlayRoot: string;
+    readonly configPath: string;
+    readonly sharedSourceOverlay: string;
+  };
+  readonly runtime: {
+    readonly name: string;
+    readonly version: string;
+    readonly asset: string;
+    readonly url: string;
+    readonly sha256: string;
+    readonly archiveMember: string;
+  };
+  readonly wasmtime: {
+    readonly name: string;
+    readonly version: string;
+    readonly asset: string;
+    readonly url: string;
+    readonly sha256: string;
+    readonly archiveMember: string;
+    readonly binary: string;
+    readonly binaryMode: string;
+    readonly binaryOwner: string;
+  };
+  readonly install: {
+    readonly binary: string;
+    readonly binaryMode: string;
+    readonly binaryOwner: string;
+  };
+};
+
 type ParsedConfig = ReadonlyMap<string, ReadonlyMap<string, string>>;
 
 const buildRootModuleUrl = new URL("../build-root.mjs", import.meta.url);
 const agentImageConfigUrl = new URL("../agent-image.conf", import.meta.url);
+const runtimeImageConfigUrl = new URL("../ts-image.conf", import.meta.url);
+const sharedTsOverlayUrl = new URL("../../x86_64/ts-overlay/", import.meta.url);
+const arm64AgentOverlayUrl = new URL("../agent-overlay/", import.meta.url);
 
-test("arm64 plan carries the Vita TS and agent overlays into mkosi", async () => {
+test("arm64 root plan applies real Vita TS source, runtime, and agent extra trees", async () => {
   const buildRoot = await loadBuildRootModule();
   const plan = buildRoot.planRootBuild();
 
@@ -93,17 +129,24 @@ test("arm64 plan carries the Vita TS and agent overlays into mkosi", async () =>
   assert.equal(plan.overlays.required, true);
   assert.deepEqual(
     plan.overlays.extraTrees.map((overlay) => overlay.name),
-    ["ts-overlay", "agent-overlay"],
+    ["ts-overlay", "ts-runtime-overlay", "agent-overlay"],
   );
 
   const tsOverlay = findOverlay(plan, "ts-overlay");
-  assert.equal(tsOverlay.kind, "typescript-runtime-overlay");
-  assert.equal(tsOverlay.relativePath, "os/arm64/ts-overlay");
-  assert.equal(tsOverlay.containerPath, "/work/os/arm64/ts-overlay");
-  assert.equal(tsOverlay.x86Reference, "os/x86_64/ts-overlay");
-  assert.ok(tsOverlay.requiredPaths.includes("/usr/lib/vita/deno"));
+  assert.equal(tsOverlay.kind, "shared-typescript-source-overlay");
+  assert.equal(tsOverlay.relativePath, "os/x86_64/ts-overlay");
+  assert.equal(tsOverlay.containerPath, "/work/os/x86_64/ts-overlay");
+  assert.equal(tsOverlay.sharedFrom, "os/x86_64/ts-overlay");
   assert.ok(tsOverlay.requiredPaths.includes("/usr/lib/vita/ts/main.ts"));
   assert.ok(tsOverlay.requiredPaths.includes("/usr/lib/systemd/system/vita-ts.service"));
+
+  const runtimeOverlay = findOverlay(plan, "ts-runtime-overlay");
+  assert.equal(runtimeOverlay.kind, "arm64-typescript-runtime-overlay");
+  assert.equal(runtimeOverlay.relativePath, "os/arm64/ts-runtime-overlay");
+  assert.equal(runtimeOverlay.containerPath, "/work/os/arm64/ts-runtime-overlay");
+  assert.equal(runtimeOverlay.configPath, "os/arm64/ts-image.conf");
+  assert.ok(runtimeOverlay.requiredPaths.includes("/usr/lib/vita/deno"));
+  assert.ok(runtimeOverlay.requiredPaths.includes("/usr/lib/vita/bin/wasmtime"));
 
   const agentOverlay = findOverlay(plan, "agent-overlay");
   assert.equal(agentOverlay.kind, "privileged-agent-overlay");
@@ -114,8 +157,32 @@ test("arm64 plan carries the Vita TS and agent overlays into mkosi", async () =>
   assert.ok(agentOverlay.requiredPaths.includes("/usr/bin/vita-agentd"));
   assert.ok(agentOverlay.requiredPaths.includes("/usr/lib/systemd/system/vita-agentd.service"));
 
-  assert.ok(plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/ts-overlay"));
+  assert.ok(plan.command.mkosiArgs.includes("--extra-tree=/work/os/x86_64/ts-overlay"));
+  assert.ok(plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/ts-runtime-overlay"));
   assert.ok(plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/agent-overlay"));
+});
+
+test("Vita overlay content exists on disk, not only in build-root metadata", async () => {
+  await assertSharedTsOverlayContent();
+  await assertArm64AgentOverlayContent();
+
+  const runtime = assertArm64RuntimeConfig(await readFile(runtimeImageConfigUrl, "utf8"));
+  assert.deepEqual(runtime.paths, {
+    workRoot: "/work",
+    overlayRoot: "/work/os/arm64/ts-runtime-overlay",
+    configPath: "/work/os/arm64/ts-image.conf",
+    sharedSourceOverlay: "/work/os/x86_64/ts-overlay",
+  });
+  assert.equal(runtime.runtime.asset, "deno-aarch64-unknown-linux-gnu.zip");
+  assert.equal(
+    runtime.runtime.url,
+    "https://github.com/denoland/deno/releases/download/v2.8.3/deno-aarch64-unknown-linux-gnu.zip",
+  );
+  assert.equal(runtime.runtime.archiveMember, "deno");
+  assert.equal(runtime.install.binary, "/usr/lib/vita/deno");
+  assert.equal(runtime.install.binaryMode, "0755");
+  assert.equal(runtime.wasmtime.asset, "wasmtime-v36.0.11-aarch64-linux.tar.xz");
+  assert.equal(runtime.wasmtime.binary, "/usr/lib/vita/bin/wasmtime");
 });
 
 test("arm64 agent-image.conf pins the cross-build envelope and install surface", async () => {
@@ -231,19 +298,77 @@ test("bare-Debian or relabeled-x86 root plans fail the Vita overlay assertions",
           extraTrees: [],
         },
       }),
-    /must carry exactly the TS and agent overlays/u,
+    /must carry the shared TS, arm64 runtime, and agent overlays/u,
   );
   assert.throws(
     () =>
       assertVitaOverlaysPresent({
         ...realPlan,
         command: {
-          mkosiArgs: realPlan.command.mkosiArgs.filter((arg) => !arg.includes("agent-overlay")),
+          mkosiArgs: realPlan.command.mkosiArgs.filter((arg) => !arg.includes("ts-runtime-overlay")),
         },
       }),
-    /mkosi args must include agent-overlay extra-tree/u,
+    /mkosi args must include arm64 runtime extra-tree/u,
+  );
+  assert.throws(
+    () =>
+      assertVitaOverlaysPresent({
+        ...realPlan,
+        overlays: {
+          appliedBy: "mkosi --extra-tree",
+          required: true,
+          extraTrees: realPlan.overlays.extraTrees.map((overlay) =>
+            overlay.name === "ts-overlay"
+              ? { ...overlay, relativePath: "os/arm64/ts-overlay", containerPath: "/work/os/arm64/ts-overlay" }
+              : overlay,
+          ),
+        },
+      }),
+    /shared TS overlay must come from os\/x86_64\/ts-overlay/u,
   );
 });
+
+async function assertSharedTsOverlayContent(): Promise<void> {
+  const mainTs = await readFile(new URL("usr/lib/vita/ts/main.ts", sharedTsOverlayUrl), "utf8");
+  assert.match(mainTs, /const TS_MARKER = "VITA-TS";/u);
+  assert.match(mainTs, /AGENTD_SOCKET_PATH = "\/run\/vita-agent\/agentd\.sock"/u);
+
+  const service = await readFile(new URL("usr/lib/systemd/system/vita-ts.service", sharedTsOverlayUrl), "utf8");
+  assert.match(service, /ExecStart=\/usr\/lib\/vita\/deno run/u);
+  assert.match(service, /After=vita-agentd\.service/u);
+  assert.match(service, /DynamicUser=yes/u);
+
+  const enabledTarget = await readLinkTargetOrFile(
+    new URL("usr/lib/systemd/system/multi-user.target.wants/vita-ts.service", sharedTsOverlayUrl),
+  );
+  assert.equal(enabledTarget, "../vita-ts.service");
+}
+
+async function assertArm64AgentOverlayContent(): Promise<void> {
+  const service = await readFile(new URL("usr/lib/systemd/system/vita-agentd.service", arm64AgentOverlayUrl), "utf8");
+  assert.match(service, /ExecStart=\/usr\/lib\/vita\/agentd/u);
+  assert.match(service, /Group=vita-agent/u);
+  assert.match(service, /AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TIME/u);
+
+  const enabledTarget = await readLinkTargetOrFile(
+    new URL("usr/lib/systemd/system/multi-user.target.wants/vita-agentd.service", arm64AgentOverlayUrl),
+  );
+  assert.equal(enabledTarget, "../vita-agentd.service");
+
+  const sysusers = await readFile(new URL("usr/lib/sysusers.d/vita-agent.conf", arm64AgentOverlayUrl), "utf8");
+  assert.match(sysusers, /^g vita-agent - - -$/mu);
+
+  const tmpfiles = await readFile(new URL("usr/lib/tmpfiles.d/vita-agent.conf", arm64AgentOverlayUrl), "utf8");
+  assert.match(tmpfiles, /^d \/var\/lib\/vita-agent 0700 root root -$/mu);
+}
+
+async function readLinkTargetOrFile(url: URL): Promise<string> {
+  const stats = await lstat(url);
+  if (stats.isSymbolicLink()) {
+    return readlink(url);
+  }
+  return (await readFile(url, "utf8")).trim();
+}
 
 async function readAgentConfigText(): Promise<string> {
   return readFile(agentImageConfigUrl, "utf8");
@@ -263,8 +388,67 @@ async function loadBuildRootModule(): Promise<BuildRootModule> {
   };
 }
 
+function assertArm64RuntimeConfig(configText: string): RuntimeConfigSummary {
+  const config = parseKeyValueConfig(configText, "ts-image.conf");
+  const summary = {
+    paths: {
+      workRoot: getSetting(config, "Paths", "WorkRoot"),
+      overlayRoot: getSetting(config, "Paths", "OverlayRoot"),
+      configPath: getSetting(config, "Paths", "Config"),
+      sharedSourceOverlay: getSetting(config, "Paths", "SharedSourceOverlay"),
+    },
+    runtime: {
+      name: getSetting(config, "Runtime", "Name"),
+      version: getSetting(config, "Runtime", "Version"),
+      asset: getSetting(config, "Runtime", "Asset"),
+      url: getSetting(config, "Runtime", "Url"),
+      sha256: getSetting(config, "Runtime", "Sha256"),
+      archiveMember: getSetting(config, "Runtime", "ArchiveMember"),
+    },
+    wasmtime: {
+      name: getSetting(config, "Wasmtime", "Name"),
+      version: getSetting(config, "Wasmtime", "Version"),
+      asset: getSetting(config, "Wasmtime", "Asset"),
+      url: getSetting(config, "Wasmtime", "Url"),
+      sha256: getSetting(config, "Wasmtime", "Sha256"),
+      archiveMember: getSetting(config, "Wasmtime", "ArchiveMember"),
+      binary: getSetting(config, "Wasmtime", "Binary"),
+      binaryMode: getSetting(config, "Wasmtime", "BinaryMode"),
+      binaryOwner: getSetting(config, "Wasmtime", "BinaryOwner"),
+    },
+    install: {
+      binary: getSetting(config, "Install", "Binary"),
+      binaryMode: getSetting(config, "Install", "BinaryMode"),
+      binaryOwner: getSetting(config, "Install", "BinaryOwner"),
+    },
+  } satisfies RuntimeConfigSummary;
+
+  assertExpected(summary.paths.workRoot, "/work", "Paths.WorkRoot");
+  assertExpected(summary.paths.overlayRoot, "/work/os/arm64/ts-runtime-overlay", "Paths.OverlayRoot");
+  assertExpected(summary.paths.configPath, "/work/os/arm64/ts-image.conf", "Paths.Config");
+  assertExpected(summary.paths.sharedSourceOverlay, "/work/os/x86_64/ts-overlay", "Paths.SharedSourceOverlay");
+  assertExpected(summary.runtime.name, "deno", "Runtime.Name");
+  assertExpected(summary.runtime.version, "2.8.3", "Runtime.Version");
+  assertExpected(summary.runtime.asset, "deno-aarch64-unknown-linux-gnu.zip", "Runtime.Asset");
+  assertExpected(summary.runtime.archiveMember, "deno", "Runtime.ArchiveMember");
+  assertExpected(summary.wasmtime.name, "wasmtime", "Wasmtime.Name");
+  assertExpected(summary.wasmtime.version, "36.0.11", "Wasmtime.Version");
+  assertExpected(summary.wasmtime.asset, "wasmtime-v36.0.11-aarch64-linux.tar.xz", "Wasmtime.Asset");
+  assertExpected(summary.wasmtime.archiveMember, "wasmtime-v36.0.11-aarch64-linux/wasmtime", "Wasmtime.ArchiveMember");
+  assertExpected(summary.wasmtime.binary, "/usr/lib/vita/bin/wasmtime", "Wasmtime.Binary");
+  assertExpected(summary.wasmtime.binaryMode, "0755", "Wasmtime.BinaryMode");
+  assertExpected(summary.wasmtime.binaryOwner, "root:root", "Wasmtime.BinaryOwner");
+  assertExpected(summary.install.binary, "/usr/lib/vita/deno", "Install.Binary");
+  assertExpected(summary.install.binaryMode, "0755", "Install.BinaryMode");
+  assertExpected(summary.install.binaryOwner, "root:root", "Install.BinaryOwner");
+  assert.ok(summary.runtime.sha256.length > 0, "Runtime.Sha256 must be present");
+  assert.ok(summary.wasmtime.sha256.length > 0, "Wasmtime.Sha256 must be present");
+
+  return summary;
+}
+
 function assertArm64AgentConfig(configText: string): AgentConfigSummary {
-  const config = parseKeyValueConfig(configText);
+  const config = parseKeyValueConfig(configText, "agent-image.conf");
   const summary = {
     paths: {
       workRoot: getSetting(config, "Paths", "WorkRoot"),
@@ -389,12 +573,26 @@ function buildAgentdArgs(summary: AgentConfigSummary): readonly string[] {
 }
 
 function assertVitaOverlaysPresent(plan: RootBuildPlan): void {
-  assert.equal(plan.overlays.extraTrees.length, 2, "arm64 plan must carry exactly the TS and agent overlays");
-  findOverlay(plan, "ts-overlay");
+  assert.equal(plan.overlays.extraTrees.length, 3, "arm64 plan must carry the shared TS, arm64 runtime, and agent overlays");
+  const tsOverlay = findOverlay(plan, "ts-overlay");
+  if (tsOverlay.relativePath !== "os/x86_64/ts-overlay" || tsOverlay.containerPath !== "/work/os/x86_64/ts-overlay") {
+    assert.fail("shared TS overlay must come from os/x86_64/ts-overlay");
+  }
+  const runtimeOverlay = findOverlay(plan, "ts-runtime-overlay");
+  if (
+    runtimeOverlay.relativePath !== "os/arm64/ts-runtime-overlay" ||
+    runtimeOverlay.containerPath !== "/work/os/arm64/ts-runtime-overlay"
+  ) {
+    assert.fail("arm64 runtime overlay must come from os/arm64/ts-runtime-overlay");
+  }
   findOverlay(plan, "agent-overlay");
   assert.ok(
-    plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/ts-overlay"),
-    "mkosi args must include ts-overlay extra-tree",
+    plan.command.mkosiArgs.includes("--extra-tree=/work/os/x86_64/ts-overlay"),
+    "mkosi args must include shared TS extra-tree",
+  );
+  assert.ok(
+    plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/ts-runtime-overlay"),
+    "mkosi args must include arm64 runtime extra-tree",
   );
   assert.ok(
     plan.command.mkosiArgs.includes("--extra-tree=/work/os/arm64/agent-overlay"),
@@ -411,7 +609,7 @@ function findOverlay(plan: RootBuildPlan, name: VitaOverlay["name"]): VitaOverla
   assert.fail(`${name} must be declared`);
 }
 
-function parseKeyValueConfig(text: string): ParsedConfig {
+function parseKeyValueConfig(text: string, label: string): ParsedConfig {
   const sections = new Map<string, Map<string, string>>();
   let currentSection = "";
   const lines = text.replaceAll("\r\n", "\n").split("\n");
@@ -434,7 +632,7 @@ function parseKeyValueConfig(text: string): ParsedConfig {
         assert.fail("section name must exist");
       }
       if (sections.has(sectionName)) {
-        assert.fail(`agent-image.conf:${lineNumber} repeats section [${sectionName}]`);
+        assert.fail(`${label}:${lineNumber} repeats section [${sectionName}]`);
       }
       sections.set(sectionName, new Map<string, string>());
       currentSection = sectionName;
@@ -442,25 +640,25 @@ function parseKeyValueConfig(text: string): ParsedConfig {
     }
 
     if (currentSection === "") {
-      assert.fail(`agent-image.conf:${lineNumber} setting appears before a section`);
+      assert.fail(`${label}:${lineNumber} setting appears before a section`);
     }
     if (/^\s/u.test(rawLine)) {
-      assert.fail(`agent-image.conf:${lineNumber} must not use continuation lines`);
+      assert.fail(`${label}:${lineNumber} must not use continuation lines`);
     }
 
     const equalsIndex = trimmed.indexOf("=");
     if (equalsIndex <= 0) {
-      assert.fail(`agent-image.conf:${lineNumber} must be a Key=Value setting`);
+      assert.fail(`${label}:${lineNumber} must be a Key=Value setting`);
     }
 
     const key = trimmed.slice(0, equalsIndex).trim();
     const value = trimmed.slice(equalsIndex + 1).trim();
     const section = sections.get(currentSection);
     if (section === undefined) {
-      assert.fail(`agent-image.conf:${lineNumber} section must exist`);
+      assert.fail(`${label}:${lineNumber} section must exist`);
     }
     if (section.has(key)) {
-      assert.fail(`agent-image.conf:${lineNumber} repeats setting ${currentSection}.${key}`);
+      assert.fail(`${label}:${lineNumber} repeats setting ${currentSection}.${key}`);
     }
     section.set(key, value);
   }
@@ -471,11 +669,11 @@ function parseKeyValueConfig(text: string): ParsedConfig {
 function getSetting(config: ParsedConfig, sectionName: string, key: string): string {
   const section = config.get(sectionName);
   if (section === undefined) {
-    assert.fail(`agent-image.conf missing section [${sectionName}]`);
+    assert.fail(`config missing section [${sectionName}]`);
   }
   const value = section.get(key);
   if (value === undefined || value.length === 0) {
-    assert.fail(`agent-image.conf missing setting ${sectionName}.${key}`);
+    assert.fail(`config missing setting ${sectionName}.${key}`);
   }
   return value;
 }

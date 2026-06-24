@@ -20,11 +20,11 @@ type ConfigLayer = {
 };
 
 type VitaOverlay = {
-  readonly name: "ts-overlay" | "agent-overlay";
+  readonly name: "ts-overlay" | "ts-runtime-overlay" | "agent-overlay";
   readonly kind: string;
   readonly relativePath: string;
   readonly containerPath: string;
-  readonly x86Reference?: string;
+  readonly sharedFrom?: string;
   readonly configPath?: string;
   readonly requiredPaths: readonly string[];
 };
@@ -161,7 +161,8 @@ test("planRootBuild resolves both mkosi config layers deterministically", async 
     "--force",
     "--output-dir",
     "/out",
-    "--extra-tree=/work/os/arm64/ts-overlay",
+    "--extra-tree=/work/os/x86_64/ts-overlay",
+    "--extra-tree=/work/os/arm64/ts-runtime-overlay",
     "--extra-tree=/work/os/arm64/agent-overlay",
   ]);
 });

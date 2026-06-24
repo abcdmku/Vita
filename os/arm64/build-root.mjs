@@ -23,14 +23,25 @@ export const DEFAULT_PACKAGE_ALLOWLIST_ARM64 = Object.freeze(
 export const DEFAULT_VITA_OVERLAYS_ARM64 = deepFreeze([
   {
     name: "ts-overlay",
-    kind: "typescript-runtime-overlay",
-    relativePath: "os/arm64/ts-overlay",
-    containerPath: "/work/os/arm64/ts-overlay",
-    x86Reference: "os/x86_64/ts-overlay",
+    kind: "shared-typescript-source-overlay",
+    relativePath: "os/x86_64/ts-overlay",
+    containerPath: "/work/os/x86_64/ts-overlay",
+    sharedFrom: "os/x86_64/ts-overlay",
     requiredPaths: [
-      "/usr/lib/vita/deno",
       "/usr/lib/vita/ts/main.ts",
       "/usr/lib/systemd/system/vita-ts.service",
+      "/usr/lib/systemd/system/multi-user.target.wants/vita-ts.service",
+    ],
+  },
+  {
+    name: "ts-runtime-overlay",
+    kind: "arm64-typescript-runtime-overlay",
+    relativePath: "os/arm64/ts-runtime-overlay",
+    containerPath: "/work/os/arm64/ts-runtime-overlay",
+    configPath: "os/arm64/ts-image.conf",
+    requiredPaths: [
+      "/usr/lib/vita/deno",
+      "/usr/lib/vita/bin/wasmtime",
     ],
   },
   {
@@ -43,6 +54,8 @@ export const DEFAULT_VITA_OVERLAYS_ARM64 = deepFreeze([
       "/usr/lib/vita/agentd",
       "/usr/bin/vita-agentd",
       "/usr/lib/systemd/system/vita-agentd.service",
+      "/usr/lib/systemd/system/multi-user.target.wants/vita-agentd.service",
+      "/usr/lib/sysusers.d/vita-agent.conf",
       "/usr/lib/tmpfiles.d/vita-agent.conf",
     ],
   },
