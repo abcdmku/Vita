@@ -76,6 +76,9 @@ const CAPSULE_WASM_EXECUTE_ERROR_MARKER = "VITA-CAPSULE-WASM-EXECUTE-ERROR";
 const CAPSULE_OCI_LIMITS_MARKER = "VITA-CAPSULE-OCI-LIMITS";
 const CAPSULE_NET_PARSE_MARKER = "VITA-CAPSULE-NET-PARSE";
 const CAPSULE_NET_REJECT_MARKER = "VITA-CAPSULE-NET-REJECT";
+const CAPSULE_NET_NS_MARKER = "VITA-CAPSULE-NET-NS";
+const CAPSULE_NET_NS_REJECT_MARKER = "VITA-CAPSULE-NET-NS-REJECT";
+const CAPSULE_NET_NS_ERROR_MARKER = "VITA-CAPSULE-NET-NS-ERROR";
 const CAPSULE_VOLUME_MARKER = "VITA-CAPSULE-VOLUME";
 const CAPSULE_VOLUME_ERROR_MARKER = "VITA-CAPSULE-VOLUME-ERROR";
 const CAPSULE_HEALTH_MARKER = "VITA-CAPSULE-HEALTH";
@@ -608,6 +611,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -630,6 +634,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
       emit(formatOCILimitsFailureMarker());
@@ -644,6 +649,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -684,6 +690,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -703,6 +710,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_FETCH_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_OCI_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_WASM_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatOCILimitsFailureMarker());
@@ -716,6 +724,7 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
     await emitCapsuleExecuteMarkers(agentTransport);
   } else {
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
   }
@@ -1002,6 +1011,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
     if (result.outcome !== "committed") {
       const reason = agentApplyResultReason(result);
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
@@ -1012,6 +1022,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     if (!state.ok) {
       emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=state_unreadable status=FAILSAFE`);
       emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
       await emitForcedCapsuleExecuteRejectMarker(client);
@@ -1020,6 +1031,12 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
 
     emit(formatCapsuleExecutedMarker(state.status));
     emit(formatCapsuleNetworkParseMarker(state.status));
+    const netnsState = await readCapsuleNetnsState(client, state.status.id);
+    if (netnsState.ok) {
+      emit(formatCapsuleNetnsMarker(netnsState.status));
+    } else {
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=netns_unverified status=FAILSAFE`);
+    }
     const volume = capsuleVolumeStatus(state.status);
     if (volume === undefined) {
       emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=volume_state_missing status=FAILSAFE`);
@@ -1036,6 +1053,7 @@ async function emitCapsuleExecuteMarkers(agentTransport: AgentTransport): Promis
   } catch (cause) {
     const reason = agentClientErrorReason(cause, "transport_failed");
     emit(`${CAPSULE_EXECUTE_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
+    emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_VOLUME_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
     emit(`${CAPSULE_HEALTH_ERROR_MARKER}: status=FAILSAFE`);
     return;
@@ -1052,14 +1070,18 @@ async function emitForcedCapsuleNetworkRejectMarker(
     const registryResult = await client.apply(CAPSULE_NET_REGISTRY_PLAN);
 
     if (registryResult.outcome !== "committed") {
-      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${agentApplyResultReason(registryResult)} status=FAILSAFE`);
+      const reason = agentApplyResultReason(registryResult);
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=FAILSAFE`);
+      emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=${reason} status=FAILSAFE`);
       return;
     }
 
     const result = await client.apply(FORCED_INVALID_CAPSULE_NET_EXECUTE_PLAN);
 
     if (result.outcome !== "committed") {
-      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${agentApplyResultReason(result)} status=OK`);
+      const reason = agentApplyResultReason(result);
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=OK`);
+      emit(`${CAPSULE_NET_NS_REJECT_MARKER}: reason=${reason} status=OK`);
       return;
     }
   } catch (cause) {
@@ -1070,12 +1092,15 @@ async function emitForcedCapsuleNetworkRejectMarker(
       cause.status >= 400 &&
       cause.status <= 499
     ) {
-      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${markerToken(cause.agentError.code)} status=OK`);
+      const reason = markerToken(cause.agentError.code);
+      emit(`${CAPSULE_NET_REJECT_MARKER}: reason=${reason} status=OK`);
+      emit(`${CAPSULE_NET_NS_REJECT_MARKER}: reason=${reason} status=OK`);
       return;
     }
   }
 
   emit(`${CAPSULE_NET_REJECT_MARKER}: reason=not_rejected status=FAILSAFE`);
+  emit(`${CAPSULE_NET_NS_ERROR_MARKER}: reason=not_rejected status=FAILSAFE`);
 }
 
 async function emitForcedCapsuleExecuteRejectMarker(
@@ -1298,6 +1323,9 @@ interface CapsuleExecuteStatus {
 interface CapsuleNetworkStatus {
   readonly ingress: number;
   readonly egress: number;
+  readonly isolation?: "enforced";
+  readonly loopback?: "OK";
+  readonly netns?: string;
 }
 
 interface CapsuleVolumeStatus {
@@ -1406,14 +1434,24 @@ function parseCapsuleNetworkStatus(value: unknown): CapsuleNetworkStatus | undef
 
   const ingress = readNonNegativeIntegerField(value, "ingress");
   const egress = readNonNegativeIntegerField(value, "egress");
+  const netns = readOptionalStringField(value, "netns");
+  const loopback = readOptionalStringField(value, "loopback");
+  const isolation = readOptionalStringField(value, "isolation");
 
   if (ingress === undefined || egress === undefined) {
     return undefined;
   }
 
-  return {
+  const status = {
     egress,
     ingress,
+  } satisfies CapsuleNetworkStatus;
+
+  return {
+    ...status,
+    ...(isolation === "enforced" ? { isolation } : {}),
+    ...(loopback === "OK" ? { loopback } : {}),
+    ...(netns === undefined ? {} : { netns }),
   };
 }
 
@@ -1532,6 +1570,27 @@ function formatCapsuleNetworkParseMarker(status: CapsuleExecuteStatus): string {
     `id=${status.id} ` +
     `egress=${status.network.egress} ` +
     `ingress=${status.network.ingress} ` +
+    "status=OK"
+  );
+}
+
+function formatCapsuleNetnsMarker(status: CapsuleExecuteStatus): string {
+  const network = status.network;
+  if (
+    network === undefined ||
+    network.netns === undefined ||
+    network.loopback !== "OK" ||
+    network.isolation !== "enforced"
+  ) {
+    return `${CAPSULE_NET_NS_ERROR_MARKER}: reason=netns_unverified status=FAILSAFE`;
+  }
+
+  return (
+    `${CAPSULE_NET_NS_MARKER}: ` +
+    `id=${status.id} ` +
+    `netns=${markerToken(network.netns)} ` +
+    `loopback=${network.loopback} ` +
+    `isolation=${network.isolation} ` +
     "status=OK"
   );
 }
@@ -1687,6 +1746,37 @@ async function readCapsuleHealthState(
   }
 }
 
+async function readCapsuleNetnsState(
+  client: Pick<AgentClient, "getState">,
+  id: string,
+): Promise<CapsuleExecuteReadResult> {
+  const deadline = Date.now() + 5000;
+  let last: CapsuleExecuteReadResult = { ok: false };
+
+  while (Date.now() <= deadline) {
+    last = parseCapsuleExecuteState(await client.getState(CAPSULE_EXECUTE_CAPABILITY));
+    if (
+      last.ok &&
+      last.status.id === id &&
+      last.status.network !== undefined &&
+      last.status.network.netns !== undefined &&
+      last.status.network.loopback === "OK" &&
+      last.status.network.isolation === "enforced"
+    ) {
+      return last;
+    }
+    await delay(250);
+  }
+
+  return last;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function parseCapsuleHealthState(value: unknown, id: string): CapsuleHealthReadResult {
   if (!isJsonObject(value)) {
     return { ok: false };
@@ -1763,6 +1853,22 @@ function readStringField(
 ): string | undefined {
   const child = value[key];
 
+  if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
+}
+
+function readOptionalStringField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const child = value[key];
+
+  if (child === undefined) {
+    return undefined;
+  }
   if (typeof child !== "string" || child.length === 0) {
     return undefined;
   }

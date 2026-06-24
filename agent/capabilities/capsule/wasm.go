@@ -61,6 +61,11 @@ func composeWasmTransientUnit(manifest ExecutionManifest) (transientUnit, error)
 	}
 
 	unitName := capsuleUnitName(manifest.ID)
+	var netns *capsuleNetns
+	if manifest.Network != nil {
+		unitNetns := capsuleNetnsForUnit(unitName, "")
+		netns = &unitNetns
+	}
 	limits := manifest.ResourceLimits
 	volumes, err := capsulestorage.SetupVolumes(manifest.ID, manifest.Data.Volumes)
 	if err != nil {
@@ -72,6 +77,9 @@ func composeWasmTransientUnit(manifest ExecutionManifest) (transientUnit, error)
 		systemdProperty{Name: "CPUQuota", Value: cpuQuota(limits.CPUCores)},
 		systemdProperty{Name: "TasksMax", Value: strconv.FormatInt(limits.TasksMax, 10)},
 	)
+	if netns != nil {
+		properties = append(properties, systemdProperty{Name: "NetworkNamespacePath", Value: netns.Path})
+	}
 	if len(volumes) > 0 {
 		properties = append(properties,
 			systemdProperty{Name: "StateDirectory", Value: stateDirectories(volumes)},
@@ -84,6 +92,7 @@ func composeWasmTransientUnit(manifest ExecutionManifest) (transientUnit, error)
 		Argv:       wasmtimeArgv(module),
 		Properties: properties,
 		Volumes:    volumes,
+		NetNS:      netns,
 	}, nil
 }
 

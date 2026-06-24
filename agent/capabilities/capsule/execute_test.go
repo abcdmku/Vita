@@ -578,7 +578,7 @@ func TestExecutionManifestAbsentNetworkIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestExecuteWithNetworkGrantsReportsCountsWithoutWideningSandbox(t *testing.T) {
+func TestExecuteWithNetworkGrantsReportsCountsAndWidensSandbox(t *testing.T) {
 	ctx := context.Background()
 	entry := executeEntry()
 	manifest := executeManifest(entry)
@@ -587,12 +587,21 @@ func TestExecuteWithNetworkGrantsReportsCountsWithoutWideningSandbox(t *testing.
 	launcher := &recordingTransientLauncher{
 		status: transientUnitStatus{DynamicUID: "61408"},
 	}
-	capability := newExecuteCapability(
+	netns := &recordingNetnsManager{
+		check: &capsuleNetnsCheck{
+			Interfaces: []string{"lo"},
+			Isolation:  capsuleNetnsIsolationEnforced,
+			Status:     capsuleNetnsMeasuredStatusOK,
+		},
+	}
+	capability := newExecuteCapabilityWithNetns(
 		fs,
 		memoryExecutionManifestStore{
 			entry.ID: manifest,
 		},
 		launcher,
+		netns,
+		nil,
 	)
 
 	undo, err := capability.Apply(ctx, executeApply(entry))
@@ -607,7 +616,8 @@ func TestExecuteWithNetworkGrantsReportsCountsWithoutWideningSandbox(t *testing.
 	}
 
 	props := propertyValues(launcher.starts[0].Properties)
-	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX")
+	assertProperty(t, props, "RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6 AF_NETLINK")
+	assertProperty(t, props, "NetworkNamespacePath", launcher.starts[0].NetNS.Path)
 
 	response, err := capability.Handle(ctx, ExecuteReadRequest{})
 	if err != nil {
@@ -619,6 +629,15 @@ func TestExecuteWithNetworkGrantsReportsCountsWithoutWideningSandbox(t *testing.
 	}
 	if readResponse.Last.Network.Ingress != 1 || readResponse.Last.Network.Egress != 1 {
 		t.Fatalf("Last.Network = %#v, want ingress=1 egress=1", readResponse.Last.Network)
+	}
+	if readResponse.Last.Network.NetNS != launcher.starts[0].NetNS.Name || readResponse.Last.Network.Isolation != capsuleNetnsIsolationEnforced {
+		t.Fatalf("Last.Network = %#v, want netns name and enforced isolation", readResponse.Last.Network)
+	}
+	if err := undo.Undo(ctx); err != nil {
+		t.Fatalf("Undo returned error: %v", err)
+	}
+	if len(netns.tornDown) != 1 || netns.tornDown[0].Name != launcher.starts[0].NetNS.Name {
+		t.Fatalf("netns teardowns = %#v, want started netns", netns.tornDown)
 	}
 }
 
@@ -1302,11 +1321,17 @@ func cloneTransientUnit(unit transientUnit) transientUnit {
 	argv := append([]string(nil), unit.Argv...)
 	properties := append([]systemdProperty(nil), unit.Properties...)
 	volumes := append([]capsulestorage.VolumeMount(nil), unit.Volumes...)
+	var netns *capsuleNetns
+	if unit.NetNS != nil {
+		cloned := *unit.NetNS
+		netns = &cloned
+	}
 	return transientUnit{
 		Name:       unit.Name,
 		Argv:       argv,
 		Properties: properties,
 		Volumes:    volumes,
+		NetNS:      netns,
 	}
 }
 
