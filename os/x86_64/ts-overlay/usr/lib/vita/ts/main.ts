@@ -31,6 +31,11 @@ import {
   rejectInvalidPdsSyncStateWrite,
 } from "./vita/pds-write.ts";
 import {
+  applyAndReadPdsRepoCreate,
+  formatPdsRepoMarker,
+  rejectInvalidPdsRepoCreate,
+} from "./vita/pds-repo.ts";
+import {
   createDenoUnixSocketAgentTransport,
   createDenoUnixSocketApplyAgentTransport,
 } from "./vita/unix-socket-transport.ts";
@@ -612,6 +617,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatPdsRepoMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -666,6 +672,9 @@ async function emitAgentdConnectMarker(): Promise<void> {
   await emitPdsReadMarker(client);
   if (await emitPdsWriteMarkers(agentTransport)) {
     await emitPdsReadMarker(client);
+    await emitPdsRepoMarkers(agentTransport, client);
+  } else {
+    emit(formatPdsRepoMarker({ ok: false, reason: "PDS sync-state write failed" }));
   }
 }
 
@@ -873,6 +882,26 @@ async function emitPdsWriteMarkers(agentTransport: AgentTransport): Promise<bool
   const rejected = await rejectInvalidPdsSyncStateWrite(client);
   emit(formatPdsSyncStateWriteMarker(rejected));
   return true;
+}
+
+async function emitPdsRepoMarkers(
+  agentTransport: AgentTransport,
+  client: Pick<AgentClient, "apply" | "getState">,
+): Promise<void> {
+  const result = await applyAndReadPdsRepoCreate(
+    CAPABILITY_REGISTRY,
+    createApplyNodeTransport(agentTransport),
+    client,
+  );
+
+  emit(formatPdsRepoMarker(result));
+
+  if (!result.ok || result.outcome !== "committed") {
+    return;
+  }
+
+  const rejected = await rejectInvalidPdsRepoCreate(client);
+  emit(formatPdsRepoMarker(rejected));
 }
 
 async function emitForcedCapsuleRejectMarker(agentTransport: AgentTransport): Promise<void> {
