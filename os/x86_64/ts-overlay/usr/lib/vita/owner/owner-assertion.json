@@ -1,0 +1,11 @@
+{
+  "action": "vita.owner.test-action",
+  "challenge": "8bTshBRmacmSvLeFRGJifA-_GfDc8mi3saTWFCxSIGE",
+  "assertion": {
+    "credentialId": "nZWYv8t4X7tiL7rYujaDiwAUxKqgmIV37hHNg90kaCM",
+    "authenticatorData": "_dREwJlOJ18sYMBuO28fIkg-KkIFPaNoRWl8Ak3TyEgBAAAAAQ",
+    "clientDataJSON": "eyJjaGFsbGVuZ2UiOiI4YlRzaEJSbWFjbVN2TGVGUkdKaWZBLV9HZkRjOG1pM3NhVFdGQ3hTSUdFIiwib3JpZ2luIjoiaHR0cHM6Ly9vd25lci5leGFtcGxlLmNvbSIsInR5cGUiOiJ3ZWJhdXRobi5nZXQifQ",
+    "signature": "MEUCIDwN--GjaJr2D-lYhJJlSS0uUFEQK50g0J--Mmp4_CWZAiEAu_m1VUukExnL1fqogi5enZzJGkvX6xEi_IVzkiquG6A",
+    "action": "vita.owner.test-action"
+  }
+}

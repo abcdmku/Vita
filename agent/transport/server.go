@@ -29,6 +29,7 @@ import (
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
 	"github.com/vita/agent/capabilities/nodeconfig"
+	"github.com/vita/agent/capabilities/owner"
 	"github.com/vita/agent/capabilities/pdsrepo"
 	"github.com/vita/agent/capabilities/pdssync"
 	"github.com/vita/agent/capabilities/services"
@@ -625,6 +626,7 @@ func DefaultRequestDecoders() map[string]RequestDecoder {
 		hostname.Name:         DecodeJSONRequest[hostname.ApplyRequest],
 		identity.Name:         DecodeJSONRequest[identity.ApplyRequest],
 		network.Name:          DecodeJSONRequest[network.ApplyRequest],
+		owner.Name:            owner.DecodeRequest,
 		pdsrepo.Name:          DecodeJSONRequest[pdsrepo.ApplyRequest],
 		pdssync.Name:          DecodeJSONRequest[pdssync.ApplyRequest],
 		services.Name:         DecodeJSONRequest[services.ApplyRequest],
@@ -648,6 +650,7 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		hostname.Name:         func() capabilities.TypedRequest { return hostname.ReadRequest{} },
 		identity.Name:         func() capabilities.TypedRequest { return identity.ReadRequest{} },
 		network.Name:          func() capabilities.TypedRequest { return network.ReadRequest{} },
+		owner.Name:            func() capabilities.TypedRequest { return owner.ReadRequest{} },
 		pdsrepo.Name:          func() capabilities.TypedRequest { return pdsrepo.ReadRequest{} },
 		pdssync.Name:          func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
 		services.Name:         func() capabilities.TypedRequest { return services.ReadRequest{} },
@@ -693,6 +696,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleExport(w, r)
 	case "/audit":
 		h.handleAudit(w, r)
+	case "/challenge/owner.identity":
+		h.handleOwnerChallenge(w, r)
 	case "/read":
 		h.handleRead(w, r, "")
 	default:
@@ -826,6 +831,39 @@ func (h *handler) readExportFile(ctx context.Context, grant string, path string)
 		return nil, &exportcap.BundleError{Code: "integrity_mismatch", Message: "export content read returned malformed data"}
 	}
 	return content, nil
+}
+
+func (h *handler) handleOwnerChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	if action == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "action is required")
+		return
+	}
+
+	capability, ok := h.registry.Lookup(owner.Name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown_capability", fmt.Sprintf("unknown capability %q", owner.Name))
+		return
+	}
+	challenger, ok := capability.(interface {
+		Challenge(string) (owner.ChallengeTicket, error)
+	})
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "unsupported_request_type", fmt.Sprintf("capability %q cannot issue challenges", owner.Name))
+		return
+	}
+
+	challenge, err := challenger.Challenge(action)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, challenge)
 }
 
 func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string) {

@@ -162,8 +162,15 @@ const FILES_SHARED_MARKER = "VITA-FILES-SHARED";
 const FILES_SHARED_REJECT_MARKER = "VITA-FILES-SHARED-REJECT";
 const FILES_SHARED_ERROR_MARKER = "VITA-FILES-SHARED-ERROR";
 const FILES_SHARED_DEFERRED_MARKER = "VITA-FILES-SHARED-DEFERRED";
+const OWNER_MARKER = "VITA-OWNER";
+const OWNER_REJECT_MARKER = "VITA-OWNER-REJECT";
+const OWNER_ERROR_MARKER = "VITA-OWNER-ERROR";
 const AGENTD_SOCKET_PATH = "/run/vita-agent/agentd.sock";
 const AGENTD_BASE_URL = "http://agentd";
+const OWNER_CAPABILITY = "owner.identity";
+const OWNER_ACTION = "vita.owner.test-action";
+const OWNER_CREDENTIAL_PATH = "/usr/lib/vita/owner/owner-credential.json";
+const OWNER_ASSERTION_PATH = "/usr/lib/vita/owner/owner-assertion.json";
 const FILES_RW_GRANT = "runtime-files";
 const FILES_RO_GRANT = "runtime-files-ro";
 const FILES_ROUNDTRIP_PATH = "roundtrip.txt";
@@ -774,6 +781,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatControllerShellErrorMarker());
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatPdsSyncStateReadMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsSyncStateWriteMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
@@ -815,6 +823,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatStorageHealthMarker(await readStorageHealthState(agentTransport)));
     await emitApplyMarkers(state.state.hostname, agentTransport);
     await emitControllerShellMarkers(state.state.hostname, client, agentTransport);
+    await emitOwnerMarkers(agentTransport);
     if (await emitCapsulePreviewMarker(client)) {
       await emitCapsuleMarkers(agentTransport);
     } else {
@@ -835,6 +844,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(`${DRIFT_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${APPLY_ERROR_MARKER}: status=FAILSAFE`);
     emit(formatControllerShellErrorMarker());
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -981,6 +991,435 @@ async function readNodeStateSnapshot(agentTransport: AgentTransport): Promise<un
   }
 
   return parseJsonOrText(await response.text());
+}
+
+interface OwnerCredential {
+  readonly credentialId: string;
+  readonly publicKeyCose: string;
+  readonly signCount: number;
+  readonly aaguid?: string;
+  readonly transports?: readonly string[];
+  readonly rpId: string;
+  readonly userHandle: string;
+}
+
+interface OwnerAssertion {
+  readonly credentialId: string;
+  readonly authenticatorData: string;
+  readonly clientDataJSON: string;
+  readonly signature: string;
+  readonly action: string;
+}
+
+interface OwnerChallenge {
+  readonly challenge: string;
+  readonly action: string;
+  readonly expiresAt: string;
+}
+
+type OwnerStateRead =
+  | {
+      readonly ok: true;
+      readonly enrolled: boolean;
+      readonly credential?: OwnerCredential;
+    }
+  | {
+      readonly ok: false;
+    };
+
+interface OwnerFixture {
+  readonly credential: OwnerCredential;
+  readonly assertion: OwnerAssertion;
+  readonly assertionChallenge: string;
+}
+
+interface OwnerAssertionFixture {
+  readonly action: string;
+  readonly challenge: string;
+  readonly assertion: OwnerAssertion;
+}
+
+async function emitOwnerMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  try {
+    const fixture = await readOwnerFixture();
+    const enrollResult = await client.apply(ownerEnrollPlan(fixture.credential));
+
+    if (enrollResult.outcome !== "committed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const ownerState = parseOwnerState(await client.getState(OWNER_CAPABILITY));
+    if (
+      !ownerState.ok ||
+      !ownerState.enrolled ||
+      ownerState.credential === undefined ||
+      !ownerCredentialsEqual(ownerState.credential, fixture.credential)
+    ) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const challenge = await mintOwnerChallenge(agentTransport, OWNER_ACTION);
+    if (challenge === undefined) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    if (
+      challenge.action !== OWNER_ACTION ||
+      fixture.assertion.action !== OWNER_ACTION ||
+      fixture.assertionChallenge === challenge.challenge
+    ) {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const rejectResult = await client.apply(ownerVerifyPlan(fixture.assertion));
+    if (rejectResult.outcome === "committed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    const rejectReason = ownerRejectReason(rejectResult);
+    if (rejectReason !== "challenge_replayed") {
+      emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+      return;
+    }
+
+    emit(`${OWNER_REJECT_MARKER}: reason=${rejectReason} status=OK`);
+    emit(`${OWNER_MARKER}: challenge=issued reject=enforced status=OK`);
+  } catch {
+    emit(`${OWNER_ERROR_MARKER}: status=FAILSAFE`);
+  }
+}
+
+async function readOwnerFixture(): Promise<OwnerFixture> {
+  const credentialJSON = parseJsonOrText(await Deno.readTextFile(OWNER_CREDENTIAL_PATH));
+  if (!isJsonObject(credentialJSON)) {
+    throw new Error("owner credential fixture must be a JSON object");
+  }
+  const credential = parseOwnerCredential(credentialJSON);
+  if (credential === undefined) {
+    throw new Error("owner credential fixture is invalid");
+  }
+
+  const assertionJSON = parseJsonOrText(await Deno.readTextFile(OWNER_ASSERTION_PATH));
+  const fixture = parseOwnerAssertionFixture(assertionJSON);
+  if (
+    fixture === undefined ||
+    fixture.action !== OWNER_ACTION ||
+    fixture.assertion.credentialId !== credential.credentialId
+  ) {
+    throw new Error("owner assertion fixture is invalid");
+  }
+
+  return {
+    assertion: fixture.assertion,
+    assertionChallenge: fixture.challenge,
+    credential,
+  };
+}
+
+async function mintOwnerChallenge(
+  agentTransport: AgentTransport,
+  action: string,
+): Promise<OwnerChallenge | undefined> {
+  try {
+    const response = await agentTransport(
+      new URL(`/challenge/${OWNER_CAPABILITY}?action=${encodeURIComponent(action)}`, AGENTD_BASE_URL).toString(),
+      {
+        headers: STATE_JSON_HEADERS,
+        method: "GET",
+      },
+    );
+
+    if (!response.ok) {
+      return undefined;
+    }
+
+    return parseOwnerChallenge(parseJsonOrText(await response.text()));
+  } catch {
+    return undefined;
+  }
+}
+
+function ownerEnrollPlan(credential: OwnerCredential): AgentApplyPlan {
+  return {
+    operations: [
+      {
+        capability: OWNER_CAPABILITY,
+        request: {
+          desired: ownerCredentialJSON(credential),
+        },
+      },
+    ],
+  };
+}
+
+function ownerVerifyPlan(assertion: OwnerAssertion): AgentApplyPlan {
+  return {
+    operations: [
+      {
+        capability: OWNER_CAPABILITY,
+        request: {
+          assertion: {
+            action: assertion.action,
+            authenticatorData: assertion.authenticatorData,
+            clientDataJSON: assertion.clientDataJSON,
+            credentialId: assertion.credentialId,
+            signature: assertion.signature,
+          },
+        },
+      },
+    ],
+  };
+}
+
+function ownerCredentialJSON(credential: OwnerCredential): Readonly<Record<string, string | number | readonly string[]>> {
+  return {
+    ...(credential.aaguid === undefined ? {} : { aaguid: credential.aaguid }),
+    credentialId: credential.credentialId,
+    publicKeyCose: credential.publicKeyCose,
+    rpId: credential.rpId,
+    signCount: credential.signCount,
+    ...(credential.transports === undefined ? {} : { transports: credential.transports }),
+    userHandle: credential.userHandle,
+  };
+}
+
+function parseOwnerState(value: unknown): OwnerStateRead {
+  if (!isJsonObject(value)) {
+    return { ok: false };
+  }
+
+  const exists = readBooleanField(value, "exists");
+  const enrolled = readBooleanField(value, "enrolled");
+  if (exists === undefined || enrolled === undefined) {
+    return { ok: false };
+  }
+  if (!exists || !enrolled) {
+    return { ok: true, enrolled: false };
+  }
+
+  const credentialValue = value["credential"];
+  if (!isJsonObject(credentialValue)) {
+    return { ok: false };
+  }
+
+  const credential = parseOwnerCredential(credentialValue);
+  if (credential === undefined) {
+    return { ok: false };
+  }
+
+  return {
+    credential,
+    enrolled: true,
+    ok: true,
+  };
+}
+
+function parseOwnerCredential(value: Readonly<Record<string, unknown>>): OwnerCredential | undefined {
+  const credentialId = readStringField(value, "credentialId");
+  const publicKeyCose = readStringField(value, "publicKeyCose");
+  const signCount = readNonNegativeIntegerField(value, "signCount");
+  const rpId = readStringField(value, "rpId");
+  const userHandle = readStringField(value, "userHandle");
+  const aaguid = readOptionalStringField(value, "aaguid");
+  const transports = parseOwnerTransports(value["transports"]);
+
+  if (
+    credentialId === undefined ||
+    publicKeyCose === undefined ||
+    signCount === undefined ||
+    rpId === undefined ||
+    userHandle === undefined ||
+    transports === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(aaguid === undefined ? {} : { aaguid }),
+    credentialId,
+    publicKeyCose,
+    rpId,
+    signCount,
+    ...(transports.length === 0 ? {} : { transports }),
+    userHandle,
+  };
+}
+
+function parseOwnerTransports(value: unknown): readonly string[] | undefined {
+  if (value === undefined) {
+    return Object.freeze([]);
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const transports: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index];
+    if (typeof item !== "string" || item.length === 0) {
+      return undefined;
+    }
+    transports[index] = item;
+  }
+  return Object.freeze(transports);
+}
+
+function parseOwnerChallenge(value: unknown): OwnerChallenge | undefined {
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const challenge = readStringField(value, "challenge");
+  const action = readStringField(value, "action");
+  const expiresAt = readStringField(value, "expiresAt");
+  if (challenge === undefined || action === undefined || expiresAt === undefined) {
+    return undefined;
+  }
+
+  return {
+    action,
+    challenge,
+    expiresAt,
+  };
+}
+
+function ownerRejectReason(result: AgentApplyResult): string {
+  const message = result.error?.message ?? "";
+  const marker = "owner assertion denied:";
+  const markerIndex = message.indexOf(marker);
+  if (markerIndex >= 0) {
+    return markerToken(message.slice(markerIndex + marker.length).trim());
+  }
+  return agentApplyResultReason(result);
+}
+
+function base64URLDecode(value: string): Uint8Array {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === undefined) {
+      continue;
+    }
+    const sixBits = alphabet.indexOf(char);
+    if (sixBits < 0) {
+      throw new Error("invalid base64url character");
+    }
+    buffer = (buffer << 6) | sixBits;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+      buffer &= (1 << bits) - 1;
+    }
+  }
+
+  return new Uint8Array(bytes);
+}
+
+function parseOwnerAssertionFixture(value: unknown): OwnerAssertionFixture | undefined {
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const action = readStringField(value, "action");
+  const challenge = readStringField(value, "challenge");
+  const assertionValue = value["assertion"];
+  if (action === undefined || challenge === undefined || !isJsonObject(assertionValue)) {
+    return undefined;
+  }
+
+  const assertion = parseOwnerAssertion(assertionValue);
+  if (
+    assertion === undefined ||
+    assertion.action !== action ||
+    ownerAssertionChallenge(assertion) !== challenge
+  ) {
+    return undefined;
+  }
+
+  return {
+    action,
+    assertion,
+    challenge,
+  };
+}
+
+function parseOwnerAssertion(value: Readonly<Record<string, unknown>>): OwnerAssertion | undefined {
+  const credentialId = readStringField(value, "credentialId");
+  const authenticatorData = readStringField(value, "authenticatorData");
+  const clientDataJSON = readStringField(value, "clientDataJSON");
+  const signature = readStringField(value, "signature");
+  const action = readStringField(value, "action");
+  if (
+    credentialId === undefined ||
+    authenticatorData === undefined ||
+    clientDataJSON === undefined ||
+    signature === undefined ||
+    action === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    action,
+    authenticatorData,
+    clientDataJSON,
+    credentialId,
+    signature,
+  };
+}
+
+function ownerAssertionChallenge(assertion: OwnerAssertion): string | undefined {
+  try {
+    const clientData = parseJsonOrText(new TextDecoder().decode(base64URLDecode(assertion.clientDataJSON)));
+    if (!isJsonObject(clientData)) {
+      return undefined;
+    }
+    const type = readStringField(clientData, "type");
+    const challenge = readStringField(clientData, "challenge");
+    if (type !== "webauthn.get" || challenge === undefined) {
+      return undefined;
+    }
+    return challenge;
+  } catch {
+    return undefined;
+  }
+}
+
+function ownerCredentialsEqual(left: OwnerCredential, right: OwnerCredential): boolean {
+  return left.credentialId === right.credentialId &&
+    left.publicKeyCose === right.publicKeyCose &&
+    left.signCount === right.signCount &&
+    left.aaguid === right.aaguid &&
+    left.rpId === right.rpId &&
+    left.userHandle === right.userHandle &&
+    stringArraysEqual(left.transports ?? [], right.transports ?? []);
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
@@ -3032,6 +3471,19 @@ function readStringField(
   const child = value[key];
 
   if (typeof child !== "string" || child.length === 0) {
+    return undefined;
+  }
+
+  return child;
+}
+
+function readBooleanField(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): boolean | undefined {
+  const child = value[key];
+
+  if (typeof child !== "boolean") {
     return undefined;
   }
 

@@ -33,6 +33,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const CONFIG_PATH = join(HERE, "ts-image.conf");
 const OVERLAY_ROOT = join(HERE, "ts-overlay");
+const OWNER_FIXTURE_DIR = join(OVERLAY_ROOT, "usr", "lib", "vita", "owner");
+const OWNER_CREDENTIAL_PATH = join(OWNER_FIXTURE_DIR, "owner-credential.json");
+const OWNER_ASSERTION_PATH = join(OWNER_FIXTURE_DIR, "owner-assertion.json");
+const OWNER_FIXTURE_RP_ID = "owner.example.com";
+const OWNER_FIXTURE_ACTION = "vita.owner.test-action";
 const BAKED_OCI_ROOTFS_PATHS = Object.freeze([
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.oci.capsule", "rootfs"),
   join(OVERLAY_ROOT, "usr", "lib", "vita", "capsules", "local.hostile-oci.capsule", "rootfs"),
@@ -189,6 +194,7 @@ async function stageWasmtime(pin) {
 async function stage(pins) {
   await stageDeno(pins.deno);
   await stageWasmtime(pins.wasmtime);
+  stageOwnerFixture();
   stageBakedOCIRootfs();
   stageBakedWasmCapsules();
 }
@@ -219,6 +225,92 @@ function stageBakedWasmCapsules() {
   }
 }
 
+function stageOwnerFixture() {
+  if (!existsSync(OWNER_FIXTURE_DIR)) fail(`owner fixture directory missing: ${OWNER_FIXTURE_DIR}`);
+  if (!existsSync(OWNER_CREDENTIAL_PATH)) fail(`owner public credential fixture missing: ${OWNER_CREDENTIAL_PATH}`);
+  if (!existsSync(OWNER_ASSERTION_PATH)) fail(`owner assertion fixture missing: ${OWNER_ASSERTION_PATH}`);
+
+  const credentialText = readFileSync(OWNER_CREDENTIAL_PATH, "utf8");
+  const assertionText = readFileSync(OWNER_ASSERTION_PATH, "utf8");
+  rejectInlineOwnerSecretMaterial(credentialText, OWNER_CREDENTIAL_PATH);
+  rejectInlineOwnerSecretMaterial(assertionText, OWNER_ASSERTION_PATH);
+
+  const credential = parseJSONFile(credentialText, OWNER_CREDENTIAL_PATH);
+  const fixture = parseJSONFile(assertionText, OWNER_ASSERTION_PATH);
+  validateOwnerCredentialFixture(credential);
+  validateOwnerAssertionFixture(fixture, credential);
+  log(`   verified owner public credential + pre-signed reject fixture`);
+}
+
+function parseJSONFile(text, path) {
+  try {
+    return JSON.parse(text);
+  } catch (cause) {
+    fail(`invalid JSON in ${path}: ${cause?.message ?? String(cause)}`);
+  }
+}
+
+function validateOwnerCredentialFixture(value) {
+  if (!isPlainObject(value)) fail("owner credential fixture must be a JSON object");
+  assertBase64URL(value.credentialId, "owner credential credentialId", 1, 1024);
+  assertBase64URL(value.publicKeyCose, "owner credential publicKeyCose", 1, 4096);
+  assertBase64URL(value.userHandle, "owner credential userHandle", 1, 64);
+  if (value.rpId !== OWNER_FIXTURE_RP_ID) fail(`owner credential rpId must be ${OWNER_FIXTURE_RP_ID}`);
+  if (!Number.isSafeInteger(value.signCount) || value.signCount < 0) fail("owner credential signCount must be a non-negative integer");
+  if (value.aaguid !== undefined && typeof value.aaguid !== "string") fail("owner credential aaguid must be a string when present");
+  if (value.transports !== undefined) {
+    if (!Array.isArray(value.transports) || value.transports.length === 0) fail("owner credential transports must be a non-empty array when present");
+    for (const transport of value.transports) {
+      if (typeof transport !== "string" || transport.length === 0) fail("owner credential transports must contain strings");
+    }
+  }
+}
+
+function validateOwnerAssertionFixture(value, credential) {
+  if (!isPlainObject(value)) fail("owner assertion fixture must be a JSON object");
+  if (value.action !== OWNER_FIXTURE_ACTION) fail(`owner assertion fixture action must be ${OWNER_FIXTURE_ACTION}`);
+  assertBase64URL(value.challenge, "owner assertion fixture challenge", 32, 32);
+  const assertion = value.assertion;
+  if (!isPlainObject(assertion)) fail("owner assertion fixture assertion must be a JSON object");
+  if (assertion.credentialId !== credential.credentialId) fail("owner assertion fixture credentialId must match public credential");
+  if (assertion.action !== OWNER_FIXTURE_ACTION) fail(`owner assertion action must be ${OWNER_FIXTURE_ACTION}`);
+  assertBase64URL(assertion.authenticatorData, "owner assertion authenticatorData", 37, 4096);
+  const clientDataJSON = assertBase64URL(assertion.clientDataJSON, "owner assertion clientDataJSON", 1, 8192).toString("utf8");
+  assertBase64URL(assertion.signature, "owner assertion signature", 1, 512);
+  const clientData = parseJSONFile(clientDataJSON, "owner assertion clientDataJSON");
+  if (!isPlainObject(clientData)) fail("owner assertion clientDataJSON must decode to an object");
+  if (
+    clientData.type !== "webauthn.get" ||
+    clientData.challenge !== value.challenge ||
+    clientData.origin !== `https://${OWNER_FIXTURE_RP_ID}`
+  ) {
+    fail("owner assertion fixture clientDataJSON must match action challenge and origin");
+  }
+}
+
+function assertBase64URL(value, label, minBytes, maxBytes) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value) || value.includes("=")) {
+    fail(`${label} must be base64url without padding`);
+  }
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const decoded = Buffer.from(padded, "base64");
+  if (decoded.length < minBytes || decoded.length > maxBytes) {
+    fail(`${label} must decode to ${minBytes}..${maxBytes} bytes`);
+  }
+  return decoded;
+}
+
+function rejectInlineOwnerSecretMaterial(text, path) {
+  const lowered = text.toLowerCase();
+  for (const marker of ["-----begin", "private_key", "privatekey", "openssh private key", "age-secret-key", "seed phrase", "mnemonic"]) {
+    if (lowered.includes(marker)) fail(`owner fixture ${path} contains private-key marker ${marker}`);
+  }
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function chmodDirectories(root) {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.isDirectory()) chmodDirectories(join(root, entry.name));
@@ -239,6 +331,7 @@ async function main() {
   if (argv.includes("--check")) {
     checkStagedBinary(pins.deno);
     checkStagedBinary(pins.wasmtime);
+    stageOwnerFixture();
     stageBakedWasmCapsules();
     return;
   }

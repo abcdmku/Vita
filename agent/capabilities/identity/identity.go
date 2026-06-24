@@ -583,6 +583,11 @@ func isDomainHandle(value string) bool {
 	return len(topLevelLabel) >= 2 && !allDigits(topLevelLabel)
 }
 
+// IsDomainHandle reports whether value follows the identity capability's domain-handle rules.
+func IsDomainHandle(value string) bool {
+	return isDomainHandle(value)
+}
+
 func isReferenceSyntax(value string) bool {
 	if value != strings.TrimSpace(value) || hasControlCharacter(value) {
 		return false
@@ -624,6 +629,11 @@ func containsInlineSecretMaterial(value string) bool {
 		return true
 	}
 	return longHexPattern.MatchString(value) || longBase64Pattern.MatchString(value)
+}
+
+// ContainsInlineSecretMaterial exposes the identity capability's strong inline-secret scanner.
+func ContainsInlineSecretMaterial(value string) bool {
+	return containsInlineSecretMaterial(value)
 }
 
 func containsSecretAssignment(value string) bool {
