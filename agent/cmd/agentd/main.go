@@ -16,6 +16,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	"github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
@@ -75,11 +76,12 @@ func main() {
 	}
 
 	handler, err := transport.NewHandler(transport.Config{
-		Version:    agentVersion,
-		StartedAt:  startedAt,
-		Registry:   registry,
-		Discoverer: hardware.NewDiscoverer(),
-		AuditStore: auditStore,
+		Version:     agentVersion,
+		StartedAt:   startedAt,
+		Registry:    registry,
+		Discoverer:  hardware.NewDiscoverer(),
+		FilesGrants: files.DefaultGrants(),
+		AuditStore:  auditStore,
 	})
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)

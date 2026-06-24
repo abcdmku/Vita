@@ -21,6 +21,7 @@ import (
 	"github.com/vita/agent/capabilities/accounts"
 	"github.com/vita/agent/capabilities/backup"
 	"github.com/vita/agent/capabilities/capsule"
+	filecap "github.com/vita/agent/capabilities/files"
 	"github.com/vita/agent/capabilities/hostname"
 	"github.com/vita/agent/capabilities/identity"
 	"github.com/vita/agent/capabilities/network"
@@ -1289,6 +1290,84 @@ func TestApplyRejectsValidOpBeforeIncompleteOpWithoutApplying(t *testing.T) {
 	}
 }
 
+func TestFilesRouteDispatchesToHandler(t *testing.T) {
+	stateRoot := t.TempDir()
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: stateRoot,
+		filesGrants: []filecap.Grant{
+			{Name: "rw", Root: "scope", Access: filecap.AccessReadWrite},
+		},
+	})
+	data := []byte("files route data")
+	writeBody := fmt.Sprintf(
+		`{"op":"write","grant":"rw","path":"note.txt","data":%q}`,
+		base64.StdEncoding.EncodeToString(data),
+	)
+
+	writeResponse := perform(handler, http.MethodPost, "/files", writeBody)
+	if writeResponse.Code != http.StatusOK {
+		t.Fatalf("write status code = %d, want %d; body=%s", writeResponse.Code, http.StatusOK, writeResponse.Body.String())
+	}
+	var writeResult filecap.Response
+	decodeResponse(t, writeResponse, &writeResult)
+	if writeResult.Kind == nil || *writeResult.Kind != filecap.KindFile || writeResult.Size == nil || *writeResult.Size != int64(len(data)) {
+		t.Fatalf("write result = %#v, want file size %d", writeResult, len(data))
+	}
+
+	readResponse := perform(handler, http.MethodPost, "/files", `{"op":"read","grant":"rw","path":"note.txt"}`)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("read status code = %d, want %d; body=%s", readResponse.Code, http.StatusOK, readResponse.Body.String())
+	}
+	var readResult filecap.Response
+	decodeResponse(t, readResponse, &readResult)
+	if readResult.Data == nil {
+		t.Fatalf("read result = %#v, want data", readResult)
+	}
+	got, err := base64.StdEncoding.DecodeString(*readResult.Data)
+	if err != nil {
+		t.Fatalf("read result data is not base64: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("read data = %q, want %q", got, data)
+	}
+}
+
+func TestFilesRouteReturnsTypedErrors(t *testing.T) {
+	handler := mustHandler(t, handlerConfig{
+		registry:       mustRegistry(t),
+		filesStateRoot: t.TempDir(),
+		filesGrants: []filecap.Grant{
+			{Name: "rw", Root: "scope", Access: filecap.AccessReadWrite},
+		},
+	})
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "method", method: http.MethodGet, wantStatus: http.StatusMethodNotAllowed, wantCode: "method_not_allowed"},
+		{name: "shape", method: http.MethodPost, body: `{}`, wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "unknown op", method: http.MethodPost, body: `{"op":"remove","grant":"rw","path":"note.txt"}`, wantStatus: http.StatusBadRequest, wantCode: "unknown_op"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := perform(handler, tt.method, "/files", tt.body)
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status code = %d, want %d; body=%s", response.Code, tt.wantStatus, response.Body.String())
+			}
+			var errorResponse ErrorResponse
+			decodeResponse(t, response, &errorResponse)
+			if errorResponse.Error.Code != tt.wantCode {
+				t.Fatalf("error code = %q, want %q", errorResponse.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
 func TestMethodAndPathGuards(t *testing.T) {
 	handler := mustHandler(t, handlerConfig{registry: mustRegistry(t, &mockTxCapability{name: "test.apply"})})
 	tests := []struct {
@@ -1303,6 +1382,7 @@ func TestMethodAndPathGuards(t *testing.T) {
 		{name: "operations rejects non GET", method: http.MethodPost, path: "/operations", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "state rejects non GET", method: http.MethodPost, path: "/state", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "apply rejects non POST", method: http.MethodGet, path: "/apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
+		{name: "files rejects non POST", method: http.MethodGet, path: "/files", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodPost},
 		{name: "read rejects non GET", method: http.MethodPost, path: "/read/test.apply", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "read base rejects non GET", method: http.MethodPost, path: "/read", wantStatus: http.StatusMethodNotAllowed, wantAllowed: http.MethodGet},
 		{name: "unknown path", method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound},
@@ -1378,6 +1458,8 @@ type handlerConfig struct {
 	discoverer       hardware.Discoverer
 	readRequests     map[string]ReadRequestFactory
 	maxBodyBytes     int64
+	filesStateRoot   string
+	filesGrants      []filecap.Grant
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 }
@@ -1403,6 +1485,8 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		RequestDecoders:  map[string]RequestDecoder{"test.apply": decodeMockRequest, "test.first": decodeMockRequest, "test.second": decodeMockRequest},
 		ReadRequests:     config.readRequests,
 		MaxBodyBytes:     config.maxBodyBytes,
+		FilesStateRoot:   config.filesStateRoot,
+		FilesGrants:      config.filesGrants,
 		AuditStore:       config.auditStore,
 		CapsuleWorkloads: config.capsuleWorkloads,
 		Now: func() time.Time {
