@@ -10,6 +10,7 @@ import {
   buildPdsRepoDeletePlan,
   buildPdsRepoCreateConfig,
   buildPdsRepoQueryRequest,
+  createPdsRepoReadTransport,
   deleteAndReadBackPdsRepoRecord,
   formatPdsRepoMarker,
   formatPdsRepoDeleteMarker,
@@ -22,6 +23,7 @@ import {
   PDS_REPO_DELETE_RECORD,
   PDS_REPO_QUERY_COLLECTION,
   PDS_REPO_QUERY_LIMIT,
+  PDS_REPO_READ_PATH,
   PDS_REPO_RECORDS,
   PDS_REPO_TEST_REPO,
   queryPdsRepoCollection,
@@ -32,6 +34,8 @@ import type {
   AgentApplyPlan,
   AgentApplyResult,
   AgentClient,
+  AgentTransport,
+  AgentTransportInit,
 } from "./vita/agent-client.ts";
 import type {
   ApplyNodeApplyResult,
@@ -181,47 +185,87 @@ test("pds repo query helper sends exact read body and formats measured page mark
   );
 
   assert.deepEqual(buildPdsRepoQueryRequest(), {
-    capability: PDS_REPO_CAPABILITY,
-    request: {
-      query: {
-        collection: PDS_REPO_QUERY_COLLECTION,
-        limit: PDS_REPO_QUERY_LIMIT,
-      },
+    query: {
+      collection: PDS_REPO_QUERY_COLLECTION,
+      limit: PDS_REPO_QUERY_LIMIT,
     },
   });
   assert.deepEqual(calls, [
     {
       body: {
-        capability: PDS_REPO_CAPABILITY,
-        request: {
-          query: {
-            collection: PDS_REPO_QUERY_COLLECTION,
-            limit: PDS_REPO_QUERY_LIMIT,
-          },
+        query: {
+          collection: PDS_REPO_QUERY_COLLECTION,
+          limit: PDS_REPO_QUERY_LIMIT,
         },
       },
       method: "GET",
-      path: "/state",
+      path: PDS_REPO_READ_PATH,
     },
     {
       body: {
-        capability: PDS_REPO_CAPABILITY,
-        request: {
-          query: {
-            collection: PDS_REPO_QUERY_COLLECTION,
-            cursor: 2,
-            limit: PDS_REPO_QUERY_LIMIT,
-          },
+        query: {
+          collection: PDS_REPO_QUERY_COLLECTION,
+          cursor: 2,
+          limit: PDS_REPO_QUERY_LIMIT,
         },
       },
       method: "GET",
-      path: "/state",
+      path: PDS_REPO_READ_PATH,
     },
   ]);
   assert.deepEqual(formatPdsRepoQueryMarkers(result), [
     `VITA-PDS-QUERY: collection=${PDS_REPO_QUERY_COLLECTION} page=1 records=2 status=OK`,
     `VITA-PDS-QUERY: collection=${PDS_REPO_QUERY_COLLECTION} page=2 records=1 status=OK`,
   ]);
+});
+
+test("production pds repo read transport issues GET /read/pds.repo with the typed ReadRequest body and no URL query", async () => {
+  const wireCalls: WireCall[] = [];
+  const transport = createPdsRepoReadTransport(
+    fakeAgentTransport(
+      JSON.stringify({
+        collection: PDS_REPO_QUERY_COLLECTION,
+        exists: true,
+        nextCursor: null,
+        records: [
+          {
+            collection: PDS_REPO_QUERY_COLLECTION,
+            rkey: "p1-067-post",
+            valueDigest: "1111111111111111111111111111111111111111111111111111111111111111",
+          },
+        ],
+        total: 1,
+      }),
+      wireCalls,
+    ),
+    "http://agentd",
+  );
+
+  const response = await transport("GET", PDS_REPO_READ_PATH, buildPdsRepoQueryRequest(PDS_REPO_QUERY_COLLECTION, 0));
+
+  // The production wire request is the typed Read surface: GET /read/pds.repo
+  // with the typed ReadRequest on the BODY, carrying NO URL query parameters
+  // (the fail-closed server rejects URL params). This exercises the actual
+  // production path, not a divergent fake.
+  assert.equal(wireCalls.length, 1);
+  const wire = wireCalls[0];
+  assert.notEqual(wire, undefined);
+  if (wire !== undefined) {
+    const url = new URL(wire.url);
+    assert.equal(url.pathname, "/read/pds.repo");
+    assert.equal(url.search, "");
+    assert.equal(wire.init.method, "GET");
+    assert.equal(wire.init.headers?.["Content-Type"], "application/json");
+    assert.notEqual(wire.init.body, undefined);
+    assert.deepEqual(JSON.parse(wire.init.body ?? ""), {
+      query: {
+        collection: PDS_REPO_QUERY_COLLECTION,
+        cursor: 0,
+        limit: PDS_REPO_QUERY_LIMIT,
+      },
+    });
+  }
+  assert.equal(response.status, 200);
 });
 
 test("pds repo delete helper sends exact apply body and proves removal via read-back", async () => {
@@ -516,6 +560,26 @@ function fakeReadTransport(
     }
 
     return response;
+  };
+}
+
+interface WireCall {
+  readonly url: string;
+  readonly init: AgentTransportInit;
+}
+
+function fakeAgentTransport(
+  responseBody: string,
+  calls: WireCall[] = [],
+  status = 200,
+): AgentTransport {
+  return async (url, init) => {
+    calls[calls.length] = { init, url };
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => responseBody,
+    };
   };
 }
 

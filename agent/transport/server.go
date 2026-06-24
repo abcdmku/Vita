@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/user"
 	"sort"
@@ -154,19 +153,20 @@ type capsuleWorkloadSource interface {
 }
 
 type handler struct {
-	version          string
-	startedAt        time.Time
-	capabilityNames  []string
-	registry         *capabilities.Registry
-	discoverer       hardware.Discoverer
-	requestDecoders  map[string]RequestDecoder
-	readRequests     map[string]ReadRequestFactory
-	healthCheck      transaction.HealthCheck
-	maxBodyBytes     int64
-	now              func() time.Time
-	files            *filecap.Handler
-	auditStore       AuditStore
-	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	version             string
+	startedAt           time.Time
+	capabilityNames     []string
+	registry            *capabilities.Registry
+	discoverer          hardware.Discoverer
+	requestDecoders     map[string]RequestDecoder
+	readRequests        map[string]ReadRequestFactory
+	readRequestDecoders map[string]RequestDecoder
+	healthCheck         transaction.HealthCheck
+	maxBodyBytes        int64
+	now                 func() time.Time
+	files               *filecap.Handler
+	auditStore          AuditStore
+	capsuleWorkloads    func() []capsuleruntime.WorkloadStatus
 }
 
 type applyRequest struct {
@@ -483,19 +483,20 @@ func NewHandler(config Config) (http.Handler, error) {
 	sort.Strings(names)
 
 	return &handler{
-		version:          config.Version,
-		startedAt:        startedAt.UTC(),
-		capabilityNames:  names,
-		registry:         registry,
-		discoverer:       discoverer,
-		requestDecoders:  decoders,
-		readRequests:     readRequests,
-		healthCheck:      config.HealthCheck,
-		maxBodyBytes:     maxBodyBytes,
-		now:              now,
-		files:            filesHandler,
-		auditStore:       config.AuditStore,
-		capsuleWorkloads: capsuleWorkloads,
+		version:             config.Version,
+		startedAt:           startedAt.UTC(),
+		capabilityNames:     names,
+		registry:            registry,
+		discoverer:          discoverer,
+		requestDecoders:     decoders,
+		readRequests:        readRequests,
+		readRequestDecoders: DefaultReadRequestDecoders(),
+		healthCheck:         config.HealthCheck,
+		maxBodyBytes:        maxBodyBytes,
+		now:                 now,
+		files:               filesHandler,
+		auditStore:          config.AuditStore,
+		capsuleWorkloads:    capsuleWorkloads,
 	}, nil
 }
 
@@ -540,6 +541,18 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		storage.Name:        func() capabilities.TypedRequest { return storage.ReadRequest{} },
 		timesync.Name:       func() capabilities.TypedRequest { return timesync.ReadRequest{} },
 		update.Name:         func() capabilities.TypedRequest { return update.ReadRequest{} },
+	}
+}
+
+// DefaultReadRequestDecoders maps a capability to the decoder for a body-borne
+// typed READ request (distinct from the zero-value whole-state read in
+// DefaultReadRequests). Only capabilities that accept a typed read body appear
+// here. pds.repo's paginated query rides ReadRequest{Query} on the body, so its
+// production query path is the same strict typed-JSON decode /apply uses — not a
+// divergent URL-query parser.
+func DefaultReadRequestDecoders() map[string]RequestDecoder {
+	return map[string]RequestDecoder{
+		pdsrepo.Name: DecodeJSONRequest[pdsrepo.ReadRequest],
 	}
 }
 
@@ -665,14 +678,27 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 		writeError(w, http.StatusNotFound, "unknown_capability", "unknown capability")
 		return
 	}
-
-	var response capabilities.TypedResponse
-	var readErr *requestError
-	if name == pdsrepo.Name && hasPDSRepoQuery(r.URL.Query()) {
-		response, readErr = h.readPDSRepoQuery(r.Context(), r.URL.Query())
-	} else {
-		response, readErr = h.readCapability(r.Context(), name)
+	// Fail closed: the typed Read surface carries any query in the request BODY,
+	// never the URL. A read request that smuggles URL query parameters (e.g.
+	// ?privateKey=ref-only or ?collection=...) is REFUSED rather than silently
+	// ignored, so an untrusted/secret-named field can never bypass validation
+	// and leak the whole repo state.
+	if len(r.URL.RawQuery) != 0 {
+		writeRequestError(w, badRequest("unknown_field", "read requests must not carry URL query parameters"))
+		return
 	}
+
+	// The typed read request rides the request BODY — the same typed Read surface
+	// every capability uses — decoded through the same strict typed-JSON path
+	// /apply uses. e.g. pds.repo's paginated query is {"query":{...}} on the body,
+	// not a divergent URL-query shape.
+	readReq, requestErr := h.decodeReadRequest(w, r, name)
+	if requestErr != nil {
+		writeRequestError(w, requestErr)
+		return
+	}
+
+	response, readErr := h.readCapabilityRequest(r.Context(), name, readReq)
 	if readErr != nil {
 		writeRequestError(w, readErr)
 		return
@@ -680,7 +706,59 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 	writeJSON(w, http.StatusOK, response)
 }
 
+// decodeReadRequest builds the typed read request for the named capability. An
+// absent/empty body yields a nil request, so the caller falls back to the
+// capability's zero-value read request (the whole-state read every capability
+// already supports). When a body IS present it is decoded — through the SAME
+// strict typed-JSON path /apply uses — into the capability's registered read
+// request type, so e.g. pds.repo's paginated query rides {"query":{...}} on the
+// body rather than a divergent URL-query shape.
+func (h *handler) decodeReadRequest(w http.ResponseWriter, r *http.Request, name string) (capabilities.TypedRequest, *requestError) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, &requestError{
+				status:  http.StatusRequestEntityTooLarge,
+				code:    "request_too_large",
+				message: "request body exceeds maximum size",
+			}
+		}
+		return nil, badRequest("invalid_json", err.Error())
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
+	decoder, ok := h.readRequestDecoders[name]
+	if !ok {
+		return nil, badRequest("unsupported_read_request", fmt.Sprintf("capability %q does not accept a read request body", name))
+	}
+	request, err := decoder(body)
+	if err != nil {
+		return nil, decodeRequestError(err)
+	}
+	if request == nil {
+		return nil, badRequest("invalid_request", fmt.Sprintf("capability %q decoded nil read request", name))
+	}
+	if validator, ok := request.(validatableRequest); ok {
+		if err := validator.Validate(); err != nil {
+			return nil, badRequest("invalid_request", err.Error())
+		}
+	}
+	return request, nil
+}
+
 func (h *handler) readCapability(ctx context.Context, name string) (capabilities.TypedResponse, *requestError) {
+	return h.readCapabilityRequest(ctx, name, nil)
+}
+
+// readCapabilityRequest serves a read for the named capability. When readReq is
+// nil it falls back to the capability's zero-value read request (the whole-state
+// read). When readReq is non-nil — a body-borne typed read such as pds.repo's
+// paginated query — that request is handled directly; a capability-level
+// rejection of an invalid body-borne request is a 400, not a 500.
+func (h *handler) readCapabilityRequest(ctx context.Context, name string, readReq capabilities.TypedRequest) (capabilities.TypedResponse, *requestError) {
 	capability, ok := h.registry.Lookup(name)
 	if !ok {
 		return nil, &requestError{
@@ -690,46 +768,34 @@ func (h *handler) readCapability(ctx context.Context, name string) (capabilities
 		}
 	}
 
-	readRequest, ok := h.readRequest(name)
-	if !ok {
-		return nil, &requestError{
-			status:  http.StatusInternalServerError,
-			code:    "unsupported_read_request",
-			message: fmt.Sprintf("capability %q has no registered read request", name),
+	bodyBorne := readReq != nil
+	if !bodyBorne {
+		readReq, ok = h.readRequest(name)
+		if !ok {
+			return nil, &requestError{
+				status:  http.StatusInternalServerError,
+				code:    "unsupported_read_request",
+				message: fmt.Sprintf("capability %q has no registered read request", name),
+			}
 		}
 	}
 
-	response, err := capability.Handle(ctx, readRequest)
+	response, err := capability.Handle(ctx, readReq)
 	if err != nil {
-		return nil, &requestError{
-			status:  http.StatusInternalServerError,
-			code:    "capability_read_failed",
-			message: err.Error(),
+		status := http.StatusInternalServerError
+		code := "capability_read_failed"
+		// A body-borne typed read that the capability rejects (e.g. a query
+		// cursor past the end) is a client error, not a server fault.
+		if bodyBorne {
+			var invalid *pdsrepo.InvalidRequestError
+			if errors.As(err, &invalid) {
+				status = http.StatusBadRequest
+				code = "invalid_request"
+			}
 		}
-	}
-	return response, nil
-}
-
-func (h *handler) readPDSRepoQuery(ctx context.Context, values url.Values) (capabilities.TypedResponse, *requestError) {
-	capability, ok := h.registry.Lookup(pdsrepo.Name)
-	if !ok {
 		return nil, &requestError{
-			status:  http.StatusNotFound,
-			code:    "unknown_capability",
-			message: fmt.Sprintf("unknown capability %q", pdsrepo.Name),
-		}
-	}
-
-	readRequest, requestErr := pdsRepoQueryReadRequest(values)
-	if requestErr != nil {
-		return nil, requestErr
-	}
-
-	response, err := capability.Handle(ctx, readRequest)
-	if err != nil {
-		return nil, &requestError{
-			status:  http.StatusBadRequest,
-			code:    "invalid_request",
+			status:  status,
+			code:    code,
 			message: err.Error(),
 		}
 	}
@@ -809,81 +875,6 @@ func (h *handler) readRequest(name string) (capabilities.TypedRequest, bool) {
 
 	request := factory()
 	return request, request != nil
-}
-
-func hasPDSRepoQuery(values url.Values) bool {
-	return values.Has("collection") || values.Has("cursor") || values.Has("limit")
-}
-
-func pdsRepoQueryReadRequest(values url.Values) (pdsrepo.ReadRequest, *requestError) {
-	for key := range values {
-		switch key {
-		case "collection", "cursor", "limit":
-		default:
-			return pdsrepo.ReadRequest{}, badRequest("unknown_field", fmt.Sprintf("unknown query parameter %q", key))
-		}
-	}
-
-	collection, requestErr := requiredSingleQueryValue(values, "collection")
-	if requestErr != nil {
-		return pdsrepo.ReadRequest{}, requestErr
-	}
-	limitText, requestErr := requiredSingleQueryValue(values, "limit")
-	if requestErr != nil {
-		return pdsrepo.ReadRequest{}, requestErr
-	}
-	limit, requestErr := parseQueryInt(limitText, "limit")
-	if requestErr != nil {
-		return pdsrepo.ReadRequest{}, requestErr
-	}
-
-	var cursor *int64
-	if values.Has("cursor") {
-		cursorText, requestErr := requiredSingleQueryValue(values, "cursor")
-		if requestErr != nil {
-			return pdsrepo.ReadRequest{}, requestErr
-		}
-		parsed, requestErr := parseQueryInt(cursorText, "cursor")
-		if requestErr != nil {
-			return pdsrepo.ReadRequest{}, requestErr
-		}
-		cursor = &parsed
-	}
-
-	request := pdsrepo.ReadRequest{Query: &pdsrepo.QueryRequest{
-		Collection: collection,
-		Cursor:     cursor,
-		Limit:      limit,
-	}}
-	if err := request.Validate(); err != nil {
-		return pdsrepo.ReadRequest{}, badRequest("invalid_request", err.Error())
-	}
-	return request, nil
-}
-
-func requiredSingleQueryValue(values url.Values, key string) (string, *requestError) {
-	items, ok := values[key]
-	if !ok || len(items) == 0 {
-		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q is required", key))
-	}
-	if len(items) != 1 {
-		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q must appear exactly once", key))
-	}
-	if items[0] == "" {
-		return "", badRequest("invalid_request", fmt.Sprintf("query parameter %q is required", key))
-	}
-	return items[0], nil
-}
-
-func parseQueryInt(value string, field string) (int64, *requestError) {
-	if strings.ContainsAny(value, ".eE") {
-		return 0, badRequest("invalid_request", fmt.Sprintf("query parameter %q must be an integer", field))
-	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return 0, badRequest("invalid_request", fmt.Sprintf("query parameter %q must be an integer", field))
-	}
-	return parsed, nil
 }
 
 func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) (func() []capsuleruntime.WorkloadStatus, error) {

@@ -549,7 +549,14 @@ func (c *Capability) Handle(ctx context.Context, req capabilities.TypedRequest) 
 	}
 	if !snapshot.exists {
 		if readReq.Query != nil {
-			return emptyQueryResponse(*readReq.Query), nil
+			// Fail closed: a page cursor past the end of an (empty) collection is
+			// rejected, exactly as on a populated repo. The empty set has total=0,
+			// so any positive cursor is past the end.
+			response, err := emptyQueryResponse(*readReq.Query)
+			if err != nil {
+				return nil, err
+			}
+			return response, nil
 		}
 		return emptyReadResponse(), nil
 	}
@@ -1403,14 +1410,17 @@ func emptyReadResponse() ReadResponse {
 	}
 }
 
-func emptyQueryResponse(query QueryRequest) QueryResponse {
+func emptyQueryResponse(query QueryRequest) (QueryResponse, error) {
+	if query.Cursor != nil && *query.Cursor > 0 {
+		return QueryResponse{}, &InvalidRequestError{Reason: "query cursor is past the end of the collection"}
+	}
 	return QueryResponse{
 		Exists:     false,
 		Collection: query.Collection,
 		Records:    []RepoRecord{},
 		Total:      0,
 		NextCursor: nil,
-	}
+	}, nil
 }
 
 func readResponseFromState(state RepoState) ReadResponse {

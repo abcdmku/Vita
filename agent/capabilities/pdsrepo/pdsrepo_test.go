@@ -529,6 +529,50 @@ func TestQueryRejectsInvalidRequestsFailClosed(t *testing.T) {
 	}
 }
 
+func TestQueryEmptyRepoFailsClosedOnPastEndCursor(t *testing.T) {
+	ctx := context.Background()
+	zeroCursor := int64(0)
+	pastEnd := int64(1)
+
+	// cursor 0 (or absent) on an empty repo is a valid empty page.
+	for _, cursor := range []*int64{nil, &zeroCursor} {
+		fs := newMemoryFileSystem(nil)
+		capability := newCapability(fs)
+		response, err := capability.Handle(ctx, ReadRequest{Query: &QueryRequest{
+			Collection: "app.bsky.feed.post",
+			Cursor:     cursor,
+			Limit:      maxPageLimit,
+		}})
+		if err != nil {
+			t.Fatalf("empty-repo query (cursor=%v) returned error: %v", cursor, err)
+		}
+		query, ok := response.(QueryResponse)
+		if !ok {
+			t.Fatalf("response type = %T, want QueryResponse", response)
+		}
+		if query.Exists || query.Total != 0 || len(query.Records) != 0 || query.NextCursor != nil {
+			t.Fatalf("empty-repo query = %#v, want empty non-existent page", query)
+		}
+	}
+
+	// A positive cursor is past the end of the (empty) collection: fail closed,
+	// exactly as on a populated repo.
+	fs := newMemoryFileSystem(nil)
+	capability := newCapability(fs)
+	response, err := capability.Handle(ctx, ReadRequest{Query: &QueryRequest{
+		Collection: "app.bsky.feed.post",
+		Cursor:     &pastEnd,
+		Limit:      maxPageLimit,
+	}})
+	if response != nil {
+		t.Fatalf("empty-repo past-end query returned response %#v, want nil", response)
+	}
+	var invalid *InvalidRequestError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("empty-repo past-end query error = %T %v, want InvalidRequestError", err, err)
+	}
+}
+
 func TestRawJSONDecodeRejectsFailClosedRequestShapes(t *testing.T) {
 	tests := []struct {
 		name string

@@ -59,21 +59,24 @@ export interface PdsRepoDeleteDesired {
   readonly deletes: readonly PdsRepoDeleteRecord[];
 }
 
-export interface PdsRepoQueryRequest {
-  readonly capability: typeof PDS_REPO_CAPABILITY;
-  readonly request: {
-    readonly query: {
-      readonly collection: string;
-      readonly limit: number;
-      readonly cursor?: number;
-    };
-  };
+export interface PdsRepoQuery {
+  readonly collection: string;
+  readonly limit: number;
+  readonly cursor?: number;
+}
+
+// PdsRepoReadRequest is the typed Read body agentd decodes for a paginated
+// query — the SAME typed Read surface (pdsrepo.ReadRequest{Query}) the
+// whole-repo read uses, carried on the request BODY of GET /read/pds.repo. It is
+// NOT a divergent URL-query / pds.repo-specific transport shape.
+export interface PdsRepoReadRequest {
+  readonly query: PdsRepoQuery;
 }
 
 export type PdsRepoReadTransport = (
   method: "GET",
-  path: "/state",
-  body: PdsRepoQueryRequest,
+  path: "/read/pds.repo",
+  body: PdsRepoReadRequest,
 ) => Promise<ApplyNodeTransportResponse>;
 
 export interface PdsRepoStateSummary {
@@ -180,6 +183,9 @@ type ValidationResult<T> =
     };
 
 export const PDS_REPO_CAPABILITY = "pds.repo";
+// The query rides the EXISTING typed Read surface: GET /read/pds.repo with the
+// typed ReadRequest on the body. Same endpoint the whole-repo read uses.
+export const PDS_REPO_READ_PATH = "/read/pds.repo" as const;
 export const PDS_REPO_TEST_REPO = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
 export const PDS_REPO_COMMIT_CURSOR = 43;
 export const PDS_REPO_DELETE_CURSOR = PDS_REPO_COMMIT_CURSOR + 1;
@@ -254,8 +260,11 @@ const NSID_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u;
 const RECORD_KEY_PATTERN = /^[A-Za-z0-9._~:-]+$/u;
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 const DEFAULT_AGENTD_BASE_URL = "http://agentd";
-const JSON_GET_HEADERS = Object.freeze({
+// GET /read/pds.repo carries the typed ReadRequest on the body, so it declares
+// a JSON Content-Type like the apply path does.
+const JSON_GET_BODY_HEADERS = Object.freeze({
   Accept: "application/json",
+  "Content-Type": "application/json",
 });
 const EMPTY_REPO_STATE = Object.freeze({
   commitCursor: 0,
@@ -291,7 +300,7 @@ export function buildPdsRepoQueryRequest(
   collection: string = PDS_REPO_QUERY_COLLECTION,
   cursor?: number,
   limit: number = PDS_REPO_QUERY_LIMIT,
-): PdsRepoQueryRequest {
+): PdsRepoReadRequest {
   const query: {
     collection: string;
     limit: number;
@@ -306,11 +315,8 @@ export function buildPdsRepoQueryRequest(
   }
 
   return Object.freeze({
-    capability: PDS_REPO_CAPABILITY,
-    request: Object.freeze({
-      query: Object.freeze(query),
-    }),
-  }) satisfies PdsRepoQueryRequest;
+    query: Object.freeze(query),
+  }) satisfies PdsRepoReadRequest;
 }
 
 export function buildPdsRepoDeletePlan(
@@ -331,22 +337,18 @@ export function createPdsRepoReadTransport(
   baseUrl: string | URL = DEFAULT_AGENTD_BASE_URL,
 ): PdsRepoReadTransport {
   return async (method, path, body) => {
-    if (method !== "GET" || path !== "/state") {
-      throw new Error("PDS repo read transport only supports GET /state");
+    if (method !== "GET" || path !== PDS_REPO_READ_PATH) {
+      throw new Error("PDS repo read transport only supports GET /read/pds.repo");
     }
 
-    const query = body.request.query;
-    const params = new URLSearchParams();
-    params.set("collection", query.collection);
-    params.set("limit", String(query.limit));
-    if (query.cursor !== undefined) {
-      params.set("cursor", String(query.cursor));
-    }
-
+    // The query rides the typed Read BODY of GET /read/pds.repo — the same typed
+    // Read surface the whole-repo read uses, decoded by agentd's strict typed
+    // JSON path. No URL query parameters (the fail-closed surface rejects them).
     const response = await agentTransport(
-      new URL(`/read/${encodeURIComponent(PDS_REPO_CAPABILITY)}?${params.toString()}`, baseUrl).toString(),
+      new URL(path, baseUrl).toString(),
       {
-        headers: JSON_GET_HEADERS,
+        body: JSON.stringify(body),
+        headers: JSON_GET_BODY_HEADERS,
         method: "GET",
       },
     );
@@ -989,7 +991,7 @@ async function readPdsRepoQueryPage(
   try {
     rawResponse = await readTransport(
       "GET",
-      "/state",
+      PDS_REPO_READ_PATH,
       buildPdsRepoQueryRequest(collection, cursor, limit),
     );
   } catch {

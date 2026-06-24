@@ -43,7 +43,6 @@ import {
 import {
   applyAndReadPdsRepoCreate,
   createPdsRepoReadTransport,
-  deleteAndReadBackPdsRepoRecord,
   formatPdsRepoMarker,
   formatPdsRepoDeleteMarker,
   formatPdsRepoQueryMarkers,
@@ -1021,14 +1020,21 @@ async function emitPdsRepoMarkers(
     return;
   }
 
+  // QUERY/LIST is READ-ONLY: it pages the persisted collection through the typed
+  // Read body surface and never mutates the store, so it is safe to re-run every
+  // boot. The MEASURED page counts come from agentd's validated response.
   const query = await queryPdsRepoCollection(createPdsRepoReadTransport(agentTransport, AGENTD_BASE_URL));
   for (const marker of formatPdsRepoQueryMarkers(query)) {
     emit(marker);
   }
 
-  const deleted = await deleteAndReadBackPdsRepoRecord(client);
-  emit(formatPdsRepoDeleteMarker(deleted));
-
+  // The boot flow deliberately does NOT commit a destructive delete: a committed
+  // delete advances the persisted commit cursor (e.g. 43 -> 44) and removes the
+  // record the NEXT boot's fixed-cursor create depends on, which would make the
+  // create regress and break the required two-boot persistence / full-chain.
+  // Instead we prove the delete path FAILS CLOSED with a deliberately-invalid
+  // (non-existent key at an over-advanced cursor) request — a rejected apply does
+  // not persist, so the store and cursor are untouched and reboot-safe.
   const rejectedDelete = await rejectInvalidPdsRepoDelete(client);
   emit(formatPdsRepoDeleteMarker(rejectedDelete));
 
