@@ -1441,3 +1441,51 @@ Primary references:
 - OCI image index specification
 - Raspberry Pi Linux kernel documentation
 - NVIDIA DGX Spark software and update documentation
+
+---
+
+## Phase 6 — Desktop environment (separable first-class package)  [owner intent, 2026-06-24]
+
+> Authoritative addendum capturing owner direction (2026-06-24). The desktop is the DEFAULT user
+> experience, **not** the foundation.
+
+### 6.0 Boundary principle (hard)
+- The OS — boot, recovery, update, identity, storage, data management, control plane, and the
+  application platform (capsule runtimes) — MUST be fully functional **headless, with no desktop
+  installed**. The OS must boot, recover, update, and manage data without the desktop.
+- The desktop is shipped/installed as a **first-class, separable PACKAGE** (via the existing
+  package/capsule mechanism), never baked into the OS image. The OS exposes a stable
+  compositor-substrate interface; desktop packages consume it.
+- Multiple desktop packages — the flagship "PSD desktop", lighter-weight variants, or **none**
+  (headless) — MUST be supported **without changing the OS**.
+
+### 6.1 Flagship: PSD desktop
+- The desktop is a **composite TSX/CSS layout** the user customizes by **registering new components**
+  and **editing the desktop's own TSX** to rearrange the shell. Full TSX/CSS support.
+- Editing the live desktop MUST be safe: shell layout is a managed configuration with
+  preview/apply/**rollback** (the control plane) and a known-good **fallback shell** — a broken edit
+  cannot brick the GUI or lock the owner out.
+- **Full modern web app support** via an embedded web engine (recommended: CEF/Chromium; WPE WebKit
+  as the lighter fallback; Servo as a strategic future engine).
+- **App model:** TSX, web, WASM, and container apps are **one class** of windowed surface, built on
+  the existing capsule runtimes.
+
+### 6.2 Rendering architecture (the render/composite split)
+- The web engine renders each surface's content **offscreen into a GPU texture/surface, once per
+  content change**. A **thin native compositor core** (DRM/KMS, libinput, GPU compositing, damage
+  tracking) composites those textures. Window move/resize/animate = the compositor repositions a
+  texture on the GPU — **web content is NOT repainted**.
+- WM behavior (layout, focus, workspaces, animation) is **TypeScript policy** over the native core's
+  mechanism. The native compositor substrate is not OS-coupled (package choice is flexible).
+
+### 6.3 Performance requirements (hard, testable)
+- **PSD desktop MUST use accelerated OSR with shared GPU textures/surfaces.** CPU bitmap readback is
+  allowed **only** for tests, screenshots, or fallback mode.
+- De-risking spike (before factory decomposition): prove CEF accelerated-OSR -> shared GPU texture
+  -> composited by the native core -> drag/animate a heavy web app at frame budget (>=60 fps) with the
+  web content NOT repainting. If CEF-OSR misses budget, fall back to WPE and re-measure.
+
+### 6.4 Sequencing
+- Phase 6 starts **after** the node foundation (Phases 2-5) is complete and boot-verified. Decompose
+  into thin slices: compositor core -> texture/surface bridge -> WM policy -> shell + component
+  registry -> panel/launcher/notifications -> settings & file-manager as TSX apps -> webview app class.
