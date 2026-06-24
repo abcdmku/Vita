@@ -94,6 +94,23 @@ const MAX_ARCH_BYTES = 128;
 const MAX_CPU_MODEL_BYTES = 512;
 const MAX_DISK_NAME_BYTES = 128;
 
+const SECRET_FIELD_NAMES = new Set([
+  "apikey",
+  "accesstoken",
+  "key",
+  "keymaterial",
+  "mnemonic",
+  "passphrase",
+  "password",
+  "privatekey",
+  "recoverykey",
+  "refreshtoken",
+  "secret",
+  "seed",
+  "seedphrase",
+  "token",
+]);
+
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
 const PEM_BLOCK_PATTERN = /-----BEGIN\b/iu;
 const PRIVATE_KEY_PATTERN =
@@ -179,13 +196,80 @@ function parseStorageHealthState(
 }
 
 function validateOptionalStateExtras(value: JsonRecord, path: Path, errors: ValidationError[]): void {
-  if (hasOwn(value, "capabilities") && !isRecord(value["capabilities"])) {
-    addError(errors, [...path, "capabilities"], "Expected capabilities object.");
+  if (hasOwn(value, "capabilities")) {
+    const capabilities = value["capabilities"];
+    if (!isRecord(capabilities)) {
+      addError(errors, [...path, "capabilities"], "Expected capabilities object.");
+    } else {
+      // The extras are structurally allowed but otherwise unvalidated, so they cannot be
+      // a back door for inline key material. Recursively reject any secret/inline-key
+      // payload they carry (fail-closed, mirrors node-health-model.ts).
+      rejectInlineKeyMaterial(capabilities, [...path, "capabilities"], errors);
+    }
   }
 
-  if (hasOwn(value, "capsuleWorkloads") && !Array.isArray(value["capsuleWorkloads"])) {
-    addError(errors, [...path, "capsuleWorkloads"], "Expected capsuleWorkloads array.");
+  if (hasOwn(value, "capsuleWorkloads")) {
+    const capsuleWorkloads = value["capsuleWorkloads"];
+    if (!Array.isArray(capsuleWorkloads)) {
+      addError(errors, [...path, "capsuleWorkloads"], "Expected capsuleWorkloads array.");
+    } else {
+      rejectInlineKeyMaterial(capsuleWorkloads, [...path, "capsuleWorkloads"], errors);
+    }
   }
+}
+
+function rejectInlineKeyMaterial(value: PlainJson, path: Path, errors: ValidationError[]): void {
+  if (typeof value === "string") {
+    if (containsInlineKeyMaterial(value)) {
+      addError(errors, path, "Inline key material is not allowed.");
+    }
+
+    return;
+  }
+
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+
+      if (item !== undefined) {
+        rejectInlineKeyMaterial(item, [...path, String(index)], errors);
+      }
+    }
+
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  const keys = Object.keys(value).sort(compareStrings);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined) {
+      continue;
+    }
+
+    if (isSecretFieldName(key)) {
+      addError(errors, [...path, key], "Inline key material is not allowed.");
+    }
+
+    const child = value[key];
+
+    if (child !== undefined) {
+      rejectInlineKeyMaterial(child, [...path, key], errors);
+    }
+  }
+}
+
+function isSecretFieldName(value: string): boolean {
+  return SECRET_FIELD_NAMES.has(value.replace(/[-_\s]/gu, "").toLowerCase());
 }
 
 function parseMountHealth(

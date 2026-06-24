@@ -326,10 +326,12 @@ func readBlockMetadata(ctx context.Context, sysBlock string) map[string]blockInf
 		if ctx.Err() != nil {
 			return blocks
 		}
-		if !entry.IsDir() {
-			continue
-		}
-
+		// /sys/block entries are commonly SYMLINKS (e.g. sda -> ../devices/.../sda),
+		// not directories, so do NOT filter on IsDir(): that would drop every real
+		// block device on Linux and a read-only device would never become degraded.
+		// Mirror the hardware discoverer (discoverStorage), which reads entries
+		// symlink-faithfully and lets the per-signal sysfs reads (which follow the
+		// symlink) decide what is actually present.
 		name := entry.Name()
 		devicePath := filepath.Join(sysBlock, name)
 		rotational, rotationalKnown := readKnownSysfsBool(filepath.Join(devicePath, "queue", "rotational"))

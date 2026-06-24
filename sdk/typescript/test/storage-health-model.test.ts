@@ -132,6 +132,57 @@ test("inline key material is rejected from modeled strings", () => {
   );
 });
 
+test("inline key material smuggled through allowed extras is rejected", () => {
+  // The `capabilities` extra is structurally allowed but otherwise unvalidated; it must
+  // not become a back door for inline key material. A PEM private key nested anywhere
+  // inside it must fail closed.
+  assert.deepEqual(
+    rejectedPaths(
+      validateStorageHealthState({
+        ...validState(),
+        capabilities: {
+          x: "-----BEGIN PRIVATE KEY-----",
+        },
+      }),
+    ),
+    ["capabilities/x"],
+  );
+
+  // A secret-named field inside the extras is rejected by name (recursive scan).
+  assert.deepEqual(
+    rejectedPaths(
+      validateStorageHealthState({
+        ...validState(),
+        capabilities: {
+          nested: { privateKey: "redacted" },
+        },
+      }),
+    ),
+    ["capabilities/nested/privateKey"],
+  );
+
+  // The same scan applies to the capsuleWorkloads array extra.
+  assert.deepEqual(
+    rejectedPaths(
+      validateStorageHealthState({
+        ...validState(),
+        capsuleWorkloads: [{ token: "ssh-secret", note: "-----BEGIN OPENSSH PRIVATE KEY-----" }],
+      }),
+    ),
+    ["capsuleWorkloads/0/note", "capsuleWorkloads/0/token"],
+  );
+
+  // A clean extras payload still validates (no over-rejection of benign data).
+  const clean = validateStorageHealthState({
+    ...validState(),
+    capabilities: { compute: { cores: 8 } },
+    capsuleWorkloads: [{ id: "web", status: "running" }],
+  });
+  if (!clean.ok) {
+    assert.fail(`expected clean extras to validate: ${JSON.stringify(clean.errors)}`);
+  }
+});
+
 test("hostile input fails closed without throwing", () => {
   const cyclic: Record<string, unknown> = {
     hardwareInventory: validState().hardwareInventory,

@@ -163,6 +163,51 @@ func TestCollectReportsStorageHealthAndHardwareInventoryDeterministically(t *tes
 	}
 }
 
+// TestCollectMarksReadOnlySymlinkedBlockDeviceDegraded reproduces the real /sys/block
+// layout, where each block device entry is a SYMLINK into /sys/devices (not a directory).
+// readBlockMetadata must read those entries symlink-faithfully; if it filters to dir-only
+// entries, the read-only signal is dropped and the device never becomes degraded.
+func TestCollectMarksReadOnlySymlinkedBlockDeviceDegraded(t *testing.T) {
+	root := t.TempDir()
+	procMounts := filepath.Join(root, "proc", "mounts")
+	sysBlock := filepath.Join(root, "sys", "block")
+	// Real sysfs backing store lives under /sys/devices; /sys/block holds symlinks to it.
+	devices := filepath.Join(root, "sys", "devices", "sdc")
+
+	writeFile(t, procMounts, stringsJoinLines(
+		"/dev/sdc1 /readonly ext4 rw,relatime 0 0",
+	))
+
+	writeFile(t, filepath.Join(devices, "queue", "rotational"), "0\n")
+	writeFile(t, filepath.Join(devices, "ro"), "1\n")
+	symlinkBlockDevice(t, sysBlock, "sdc", devices)
+
+	statfs := mapStatfs{
+		"/readonly": {stats: FilesystemStats{Blocks: 100, BlocksFree: 50, BlocksAvailable: 40, BlockSize: 4096}},
+	}
+
+	report, err := Collect(context.Background(), Roots{
+		ProcMounts: procMounts,
+		SysBlock:   sysBlock,
+		Statfs:     statfs.Statfs,
+		Discoverer: fakeDiscoverer{},
+	})
+	if err != nil {
+		t.Fatalf("Collect returned error: %v", err)
+	}
+
+	if len(report.StorageHealth) != 1 {
+		t.Fatalf("expected exactly one mount, got %d: %#v", len(report.StorageHealth), report.StorageHealth)
+	}
+	got := report.StorageHealth[0]
+	if !got.ReadOnly {
+		t.Fatalf("symlinked read-only block device was not detected as read-only: %#v", got)
+	}
+	if got.Status != StatusDegraded {
+		t.Fatalf("read-only block device status = %q, want %q (symlinked /sys/block entry must still be read)", got.Status, StatusDegraded)
+	}
+}
+
 func TestCollectReturnsErrorForUnreadableMountTable(t *testing.T) {
 	_, err := Collect(context.Background(), Roots{
 		ProcMounts: filepath.Join(t.TempDir(), "missing-mounts"),
@@ -211,6 +256,23 @@ func writeBlockSignals(t *testing.T, sysBlock string, name string, rotational st
 
 	writeFile(t, filepath.Join(sysBlock, name, "queue", "rotational"), rotational+"\n")
 	writeFile(t, filepath.Join(sysBlock, name, "ro"), readOnly+"\n")
+}
+
+// symlinkBlockDevice mirrors the real /sys/block layout: the entry is a symlink that
+// points at the backing device directory under /sys/devices, never a real directory.
+func symlinkBlockDevice(t *testing.T, sysBlock string, name string, target string) {
+	t.Helper()
+
+	if err := os.MkdirAll(sysBlock, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", sysBlock, err)
+	}
+	rel, err := filepath.Rel(sysBlock, target)
+	if err != nil {
+		t.Fatalf("relpath %s -> %s: %v", sysBlock, target, err)
+	}
+	if err := os.Symlink(rel, filepath.Join(sysBlock, name)); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
 }
 
 func writeFile(t *testing.T, path string, content string) {
