@@ -206,6 +206,50 @@ func TestArchiveCreateSkipsSpecialEntriesAndDanglingSymlinks(t *testing.T) {
 	}
 }
 
+// TestArchiveCreateRejectsSymlinkSourceRootButAcceptsResolvedDir documents the on-device
+// root cause of capsule_lifecycle_backup_failed: a capsule volume's StateDirectory under
+// systemd DynamicUser is a SYMLINK to a real directory beneath /var/lib/private. When that
+// symlink is handed to Create as a top-level source root, the walker rejects it (a source
+// root must be a real directory, unlike a child symlink which is skipped). The capsule
+// lifecycle backup must therefore resolve the symlink first; this asserts the resolved
+// real directory is accepted and backs up the actual state bytes.
+func TestArchiveCreateRejectsSymlinkSourceRootButAcceptsResolvedDir(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	realDir := filepath.Join(base, "private", "state")
+	writeTestFile(t, filepath.Join(realDir, "data.bin"), []byte{0xCA, 0xFE}, 0o600)
+	symlinkRoot := filepath.Join(base, "state")
+	if err := os.Symlink(realDir, symlinkRoot); err != nil {
+		t.Fatalf("create state-directory symlink: %v", err)
+	}
+	target := t.TempDir()
+	capability := NewArchiveCapability()
+
+	// The declared (symlink) path is rejected — this is the boot failure.
+	if _, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "state", Path: symlinkRoot}},
+	}); err == nil {
+		t.Fatal("Create accepted a symlink source root, want rejection (capsule_lifecycle_backup_failed root cause)")
+	}
+
+	// The resolved real directory is accepted and measures the actual bytes.
+	resolved, err := filepath.EvalSymlinks(symlinkRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	result, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "state", Path: resolved}},
+	})
+	if err != nil {
+		t.Fatalf("Create with resolved real directory returned error: %v", err)
+	}
+	if result.Files != 1 {
+		t.Fatalf("Files = %d, want 1 (the real state bytes)", result.Files)
+	}
+}
+
 func TestArchiveBuildManifestExcludesTargetSubtree(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()
