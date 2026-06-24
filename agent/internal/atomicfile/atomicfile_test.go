@@ -70,20 +70,66 @@ func TestWriteUsesDefaultExclusiveTempPattern(t *testing.T) {
 	}
 }
 
-func TestWriteRequiresParentDirSync(t *testing.T) {
+// TestWriteSyncsParentDir proves the durability step is load-bearing and
+// observable: a successful write fsyncs the parent dir after the rename, and a
+// no-op SyncDir impl (one that never records the call) FAILS this assertion.
+func TestWriteSyncsParentDir(t *testing.T) {
 	fileSystem := newMemoryFS()
-	syncDirErr := errors.New("parent dir sync failed")
-	fileSystem.failNextSyncDir(syncDirErr)
 
-	err := Write(fileSystem, testTargetPath, []byte("next"), testTempMode)
-	if !errors.Is(err, syncDirErr) {
-		t.Fatalf("Write error = %v, want syncDirErr", err)
+	if err := Write(fileSystem, testTargetPath, []byte("next"), testTempMode); err != nil {
+		t.Fatalf("Write returned error: %v", err)
 	}
 	if !fileSystem.saw("sync-dir:/var/lib/vita-agent") {
 		t.Fatalf("operation order = %#v, want observable parent dir sync", fileSystem.order)
 	}
+}
+
+// TestWritePostCommitSyncDirErrorIsNotTransactional pins the atomicity
+// invariant: the rename is the commit point, so a post-rename parent-dir fsync
+// failure must NOT be returned as a transactional error (which would imply the
+// prior bytes survived). Instead the write reports SUCCESS, the NEW bytes are
+// live, and the failure is surfaced as a non-fatal durability warning. Anything
+// else is the forbidden mutated-but-reported-failed third state.
+func TestWritePostCommitSyncDirErrorIsNotTransactional(t *testing.T) {
+	prevWarn := OnDurabilityWarning
+	t.Cleanup(func() { OnDurabilityWarning = prevWarn })
+
+	var warned struct {
+		path string
+		err  error
+		hits int
+	}
+	OnDurabilityWarning = func(path string, err error) {
+		warned.path = path
+		warned.err = err
+		warned.hits++
+	}
+
+	fileSystem := newMemoryFS()
+	fileSystem.writeRaw(testTargetPath, []byte("prior"))
+	syncDirErr := errors.New("parent dir sync failed")
+	fileSystem.failNextSyncDir(syncDirErr)
+
+	// (b) A post-commit SyncDir failure must NOT report a transactional failure.
+	if err := Write(fileSystem, testTargetPath, []byte("next"), testTempMode); err != nil {
+		t.Fatalf("post-commit sync-dir failure returned error = %v, want nil (commit already happened)", err)
+	}
+	if !fileSystem.saw("sync-dir:/var/lib/vita-agent") {
+		t.Fatalf("operation order = %#v, want observable parent dir sync", fileSystem.order)
+	}
+	// The NEW bytes are live — there is no rollback after the commit point.
 	if got := string(fileSystem.mustRead(t, testTargetPath)); got != "next" {
-		t.Fatalf("target bytes after post-rename sync-dir error = %q, want committed next", got)
+		t.Fatalf("target bytes after post-rename sync-dir failure = %q, want committed next", got)
+	}
+	// The failure is surfaced as a non-fatal durability signal, not swallowed.
+	if warned.hits != 1 {
+		t.Fatalf("OnDurabilityWarning hits = %d, want 1", warned.hits)
+	}
+	if warned.path != testTargetPath {
+		t.Fatalf("durability warning path = %q, want %q", warned.path, testTargetPath)
+	}
+	if !errors.Is(warned.err, syncDirErr) {
+		t.Fatalf("durability warning err = %v, want wraps syncDirErr", warned.err)
 	}
 }
 

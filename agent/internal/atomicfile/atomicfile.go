@@ -5,9 +5,22 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 )
+
+// OnDurabilityWarning is invoked when a write COMMITTED (the rename succeeded,
+// so the new bytes are live) but the post-rename parent-directory fsync failed,
+// leaving the rename's durability across an immediate power loss uncertain. It
+// is a non-fatal durability signal, NOT a transactional failure: the commit
+// point has already passed, there is no rollback, and Write still returns nil.
+// It must never be read as "prior bytes intact" — by the time it fires the NEW
+// bytes are already live. The default logs to the standard logger; tests
+// override it to observe the warning.
+var OnDurabilityWarning = func(path string, err error) {
+	log.Printf("atomicfile: committed %s but parent-dir fsync failed (durability uncertain): %v", path, err)
+}
 
 // TempFile is the subset of *os.File needed to stage content before the
 // single rename commit point.
@@ -60,6 +73,14 @@ func (OSFileSystem) SyncDir(dir string) error {
 // Write atomically replaces path with data using a fresh temp file in the
 // target directory, then fsyncs the parent directory so the rename is durable
 // across power loss.
+//
+// It guarantees exactly two outcomes: (a) it returns nil and the new bytes are
+// live, or (b) it returns an error and the live file is byte-identical to its
+// prior state (the temp is cleaned up). The rename is the single commit point;
+// only failures BEFORE it are returned as errors. A post-rename parent-dir
+// fsync failure does NOT roll back (the bytes are committed) and is therefore
+// reported via OnDurabilityWarning rather than as an error — there is never a
+// "mutated-but-reported-failed" third state.
 func Write(fsys FileSystem, path string, data []byte, mode fs.FileMode) error {
 	return WriteWithPattern(fsys, path, data, mode, defaultTempPattern(path))
 }
@@ -143,13 +164,26 @@ func WriteWithPatternAndBeforeCommit(
 		}
 	}
 
+	// The rename is the single commit point. Once it succeeds the new bytes
+	// are live and the operation has logically SUCCEEDED — there is no rollback.
+	// Any failure BEFORE this point leaves the live file byte-identical to its
+	// prior state (and the temp is cleaned up by the deferred Remove), so it is
+	// returned as a transactional error. Any failure AFTER this point must NOT
+	// be returned as an error: doing so would create the forbidden third state
+	// (mutated-but-reported-failed) where the caller assumes the prior bytes are
+	// intact while the new bytes are actually live and unrollbackable.
 	if err := fsys.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("atomicfile: rename temp: %w", err)
 	}
 	committed = true
 
+	// Post-commit: fsync the parent directory so the rename is durable across an
+	// abrupt power loss. A failure here is a non-fatal DURABILITY signal, not a
+	// transactional failure — the bytes are already committed. Surface it via
+	// OnDurabilityWarning and return success; never return it as an error that
+	// would imply the prior state survived.
 	if err := fsys.SyncDir(targetDir); err != nil {
-		return fmt.Errorf("atomicfile: sync parent dir: %w", err)
+		OnDurabilityWarning(path, fmt.Errorf("atomicfile: sync parent dir: %w", err))
 	}
 	return nil
 }
