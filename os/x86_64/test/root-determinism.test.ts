@@ -78,6 +78,7 @@ const archConfigUrl = new URL("../mkosi.conf", import.meta.url);
 
 const expectedPackageAllowlist = [
   "bash",
+  "btrfs-progs",
   "ca-certificates",
   "coreutils",
   "cryptsetup-bin",

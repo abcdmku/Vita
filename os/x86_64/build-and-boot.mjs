@@ -23,6 +23,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -196,6 +197,43 @@ Type=ext4
 Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs
 `;
 
+const PLAIN_BTRFS_VAR_MOUNT_UNIT = `# Vita Btrfs /var mount. Enabled only when VITA_BTRFS=1 stages
+# /usr/lib/vita/btrfs/enabled. Condition skips are success, preserving the P1-029 no-cascade semantics.
+[Unit]
+Description=Vita persistent Btrfs data subvolume (/var)
+DefaultDependencies=no
+Before=local-fs.target umount.target
+Conflicts=umount.target
+ConditionPathExists=/usr/lib/vita/btrfs/enabled
+ConditionPathExists=/dev/disk/by-label/vita-data
+
+[Mount]
+What=/dev/disk/by-label/vita-data
+Where=/var
+Type=btrfs
+Options=subvol=@data,compress=zstd:1,nofail,x-systemd.device-timeout=5s,x-systemd.growfs
+`;
+
+const LUKS_BTRFS_VAR_MOUNT_UNIT = `# Vita LUKS+Btrfs /var mount. The Btrfs filesystem lives inside the
+# decrypted mapper; this unit never falls back to the raw ciphertext partition.
+[Unit]
+Description=Vita persistent Btrfs data subvolume (/var)
+DefaultDependencies=no
+Requires=vita-data-luks.service
+BindsTo=vita-data-luks.service
+After=vita-data-luks.service
+Before=local-fs.target umount.target
+Conflicts=umount.target
+ConditionPathExists=/usr/lib/vita/luks/enabled
+ConditionPathExists=/usr/lib/vita/btrfs/enabled
+
+[Mount]
+What=/dev/mapper/vita-data
+Where=/var
+Type=btrfs
+Options=subvol=@data,compress=zstd:1,nofail,x-systemd.device-timeout=5s,x-systemd.growfs
+`;
+
 function prepareVerityRepartDirectory({ luksMode }) {
   if (luksMode) {
     return REPART_VERITY_DIR;
@@ -217,10 +255,51 @@ function prepareVerityRepartDirectory({ luksMode }) {
   return plainDir;
 }
 
-function prepareVerityOverlay({ luksMode }) {
+function prepareVerityOverlay({ luksMode, btrfsMode }) {
   const overlay = join(HERE, "verity-overlay");
+  if (btrfsMode) {
+    const btrfsOverlay = join(OUT, luksMode ? "verity-overlay-luks-btrfs" : "verity-overlay-btrfs");
+    if (DRY) return btrfsOverlay;
+    rmSync(btrfsOverlay, { recursive: true, force: true });
+    cpSync(overlay, btrfsOverlay, { recursive: true });
+    const systemdDir = join(btrfsOverlay, "usr", "lib", "systemd", "system");
+    writeFileSync(
+      join(systemdDir, "var.mount"),
+      luksMode ? LUKS_BTRFS_VAR_MOUNT_UNIT : PLAIN_BTRFS_VAR_MOUNT_UNIT,
+      { mode: 0o644 },
+    );
+    const btrfsDir = join(btrfsOverlay, "usr", "lib", "vita", "btrfs");
+    mkdirSync(btrfsDir, { recursive: true });
+    writeFileSync(join(btrfsDir, "enabled"), "VITA_BTRFS=1 data subvolume enabled\n", { mode: 0o444 });
+    return btrfsOverlay;
+  }
+
   if (luksMode) {
-    return overlay;
+    // The committed overlay also carries Btrfs marker artifacts. For VITA_BTRFS=0,
+    // stage only the historical LUKS files so the LUKS/ext4 image contents stay byte-compatible.
+    const luksOverlay = join(OUT, "verity-overlay-luks-ext4");
+    if (DRY) return luksOverlay;
+    const systemdDir = join(luksOverlay, "usr", "lib", "systemd", "system");
+    const vitaLuksDir = join(luksOverlay, "usr", "lib", "vita", "luks");
+    rmSync(luksOverlay, { recursive: true, force: true });
+    mkdirSync(join(systemdDir, "local-fs.target.d"), { recursive: true });
+    mkdirSync(join(systemdDir, "multi-user.target.d"), { recursive: true });
+    mkdirSync(vitaLuksDir, { recursive: true });
+    for (const name of ["var.mount", "vita-data-luks.service", "vita-luks-marker.service"]) {
+      copyFileSync(join(overlay, "usr", "lib", "systemd", "system", name), join(systemdDir, name));
+    }
+    copyFileSync(
+      join(overlay, "usr", "lib", "systemd", "system", "local-fs.target.d", "10-vita-var.conf"),
+      join(systemdDir, "local-fs.target.d", "10-vita-var.conf"),
+    );
+    copyFileSync(
+      join(overlay, "usr", "lib", "systemd", "system", "multi-user.target.d", "10-vita-luks-marker.conf"),
+      join(systemdDir, "multi-user.target.d", "10-vita-luks-marker.conf"),
+    );
+    for (const name of ["vita-data-unlock.sh", "vita-luks-marker.sh"]) {
+      copyFileSync(join(overlay, "usr", "lib", "vita", "luks", name), join(vitaLuksDir, name));
+    }
+    return luksOverlay;
   }
 
   // Keep VITA_LUKS=0 verity image contents identical to P1-029: no unlock unit,
@@ -303,7 +382,58 @@ function cleanupLuksPostprocess(loopDevice, mapperName) {
   }
 }
 
-function luksFormatDataPartition(disk, keyPath) {
+function formatBtrfsVolume(device) {
+  const mnt = join(OUT, `btrfs-format-${process.pid}`);
+  let mounted = false;
+  try {
+    rmSync(mnt, { recursive: true, force: true });
+    mkdirSync(mnt, { recursive: true });
+    runLuksPostprocess("Btrfs · mkfs vita-data", "mkfs.btrfs", ["-f", "-L", "vita-data", device]);
+    runLuksPostprocess("Btrfs · mount top-level", "mount", ["-t", "btrfs", "-o", "subvolid=5,compress=zstd:1", device, mnt]);
+    mounted = true;
+    runLuksPostprocess("Btrfs · create @data subvolume", "btrfs", ["subvolume", "create", join(mnt, "@data")]);
+    runLuksPostprocess("Btrfs · create @snapshots subvolume", "btrfs", ["subvolume", "create", join(mnt, "@snapshots")]);
+    runLuksPostprocess("Btrfs · enable quotas", "btrfs", ["quota", "enable", mnt]);
+  } finally {
+    if (mounted) {
+      const r = spawnSync("umount", [mnt], { stdio: "inherit" });
+      if (r.status !== 0) log(`   (cleanup warning: umount ${mnt} exited ${r.status})`);
+    }
+    rmSync(mnt, { recursive: true, force: true });
+  }
+}
+
+function btrfsFormatDataPartition(disk) {
+  log("\n── Btrfs · format vita-data partition with @data/@snapshots");
+  if (DRY) {
+    log(`   $ losetup --find --show --partscan ${disk}`);
+    log("   $ wipefs --all --force <vita-data partition>");
+    log("   $ mkfs.btrfs -f -L vita-data <vita-data partition>");
+    log("   $ mount -t btrfs -o subvolid=5,compress=zstd:1 <vita-data partition> <tmp>");
+    log("   $ btrfs subvolume create <tmp>/@data");
+    log("   $ btrfs subvolume create <tmp>/@snapshots");
+    log("   $ btrfs quota enable <tmp>");
+    return;
+  }
+
+  let loopDevice = "";
+  let postprocessError;
+  try {
+    const loop = captureLuksPostprocess("Btrfs · attach disk image", "losetup", ["--find", "--show", "--partscan", disk]);
+    loopDevice = loop.trim().split(/\s+/u)[0] ?? "";
+    if (!loopDevice) throw new Error("Btrfs: losetup did not return a loop device");
+    const dataPartition = findLoopPartitionByPartLabel(loopDevice, "vita-data");
+    runLuksPostprocess("Btrfs · wipe old filesystem signatures", "wipefs", ["--all", "--force", dataPartition]);
+    formatBtrfsVolume(dataPartition);
+  } catch (e) {
+    postprocessError = e;
+  } finally {
+    cleanupLuksPostprocess(loopDevice, "");
+  }
+  if (postprocessError) fail(postprocessError.message);
+}
+
+function luksFormatDataPartition(disk, keyPath, { btrfsMode }) {
   log("\n── LUKS · format vita-data as LUKS2 and create inner ext4 label");
   log("   (cryptsetup LUKS2 defaults are used for cipher/KDF; no production key material is generated)");
   if (DRY) {
@@ -327,6 +457,10 @@ function luksFormatDataPartition(disk, keyPath) {
       ["luksFormat", "--type", "luks2", "--batch-mode", "--key-file", keyPath, dataPartition]);
     runLuksPostprocess("LUKS · open vita-data mapper for inner ext4 formatting", "cryptsetup",
       ["luksOpen", "--key-file", keyPath, dataPartition, mapperName]);
+    if (btrfsMode) {
+      formatBtrfsVolume(`/dev/mapper/${mapperName}`);
+      return;
+    }
     runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
       ["-F", "-L", "vita-data", `/dev/mapper/${mapperName}`]);
   } catch (e) {
@@ -417,11 +551,18 @@ if (MODE === "smoke") {
     fail("VITA_VERITY=1 requires the native mkosi engine — --repart-directory is a host path not mounted into " +
          "the docker mkosi container. Install mkosi on PATH or set VITA_MKOSI=native.");
   const luksMode = process.env.VITA_LUKS === "1";
+  const btrfsMode = process.env.VITA_BTRFS === "1";
   if (luksMode && !verityMode) {
     fail("VITA_LUKS=1 requires VITA_VERITY=1: the encrypted data partition is only present in repart-verity.");
   }
+  if (btrfsMode && !verityMode) {
+    fail("VITA_BTRFS=1 requires VITA_VERITY=1: the Btrfs data partition is only present in repart-verity.");
+  }
   if (luksMode && !DRY && !useNative) {
     fail("VITA_LUKS=1 requires the native mkosi engine — LUKS post-processing uses host loop devices.");
+  }
+  if (btrfsMode && !DRY && !useNative) {
+    fail("VITA_BTRFS=1 requires the native mkosi engine: Btrfs post-processing uses host loop devices.");
   }
   const verityRepartDir = verityMode ? prepareVerityRepartDirectory({ luksMode }) : "";
   const verity = verityMode ? ["--verity=hash", `--repart-directory=${verityRepartDir}`] : [];
@@ -432,7 +573,7 @@ if (MODE === "smoke") {
   // var.mount + its local-fs drop-in live in a VERITY-ONLY overlay: on a plain (non-verity) image the vita-data
   // device never exists, and a present-but-failed var.mount cascades through RequiresMountsFor=/var/... to cancel
   // vita-agentd (StateDirectory=vita-agent) — breaking the agentd socket. So ship those units ONLY when VITA_VERITY=1.
-  const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode }) : "";
+  const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode, btrfsMode }) : "";
   const verityTree = verityMode ? [`--extra-tree=${verityOverlay}`] : [];
   const luksKey = resolve(process.env.VITA_LUKS_TEST_KEY_PATH ?? join(HERE, ".luks", "data.key"));
   const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey)}`] : [];
@@ -483,7 +624,11 @@ if (MODE === "smoke") {
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
-  if (luksMode) luksFormatDataPartition(disk, luksKey);
+  if (luksMode) {
+    luksFormatDataPartition(disk, luksKey, { btrfsMode });
+  } else if (btrfsMode) {
+    btrfsFormatDataPartition(disk);
+  }
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
