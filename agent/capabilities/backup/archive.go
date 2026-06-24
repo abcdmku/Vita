@@ -1,3 +1,5 @@
+//go:build linux
+
 package backup
 
 import (
@@ -168,7 +170,36 @@ func (e *ArchiveVerificationError) Error() string {
 }
 
 func (e *ArchiveVerificationError) ApplyErrorCode() string {
-	return "backup_archive_verify_failed"
+	if e == nil {
+		return "verify_failed"
+	}
+	return archiveVerificationCode(e.Failure)
+}
+
+type ArchiveOperationError struct {
+	Code string
+	Err  error
+}
+
+func (e *ArchiveOperationError) Error() string {
+	if e == nil || e.Err == nil {
+		return "backup archive operation failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *ArchiveOperationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *ArchiveOperationError) ApplyErrorCode() string {
+	if e == nil || e.Code == "" {
+		return "backup_archive_apply_failed"
+	}
+	return e.Code
 }
 
 func NewArchiveCapability() *ArchiveCapability {
@@ -642,12 +673,15 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 		return ArchiveCreateResult{}, nil, err
 	}
 	if err := os.MkdirAll(normalized.TargetPath, archiveDirMode); err != nil {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("create backup archive target: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_target_mkdir", err)
+	}
+	if err := os.Chmod(normalized.TargetPath, archiveDirMode); err != nil {
+		return ArchiveCreateResult{}, nil, archiveStepError("create_target_chmod", err)
 	}
 
 	stage, err := os.MkdirTemp(normalized.TargetPath, ".backup-archive-*.tmp")
 	if err != nil {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("create backup archive staging directory: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_stage_mkdir", err)
 	}
 	cleanupStage := true
 	defer func() {
@@ -656,12 +690,12 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 		}
 	}()
 	if err := os.Chmod(stage, archiveDirMode); err != nil {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("secure backup archive staging directory: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_stage_chmod", err)
 	}
 
 	objectsDir := filepath.Join(stage, archiveObjectsDirName)
 	if err := os.MkdirAll(objectsDir, archiveDirMode); err != nil {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("create backup archive object store: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_objects_mkdir", err)
 	}
 
 	roots := *normalized.SourceRoots
@@ -671,7 +705,7 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 	}
 	digest, err := manifestDigest(manifestBody(manifest))
 	if err != nil {
-		return ArchiveCreateResult{}, nil, err
+		return ArchiveCreateResult{}, nil, archiveStepError("create_manifest_digest", err)
 	}
 	manifest.Digest = digest
 	if err := validateArchiveManifest(manifest); err != nil {
@@ -680,13 +714,13 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 
 	rendered, err := renderArchiveManifest(manifest)
 	if err != nil {
-		return ArchiveCreateResult{}, nil, err
+		return ArchiveCreateResult{}, nil, archiveStepError("create_manifest_render", err)
 	}
 	if err := atomicWriteFile(filepath.Join(stage, archiveManifestName), rendered, archiveFileMode); err != nil {
-		return ArchiveCreateResult{}, nil, err
+		return ArchiveCreateResult{}, nil, archiveStepError("create_manifest_write", err)
 	}
 	if err := syncTreeDirs(stage); err != nil {
-		return ArchiveCreateResult{}, nil, err
+		return ArchiveCreateResult{}, nil, archiveStepError("create_stage_sync", err)
 	}
 
 	finalPath := archivePath(normalized.TargetPath, digest)
@@ -700,12 +734,12 @@ func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreate
 		}
 		return ArchiveCreateResult{BackupID: digest, Files: files}, archiveUndo{}, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("stat backup archive destination: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_destination_stat", err)
 	}
 
 	// Rename publishes the fully staged backup as the single create commit point.
 	if err := os.Rename(stage, finalPath); err != nil {
-		return ArchiveCreateResult{}, nil, fmt.Errorf("publish backup archive: %w", err)
+		return ArchiveCreateResult{}, nil, archiveStepError("create_publish_rename", err)
 	}
 	cleanupStage = false
 
@@ -735,7 +769,7 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 	}
 
 	if ok, err := treeMatchesManifest(normalized.DestinationRoot, manifest); err != nil {
-		return ArchiveRestoreResult{}, nil, err
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_destination_check", err)
 	} else if ok {
 		return ArchiveRestoreResult{BackupID: manifest.Digest, Files: verify.Files, Restored: true}, archiveUndo{}, nil
 	}
@@ -743,11 +777,11 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 	parent := filepath.Dir(normalized.DestinationRoot)
 	base := filepath.Base(normalized.DestinationRoot)
 	if err := os.MkdirAll(parent, archiveDirMode); err != nil {
-		return ArchiveRestoreResult{}, nil, fmt.Errorf("create restore parent: %w", err)
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_parent_mkdir", err)
 	}
 	stage, err := os.MkdirTemp(parent, "."+base+"-restore-*.tmp")
 	if err != nil {
-		return ArchiveRestoreResult{}, nil, fmt.Errorf("create restore staging directory: %w", err)
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_stage_mkdir", err)
 	}
 	cleanupStage := true
 	defer func() {
@@ -756,30 +790,30 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 		}
 	}()
 	if err := os.Chmod(stage, archiveDirMode); err != nil {
-		return ArchiveRestoreResult{}, nil, fmt.Errorf("secure restore staging directory: %w", err)
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_stage_chmod", err)
 	}
 
 	if err := materializeArchive(ctx, archivePath(normalized.TargetPath, normalized.BackupID), manifest, stage); err != nil {
-		return ArchiveRestoreResult{}, nil, err
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_materialize", err)
 	}
 	if normalized.CompareSourceRoots != nil {
 		if err := compareStageToSourceRoots(ctx, stage, *normalized.CompareSourceRoots); err != nil {
-			return ArchiveRestoreResult{}, nil, err
+			return ArchiveRestoreResult{}, nil, archiveStepError("restore_compare", err)
 		}
 	}
 	if err := syncTreeDirs(stage); err != nil {
-		return ArchiveRestoreResult{}, nil, err
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_stage_sync", err)
 	}
 
 	_, statErr := os.Lstat(normalized.DestinationRoot)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return ArchiveRestoreResult{}, nil, fmt.Errorf("stat restore destination: %w", statErr)
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_destination_stat", statErr)
 	}
 
 	if errors.Is(statErr, os.ErrNotExist) {
 		// Rename is the single restore commit point for a new destination.
 		if err := os.Rename(stage, normalized.DestinationRoot); err != nil {
-			return ArchiveRestoreResult{}, nil, fmt.Errorf("publish restored archive: %w", err)
+			return ArchiveRestoreResult{}, nil, archiveStepError("restore_publish_rename", err)
 		}
 		cleanupStage = false
 		return ArchiveRestoreResult{BackupID: manifest.Digest, Files: verify.Files, Restored: true}, archiveRestoreUndo{
@@ -790,7 +824,7 @@ func restoreArchive(ctx context.Context, req ArchiveRestoreRequest) (ArchiveRest
 
 	// Rename exchange is the single restore commit point for an existing destination.
 	if err := renameExchange(stage, normalized.DestinationRoot); err != nil {
-		return ArchiveRestoreResult{}, nil, fmt.Errorf("swap restored archive into place: %w", err)
+		return ArchiveRestoreResult{}, nil, archiveStepError("restore_rename_exchange", err)
 	}
 	cleanupStage = false
 	return ArchiveRestoreResult{BackupID: manifest.Digest, Files: verify.Files, Restored: true}, archiveRestoreUndo{
@@ -811,7 +845,10 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 		manifest.Roots[i] = archiveManifestRoot{Name: root.Name}
 		rootInfo, err := os.Lstat(root.Path)
 		if err != nil {
-			return archiveManifest{}, 0, fmt.Errorf("stat source root %q: %w", root.Name, err)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return archiveManifest{}, 0, archiveStepError("create_source_stat", fmt.Errorf("source root %q: %w", root.Name, err))
 		}
 		if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
 			return archiveManifest{}, 0, archiveInvalid(fmt.Sprintf("sourceRoots[%s].path must be a directory", root.Name))
@@ -871,7 +908,7 @@ func buildArchiveManifest(ctx context.Context, roots []ArchiveSourceRoot, object
 			return nil
 		})
 		if err != nil {
-			return archiveManifest{}, 0, fmt.Errorf("walk source root %q: %w", root.Name, err)
+			return archiveManifest{}, 0, archiveStepError("create_source_walk", fmt.Errorf("source root %q: %w", root.Name, err))
 		}
 	}
 
@@ -1548,6 +1585,117 @@ func syncDir(path string) error {
 
 func renameExchange(a string, b string) error {
 	return unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_EXCHANGE)
+}
+
+func archiveStepError(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	code := sanitizeArchiveCode(step)
+	if errno := errnoCode(err); errno != "" {
+		code += "_" + errno
+	}
+	return &ArchiveOperationError{
+		Code: code,
+		Err:  fmt.Errorf("%s: %w", step, err),
+	}
+}
+
+func archiveVerificationCode(failure ArchiveVerificationFailure) string {
+	reason := strings.ToLower(failure.Reason)
+	switch {
+	case strings.Contains(reason, "content digest mismatch"), strings.Contains(reason, "digest mismatch"):
+		return "verify_digest_mismatch"
+	case strings.Contains(reason, "content size mismatch"), strings.Contains(reason, "size mismatch"):
+		return "verify_size_mismatch"
+	case strings.Contains(reason, "backup id mismatch"):
+		return "verify_backup_id_mismatch"
+	case strings.Contains(reason, "no such file"):
+		return "verify_" + sanitizeArchiveCode(failure.Entry) + "_ENOENT"
+	case strings.Contains(reason, "permission denied"):
+		return "verify_" + sanitizeArchiveCode(failure.Entry) + "_EACCES"
+	default:
+		entry := sanitizeArchiveCode(failure.Entry)
+		reasonCode := sanitizeArchiveCode(failure.Reason)
+		if reasonCode == "" {
+			reasonCode = "failed"
+		}
+		if entry == "" {
+			return "verify_" + reasonCode
+		}
+		return "verify_" + entry + "_" + reasonCode
+	}
+}
+
+func errnoCode(err error) string {
+	var errno unix.Errno
+	if errors.As(err, &errno) {
+		return errnoName(errno)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "ENOENT"
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return "EACCES"
+	}
+	if errors.Is(err, os.ErrExist) {
+		return "EEXIST"
+	}
+	return ""
+}
+
+func errnoName(errno unix.Errno) string {
+	switch errno {
+	case unix.EACCES:
+		return "EACCES"
+	case unix.EEXIST:
+		return "EEXIST"
+	case unix.EINVAL:
+		return "EINVAL"
+	case unix.EIO:
+		return "EIO"
+	case unix.ENOENT:
+		return "ENOENT"
+	case unix.ENOSPC:
+		return "ENOSPC"
+	case unix.ENOTDIR:
+		return "ENOTDIR"
+	case unix.ENOTEMPTY:
+		return "ENOTEMPTY"
+	case unix.EPERM:
+		return "EPERM"
+	case unix.EXDEV:
+		return "EXDEV"
+	default:
+		return fmt.Sprintf("ERRNO_%d", errno)
+	}
+}
+
+func sanitizeArchiveCode(value string) string {
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		case r == '_' || r == '-' || r == '.':
+			builder.WriteByte('_')
+			lastUnderscore = true
+		default:
+			if !lastUnderscore {
+				builder.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), "_")
 }
 
 func archiveInvalid(reason string) *ArchiveInvalidRequestError {

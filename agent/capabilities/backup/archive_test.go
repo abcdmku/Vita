@@ -1,3 +1,5 @@
+//go:build linux
+
 package backup
 
 import (
@@ -66,6 +68,40 @@ func TestArchiveCreateProducesContentAddressedManifestAndObjects(t *testing.T) {
 	assertFileEntryMatchesSource(t, entries["agent/capsules/state.bin"], filepath.Join(source, "capsules", "state.bin"), target, result.BackupID)
 	if entry, ok := entries["agent/empty-dir"]; !ok || entry.Type != "dir" || entry.Mode != 0o700 {
 		t.Fatalf("empty directory entry = %#v, %v; want recorded dir mode 0700", entry, ok)
+	}
+}
+
+func TestArchiveCreateAllowsAbsentSourceRootAsEmptyRoot(t *testing.T) {
+	ctx := context.Background()
+	target := t.TempDir()
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+
+	capability := NewArchiveCapability()
+	result, _, err := capability.Create(ctx, ArchiveCreateRequest{
+		TargetPath:  target,
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "capsule-volumes", Path: missingRoot}},
+	})
+	if err != nil {
+		t.Fatalf("Create returned error for absent source root: %v", err)
+	}
+	if result.Files != 0 {
+		t.Fatalf("Files = %d, want 0 for empty absent root", result.Files)
+	}
+
+	manifest := mustLoadManifest(t, target, result.BackupID)
+	if len(manifest.Roots) != 1 || manifest.Roots[0].Name != "capsule-volumes" {
+		t.Fatalf("manifest roots = %#v, want recorded absent root", manifest.Roots)
+	}
+	if len(manifest.Entries) != 0 {
+		t.Fatalf("manifest entries = %#v, want none for absent root", manifest.Entries)
+	}
+
+	verify, err := capability.Verify(ctx, ArchiveVerifyRequest{TargetPath: target, BackupID: result.BackupID})
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+	if !verify.OK || verify.Failure != nil {
+		t.Fatalf("Verify = %#v, want ok", verify)
 	}
 }
 
@@ -201,6 +237,9 @@ func TestArchiveRestoreTamperRefusesWithoutMutationOrLeaks(t *testing.T) {
 	if !errors.As(err, &verifyErr) {
 		t.Fatalf("Restore Apply error = %T %v, want ArchiveVerificationError", err, err)
 	}
+	if code := verifyErr.ApplyErrorCode(); code != "verify_digest_mismatch" {
+		t.Fatalf("verification error code = %q, want verify_digest_mismatch", code)
+	}
 	if got := mustDigestTree(t, destination); !reflect.DeepEqual(got, prior) {
 		t.Fatalf("destination after refused restore = %#v, want unchanged %#v", got, prior)
 	}
@@ -288,6 +327,30 @@ func TestArchiveFailClosedInputHandling(t *testing.T) {
 	var invalid *ArchiveInvalidRequestError
 	if !errors.As(err, &invalid) {
 		t.Fatalf("Apply with secret path error = %T %v, want ArchiveInvalidRequestError", err, err)
+	}
+}
+
+func TestArchiveApplyReportsSpecificFilesystemDiagnosticCode(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	targetParent := filepath.Join(t.TempDir(), "not-a-dir")
+	writeTestFile(t, filepath.Join(source, "state.json"), []byte(`{"ok":true}`), 0o600)
+	writeTestFile(t, targetParent, []byte("file"), 0o600)
+
+	capability := NewArchiveCapability()
+	undo, err := capability.Apply(ctx, ArchiveApplyRequest{Op: ArchiveOperationCreate, Create: &ArchiveCreateRequest{
+		TargetPath:  filepath.Join(targetParent, "child"),
+		SourceRoots: &[]ArchiveSourceRoot{{Name: "agent", Path: source}},
+	}})
+	if undo != nil {
+		t.Fatalf("Apply returned undo %v, want nil", undo)
+	}
+	var opErr *ArchiveOperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Apply error = %T %v, want ArchiveOperationError", err, err)
+	}
+	if code := opErr.ApplyErrorCode(); code != "create_target_mkdir_ENOTDIR" {
+		t.Fatalf("ApplyErrorCode = %q, want create_target_mkdir_ENOTDIR", code)
 	}
 }
 
