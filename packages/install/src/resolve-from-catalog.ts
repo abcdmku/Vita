@@ -263,6 +263,7 @@ export function resolveFromCatalog(input: unknown): ResolveFromCatalogResult {
       artifact.value.manifest,
       request.value.appId,
       request.value.version,
+      located.value.entry.integrity,
       contract.value.packageClass,
     );
     if (!manifestMatch.ok) return reject([manifestMatch.error]);
@@ -2132,6 +2133,7 @@ function verifySelectedManifest(
   manifest: ExecutionManifest,
   appId: string,
   version: string,
+  integrity: string,
   packageClass: PackageContract["packageClass"],
 ):
   | {
@@ -2158,6 +2160,17 @@ function verifySelectedManifest(
         "POLICY_REJECTED",
         [CAPSULE_MANIFEST_BASENAME, "version"],
         "Resolved capsule manifest version does not match the selected catalog version.",
+      ),
+      ok: false,
+    };
+  }
+
+  if (manifest.integrity !== integrity) {
+    return {
+      error: error(
+        "POLICY_REJECTED",
+        [CAPSULE_MANIFEST_BASENAME, "integrity"],
+        "Resolved capsule manifest integrity does not match the selected catalog artifact integrity.",
       ),
       ok: false,
     };

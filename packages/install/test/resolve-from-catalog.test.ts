@@ -273,6 +273,27 @@ test("capsule artifact SRI mismatch rejects before install planning", () => {
   );
 });
 
+test("capsule ExecutionManifest integrity must match the signed catalog artifact integrity", () => {
+  const mismatchedArtifact = packageArtifactBytes({
+    manifest: validExecutionManifest({ integrity: sri(bytes("different manifest-declared integrity"), "sha256") }),
+  });
+
+  assertRejects(
+    resolveFromCatalog({
+      appId: "com.vita.notes",
+      catalog: signCatalog(validCatalog({
+        artifactIntegrity: sri(mismatchedArtifact, "sha512"),
+        entry: validInstallEntry(),
+        lockfile: validNpmLockfile(),
+      })),
+      mirrorStore: validMirrorStore(mismatchedArtifact),
+      trustedKeys: TEST_CATALOG_TRUSTED_KEYS,
+      version: "1.2.3",
+    }),
+    "POLICY_REJECTED",
+  );
+});
+
 test("capsule ExecutionManifest rejects non-canonical IPv6 CIDRs", () => {
   assertRejects(
     resolveFromCatalog(fixtureInput({
