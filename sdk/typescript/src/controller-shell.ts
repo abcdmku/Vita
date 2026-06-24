@@ -216,6 +216,7 @@ const RESULT_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
 const RESULT_ERROR_OPTIONAL_FIELDS = Object.freeze(["index", "capability"]);
 const ERROR_RESPONSE_FIELDS = Object.freeze(["error"]);
 const APPLY_OUTCOMES = ["committed", "rolledBack", "rejected"] as const;
+const CURRENT_STATE_METADATA_FIELDS = Object.freeze(["exists", "raw"]);
 
 export async function handleControllerShellRequest(
   ports: ControllerShellPorts,
@@ -380,7 +381,7 @@ async function previewControllerShellPlan(
     };
   }
 
-  const current = await readCurrentPlan(ports.agent);
+  const current = await readCurrentPlan(ports);
 
   if (!current.ok) {
     return previewFailure("CURRENT_STATE_UNAVAILABLE", current.reason, []);
@@ -517,8 +518,9 @@ async function applyControllerShellPlan(
 }
 
 async function readCurrentPlan(
-  agent: ControllerShellAgent,
+  ports: ControllerShellPorts,
 ): Promise<ValidationResult<ControllerShellTransactionPlan>> {
+  const agent = ports.agent;
   const currentCapabilities = await readOperations(agent);
 
   if (!currentCapabilities.ok) {
@@ -540,7 +542,11 @@ async function readCurrentPlan(
       return reject(state.reason);
     }
 
-    const request = projectCurrentStateToRequest(state.value, capability);
+    const request = await projectCurrentStateToRequest(
+      ports.evaluate,
+      state.value,
+      capability,
+    );
 
     if (!request.ok) {
       return request;
@@ -652,20 +658,68 @@ async function readCapabilityState(
   }
 }
 
-function projectCurrentStateToRequest(
+async function projectCurrentStateToRequest(
+  evaluate: ControllerShellPorts["evaluate"],
   state: PlainJsonObject,
   capability: string,
-): ValidationResult<PlainJsonObject | null> {
+): Promise<ValidationResult<PlainJsonObject | null>> {
+  const candidates = projectCurrentStateRequestCandidates(state, capability);
+
+  if (!candidates.ok) {
+    return reject(candidates.reason);
+  }
+  if (candidates.value === null) {
+    return accept(null);
+  }
+
+  for (let index = 0; index < candidates.value.length; index += 1) {
+    const candidate = candidates.value[index];
+
+    if (candidate === undefined) {
+      continue;
+    }
+
+    const evaluated = await safeEvaluate(
+      evaluate,
+      singleCapabilityConfig(capability, candidate),
+    );
+
+    if (!evaluated.ok) {
+      continue;
+    }
+
+    const operation = readSingleCapabilityOperation(evaluated.plan, capability);
+
+    if (operation.ok) {
+      return accept(operation.value.request);
+    }
+  }
+
+  const fallback = candidates.value[0];
+
+  return fallback === undefined
+    ? reject(`state for ${capability} is missing current desired payload.`)
+    : accept(fallback);
+}
+
+function projectCurrentStateRequestCandidates(
+  state: PlainJsonObject,
+  capability: string,
+): ValidationResult<readonly PlainJsonObject[] | null> {
   const current = field(state, "current");
 
   if (current !== undefined) {
-    return accept(desiredRequest(current));
+    return accept(Object.freeze([desiredRequest(current)]));
   }
 
   const exists = field(state, "exists");
 
   if (exists === undefined) {
-    return accept(null);
+    const direct = currentStatePayloadCandidates(state);
+
+    return direct.length === 0
+      ? accept(null)
+      : accept(Object.freeze(direct.map(desiredRequest)));
   }
   if (typeof exists !== "boolean") {
     return reject(`state for ${capability} has malformed exists.`);
@@ -674,17 +728,69 @@ function projectCurrentStateToRequest(
     return accept(null);
   }
 
-  const desired = readDesiredStatePayload(state);
+  const payloads = currentStatePayloadCandidates(state);
 
-  if (!desired.ok) {
+  if (payloads.length === 0) {
     return reject(`state for ${capability} is missing current desired payload.`);
   }
 
-  return accept(desiredRequest(desired.value));
+  return accept(Object.freeze(payloads.map(desiredRequest)));
 }
 
-function readDesiredStatePayload(state: PlainJsonObject): ValidationResult<PlainJson> {
-  const keys = ["config", "policy", "layout", "attestation", "plan", "state", "registry"] as const;
+function currentStatePayloadCandidates(state: PlainJsonObject): PlainJson[] {
+  const payloads: PlainJson[] = [];
+  const desired = field(state, "desired");
+
+  if (desired !== undefined) {
+    payloads[payloads.length] = desired;
+  }
+
+  const payloadKeys = currentStatePayloadKeys(state);
+
+  if (payloadKeys.length === 1) {
+    const key = payloadKeys[0];
+
+    if (key !== undefined && key !== "desired") {
+      const single = field(state, key);
+
+      if (single !== undefined) {
+        payloads[payloads.length] = single;
+      }
+    }
+  }
+
+  if (payloadKeys.length > 0) {
+    payloads[payloads.length] = copyCurrentStatePayload(state, payloadKeys);
+  }
+
+  return payloads;
+}
+
+function currentStatePayloadKeys(state: PlainJsonObject): readonly string[] {
+  const keys = Object.keys(state).sort(compareStrings);
+  const payloadKeys: string[] = [];
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined) {
+      continue;
+    }
+    if (contains(CURRENT_STATE_METADATA_FIELDS, key)) {
+      continue;
+    }
+
+    payloadKeys[payloadKeys.length] = key;
+  }
+
+  return Object.freeze(payloadKeys);
+}
+
+function copyCurrentStatePayload(
+  state: PlainJsonObject,
+  keys: readonly string[],
+): PlainJsonObject {
+  const payload: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
 
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index];
@@ -696,11 +802,16 @@ function readDesiredStatePayload(state: PlainJsonObject): ValidationResult<Plain
     const value = field(state, key);
 
     if (value !== undefined) {
-      return accept(value);
+      Object.defineProperty(payload, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: false,
+      });
     }
   }
 
-  return reject("current desired payload is absent.");
+  return Object.freeze(payload);
 }
 
 function desiredRequest(desired: PlainJson): PlainJsonObject {
@@ -713,6 +824,39 @@ function desiredRequest(desired: PlainJson): PlainJsonObject {
   });
 
   return Object.freeze(request);
+}
+
+function singleCapabilityConfig(
+  capability: string,
+  request: PlainJsonObject,
+): PlainJsonObject {
+  const config: Record<string, PlainJson> = Object.create(null) as Record<string, PlainJson>;
+
+  Object.defineProperty(config, capability, {
+    configurable: true,
+    enumerable: true,
+    value: request,
+    writable: false,
+  });
+
+  return Object.freeze(config);
+}
+
+function readSingleCapabilityOperation(
+  plan: ControllerShellTransactionPlan,
+  capability: string,
+): ValidationResult<ControllerShellPlanOperation> {
+  if (plan.operations.length !== 1) {
+    return reject(`current plan for ${capability} must contain exactly one operation.`);
+  }
+
+  const operation = plan.operations[0];
+
+  if (operation === undefined || operation.capability !== capability) {
+    return reject(`current plan for ${capability} returned a mismatched operation.`);
+  }
+
+  return accept(operation);
 }
 
 async function safeEvaluate(

@@ -109,6 +109,43 @@ test("VITA-UI status, preview, and apply markers are measured from mock agent re
   );
 });
 
+test("VITA-UI preview measures removed pds.repo-like current state", async () => {
+  const ports = shellPorts({
+    hostname: "vita-node-7",
+    operations: ["hostname.set", "pds.repo"],
+    states: {
+      "pds.repo": {
+        commitCursor: 43,
+        exists: true,
+        log: [],
+        records: [
+          {
+            collection: "app.bsky.actor.profile",
+            rkey: "self",
+            valueDigest: "2222222222222222222222222222222222222222222222222222222222222222",
+          },
+        ],
+        repo: "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+      },
+    },
+  });
+
+  const preview = parseJsonObject(await handleVendored(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  }));
+
+  assert.equal(preview["ok"], true);
+  assert.deepEqual(preview["added"], []);
+  assert.deepEqual(preview["changed"], []);
+  assert.deepEqual(preview["removed"], ["pds.repo"]);
+});
+
 test("forced invalid apply surfaces VITA-UI-REJECT and transport failure surfaces FAILSAFE", async () => {
   const rejected = parseJsonObject(await handleVendored(
     {
@@ -232,6 +269,7 @@ interface ShellPortsOptions {
   readonly applyResponse?: ControllerShellApplyTransportResponse;
   readonly applyCalls?: ApplyCall[];
   readonly transportError?: boolean;
+  readonly states?: Readonly<Record<string, unknown>>;
 }
 
 interface ApplyCall {
@@ -258,6 +296,9 @@ function shellPorts(options: ShellPortsOptions = {}): ControllerShellPorts {
       return operations;
     },
     async getState(capability): Promise<unknown> {
+      if (options.states !== undefined && Object.hasOwn(options.states, capability)) {
+        return options.states[capability];
+      }
       if (capability === "hostname.set") {
         return {
           current: hostname,

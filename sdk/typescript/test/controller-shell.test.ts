@@ -133,6 +133,71 @@ test("POST /api/preview reports a currently configured capability omitted by pro
   assert.deepEqual(body["removed"], ["node.config"]);
 });
 
+test("POST /api/preview diffs pds.repo-like current state without payload-key allow-list", async () => {
+  const pdsRepoState = {
+    commitCursor: 43,
+    exists: true,
+    log: [],
+    records: [
+      {
+        collection: "app.bsky.actor.profile",
+        rkey: "self",
+        valueDigest: "2222222222222222222222222222222222222222222222222222222222222222",
+      },
+    ],
+    repo: "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+  };
+  const pdsRepoDesired = {
+    commitCursor: 43,
+    log: [],
+    records: [
+      {
+        collection: "app.bsky.actor.profile",
+        rkey: "self",
+        valueDigest: "2222222222222222222222222222222222222222222222222222222222222222",
+      },
+    ],
+    repo: "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+  };
+  const ports = mockPorts({
+    operations: ["hostname.set", "pds.repo"],
+    states: {
+      "pds.repo": pdsRepoState,
+    },
+  });
+
+  const unchanged = parseJsonObject(await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+      "pds.repo": {
+        desired: pdsRepoDesired,
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  }));
+  assert.equal(unchanged["ok"], true);
+  assert.deepEqual(unchanged["added"], []);
+  assert.deepEqual(unchanged["changed"], []);
+  assert.deepEqual(unchanged["removed"], []);
+
+  const removed = parseJsonObject(await handleControllerShellRequest(ports, {
+    body: {
+      "hostname.set": {
+        desired: "vita-node-7",
+      },
+    },
+    method: "POST",
+    path: "/api/preview",
+  }));
+  assert.equal(removed["ok"], true);
+  assert.deepEqual(removed["added"], []);
+  assert.deepEqual(removed["changed"], []);
+  assert.deepEqual(removed["removed"], ["pds.repo"]);
+});
+
 test("POST /api/preview fails closed on duplicate-key, accessor, and cyclic bodies", async () => {
   const ports = mockPorts();
   const duplicate = await handleControllerShellRequest(ports, {
@@ -317,6 +382,7 @@ interface MockPortsOptions {
   readonly applyResponse?: ControllerShellApplyTransportResponse;
   readonly applyCalls?: ApplyCall[];
   readonly transportError?: boolean;
+  readonly states?: Readonly<Record<string, unknown>>;
 }
 
 interface ApplyCall {
@@ -343,6 +409,9 @@ function mockPorts(options: MockPortsOptions = {}): ControllerShellPorts {
       return operations;
     },
     async getState(capability): Promise<unknown> {
+      if (options.states !== undefined && Object.hasOwn(options.states, capability)) {
+        return options.states[capability];
+      }
       if (capability === "hostname.set") {
         return {
           current: hostname,
