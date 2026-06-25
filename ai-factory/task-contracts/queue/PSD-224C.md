@@ -12,7 +12,7 @@ target_paths:
   - ui_kits/desktop/viewmodels
   - sdk/typescript/test/desktop-sdk
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/desktop-sdk/*.test.ts sdk/typescript/test/ui-kits/announcer*.test.ts"
+acceptance_command: "test -f sdk/typescript/test/ui-kits/announcer.test.ts && npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/desktop-sdk/*.test.ts sdk/typescript/test/ui-kits/announcer*.test.ts"
 allowed_network: false
 budget_minutes: 110
 ---

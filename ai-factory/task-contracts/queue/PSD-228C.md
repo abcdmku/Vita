@@ -10,7 +10,7 @@ depends_on: [PSD-021, PSD-220C, PSD-222C, PSD-223C, PSD-224C]
 target_paths:
   - ui_kits/desktop
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/screens-a11y*.test.ts"
+acceptance_command: "test -f sdk/typescript/test/ui-kits/screens-a11y.test.ts && npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/screens-a11y*.test.ts"
 allowed_network: false
 budget_minutes: 100
 ---
