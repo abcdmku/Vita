@@ -41,6 +41,22 @@ GPU texture readback proves the moved surface texture is byte-identical before
 and after the placement change. Non-Linux or missing-device paths emit
 `status=FAILSAFE`.
 
+## DMABUF import smoke test
+
+```sh
+vita-compositor-core --dmabuf-self-test
+```
+
+The DMABUF path allocates a GBM buffer object, exports it as a PRIME fd, imports
+it through `EGL_EXT_image_dma_buf_import(_modifiers)` and `GL_OES_EGL_image`,
+composites it, and verifies the readback pattern. It emits a `VITA-DMABUF`
+marker with `status=OK` or a fail-safe reason such as a missing extension or
+rejected modifier.
+
+`smoke-overlay/` contains the package-owned verification unit and wrapper that
+the x86_64 smoke image can mirror into its overlay to run this check at boot
+after `/dev/dri/card0` appears.
+
 ## OS image integration
 
 The x86_64 mkosi image includes the VMware GPU stack (`vmwgfx` DRM/KMS module,

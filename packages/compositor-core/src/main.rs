@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
+    run_dmabuf_round_trip_self_test,
 };
 use vita_compositor_core::{
     failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
@@ -34,6 +35,8 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
         run_command_stream(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
+    } else if args.iter().any(|arg| arg == "--dmabuf-self-test") {
+        run_dmabuf_self_test()
     } else if args.iter().any(|arg| arg == "--serve") {
         serve()
     } else if args.iter().any(|arg| arg == "--demo") {
@@ -46,6 +49,12 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
 fn run_self_test() -> Result<(), CompositorError> {
     let report =
         run_reposition_self_test_or_failsafe(open_default_gpu_backend_for_self_test(96, 64));
+    emit_marker(&report.marker_line())?;
+    Ok(())
+}
+
+fn run_dmabuf_self_test() -> Result<(), CompositorError> {
+    let report = run_dmabuf_round_trip_self_test();
     emit_marker(&report.marker_line())?;
     Ok(())
 }

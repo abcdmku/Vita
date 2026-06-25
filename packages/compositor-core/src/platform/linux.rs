@@ -12,15 +12,20 @@ use std::ptr;
 use std::slice;
 
 use crate::{
-    validate_rgba_buffer, CompositeReport, CompositorError, GpuTextureHandle, InputAvailability,
-    InputEvent, Placement, PointerButtonState, PresentationMode, Rect, RenderBackend,
-    RenderSurface, TestPattern, TextureFormat, TextureHandleKind,
+    dmabuf_failsafe_report, fourcc_label, validate_dmabuf_import, validate_rgba_buffer,
+    CompositeReport, Compositor, CompositorError, DmabufPlane, DmabufSelfTestReport,
+    GpuTextureHandle, InputAvailability, InputEvent, Placement, PointerButtonState,
+    PresentationMode, Rect, RenderBackend, RenderSurface, SelfTestStatus, SurfaceId, TestPattern,
+    TextureFormat, TextureHandleKind, DRM_FORMAT_MOD_INVALID,
 };
 
 const RTLD_NOW: c_int = 2;
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 const EGL_OPENGL_ES_API: u32 = 0x30A0;
 const EGL_NONE: i32 = 0x3038;
+const EGL_EXTENSIONS: i32 = 0x3055;
+const EGL_WIDTH: i32 = 0x3057;
+const EGL_HEIGHT: i32 = 0x3056;
 const EGL_SURFACE_TYPE: i32 = 0x3033;
 const EGL_WINDOW_BIT: i32 = 0x0004;
 const EGL_RENDERABLE_TYPE: i32 = 0x3040;
@@ -30,8 +35,16 @@ const EGL_GREEN_SIZE: i32 = 0x3023;
 const EGL_BLUE_SIZE: i32 = 0x3022;
 const EGL_ALPHA_SIZE: i32 = 0x3021;
 const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
+const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
+const EGL_LINUX_DRM_FOURCC_EXT: i32 = 0x3271;
+const EGL_DMA_BUF_PLANE0_FD_EXT: i32 = 0x3272;
+const EGL_DMA_BUF_PLANE0_OFFSET_EXT: i32 = 0x3273;
+const EGL_DMA_BUF_PLANE0_PITCH_EXT: i32 = 0x3274;
+const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: i32 = 0x3443;
+const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: i32 = 0x3444;
 
 const GL_TEXTURE_2D: u32 = 0x0DE1;
+const GL_NO_ERROR: u32 = 0;
 const GL_RGBA: u32 = 0x1908;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
@@ -58,6 +71,7 @@ const GL_SRC_ALPHA: u32 = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
+const GL_EXTENSIONS: u32 = 0x1F03;
 
 const LIBINPUT_EVENT_KEYBOARD_KEY: u32 = 300;
 const LIBINPUT_EVENT_POINTER_MOTION: u32 = 400;
@@ -68,6 +82,7 @@ const LIBINPUT_KEY_STATE_PRESSED: u32 = 1;
 const GBM_FORMAT_ARGB8888: u32 = fourcc_code(b'A', b'R', b'2', b'4');
 const GBM_BO_USE_SCANOUT: u32 = 1 << 0;
 const GBM_BO_USE_RENDERING: u32 = 1 << 2;
+const GBM_BO_USE_LINEAR: u32 = 1 << 4;
 const DRM_MODE_CONNECTED: c_int = 1;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 const DRM_EVENT_CONTEXT_VERSION: c_int = 2;
@@ -85,15 +100,21 @@ const K_OFF: c_int = 0x04;
 type EglDisplay = *mut c_void;
 type EglConfig = *mut c_void;
 type EglContext = *mut c_void;
+type EglImage = *mut c_void;
+type EglClientBuffer = *mut c_void;
 type EglSurface = *mut c_void;
 type EglBoolean = u32;
 type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+type EglCreateImageKhr =
+    unsafe extern "C" fn(EglDisplay, EglContext, u32, EglClientBuffer, *const i32) -> EglImage;
+type EglDestroyImageKhr = unsafe extern "C" fn(EglDisplay, EglImage) -> EglBoolean;
 type GlInt = i32;
 type GlUInt = u32;
 type GlSizeI = i32;
 type GlEnum = u32;
 type GlBool = u8;
 type GlFloat = f32;
+type GlEglImageTargetTexture2dOes = unsafe extern "C" fn(GlEnum, EglImage);
 
 #[link(name = "dl")]
 extern "C" {
@@ -218,6 +239,8 @@ pub struct GpuTexture {
     id: GlUInt,
     width: u32,
     height: u32,
+    handle_kind: TextureHandleKind,
+    handle_value: i64,
 }
 
 pub struct PlatformGpuBackend {
@@ -247,6 +270,7 @@ pub struct PlatformGpuBackend {
     output_height: u32,
     gpu_name: String,
     repaint_count: u64,
+    imported_images: BTreeMap<GlUInt, EglImage>,
 }
 
 pub fn open_default_gpu_backend(
@@ -261,6 +285,81 @@ pub fn open_default_gpu_backend_for_self_test(
     height: u32,
 ) -> Result<PlatformGpuBackend, CompositorError> {
     PlatformGpuBackend::open_for_self_test(width, height)
+}
+
+pub fn run_dmabuf_round_trip_self_test() -> DmabufSelfTestReport {
+    let mut fourcc = GBM_FORMAT_ARGB8888;
+    let mut modifier = DRM_FORMAT_MOD_INVALID;
+    let backend = match PlatformGpuBackend::open_for_self_test(16, 16) {
+        Ok(backend) => backend,
+        Err(error) => {
+            return dmabuf_failsafe_report(
+                "unavailable",
+                fourcc,
+                modifier,
+                failsafe_reason(&error),
+            );
+        }
+    };
+    let gpu = backend.backend_name().to_owned();
+
+    match run_dmabuf_round_trip_with_backend(backend, &mut fourcc, &mut modifier) {
+        Ok(report) => report,
+        Err(error) => dmabuf_failsafe_report(gpu, fourcc, modifier, failsafe_reason(&error)),
+    }
+}
+
+fn run_dmabuf_round_trip_with_backend(
+    mut backend: PlatformGpuBackend,
+    fourcc_out: &mut u32,
+    modifier_out: &mut u64,
+) -> Result<DmabufSelfTestReport, CompositorError> {
+    let gpu = backend.backend_name().to_owned();
+    let export = backend.create_gbm_dmabuf_export(16, 16)?;
+    *fourcc_out = export.fourcc;
+    *modifier_out = export.modifier;
+
+    let mut compositor = Compositor::new(backend, export.width, export.height)?;
+    let surface = SurfaceId::new("dmabuf.roundtrip")?;
+    let registration = compositor.import_dmabuf_surface(
+        surface.clone(),
+        export.width,
+        export.height,
+        export.fourcc,
+        export.modifier,
+        &export.planes,
+    )?;
+    if registration.texture.kind != TextureHandleKind::DrmPrimeFd {
+        return Err(CompositorError::Verification(
+            "DMABUF import did not register a DrmPrimeFd texture".to_owned(),
+        ));
+    }
+
+    let damage = compositor.update_placements(vec![Placement::new(
+        surface,
+        0,
+        0,
+        export.width,
+        export.height,
+        0,
+    )?])?;
+    let report = compositor.composite(&damage)?;
+    if !report.composited {
+        return Err(CompositorError::Verification(
+            "DMABUF composite did not complete".to_owned(),
+        ));
+    }
+    let output = compositor.output_readback_rgba()?;
+    verify_dmabuf_round_trip_output(&output, &export.expected_rgba, export.width, export.height)?;
+
+    Ok(DmabufSelfTestReport {
+        gpu,
+        import_ok: true,
+        fourcc: export.fourcc,
+        modifier: export.modifier,
+        status: SelfTestStatus::Ok,
+        reason: None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -439,6 +538,7 @@ impl PlatformGpuBackend {
             output_height: height,
             gpu_name,
             repaint_count: 0,
+            imported_images: BTreeMap::new(),
         };
 
         backend.initialize_gl_state()?;
@@ -455,6 +555,118 @@ impl PlatformGpuBackend {
             self.libinput = Some(libinput);
             self.input_availability = InputAvailability::Available;
         }
+    }
+
+    fn create_gbm_dmabuf_export(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<GbmDmabufExport, CompositorError> {
+        let bo_create = self
+            .gbm
+            .bo_create
+            .ok_or_else(|| CompositorError::Unavailable("gbm_bo_create unavailable".to_owned()))?;
+        let bo_destroy = self
+            .gbm
+            .bo_destroy
+            .ok_or_else(|| CompositorError::Unavailable("gbm_bo_destroy unavailable".to_owned()))?;
+        let bo_get_fd = self
+            .gbm
+            .bo_get_fd
+            .ok_or_else(|| CompositorError::Unavailable("gbm_bo_get_fd unavailable".to_owned()))?;
+        let bo_get_modifier = self.gbm.bo_get_modifier.ok_or_else(|| {
+            CompositorError::Unavailable("gbm_bo_get_modifier unavailable".to_owned())
+        })?;
+        let bo_write = self
+            .gbm
+            .bo_write
+            .ok_or_else(|| CompositorError::Unavailable("gbm_bo_write unavailable".to_owned()))?;
+
+        let bo = unsafe {
+            bo_create(
+                self.gbm_device,
+                width,
+                height,
+                GBM_FORMAT_ARGB8888,
+                GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR,
+            )
+        };
+        if bo.is_null() {
+            return Err(CompositorError::Unavailable(
+                "gbm_bo_create(DMABUF self-test) returned null".to_owned(),
+            ));
+        }
+
+        let result = self.populate_and_export_gbm_bo(
+            width,
+            height,
+            bo,
+            bo_get_fd,
+            bo_get_modifier,
+            bo_write,
+        );
+        unsafe {
+            bo_destroy(bo);
+        }
+        result
+    }
+
+    fn populate_and_export_gbm_bo(
+        &self,
+        width: u32,
+        height: u32,
+        bo: *mut c_void,
+        bo_get_fd: unsafe extern "C" fn(*mut c_void) -> c_int,
+        bo_get_modifier: unsafe extern "C" fn(*mut c_void) -> u64,
+        bo_write: unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> c_int,
+    ) -> Result<GbmDmabufExport, CompositorError> {
+        let stride = unsafe { (self.gbm.bo_get_stride)(bo) };
+        if stride
+            < width
+                .checked_mul(4)
+                .ok_or(CompositorError::InvalidDimensions { width, height })?
+        {
+            return Err(CompositorError::Unavailable(format!(
+                "gbm_bo_get_stride returned too-small stride {stride}"
+            )));
+        }
+
+        let expected_rgba = dmabuf_self_test_rgba(width, height)?;
+        let argb_bytes = argb8888_dmabuf_bytes(&expected_rgba, width, height, stride)?;
+        let write_rc = unsafe { bo_write(bo, argb_bytes.as_ptr().cast(), argb_bytes.len()) };
+        if write_rc != 0 {
+            return Err(last_os_unavailable("gbm_bo_write(DMABUF self-test) failed"));
+        }
+
+        let fd = unsafe { bo_get_fd(bo) };
+        if fd < 0 {
+            return Err(last_os_unavailable(
+                "gbm_bo_get_fd(DMABUF self-test) failed",
+            ));
+        }
+
+        let modifier = unsafe { bo_get_modifier(bo) };
+        if modifier == DRM_FORMAT_MOD_INVALID {
+            unsafe {
+                libc_close(fd);
+            }
+            return Err(CompositorError::Unavailable(
+                "gbm_bo_get_modifier returned DRM_FORMAT_MOD_INVALID".to_owned(),
+            ));
+        }
+
+        Ok(GbmDmabufExport {
+            width,
+            height,
+            fourcc: GBM_FORMAT_ARGB8888,
+            modifier,
+            planes: vec![DmabufPlane {
+                fd,
+                offset: 0,
+                stride,
+            }],
+            expected_rgba,
+        })
     }
 
     fn initialize_gl_state(&mut self) -> Result<(), CompositorError> {
@@ -623,6 +835,8 @@ void main() {
             id: texture,
             width,
             height,
+            handle_kind: TextureHandleKind::OpaqueNativeTexture,
+            handle_value: i64::from(texture),
         })
     }
 
@@ -655,6 +869,111 @@ void main() {
         }
         self.repaint_count += 1;
         Ok(())
+    }
+
+    fn import_dmabuf_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        fourcc: u32,
+        modifier: u64,
+        planes: &[DmabufPlane],
+    ) -> Result<GpuTexture, CompositorError> {
+        validate_dmabuf_import(width, height, fourcc, modifier, planes)?;
+        self.ensure_dmabuf_import_supported()?;
+
+        let plane = planes[0];
+        let attrs = [
+            EGL_WIDTH,
+            width as i32,
+            EGL_HEIGHT,
+            height as i32,
+            EGL_LINUX_DRM_FOURCC_EXT,
+            fourcc as i32,
+            EGL_DMA_BUF_PLANE0_FD_EXT,
+            plane.fd,
+            EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+            plane.offset as i32,
+            EGL_DMA_BUF_PLANE0_PITCH_EXT,
+            plane.stride as i32,
+            EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+            modifier as u32 as i32,
+            EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+            (modifier >> 32) as u32 as i32,
+            EGL_NONE,
+        ];
+
+        let create_image = self.egl.create_image_khr.ok_or_else(|| {
+            CompositorError::Unavailable("eglCreateImageKHR unavailable".to_owned())
+        })?;
+        let destroy_image = self.egl.destroy_image_khr.ok_or_else(|| {
+            CompositorError::Unavailable("eglDestroyImageKHR unavailable".to_owned())
+        })?;
+        let image = unsafe {
+            create_image(
+                self.egl_display,
+                ptr::null_mut(),
+                EGL_LINUX_DMA_BUF_EXT,
+                ptr::null_mut(),
+                attrs.as_ptr(),
+            )
+        };
+        if image.is_null() {
+            return Err(CompositorError::Unavailable(format!(
+                "eglCreateImageKHR(DMABUF) failed fourcc={} modifier=0x{modifier:016x}",
+                fourcc_label(fourcc)
+            )));
+        }
+
+        let mut texture = 0_u32;
+        unsafe {
+            (self.gl.gen_textures)(1, &mut texture);
+            (self.gl.bind_texture)(GL_TEXTURE_2D, texture);
+            (self.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            (self.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            (self.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            (self.gl.tex_parameter_i)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+
+        let image_target = self.gl.egl_image_target_texture_2d_oes.ok_or_else(|| {
+            CompositorError::Unavailable("glEGLImageTargetTexture2DOES unavailable".to_owned())
+        })?;
+        unsafe {
+            image_target(GL_TEXTURE_2D, image);
+        }
+        let gl_error = unsafe { (self.gl.get_error)() };
+        if gl_error != GL_NO_ERROR {
+            unsafe {
+                if texture != 0 {
+                    (self.gl.delete_textures)(1, &texture);
+                }
+                destroy_image(self.egl_display, image);
+            }
+            return Err(CompositorError::Unavailable(format!(
+                "glEGLImageTargetTexture2DOES failed: 0x{gl_error:x}"
+            )));
+        }
+
+        self.imported_images.insert(texture, image);
+        Ok(GpuTexture {
+            id: texture,
+            width,
+            height,
+            handle_kind: TextureHandleKind::DrmPrimeFd,
+            handle_value: i64::from(texture),
+        })
+    }
+
+    fn ensure_dmabuf_import_supported(&self) -> Result<(), CompositorError> {
+        let egl_extensions = self.egl.extension_string(self.egl_display)?;
+        let gl_extensions = self.gl.extension_string()?;
+        check_dmabuf_import_capabilities(
+            &egl_extensions,
+            &gl_extensions,
+            self.egl.create_image_khr.is_some(),
+            self.egl.destroy_image_khr.is_some(),
+            self.gl.egl_image_target_texture_2d_oes.is_some(),
+        )
     }
 
     fn check_framebuffer(&self, label: &str) -> Result<(), CompositorError> {
@@ -782,6 +1101,17 @@ impl RenderBackend for PlatformGpuBackend {
         self.create_rgba_texture(width, height, rgba)
     }
 
+    fn import_dmabuf_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        fourcc: u32,
+        modifier: u64,
+        planes: &[DmabufPlane],
+    ) -> Result<Self::Texture, CompositorError> {
+        PlatformGpuBackend::import_dmabuf_texture(self, width, height, fourcc, modifier, planes)
+    }
+
     fn update_texture_rgba(
         &mut self,
         texture: &mut Self::Texture,
@@ -794,8 +1124,8 @@ impl RenderBackend for PlatformGpuBackend {
 
     fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {
         GpuTextureHandle {
-            kind: TextureHandleKind::OpaqueNativeTexture,
-            value: i64::from(texture.id),
+            kind: texture.handle_kind,
+            value: texture.handle_value,
             width: texture.width,
             height: texture.height,
             format: TextureFormat::Rgba8Unorm,
@@ -936,6 +1266,17 @@ impl RenderBackend for PlatformGpuBackend {
 impl Drop for PlatformGpuBackend {
     fn drop(&mut self) {
         unsafe {
+            let imported_images = mem::take(&mut self.imported_images);
+            for (texture, image) in imported_images {
+                if texture != 0 {
+                    (self.gl.delete_textures)(1, &texture);
+                }
+                if !image.is_null() {
+                    if let Some(destroy_image) = self.egl.destroy_image_khr {
+                        destroy_image(self.egl_display, image);
+                    }
+                }
+            }
             if self.output_texture != 0 {
                 (self.gl.delete_textures)(1, &self.output_texture);
             }
@@ -1002,6 +1343,52 @@ fn choose_config(egl: &Egl, display: EglDisplay) -> Result<EglConfig, Compositor
     Ok(config)
 }
 
+fn check_dmabuf_import_capabilities(
+    egl_extensions: &str,
+    gl_extensions: &str,
+    has_create_image: bool,
+    has_destroy_image: bool,
+    has_image_target: bool,
+) -> Result<(), CompositorError> {
+    if !has_extension(egl_extensions, "EGL_EXT_image_dma_buf_import") {
+        return Err(CompositorError::Unavailable(
+            "EGL_EXT_image_dma_buf_import missing".to_owned(),
+        ));
+    }
+    if !has_extension(egl_extensions, "EGL_EXT_image_dma_buf_import_modifiers") {
+        return Err(CompositorError::Unavailable(
+            "EGL_EXT_image_dma_buf_import_modifiers missing".to_owned(),
+        ));
+    }
+    if !has_extension(gl_extensions, "GL_OES_EGL_image") {
+        return Err(CompositorError::Unavailable(
+            "GL_OES_EGL_image missing".to_owned(),
+        ));
+    }
+    if !has_create_image {
+        return Err(CompositorError::Unavailable(
+            "eglCreateImageKHR unavailable".to_owned(),
+        ));
+    }
+    if !has_destroy_image {
+        return Err(CompositorError::Unavailable(
+            "eglDestroyImageKHR unavailable".to_owned(),
+        ));
+    }
+    if !has_image_target {
+        return Err(CompositorError::Unavailable(
+            "glEGLImageTargetTexture2DOES unavailable".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn has_extension(extensions: &str, required: &str) -> bool {
+    extensions
+        .split_ascii_whitespace()
+        .any(|extension| extension == required)
+}
+
 fn pixel_to_clip_x(x: i32, width: u32) -> f32 {
     (x as f32 / width as f32) * 2.0 - 1.0
 }
@@ -1020,6 +1407,118 @@ fn flip_rgba_rows(bytes: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
         flipped[dst..dst + stride].copy_from_slice(&bytes[src..src + stride]);
     }
     flipped
+}
+
+struct GbmDmabufExport {
+    width: u32,
+    height: u32,
+    fourcc: u32,
+    modifier: u64,
+    planes: Vec<DmabufPlane>,
+    expected_rgba: Vec<u8>,
+}
+
+impl Drop for GbmDmabufExport {
+    fn drop(&mut self) {
+        for plane in &self.planes {
+            if plane.fd >= 0 {
+                unsafe {
+                    libc_close(plane.fd);
+                }
+            }
+        }
+    }
+}
+
+fn dmabuf_self_test_rgba(width: u32, height: u32) -> Result<Vec<u8>, CompositorError> {
+    let len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(CompositorError::InvalidDimensions { width, height })?;
+    let mut rgba = vec![0_u8; len];
+    let colors = [
+        [233, 32, 44, 255],
+        [46, 160, 67, 255],
+        [31, 111, 235, 255],
+        [245, 158, 11, 255],
+    ];
+
+    for y in 0..height {
+        for x in 0..width {
+            let band = (x as usize * colors.len()) / width as usize;
+            let offset = ((y * width + x) * 4) as usize;
+            rgba[offset..offset + 4].copy_from_slice(&colors[band.min(colors.len() - 1)]);
+        }
+    }
+    Ok(rgba)
+}
+
+fn argb8888_dmabuf_bytes(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<Vec<u8>, CompositorError> {
+    let tight_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(CompositorError::InvalidDimensions { width, height })?;
+    if rgba.len() != tight_len {
+        return Err(CompositorError::InvalidBufferLength {
+            expected: tight_len,
+            actual: rgba.len(),
+        });
+    }
+    let padded_len = (stride as usize)
+        .checked_mul(height as usize)
+        .ok_or(CompositorError::InvalidDimensions { width, height })?;
+    let mut bytes = vec![0_u8; padded_len];
+
+    for y in 0..height {
+        for x in 0..width {
+            let rgba_offset = ((y * width + x) * 4) as usize;
+            let bo_offset = (y as usize * stride as usize) + x as usize * 4;
+            bytes[bo_offset] = rgba[rgba_offset + 2];
+            bytes[bo_offset + 1] = rgba[rgba_offset + 1];
+            bytes[bo_offset + 2] = rgba[rgba_offset];
+            bytes[bo_offset + 3] = rgba[rgba_offset + 3];
+        }
+    }
+
+    Ok(bytes)
+}
+
+fn verify_dmabuf_round_trip_output(
+    actual: &[u8],
+    expected: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), CompositorError> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(CompositorError::InvalidDimensions { width, height })?;
+    if actual.len() != expected_len || expected.len() != expected_len {
+        return Err(CompositorError::Verification(format!(
+            "DMABUF round-trip length mismatch actual={} expected={}",
+            actual.len(),
+            expected.len()
+        )));
+    }
+
+    for y in 0..height {
+        for x in 0..width {
+            let offset = ((y * width + x) * 4) as usize;
+            if actual[offset..offset + 4] != expected[offset..offset + 4] {
+                return Err(CompositorError::Verification(format!(
+                    "DMABUF round-trip pixel mismatch at {x},{y}: actual={:?} expected={:?}",
+                    &actual[offset..offset + 4],
+                    &expected[offset..offset + 4]
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 struct VtState {
@@ -1190,6 +1689,21 @@ impl DynamicLibrary {
                 )));
             }
             Ok(mem::transmute_copy::<*mut c_void, T>(&symbol))
+        }
+    }
+
+    fn optional_symbol<T>(&self, name: &str) -> Result<Option<T>, CompositorError>
+    where
+        T: Copy,
+    {
+        let c_name = cstring(name)?;
+        unsafe {
+            let symbol = dlsym(self.handle, c_name.as_ptr());
+            if symbol.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(mem::transmute_copy::<*mut c_void, T>(&symbol)))
+            }
         }
     }
 }
@@ -1680,8 +2194,13 @@ struct Gbm {
     surface_destroy: unsafe extern "C" fn(*mut c_void),
     surface_lock_front_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     surface_release_buffer: unsafe extern "C" fn(*mut c_void, *mut c_void),
+    bo_create: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32) -> *mut c_void>,
+    bo_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    bo_get_fd: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
     bo_get_handle: unsafe extern "C" fn(*mut c_void) -> GbmBoHandle,
+    bo_get_modifier: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
     bo_get_stride: unsafe extern "C" fn(*mut c_void) -> u32,
+    bo_write: Option<unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> c_int>,
 }
 
 impl Gbm {
@@ -1693,8 +2212,13 @@ impl Gbm {
         let surface_destroy = lib.symbol("gbm_surface_destroy")?;
         let surface_lock_front_buffer = lib.symbol("gbm_surface_lock_front_buffer")?;
         let surface_release_buffer = lib.symbol("gbm_surface_release_buffer")?;
+        let bo_create = lib.optional_symbol("gbm_bo_create")?;
+        let bo_destroy = lib.optional_symbol("gbm_bo_destroy")?;
+        let bo_get_fd = lib.optional_symbol("gbm_bo_get_fd")?;
         let bo_get_handle = lib.symbol("gbm_bo_get_handle")?;
+        let bo_get_modifier = lib.optional_symbol("gbm_bo_get_modifier")?;
         let bo_get_stride = lib.symbol("gbm_bo_get_stride")?;
+        let bo_write = lib.optional_symbol("gbm_bo_write")?;
         Ok(Self {
             _lib: lib,
             create_device,
@@ -1703,8 +2227,13 @@ impl Gbm {
             surface_destroy,
             surface_lock_front_buffer,
             surface_release_buffer,
+            bo_create,
+            bo_destroy,
+            bo_get_fd,
             bo_get_handle,
+            bo_get_modifier,
             bo_get_stride,
+            bo_write,
         })
     }
 }
@@ -1719,10 +2248,13 @@ struct Egl {
         unsafe extern "C" fn(EglDisplay, *const i32, *mut EglConfig, i32, *mut i32) -> EglBoolean,
     create_context:
         unsafe extern "C" fn(EglDisplay, EglConfig, EglContext, *const i32) -> EglContext,
+    create_image_khr: Option<EglCreateImageKhr>,
     create_window_surface:
         unsafe extern "C" fn(EglDisplay, EglConfig, *mut c_void, *const i32) -> EglSurface,
+    destroy_image_khr: Option<EglDestroyImageKhr>,
     make_current:
         unsafe extern "C" fn(EglDisplay, EglSurface, EglSurface, EglContext) -> EglBoolean,
+    query_string: unsafe extern "C" fn(EglDisplay, i32) -> *const c_char,
     swap_buffers: unsafe extern "C" fn(EglDisplay, EglSurface) -> EglBoolean,
     destroy_surface: unsafe extern "C" fn(EglDisplay, EglSurface) -> EglBoolean,
     destroy_context: unsafe extern "C" fn(EglDisplay, EglContext) -> EglBoolean,
@@ -1752,8 +2284,11 @@ impl Egl {
         let bind_api = lib.symbol("eglBindAPI")?;
         let choose_config = lib.symbol("eglChooseConfig")?;
         let create_context = lib.symbol("eglCreateContext")?;
+        let create_image_khr = egl_proc_symbol(&get_proc_address, "eglCreateImageKHR")?;
         let create_window_surface = lib.symbol("eglCreateWindowSurface")?;
+        let destroy_image_khr = egl_proc_symbol(&get_proc_address, "eglDestroyImageKHR")?;
         let make_current = lib.symbol("eglMakeCurrent")?;
+        let query_string = lib.symbol("eglQueryString")?;
         let swap_buffers = lib.symbol("eglSwapBuffers")?;
         let destroy_surface = lib.symbol("eglDestroySurface")?;
         let destroy_context = lib.symbol("eglDestroyContext")?;
@@ -1766,13 +2301,44 @@ impl Egl {
             bind_api,
             choose_config,
             create_context,
+            create_image_khr,
             create_window_surface,
+            destroy_image_khr,
             make_current,
+            query_string,
             swap_buffers,
             destroy_surface,
             destroy_context,
             terminate,
         })
+    }
+
+    fn extension_string(&self, display: EglDisplay) -> Result<String, CompositorError> {
+        let value = unsafe { (self.query_string)(display, EGL_EXTENSIONS) };
+        if value.is_null() {
+            return Err(CompositorError::Unavailable(
+                "eglQueryString(EGL_EXTENSIONS) returned null".to_owned(),
+            ));
+        }
+        Ok(unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned())
+    }
+}
+
+fn egl_proc_symbol<T>(
+    get_proc_address: &EglGetProcAddress,
+    name: &str,
+) -> Result<Option<T>, CompositorError>
+where
+    T: Copy,
+{
+    let c_name = cstring(name)?;
+    let symbol = unsafe { get_proc_address(c_name.as_ptr()) };
+    if symbol.is_null() {
+        Ok(None)
+    } else {
+        unsafe { Ok(Some(mem::transmute_copy::<*mut c_void, T>(&symbol))) }
     }
 }
 
@@ -1797,13 +2363,16 @@ struct Gl {
     draw_arrays: unsafe extern "C" fn(GlEnum, GlInt, GlSizeI),
     enable: unsafe extern "C" fn(GlEnum),
     enable_vertex_attrib_array: unsafe extern "C" fn(GlUInt),
+    egl_image_target_texture_2d_oes: Option<GlEglImageTargetTexture2dOes>,
     flush: unsafe extern "C" fn(),
     framebuffer_texture_2d: unsafe extern "C" fn(GlEnum, GlEnum, GlEnum, GlUInt, GlInt),
     gen_framebuffers: unsafe extern "C" fn(GlSizeI, *mut GlUInt),
     gen_textures: unsafe extern "C" fn(GlSizeI, *mut GlUInt),
     get_attrib_location: unsafe extern "C" fn(GlUInt, *const c_char) -> GlInt,
+    get_error: unsafe extern "C" fn() -> GlEnum,
     get_program_iv: unsafe extern "C" fn(GlUInt, GlEnum, *mut GlInt),
     get_shader_iv: unsafe extern "C" fn(GlUInt, GlEnum, *mut GlInt),
+    get_string: unsafe extern "C" fn(GlEnum) -> *const u8,
     get_uniform_location: unsafe extern "C" fn(GlUInt, *const c_char) -> GlInt,
     link_program: unsafe extern "C" fn(GlUInt),
     pixel_store_i: unsafe extern "C" fn(GlEnum, GlInt),
@@ -1853,13 +2422,20 @@ impl Gl {
             draw_arrays: gl_symbol(&lib, egl, "glDrawArrays")?,
             enable: gl_symbol(&lib, egl, "glEnable")?,
             enable_vertex_attrib_array: gl_symbol(&lib, egl, "glEnableVertexAttribArray")?,
+            egl_image_target_texture_2d_oes: optional_gl_symbol(
+                &lib,
+                egl,
+                "glEGLImageTargetTexture2DOES",
+            )?,
             flush: gl_symbol(&lib, egl, "glFlush")?,
             framebuffer_texture_2d: gl_symbol(&lib, egl, "glFramebufferTexture2D")?,
             gen_framebuffers: gl_symbol(&lib, egl, "glGenFramebuffers")?,
             gen_textures: gl_symbol(&lib, egl, "glGenTextures")?,
             get_attrib_location: gl_symbol(&lib, egl, "glGetAttribLocation")?,
+            get_error: gl_symbol(&lib, egl, "glGetError")?,
             get_program_iv: gl_symbol(&lib, egl, "glGetProgramiv")?,
             get_shader_iv: gl_symbol(&lib, egl, "glGetShaderiv")?,
+            get_string: gl_symbol(&lib, egl, "glGetString")?,
             get_uniform_location: gl_symbol(&lib, egl, "glGetUniformLocation")?,
             link_program: gl_symbol(&lib, egl, "glLinkProgram")?,
             pixel_store_i: gl_symbol(&lib, egl, "glPixelStorei")?,
@@ -1875,6 +2451,18 @@ impl Gl {
             viewport: gl_symbol(&lib, egl, "glViewport")?,
             _lib: lib,
         })
+    }
+
+    fn extension_string(&self) -> Result<String, CompositorError> {
+        let value = unsafe { (self.get_string)(GL_EXTENSIONS) };
+        if value.is_null() {
+            return Err(CompositorError::Unavailable(
+                "glGetString(GL_EXTENSIONS) returned null".to_owned(),
+            ));
+        }
+        Ok(unsafe { CStr::from_ptr(value.cast()) }
+            .to_string_lossy()
+            .into_owned())
     }
 }
 
@@ -1894,6 +2482,27 @@ where
         )));
     }
     unsafe { Ok(mem::transmute_copy::<*mut c_void, T>(&symbol)) }
+}
+
+fn optional_gl_symbol<T>(
+    lib: &DynamicLibrary,
+    egl: &Egl,
+    name: &str,
+) -> Result<Option<T>, CompositorError>
+where
+    T: Copy,
+{
+    if let Ok(symbol) = lib.symbol(name) {
+        return Ok(Some(symbol));
+    }
+
+    let c_name = cstring(name)?;
+    let symbol = unsafe { (egl.get_proc_address)(c_name.as_ptr()) };
+    if symbol.is_null() {
+        Ok(None)
+    } else {
+        unsafe { Ok(Some(mem::transmute_copy::<*mut c_void, T>(&symbol))) }
+    }
 }
 
 struct LibinputState {
@@ -2169,6 +2778,74 @@ mod tests {
 
         assert_eq!(count, 1);
         assert_eq!(attempted, vec![PathBuf::from("/dev/input/event0")]);
+    }
+
+    #[test]
+    fn extension_detection_uses_exact_tokens() {
+        assert!(has_extension(
+            "EGL_KHR_platform_gbm EGL_EXT_image_dma_buf_import",
+            "EGL_EXT_image_dma_buf_import"
+        ));
+        assert!(!has_extension(
+            "EGL_EXT_image_dma_buf_import_modifiers",
+            "EGL_EXT_image_dma_buf_import"
+        ));
+        assert!(!has_extension(
+            "prefixEGL_EXT_image_dma_buf_import suffix",
+            "EGL_EXT_image_dma_buf_import"
+        ));
+    }
+
+    #[test]
+    fn dmabuf_capability_check_rejects_missing_extensions_and_symbols() {
+        let egl_extensions = "EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers";
+        let gl_extensions = "GL_OES_EGL_image GL_EXT_texture_format_BGRA8888";
+
+        assert_eq!(
+            check_dmabuf_import_capabilities(egl_extensions, gl_extensions, true, true, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_dmabuf_import_capabilities(
+                "EGL_EXT_image_dma_buf_import",
+                gl_extensions,
+                true,
+                true,
+                true
+            ),
+            Err(CompositorError::Unavailable(
+                "EGL_EXT_image_dma_buf_import_modifiers missing".to_owned()
+            ))
+        );
+        assert_eq!(
+            check_dmabuf_import_capabilities(
+                egl_extensions,
+                "GL_OES_EGL_image_external",
+                true,
+                true,
+                true
+            ),
+            Err(CompositorError::Unavailable(
+                "GL_OES_EGL_image missing".to_owned()
+            ))
+        );
+        assert_eq!(
+            check_dmabuf_import_capabilities(egl_extensions, gl_extensions, true, true, false),
+            Err(CompositorError::Unavailable(
+                "glEGLImageTargetTexture2DOES unavailable".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn argb8888_dmabuf_bytes_preserve_rgba_expectation_with_stride_padding() {
+        let rgba = dmabuf_self_test_rgba(4, 2).unwrap();
+        let bytes = argb8888_dmabuf_bytes(&rgba, 4, 2, 20).unwrap();
+
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(&bytes[0..4], &[44, 32, 233, 255]);
+        assert_eq!(&bytes[16..20], &[0, 0, 0, 0]);
+        assert_eq!(&bytes[20..24], &[44, 32, 233, 255]);
     }
 
     fn input_paths(paths: &[&str]) -> Vec<Result<PathBuf, CompositorError>> {

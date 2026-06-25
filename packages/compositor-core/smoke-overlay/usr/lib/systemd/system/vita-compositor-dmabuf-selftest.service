@@ -1,0 +1,26 @@
+# Vita SMOKE VM only - run the Rust compositor DMABUF import self-test and emit VITA-DMABUF to serial.
+# Verification-only overlay: this is not part of the production OS image.
+[Unit]
+Description=Vita compositor DMABUF zero-copy smoke verification
+After=systemd-modules-load.service systemd-udev-trigger.service dev-dri-card0.device open-vm-tools.service
+Wants=systemd-udev-trigger.service dev-dri-card0.device open-vm-tools.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/lib/vita/compositor/vita-compositor-dmabuf-selftest.sh
+TimeoutStartSec=60s
+StandardOutput=journal+console
+StandardError=journal+console
+NoNewPrivileges=yes
+PrivateNetwork=yes
+# NOTE (verification-only): keep the namespace simple so marker output reaches the smoke serial path.
+CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+DeviceAllow=/dev/ttyS0 rw
+DeviceAllow=/dev/tty0 rw
+
+[Install]
+WantedBy=multi-user.target

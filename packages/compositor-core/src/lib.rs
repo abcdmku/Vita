@@ -8,8 +8,14 @@ use std::path::Path;
 pub mod platform;
 
 pub const VITA_COMPOSITOR_MARKER: &str = "VITA-COMPOSITOR";
+pub const VITA_DMABUF_MARKER: &str = "VITA-DMABUF";
 pub const DESKTOP_DEMO_OUTPUT_WIDTH: u32 = 1280;
 pub const DESKTOP_DEMO_OUTPUT_HEIGHT: u32 = 720;
+pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+pub const DRM_FORMAT_ARGB8888: u32 = fourcc_code(b'A', b'R', b'2', b'4');
+pub const DRM_FORMAT_XRGB8888: u32 = fourcc_code(b'X', b'R', b'2', b'4');
+pub const DRM_FORMAT_ABGR8888: u32 = fourcc_code(b'A', b'B', b'2', b'4');
+pub const DRM_FORMAT_XBGR8888: u32 = fourcc_code(b'X', b'B', b'2', b'4');
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CompositorError {
@@ -18,6 +24,7 @@ pub enum CompositorError {
     DuplicateSurface(SurfaceId),
     InvalidBufferLength { expected: usize, actual: usize },
     InvalidDimensions { width: u32, height: u32 },
+    InvalidDmabuf(String),
     InvalidOpacity,
     InvalidSurfaceId(String),
     Protocol(String),
@@ -39,6 +46,7 @@ impl Display for CompositorError {
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions {width}x{height}")
             }
+            Self::InvalidDmabuf(reason) => write!(f, "invalid DMABUF: {reason}"),
             Self::InvalidOpacity => write!(f, "invalid opacity"),
             Self::InvalidSurfaceId(id) => write!(f, "invalid surface id {id:?}"),
             Self::Protocol(reason) => write!(f, "protocol error: {reason}"),
@@ -109,6 +117,13 @@ pub struct GpuTextureHandle {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct DmabufPlane {
+    pub fd: i32,
+    pub offset: u32,
+    pub stride: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -355,6 +370,20 @@ pub trait RenderBackend {
         rgba: &[u8],
     ) -> Result<Self::Texture, CompositorError>;
 
+    fn import_dmabuf_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        fourcc: u32,
+        modifier: u64,
+        planes: &[DmabufPlane],
+    ) -> Result<Self::Texture, CompositorError> {
+        let _ = (width, height, fourcc, modifier, planes);
+        Err(CompositorError::Unavailable(
+            "DMABUF import is unavailable for this backend".to_owned(),
+        ))
+    }
+
     fn update_texture_rgba(
         &mut self,
         texture: &mut Self::Texture,
@@ -471,6 +500,40 @@ impl<B: RenderBackend> Compositor<B> {
         }
 
         let texture = self.backend.create_buffer_texture(width, height, rgba)?;
+        let handle = self.backend.export_handle(&texture);
+        self.surfaces.insert(
+            id.clone(),
+            SurfaceState {
+                id: id.clone(),
+                width,
+                height,
+                texture,
+            },
+        );
+
+        Ok(SurfaceRegistration {
+            surface_id: id,
+            texture: handle,
+        })
+    }
+
+    pub fn import_dmabuf_surface(
+        &mut self,
+        id: SurfaceId,
+        width: u32,
+        height: u32,
+        fourcc: u32,
+        modifier: u64,
+        planes: &[DmabufPlane],
+    ) -> Result<SurfaceRegistration, CompositorError> {
+        validate_dmabuf_import(width, height, fourcc, modifier, planes)?;
+        if self.surfaces.contains_key(&id) {
+            return Err(CompositorError::DuplicateSurface(id));
+        }
+
+        let texture = self
+            .backend
+            .import_dmabuf_texture(width, height, fourcc, modifier, planes)?;
         let handle = self.backend.export_handle(&texture);
         self.surfaces.insert(
             id.clone(),
@@ -727,6 +790,53 @@ impl SelfTestReport {
                 self.input.marker_token()
             ),
         }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DmabufSelfTestReport {
+    pub gpu: String,
+    pub import_ok: bool,
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub status: SelfTestStatus,
+    pub reason: Option<String>,
+}
+
+impl DmabufSelfTestReport {
+    pub fn marker_line(&self) -> String {
+        match self.status {
+            SelfTestStatus::Ok => format!(
+                "{VITA_DMABUF_MARKER}: import=OK fourcc={} modifier=0x{:016x} status=OK gpu={}",
+                fourcc_label(self.fourcc),
+                self.modifier,
+                marker_token(&self.gpu)
+            ),
+            SelfTestStatus::Failsafe => format!(
+                "{VITA_DMABUF_MARKER}: import={} fourcc={} modifier=0x{:016x} status=FAILSAFE reason={} gpu={}",
+                if self.import_ok { "OK" } else { "FAIL" },
+                fourcc_label(self.fourcc),
+                self.modifier,
+                marker_token(self.reason.as_deref().unwrap_or("unavailable")),
+                marker_token(&self.gpu)
+            ),
+        }
+    }
+}
+
+pub fn dmabuf_failsafe_report(
+    gpu: impl Into<String>,
+    fourcc: u32,
+    modifier: u64,
+    reason: impl Into<String>,
+) -> DmabufSelfTestReport {
+    DmabufSelfTestReport {
+        gpu: gpu.into(),
+        import_ok: false,
+        fourcc,
+        modifier,
+        status: SelfTestStatus::Failsafe,
+        reason: Some(reason.into()),
     }
 }
 
@@ -1186,6 +1296,62 @@ pub fn validate_rgba_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<(), 
     Ok(())
 }
 
+pub fn validate_dmabuf_import(
+    width: u32,
+    height: u32,
+    fourcc: u32,
+    modifier: u64,
+    planes: &[DmabufPlane],
+) -> Result<(), CompositorError> {
+    validate_dimensions(width, height)?;
+    if !is_supported_rgba_dmabuf_fourcc(fourcc) {
+        return Err(CompositorError::InvalidDmabuf(format!(
+            "unsupported fourcc {}",
+            fourcc_label(fourcc)
+        )));
+    }
+    if modifier == DRM_FORMAT_MOD_INVALID {
+        return Err(CompositorError::InvalidDmabuf(
+            "modifier must be explicit".to_owned(),
+        ));
+    }
+    if planes.len() != 1 {
+        return Err(CompositorError::InvalidDmabuf(format!(
+            "expected exactly one plane for {}",
+            fourcc_label(fourcc)
+        )));
+    }
+
+    let min_stride = width
+        .checked_mul(4)
+        .ok_or(CompositorError::InvalidDimensions { width, height })?;
+    let plane = planes[0];
+    if plane.fd < 0 {
+        return Err(CompositorError::InvalidDmabuf(
+            "plane fd must be non-negative".to_owned(),
+        ));
+    }
+    if plane.stride < min_stride {
+        return Err(CompositorError::InvalidDmabuf(format!(
+            "plane stride {} is smaller than {}",
+            plane.stride, min_stride
+        )));
+    }
+    if plane.stride > i32::MAX as u32 || plane.offset > i32::MAX as u32 {
+        return Err(CompositorError::InvalidDmabuf(
+            "plane offset/stride exceed EGL attribute range".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn is_supported_rgba_dmabuf_fourcc(fourcc: u32) -> bool {
+    matches!(
+        fourcc,
+        DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888 | DRM_FORMAT_ABGR8888 | DRM_FORMAT_XBGR8888
+    )
+}
+
 fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
     let mut map = BTreeMap::new();
     for placement in placements {
@@ -1254,6 +1420,22 @@ fn marker_token(value: &str) -> String {
     } else {
         token
     }
+}
+
+pub fn fourcc_label(fourcc: u32) -> String {
+    let bytes = fourcc.to_le_bytes();
+    if bytes
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        format!("0x{fourcc:08x}")
+    }
+}
+
+const fn fourcc_code(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
 }
 
 fn failsafe_reason(error: &CompositorError) -> String {
@@ -1416,6 +1598,106 @@ mod tests {
             report.marker_line(),
             "VITA-COMPOSITOR: gpu=vmwgfx surfaces=2 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unavailable"
         );
+    }
+
+    #[test]
+    fn dmabuf_marker_reports_import_status_and_modifier() {
+        let report = DmabufSelfTestReport {
+            gpu: "vmwgfx".to_owned(),
+            import_ok: true,
+            fourcc: fourcc_code(b'A', b'R', b'2', b'4'),
+            modifier: 0,
+            status: SelfTestStatus::Ok,
+            reason: None,
+        };
+
+        assert_eq!(
+            report.marker_line(),
+            "VITA-DMABUF: import=OK fourcc=AR24 modifier=0x0000000000000000 status=OK gpu=vmwgfx"
+        );
+
+        let failsafe = dmabuf_failsafe_report(
+            "vmwgfx",
+            fourcc_code(b'A', b'R', b'2', b'4'),
+            0,
+            "EGL_EXT_image_dma_buf_import missing",
+        );
+        assert_eq!(
+            failsafe.marker_line(),
+            "VITA-DMABUF: import=FAIL fourcc=AR24 modifier=0x0000000000000000 status=FAILSAFE reason=EGL_EXT_image_dma_buf_import_missing gpu=vmwgfx"
+        );
+    }
+
+    #[test]
+    fn dmabuf_import_rejects_bad_planes_fail_closed() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 16, 16).unwrap();
+        let surface = SurfaceId::new("surface-dmabuf").unwrap();
+        let fourcc = fourcc_code(b'A', b'R', b'2', b'4');
+
+        let err = compositor
+            .import_dmabuf_surface(surface.clone(), 4, 4, fourcc, 0, &[])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CompositorError::InvalidDmabuf("expected exactly one plane for AR24".to_owned())
+        );
+        assert!(!compositor.has_surface(&surface));
+
+        let err = compositor
+            .import_dmabuf_surface(
+                surface.clone(),
+                4,
+                4,
+                fourcc,
+                0,
+                &[DmabufPlane {
+                    fd: -1,
+                    offset: 0,
+                    stride: 16,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CompositorError::InvalidDmabuf("plane fd must be non-negative".to_owned())
+        );
+        assert!(!compositor.has_surface(&surface));
+    }
+
+    #[test]
+    fn dmabuf_import_rejects_unsupported_fourcc_and_implicit_modifier() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 16, 16).unwrap();
+        let surface = SurfaceId::new("surface-dmabuf").unwrap();
+        let plane = DmabufPlane {
+            fd: 7,
+            offset: 0,
+            stride: 16,
+        };
+
+        let err = compositor
+            .import_dmabuf_surface(surface.clone(), 4, 4, 0, 0, &[plane])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CompositorError::InvalidDmabuf("unsupported fourcc 0x00000000".to_owned())
+        );
+        assert!(!compositor.has_surface(&surface));
+
+        let err = compositor
+            .import_dmabuf_surface(
+                surface.clone(),
+                4,
+                4,
+                fourcc_code(b'A', b'R', b'2', b'4'),
+                DRM_FORMAT_MOD_INVALID,
+                &[plane],
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CompositorError::InvalidDmabuf("modifier must be explicit".to_owned())
+        );
+        assert!(!compositor.has_surface(&surface));
     }
 
     #[test]

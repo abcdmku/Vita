@@ -1,7 +1,8 @@
 use crate::{
-    CompositeReport, CompositorError, GpuTextureHandle, InputAvailability, InputEvent, Placement,
-    PresentationMode, Rect, RenderBackend, RenderSurface, TestPattern, TextureFormat,
-    TextureHandleKind,
+    dmabuf_failsafe_report, CompositeReport, CompositorError, DmabufSelfTestReport,
+    GpuTextureHandle, InputAvailability, InputEvent, Placement, PresentationMode, Rect,
+    RenderBackend, RenderSurface, TestPattern, TextureFormat, TextureHandleKind,
+    DRM_FORMAT_MOD_INVALID,
 };
 
 #[derive(Debug)]
@@ -23,6 +24,15 @@ pub fn open_default_gpu_backend_for_self_test(
     Err(CompositorError::Unavailable(
         "DRM/GBM/EGL compositor backend is only built on linux".to_owned(),
     ))
+}
+
+pub fn run_dmabuf_round_trip_self_test() -> DmabufSelfTestReport {
+    dmabuf_failsafe_report(
+        "unavailable",
+        0,
+        DRM_FORMAT_MOD_INVALID,
+        "DMABUF import self-test is only built on linux",
+    )
 }
 
 impl RenderBackend for PlatformGpuBackend {
