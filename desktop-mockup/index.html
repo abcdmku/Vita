@@ -21,7 +21,7 @@
         known-good FALLBACK shell (KNOWN_GOOD_FALLBACK_SHELL_ID) when an edit fails closed.
       - Reproduced here: a layer/zone placement model (panel layer, desktop layer, overlay
         layer), a live "Shell config" inspector that shows the composed surface tree, and an
-        "edit shell → preview → apply / rollback / fallback" affordance.
+        "edit shell -> preview -> apply / rollback / fallback" affordance.
 
   * sdk/typescript/src/wm/policy.ts
       - WindowModel: windows (rect, mode "tiled"|"floating", minimized, maximized, order),
@@ -32,8 +32,8 @@
         requestMoveResize() flips a window to "floating" and just sets a new rect — the
         compositor REPOSITIONS the texture, it does NOT repaint web content.
       - Reproduced here: click-to-focus + focusStack z-order, drag-by-titlebar that emits a
-        repositionTexture intent (no repaint — see the dragMove() comment), tile/stack toggle
-        with the same master+stack geometry, floating mode, minimize/maximize, and 3 workspaces.
+        repositionTexture intent (no repaint — transform-based, see dragMove()), tile/stack
+        toggle with the same master+stack geometry, floating mode, minimize/maximize, 3 ws.
 
   * sdk/typescript/src/shell/chrome/index.ts
       - chromePanel (clock, focusedWindow title, tray items w/ status ok|warning|critical|offline,
@@ -46,7 +46,7 @@
   * sdk/typescript/src/apps/index.ts
       - Settings app: SettingsManagedConfig (categories -> widgets toggle|text|number), with
         control-plane preview/apply (control-plane.preview / control-plane.apply intents) and a
-        `pending` preview phase.
+        `pending` preview phase. settingAcceptsValue() rejects non-finite numbers.
       - File-manager: lists entries via the files capability (FilesEntry name/kind/size/mtime),
         stat-before-read, fail-closed (status forbidden|error), path bar + ".." navigation.
       - Reproduced here as two real windowed apps with those exact structures.
@@ -85,6 +85,8 @@
     --radius-sm: 7px;
     --shadow-win: 0 18px 50px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--win-stroke);
     --shadow-win-focus: 0 24px 64px -14px rgba(0, 0, 0, 0.72), 0 0 0 1px var(--win-stroke-focus);
+    --shadow-win-drag: 0 34px 80px -16px rgba(0, 0, 0, 0.78), 0 0 0 1px var(--win-stroke-focus);
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
     --font: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
     --mono: "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   }
@@ -108,7 +110,14 @@
       linear-gradient(160deg, var(--wall-2) 0%, var(--wall-1) 46%, var(--wall-3) 100%);
     overflow: hidden;
   }
-  /* faint geometric wallmark */
+  /* faint geometric wallmark + soft aurora bands for a tasteful wallpaper */
+  #desktop::before {
+    content: ""; position: absolute; inset: -10%; pointer-events: none; opacity: 0.5;
+    background:
+      radial-gradient(620px 280px at 22% 30%, rgba(94,200,200,0.10), transparent 70%),
+      radial-gradient(720px 320px at 80% 64%, rgba(127,119,221,0.12), transparent 72%);
+    filter: blur(6px);
+  }
   #desktop::after {
     content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.06;
     background-image:
@@ -144,8 +153,10 @@
     height: 26px; padding: 0 11px; border-radius: var(--radius-sm);
     background: transparent; border: 1px solid transparent; color: var(--text);
     font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap;
+    transition: background 120ms var(--ease), border-color 120ms var(--ease);
   }
   .panel-btn:hover { background: rgba(255,255,255,0.07); }
+  .panel-btn:focus-visible { outline: 2px solid var(--win-stroke-focus); outline-offset: 1px; }
   .panel-btn.active { background: var(--sel); border-color: rgba(94,200,200,0.35); }
   .panel-logo { width: 16px; height: 16px; border-radius: 4px;
     background: conic-gradient(from 210deg, var(--accent), var(--accent-2)); }
@@ -157,13 +168,18 @@
   /* workspaces pager */
   .ws-pager { display: flex; align-items: center; gap: 4px;
     padding: 3px; background: rgba(0,0,0,0.22); border-radius: 8px; }
-  .ws-dot { width: 22px; height: 18px; border-radius: 5px; cursor: pointer;
+  .ws-dot { position: relative; width: 22px; height: 18px; border-radius: 5px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    font-size: 11px; color: var(--text-faint); border: 1px solid transparent; }
+    font-size: 11px; color: var(--text-faint); border: 1px solid transparent;
+    transition: background 120ms var(--ease), color 120ms var(--ease); }
   .ws-dot:hover { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+  .ws-dot:focus-visible { outline: 2px solid var(--win-stroke-focus); outline-offset: 1px; }
   .ws-dot.active { background: var(--sel); color: var(--text);
     border-color: rgba(94,200,200,0.4); }
-  .ws-dot.has-windows::after { content: ""; position: absolute; }
+  .ws-dot.has-windows::after { content: ""; position: absolute; bottom: 2px; left: 50%;
+    transform: translateX(-50%); width: 9px; height: 2px; border-radius: 2px;
+    background: var(--accent); opacity: 0.7; }
+  .ws-dot.active.has-windows::after { opacity: 1; }
 
   /* tray */
   #tray { display: flex; align-items: center; gap: 2px; }
@@ -177,7 +193,7 @@
   .tray-dot.critical { background: var(--critical); }
   .tray-dot.offline { background: var(--offline); }
   #clock { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--text);
-    text-align: right; line-height: 1.1; padding: 0 6px; }
+    text-align: right; line-height: 1.1; padding: 0 6px; cursor: default; }
   #clock small { display: block; color: var(--text-faint); font-size: 10.5px; }
   #notif-bell { position: relative; }
   .badge { position: absolute; top: -3px; right: -2px; min-width: 15px; height: 15px;
@@ -188,23 +204,29 @@
   #stage { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; z-index: 100; }
 
   .window {
-    position: absolute; display: flex; flex-direction: column;
+    position: absolute; left: 0; top: 0; display: flex; flex-direction: column;
     background: var(--win-bg); border-radius: var(--radius);
     box-shadow: var(--shadow-win); overflow: hidden;
     min-width: 280px; min-height: 180px;
-    transition: box-shadow 120ms ease;
+    /* Position is driven by transform: translate(x,y) — mirrors the compositor's
+       no-repaint texture reposition (the body is never relaid out on move). */
+    transition: box-shadow 130ms var(--ease), transform 170ms var(--ease),
+                width 170ms var(--ease), height 170ms var(--ease);
+    will-change: transform;
   }
   .window.focused { box-shadow: var(--shadow-win-focus); }
-  .window.tiled { transition: left 160ms ease, top 160ms ease, width 160ms ease, height 160ms ease, box-shadow 120ms ease; }
-  .window.dragging { transition: none; }
+  .window.dragging { transition: box-shadow 130ms var(--ease); box-shadow: var(--shadow-win-drag); }
+  .window.appearing { animation: winpop 180ms var(--ease); }
+  @keyframes winpop { from { opacity: 0; transform: translate(var(--wx,0), var(--wy,0)) scale(0.97); }
+    to { opacity: 1; } }
 
   .titlebar {
     height: 36px; flex: 0 0 36px; display: flex; align-items: center; gap: 8px;
     padding: 0 8px 0 12px; background: var(--titlebar);
-    border-bottom: 1px solid rgba(0,0,0,0.25); cursor: grab;
+    border-bottom: 1px solid rgba(0,0,0,0.25); cursor: grab; user-select: none;
   }
   .window.focused .titlebar { background: var(--titlebar-focus); }
-  .titlebar:active { cursor: grabbing; }
+  .window.dragging .titlebar { cursor: grabbing; }
   .win-icon { width: 16px; height: 16px; border-radius: 4px; flex: 0 0 16px;
     display: flex; align-items: center; justify-content: center; font-size: 11px; }
   .win-title { font-size: 13px; font-weight: 500; color: var(--text);
@@ -215,8 +237,10 @@
   .win-ctrls { display: flex; gap: 4px; }
   .win-ctrl { width: 22px; height: 22px; border-radius: 5px; border: none;
     background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px;
-    display: flex; align-items: center; justify-content: center; line-height: 1; }
+    display: flex; align-items: center; justify-content: center; line-height: 1;
+    transition: background 110ms var(--ease), color 110ms var(--ease); }
   .win-ctrl:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+  .win-ctrl:focus-visible { outline: 2px solid var(--win-stroke-focus); outline-offset: 1px; }
   .win-ctrl.close:hover { background: var(--critical); color: #fff; }
   .win-body { flex: 1; overflow: hidden; background: var(--win-bg); display: flex; min-height: 0; }
 
@@ -225,7 +249,8 @@
   .settings-side { flex: 0 0 184px; background: var(--win-bg-2); padding: 10px 8px;
     border-right: 1px solid var(--panel-stroke); overflow-y: auto; }
   .cat { display: flex; align-items: center; gap: 9px; padding: 8px 10px;
-    border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer; margin-bottom: 2px; }
+    border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer; margin-bottom: 2px;
+    transition: background 110ms var(--ease), color 110ms var(--ease); }
   .cat:hover { background: rgba(255,255,255,0.05); color: var(--text); }
   .cat.selected { background: var(--sel); color: var(--text); }
   .cat .ci { width: 16px; text-align: center; opacity: 0.85; }
@@ -234,21 +259,27 @@
   .settings-rev { font-size: 11px; color: var(--text-faint); margin: 0 0 16px;
     font-family: var(--mono); }
   .widget { display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 0; border-bottom: 1px solid var(--panel-stroke); }
+    padding: 12px 0; border-bottom: 1px solid var(--panel-stroke); gap: 16px; }
   .widget:last-child { border-bottom: none; }
+  .widget.pending { background: linear-gradient(90deg, rgba(106,168,230,0.08), transparent 70%);
+    border-radius: var(--radius-sm); padding-left: 8px; padding-right: 8px; margin: 0 -8px; }
   .widget label { color: var(--text); font-size: 13px; }
   .widget .wsub { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
+  .widget .wpend { color: var(--info); font-size: 11px; margin-top: 3px; font-family: var(--mono); }
   .toggle { width: 40px; height: 22px; border-radius: 11px; background: rgba(255,255,255,0.12);
-    position: relative; cursor: pointer; transition: background 140ms; border: none; }
+    position: relative; cursor: pointer; transition: background 140ms var(--ease); border: none; flex: 0 0 40px; }
   .toggle.on { background: var(--accent); }
+  .toggle:focus-visible { outline: 2px solid var(--win-stroke-focus); outline-offset: 2px; }
   .toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
-    border-radius: 50%; background: #fff; transition: transform 140ms; }
+    border-radius: 50%; background: #fff; transition: transform 140ms var(--ease); }
   .toggle.on::after { transform: translateX(18px); }
+  .toggle[disabled] { opacity: 0.55; cursor: not-allowed; }
   .num-field, .text-field { width: 120px; height: 30px; background: var(--field-bg);
     border: 1px solid var(--panel-stroke); border-radius: var(--radius-sm); color: var(--text);
     font-family: inherit; font-size: 13px; padding: 0 9px; text-align: right; }
   .text-field { text-align: left; width: 180px; }
   .num-field:focus, .text-field:focus { outline: none; border-color: var(--win-stroke-focus); }
+  .num-field.invalid, .text-field.invalid { border-color: var(--critical); }
 
   /* control-plane preview / apply bar */
   .cp-bar { margin-top: 18px; padding: 12px 14px; border-radius: var(--radius-sm);
@@ -257,14 +288,16 @@
   .cp-bar.hidden { display: none; }
   .cp-bar .cp-text { flex: 1; font-size: 12.5px; color: var(--text-dim); }
   .cp-bar .cp-text b { color: var(--text); font-weight: 500; }
-  .cp-phase { font-family: var(--mono); font-size: 11px; color: var(--info); }
+  .cp-phase { font-family: var(--mono); font-size: 11px; color: var(--info); text-transform: uppercase; }
   .btn { height: 30px; padding: 0 14px; border-radius: var(--radius-sm); cursor: pointer;
     font-family: inherit; font-size: 12.5px; border: 1px solid var(--panel-stroke);
-    background: var(--field-bg); color: var(--text); }
+    background: var(--field-bg); color: var(--text);
+    transition: background 110ms var(--ease), filter 110ms var(--ease); }
   .btn:hover { background: rgba(255,255,255,0.08); }
+  .btn:focus-visible { outline: 2px solid var(--win-stroke-focus); outline-offset: 1px; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
     font-weight: 600; }
-  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.primary:hover { filter: brightness(1.06); background: var(--accent); }
   .btn.ghost { background: transparent; }
 
   /* ---- File manager ---- */
@@ -273,19 +306,21 @@
     background: var(--win-bg-2); border-bottom: 1px solid var(--panel-stroke); }
   .fm-up { width: 28px; height: 28px; border-radius: var(--radius-sm); border: 1px solid var(--panel-stroke);
     background: var(--field-bg); color: var(--text-dim); cursor: pointer; font-size: 14px; }
-  .fm-up:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+  .fm-up:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--text); }
   .fm-up:disabled { opacity: 0.35; cursor: default; }
   .fm-path { flex: 1; height: 28px; display: flex; align-items: center; padding: 0 11px;
     background: var(--field-bg); border: 1px solid var(--panel-stroke); border-radius: var(--radius-sm);
-    font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
-  .fm-grant { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fm-grant { font-size: 11px; color: var(--text-faint); font-family: var(--mono); white-space: nowrap; }
   .fm-grant b { color: var(--accent); font-weight: 500; }
-  .fm-cols { display: grid; grid-template-columns: 1fr 92px 110px 150px; gap: 0;
+  .fm-cols { display: grid; grid-template-columns: 1fr 86px 120px 150px; gap: 0;
     padding: 7px 12px; font-size: 11px; color: var(--text-faint); text-transform: uppercase;
     letter-spacing: 0.4px; border-bottom: 1px solid var(--panel-stroke); }
-  .fm-cols span:nth-child(2), .fm-cols span:nth-child(3) { text-align: right; }
+  .fm-cols span:nth-child(2) { text-align: right; padding-right: 16px; }
+  .fm-cols span:nth-child(3) { padding-left: 2px; }
   .fm-list { flex: 1; overflow-y: auto; }
-  .fm-row { display: grid; grid-template-columns: 1fr 92px 110px 150px; gap: 0; align-items: center;
+  .fm-row { display: grid; grid-template-columns: 1fr 86px 120px 150px; gap: 0; align-items: center;
     padding: 7px 12px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.03); }
   .fm-row:hover { background: rgba(255,255,255,0.04); }
   .fm-row.selected { background: var(--sel); }
@@ -295,12 +330,14 @@
   .fm-glyph.dir { color: var(--accent); }
   .fm-glyph.file { color: var(--text-dim); }
   .fm-glyph.skip { color: var(--text-faint); }
-  .fm-size, .fm-kind { text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .fm-kind { text-align: left; padding-left: 14px; }
+  .fm-size { text-align: right; padding-right: 16px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .fm-kind { text-align: left; padding-left: 2px; color: var(--text-dim); }
   .fm-mtime { color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .fm-empty { text-align: center; color: var(--text-faint); padding: 28px; font-size: 13px; }
   .fm-status { padding: 7px 12px; border-top: 1px solid var(--panel-stroke);
-    font-size: 11.5px; color: var(--text-faint); display: flex; justify-content: space-between; }
+    font-size: 11.5px; color: var(--text-faint); display: flex; justify-content: space-between; gap: 12px; }
   .fm-status .err { color: var(--critical); }
+  .fm-status .right { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ---- Shell-inspector app ---- */
   .shellview { width: 100%; height: 100%; display: flex; flex-direction: column; }
@@ -315,26 +352,32 @@
   .sv-node .comp { color: var(--accent); }
   .sv-node .layer { color: var(--accent-2); }
   .sv-node .zone { color: var(--info); }
+  .sv-node.added .comp { color: var(--ok); }
 
   /* ============ LAUNCHER (overlay layer) ============ */
   #launcher { position: absolute; inset: 0; z-index: 7000; display: none;
     background: rgba(10, 14, 20, 0.55); backdrop-filter: blur(10px);
     align-items: flex-start; justify-content: center; }
-  #launcher.open { display: flex; }
-  .launcher-panel { margin-top: 84px; width: 720px; max-width: 92vw;
+  #launcher.open { display: flex; animation: fadein 140ms var(--ease); }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+  .launcher-panel { margin-top: 84px; width: 720px; max-width: 92vw; max-height: calc(100vh - 140px);
+    display: flex; flex-direction: column;
     background: var(--panel-bg); border: 1px solid var(--panel-stroke);
     border-radius: 16px; box-shadow: 0 30px 80px -20px rgba(0,0,0,0.7);
-    padding: 18px; }
+    padding: 18px; animation: launchpop 160ms var(--ease); }
+  @keyframes launchpop { from { opacity: 0; transform: translateY(-10px) scale(0.985); } to { opacity: 1; transform: none; } }
   .launcher-search { display: flex; align-items: center; gap: 11px; padding: 0 6px 14px; }
   .launcher-search input { flex: 1; height: 44px; background: var(--field-bg);
     border: 1px solid var(--panel-stroke); border-radius: 12px; color: var(--text);
     font-family: inherit; font-size: 16px; padding: 0 16px; }
   .launcher-search input:focus { outline: none; border-color: var(--win-stroke-focus); }
   .launcher-search .sg { font-size: 18px; color: var(--text-faint); }
-  .app-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .app-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; overflow-y: auto; }
   .app-cell { display: flex; flex-direction: column; align-items: center; gap: 9px;
-    padding: 16px 10px; border-radius: 12px; cursor: pointer; border: 1px solid transparent; }
-  .app-cell:hover, .app-cell.kbsel { background: rgba(255,255,255,0.07); border-color: var(--panel-stroke); }
+    padding: 16px 10px; border-radius: 12px; cursor: pointer; border: 1px solid transparent;
+    transition: background 110ms var(--ease), border-color 110ms var(--ease); }
+  .app-cell:hover { background: rgba(255,255,255,0.07); border-color: var(--panel-stroke); }
+  .app-cell.kbsel { background: rgba(94,200,200,0.12); border-color: rgba(94,200,200,0.4); }
   .app-ico { width: 46px; height: 46px; border-radius: 12px; display: flex;
     align-items: center; justify-content: center; font-size: 21px; color: #fff; }
   .app-name { font-size: 12.5px; color: var(--text); text-align: center; }
@@ -350,8 +393,9 @@
     width: 320px; display: flex; flex-direction: column; gap: 8px; }
   .notif { background: var(--panel-bg); border: 1px solid var(--panel-stroke);
     border-left: 3px solid var(--info); border-radius: var(--radius);
-    padding: 11px 12px; box-shadow: 0 12px 30px -10px rgba(0,0,0,0.6);
-    animation: slidein 220ms ease; }
+    padding: 11px 12px; box-shadow: 0 12px 30px -10px rgba(0,0,0,0.6); }
+  .notif.entering { animation: slidein 220ms var(--ease); }
+  .notif.leaving { animation: slideout 180ms var(--ease) forwards; }
   .notif.severity-info { border-left-color: var(--info); }
   .notif.severity-success { border-left-color: var(--ok); }
   .notif.severity-warning { border-left-color: var(--warning); }
@@ -364,6 +408,7 @@
   .notif-x:hover { color: var(--text); }
   .notif-body { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.45; }
   @keyframes slidein { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+  @keyframes slideout { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(18px); } }
 
   /* glyph badge colors for apps */
   .g-settings { background: linear-gradient(150deg,#5b8def,#3a5fb0); }
@@ -376,6 +421,10 @@
   .g-network { background: linear-gradient(150deg,#6aa8e6,#3f7ec0); }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -408,12 +457,12 @@ shell-config inspector.</h2>
     </div>
 
     <button class="panel-btn" id="notif-bell" title="Notifications">
-      <span style="font-size:15px">◔</span>
+      <span style="font-size:15px">&#9684;</span>
       <span class="badge" id="notif-badge" style="display:none">0</span>
     </button>
     <div id="clock" title="Clock">
       <span id="clock-time">--:--</span>
-      <small id="clock-date">—</small>
+      <small id="clock-date">&mdash;</small>
     </div>
   </div>
 
@@ -427,13 +476,13 @@ shell-config inspector.</h2>
   <div id="launcher">
     <div class="launcher-panel" role="dialog" aria-label="Application launcher">
       <div class="launcher-search">
-        <span class="sg">⌕</span>
-        <input id="launcher-input" type="text" placeholder="Search applications…" autocomplete="off" />
+        <span class="sg">&#9013;</span>
+        <input id="launcher-input" type="text" placeholder="Search applications&hellip;" autocomplete="off" />
       </div>
       <div class="app-grid" id="app-grid"></div>
       <div class="launcher-empty" id="launcher-empty" style="display:none">No applications match.</div>
       <div class="launcher-hint">
-        <span><kbd>↵</kbd> launch</span>
+        <span><kbd>&crarr;</kbd> launch</span>
         <span><kbd>esc</kbd> close</span>
         <span><kbd>Super</kbd> toggle</span>
       </div>
@@ -467,10 +516,11 @@ const WS = ["workspace-1", "workspace-2", "workspace-3"];
 const state = {
   activeWorkspaceId: "workspace-1",
   workspaceLayout: { "workspace-1": "tile", "workspace-2": "tile", "workspace-3": "tile" }, // "tile" | "stack"
-  windows: [],        // {id, appId, title, glyph, icon, workspaceId, rect, mode, minimized, maximized, order, render}
+  windows: [],        // {id, appId, title, glyph, icon, workspaceId, rect, mode, minimized, maximized, order, kind, ui?}
   focusStack: [],     // most-recent-first window ids
   order: 0,
 };
+const TILE_GAP = 10;
 const STAGE = () => document.getElementById("stage");
 const stageBounds = () => { const r = STAGE().getBoundingClientRect(); return { x: 0, y: 0, width: r.width, height: r.height }; };
 
@@ -511,40 +561,44 @@ const settingsConfig = {
     ]},
   ],
 };
+const READONLY_SETTINGS = new Set(["secureboot", "verity"]);
 
-/* ---------- File-manager fake filesystem (FilesEntry: name, kind, size, mtime) ---------- */
+/* ---------- File-manager fake filesystem (FilesEntry: name, kind, size, mtime) ----------
+   Capability model (mirrors the fail-closed file manager): the window has ONE grant rooted
+   at GRANT_ROOT. Everything under the grant is browsable; ".." is floored at the grant root
+   (the "↑" button disables there). A deliberate out-of-grant entry demonstrates fail-closed. */
+const GRANT_ROOT = "/home/lewis";
 const FS = {
-  "/": [
-    { name: "home",        kind: "dir",  size: 0,     mtime: "2026-06-20 09:12" },
-    { name: "etc",         kind: "dir",  size: 0,     mtime: "2026-06-18 22:40" },
-    { name: "var",         kind: "dir",  size: 0,     mtime: "2026-06-24 04:01" },
-    { name: "capsules",    kind: "dir",  size: 0,     mtime: "2026-06-23 17:55" },
-    { name: "os-release",  kind: "file", size: 412,   mtime: "2026-06-15 00:00" },
-    { name: "fstab.lock",  kind: "symlink-skipped", size: 0, mtime: "2026-06-15 00:00" },
-  ],
-  "/home": [
-    { name: "..",          kind: "dir",  size: 0,     mtime: "" },
-    { name: "lewis",       kind: "dir",  size: 0,     mtime: "2026-06-24 03:30" },
-  ],
   "/home/lewis": [
-    { name: "..",          kind: "dir",  size: 0,     mtime: "" },
     { name: "Documents",   kind: "dir",  size: 0,     mtime: "2026-06-22 14:08" },
     { name: "Pictures",    kind: "dir",  size: 0,     mtime: "2026-06-19 08:21" },
+    { name: "capsules",    kind: "dir",  size: 0,     mtime: "2026-06-23 17:55" },
     { name: "notes.md",    kind: "file", size: 2048,  mtime: "2026-06-24 02:55" },
     { name: "shell.tsx",   kind: "file", size: 7711,  mtime: "2026-06-24 03:30" },
     { name: "id_secret",   kind: "symlink-skipped", size: 0, mtime: "2026-06-10 00:00" },
+    { name: "..",          kind: "dir",  size: 0,     mtime: "" }, // outside grant -> fail closed
   ],
-  "/capsules": [
-    { name: "..",          kind: "dir",  size: 0,     mtime: "" },
+  "/home/lewis/Documents": [
+    { name: "spec.md",     kind: "file", size: 91245, mtime: "2026-06-23 19:10" },
+    { name: "todo.txt",    kind: "file", size: 318,   mtime: "2026-06-24 01:02" },
+  ],
+  "/home/lewis/Pictures": [],
+  "/home/lewis/capsules": [
     { name: "settings.ts.capsule",  kind: "file", size: 18432, mtime: "2026-06-21 11:00" },
     { name: "files.wasm.capsule",   kind: "file", size: 40960, mtime: "2026-06-21 11:00" },
     { name: "web.oci.capsule",      kind: "file", size: 1048576, mtime: "2026-06-21 11:00" },
   ],
 };
+function withinGrant(path) {
+  return path === GRANT_ROOT || path.startsWith(GRANT_ROOT + "/");
+}
+/* Returns { entries } in grant, { forbidden:true } outside grant, { missing:true } if unknown. */
 function fsList(path) {
-  if (FS[path]) return FS[path];
-  // forbidden / unknown -> fail closed (mirrors fail-closed file manager)
-  return null;
+  if (!withinGrant(path)) return { forbidden: true };
+  if (!FS[path]) return { missing: true };
+  // Hide the synthetic ".." pseudo-entry from listings (it drives the forbidden demo only
+  // when reached via the entry, not the "↑" button which is floored at the grant root).
+  return { entries: FS[path].filter(e => e.name !== "..") };
 }
 
 /* ===================================================================================== */
@@ -555,25 +609,29 @@ function focusFirst(windowId) {
   state.focusStack = [windowId, ...state.focusStack.filter(id => id !== windowId)];
 }
 
-function openWindow(appId) {
-  const app = APPS.find(a => a.id === appId) || APPS.find(a => a.opens === appId);
-  const def = app || { id: appId, name: appId, glyph: "g-terminal", icon: "□", opens: "placeholder" };
+function openWindow(opensOrAppId) {
+  // Accept either an app id or an `opens` kind (settings/files/shell/...).
+  const app = APPS.find(a => a.id === opensOrAppId) || APPS.find(a => a.opens === opensOrAppId);
+  const def = app || { id: opensOrAppId, name: opensOrAppId, glyph: "g-terminal", icon: "□", opens: "placeholder" };
   const winId = "window:" + def.id;
-  // de-dupe: focus existing
+
+  // de-dupe: focus existing (open the same app twice => raise + un-minimize, move to active ws)
   const existing = state.windows.find(w => w.id === winId);
   if (existing) {
     existing.minimized = false;
     existing.workspaceId = state.activeWorkspaceId;
     focusFirst(winId);
     render();
-    return;
+    return existing;
   }
-  const n = state.windows.length;
-  const rect = {
-    x: 60 + (n % 4) * 46, y: 40 + (n % 4) * 38,
-    width: def.opens === "files" ? 560 : def.opens === "shell" ? 540 : 520,
-    height: def.opens === "files" ? 420 : def.opens === "shell" ? 400 : 400,
-  };
+
+  // Cascade floating defaults from the *visible* count so windows do not stack on each other.
+  const n = state.windows.filter(w => w.workspaceId === state.activeWorkspaceId).length;
+  const kind = def.opens || "placeholder";
+  const width = kind === "files" ? 600 : kind === "shell" ? 560 : 520;
+  const height = kind === "files" ? 440 : kind === "shell" ? 420 : 410;
+  const rect = { x: 70 + (n % 4) * 48, y: 36 + (n % 4) * 40, width, height };
+
   const win = {
     id: winId, appId: def.id, title: titleFor(def), glyph: def.glyph, icon: def.icon,
     workspaceId: state.activeWorkspaceId,
@@ -581,11 +639,13 @@ function openWindow(appId) {
     mode: "tiled",                 // new windows enter tiled (default-tile)
     minimized: false, maximized: false,
     order: state.order++,
-    kind: def.opens || "placeholder",
+    kind,
+    fresh: true,                   // drive the appear animation once
   };
   state.windows.push(win);
   focusFirst(winId);
   render();
+  return win;
 }
 
 function titleFor(def) {
@@ -606,9 +666,18 @@ function minimizeWindow(winId) {
   state.focusStack = state.focusStack.filter(id => id !== winId);
   render();
 }
-function maximizeWindow(winId) {
+function toggleMaximize(winId) {
   const w = state.windows.find(x => x.id === winId); if (!w) return;
-  w.maximized = !w.maximized; w.minimized = false;
+  if (!w.maximized) {
+    // maximize: only one maximized per workspace (mirrors maximizeWindow demoting others)
+    for (const o of state.windows) {
+      if (o !== w && o.workspaceId === w.workspaceId) o.maximized = false;
+    }
+    w.maximized = true;
+  } else {
+    w.maximized = false;
+  }
+  w.minimized = false;
   focusFirst(winId);
   render();
 }
@@ -617,6 +686,7 @@ function setWorkspaceLayout(mode) {
   render();
 }
 function switchWorkspace(wsId) {
+  if (wsId === state.activeWorkspaceId) return;
   state.activeWorkspaceId = wsId;
   render();
 }
@@ -646,7 +716,7 @@ function focusedWindowId() {
  */
 function layoutRects() {
   const bounds = stageBounds();
-  const gap = 10;
+  const gap = TILE_GAP;
   const mode = state.workspaceLayout[state.activeWorkspaceId];
   const vis = visibleWindows();
   const rects = new Map();
@@ -656,7 +726,11 @@ function layoutRects() {
   const tiled = rest.filter(w => w.mode === "tiled");
   const floating = rest.filter(w => w.mode === "floating");
 
-  const content = { x: bounds.x + gap, y: bounds.y + gap, width: bounds.width - gap * 2, height: bounds.height - gap * 2 };
+  const content = {
+    x: bounds.x + gap, y: bounds.y + gap,
+    width: Math.max(0, bounds.width - gap * 2),
+    height: Math.max(0, bounds.height - gap * 2),
+  };
 
   if (mode === "stack") {
     for (const w of tiled) rects.set(w.id, { ...content });
@@ -664,16 +738,21 @@ function layoutRects() {
     if (tiled.length === 1) {
       rects.set(tiled[0].id, { ...content });
     } else if (tiled.length > 1) {
-      const splitGap = gap;
+      const splitGap = Math.min(gap, content.width);
       const masterW = Math.floor((content.width - splitGap) / 2);
-      const stackW = content.width - splitGap - masterW;
+      const stackW = Math.max(0, content.width - splitGap - masterW);
       rects.set(tiled[0].id, { x: content.x, y: content.y, width: masterW, height: content.height });
       const stackWins = tiled.slice(1);
-      const each = (content.height - splitGap * (stackWins.length - 1)) / stackWins.length;
+      const count = stackWins.length;
+      const innerGap = count === 1 ? 0 : Math.min(gap, Math.floor(content.height / (count - 1)));
+      const avail = Math.max(0, content.height - innerGap * (count - 1));
+      const base = Math.floor(avail / count);
+      const extra = avail - base * count;
       let y = content.y;
-      stackWins.forEach(w => {
-        rects.set(w.id, { x: content.x + masterW + splitGap, y: Math.round(y), width: stackW, height: Math.round(each) });
-        y += each + splitGap;
+      stackWins.forEach((w, i) => {
+        const h = base + (i < extra ? 1 : 0);
+        rects.set(w.id, { x: content.x + masterW + splitGap, y, width: stackW, height: h });
+        y += h + innerGap;
       });
     }
   }
@@ -718,26 +797,46 @@ function renderWindows() {
   const vis = visibleWindows();
   const focused = focusedWindowId();
   const mode = state.workspaceLayout[state.activeWorkspaceId];
+  const visIds = new Set(vis.map(w => w.id));
 
-  // remove gone windows
+  // remove windows no longer visible here (closed, minimized, or moved to another ws)
   [...stage.children].forEach(el => {
-    const id = el.dataset.winId;
-    if (!vis.find(w => w.id === id)) el.remove();
+    if (!visIds.has(el.dataset.winId)) {
+      const dr = dragState;
+      if (dr && dr.el === el) endDrag(); // a window vanished mid-drag -> stop the drag cleanly
+      el.remove();
+    }
   });
 
   for (const w of vis) {
     const r = rects.get(w.id);
     if (!r) continue;
-    let el = stage.querySelector(`[data-win-id="${cssEsc(w.id)}"]`);
-    if (!el) { el = buildWindowEl(w); stage.appendChild(el); }
-    // reposition the surface — this is the cheap path (texture reposition, NO repaint)
-    el.style.left = r.x + "px"; el.style.top = r.y + "px";
-    el.style.width = r.width + "px"; el.style.height = r.height + "px";
+    let el = stage.querySelector('[data-win-id="' + cssEsc(w.id) + '"]');
+    if (!el) {
+      el = buildWindowEl(w);
+      stage.appendChild(el);
+      if (w.fresh) {
+        w.fresh = false;
+        el.style.setProperty("--wx", r.x + "px");
+        el.style.setProperty("--wy", r.y + "px");
+        el.classList.add("appearing");
+        el.addEventListener("animationend", () => el.classList.remove("appearing"), { once: true });
+      }
+    }
+    // Don't fight an in-flight drag: the drag owns transform/size until mouseup.
+    const isDragging = dragState && dragState.el === el;
+    if (!isDragging) {
+      // reposition via transform — the cheap path (texture reposition, NO repaint)
+      el.style.transform = "translate(" + r.x + "px," + r.y + "px)";
+      el.style.width = r.width + "px";
+      el.style.height = r.height + "px";
+    }
     el.style.zIndex = 100 + zIndexFor(w.id, vis);
     el.classList.toggle("focused", w.id === focused);
-    el.classList.toggle("tiled", w.mode === "tiled" && !w.maximized && !el.classList.contains("dragging"));
     const modeEl = el.querySelector(".win-mode");
     if (modeEl) modeEl.textContent = w.maximized ? "max" : (w.mode === "tiled" ? mode : "float");
+    const maxBtn = el.querySelector(".max");
+    if (maxBtn) maxBtn.textContent = w.maximized ? "❐" : "▢";
   }
 }
 
@@ -745,27 +844,34 @@ function buildWindowEl(w) {
   const el = document.createElement("div");
   el.className = "window";
   el.dataset.winId = w.id;
-  el.innerHTML = `
-    <div class="titlebar">
-      <span class="win-icon ${w.glyph}">${w.icon}</span>
-      <span class="win-title">${esc(w.title)}</span>
-      <span class="win-mode"></span>
-      <div class="win-ctrls">
-        <button class="win-ctrl min" title="Minimize">—</button>
-        <button class="win-ctrl max" title="Maximize / tile">▢</button>
-        <button class="win-ctrl close" title="Close">✕</button>
-      </div>
-    </div>
-    <div class="win-body"></div>`;
-  // focus on any pointer-down
-  el.addEventListener("mousedown", () => { focusFirst(w.id); renderWindows(); });
+  el.innerHTML =
+    '<div class="titlebar">' +
+      '<span class="win-icon ' + w.glyph + '">' + w.icon + '</span>' +
+      '<span class="win-title">' + esc(w.title) + '</span>' +
+      '<span class="win-mode"></span>' +
+      '<div class="win-ctrls">' +
+        '<button class="win-ctrl min" title="Minimize">—</button>' +
+        '<button class="win-ctrl max" title="Maximize / restore">▢</button>' +
+        '<button class="win-ctrl close" title="Close">✕</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="win-body"></div>';
+
+  // Raise on pointer-down anywhere in the window (capture phase so it runs before
+  // child handlers, and only when not already focused — avoids redundant re-renders).
+  el.addEventListener("mousedown", () => {
+    if (focusedWindowId() !== w.id) { focusFirst(w.id); renderWindows(); }
+  });
+
   // titlebar drag => reposition (becomes floating)
   attachDrag(el, w);
   el.querySelector(".min").addEventListener("click", e => { e.stopPropagation(); minimizeWindow(w.id); });
-  el.querySelector(".max").addEventListener("click", e => { e.stopPropagation(); maximizeWindow(w.id); });
+  el.querySelector(".max").addEventListener("click", e => { e.stopPropagation(); toggleMaximize(w.id); });
   el.querySelector(".close").addEventListener("click", e => { e.stopPropagation(); closeWindow(w.id); });
-  // double-click titlebar toggles maximize
-  el.querySelector(".titlebar").addEventListener("dblclick", () => maximizeWindow(w.id));
+  el.querySelector(".titlebar").addEventListener("dblclick", e => {
+    if (e.target.closest(".win-ctrl")) return;
+    toggleMaximize(w.id);
+  });
   renderWindowBody(el.querySelector(".win-body"), w);
   return el;
 }
@@ -774,39 +880,67 @@ function buildWindowEl(w) {
  * Drag-by-titlebar. In the real system (wm/policy.ts -> requestMoveResize) this flips the
  * window to "floating" and emits a { type: "repositionTexture", rect } intent. The native
  * compositor moves the already-rendered GPU texture to the new rect — the web content is
- * NOT repainted. Here we just translate the element; the body is never re-rendered.
+ * NOT repainted. Here we translate the element via transform; the body is never re-rendered.
+ *
+ * A single module-level dragState + document listeners guarantee the drag always ends on
+ * mouseup (no "drag continues after release", no listener leaks across drags).
  */
+let dragState = null;
 function attachDrag(el, w) {
   const bar = el.querySelector(".titlebar");
   bar.addEventListener("mousedown", (e) => {
-    if (e.target.closest(".win-ctrl")) return;
+    if (e.button !== 0) return;                 // primary button only
+    if (e.target.closest(".win-ctrl")) return;  // not on the window controls
     e.preventDefault();
-    focusFirst(w.id); renderWindows();
-    if (w.maximized) return;
-    const startX = e.clientX, startY = e.clientY;
-    const rect = el.getBoundingClientRect();
+
+    // raise first so the dragged window is on top
+    if (focusedWindowId() !== w.id) { focusFirst(w.id); renderWindows(); }
+    if (w.maximized) return; // maximized windows are not draggable (real WM keeps them pinned)
+
     const stageR = STAGE().getBoundingClientRect();
-    const offX = startX - rect.left, offY = startY - rect.top;
-    el.classList.add("dragging"); el.classList.remove("tiled");
-    function move(ev) {
-      // pure reposition — no body re-render (mirrors the no-repaint texture move)
-      let nx = ev.clientX - stageR.left - offX;
-      let ny = ev.clientY - stageR.top - offY;
-      nx = Math.max(0, Math.min(nx, stageR.width - rect.width));
-      ny = Math.max(0, Math.min(ny, stageR.height - rect.height));
-      el.style.left = nx + "px"; el.style.top = ny + "px";
-      w.rect = { x: nx, y: ny, width: rect.width, height: rect.height };
-    }
-    function up() {
-      document.removeEventListener("mousemove", move);
-      document.removeEventListener("mouseup", up);
-      el.classList.remove("dragging");
-      w.mode = "floating";  // requestMoveResize => mode becomes "floating"
-      render();
-    }
-    document.addEventListener("mousemove", move);
-    document.addEventListener("mouseup", up);
+    const r = el.getBoundingClientRect();
+    // current position of the element within the stage
+    const curX = r.left - stageR.left;
+    const curY = r.top - stageR.top;
+    const grabX = e.clientX - r.left;   // pointer offset inside the window
+    const grabY = e.clientY - r.top;
+    const width = r.width, height = r.height;
+
+    el.classList.add("dragging");
+    document.body.style.cursor = "grabbing";
+
+    dragState = { el, w, stageR, grabX, grabY, width, height, x: curX, y: curY, moved: false };
+    document.addEventListener("mousemove", dragMove);
+    document.addEventListener("mouseup", dragUp);
   });
+}
+function dragMove(ev) {
+  const d = dragState; if (!d) return;
+  // Self-heal a missed mouseup: if the primary button is no longer held, end the drag.
+  if (ev.buttons !== undefined && (ev.buttons & 1) === 0) { dragUp(); return; }
+  let nx = ev.clientX - d.stageR.left - d.grabX;
+  let ny = ev.clientY - d.stageR.top - d.grabY;
+  nx = Math.max(0, Math.min(nx, d.stageR.width - d.width));
+  ny = Math.max(0, Math.min(ny, d.stageR.height - d.height));
+  d.x = nx; d.y = ny; d.moved = true;
+  // pure reposition — no body re-render (mirrors the no-repaint texture move)
+  d.el.style.transform = "translate(" + nx + "px," + ny + "px)";
+}
+function dragUp() {
+  const d = dragState; if (!d) return;
+  endDrag();
+  if (d.moved) {
+    d.w.mode = "floating";   // requestMoveResize => mode becomes "floating"
+    d.w.rect = { x: d.x, y: d.y, width: d.width, height: d.height };
+  }
+  render();
+}
+function endDrag() {
+  document.removeEventListener("mousemove", dragMove);
+  document.removeEventListener("mouseup", dragUp);
+  document.body.style.cursor = "";
+  if (dragState && dragState.el) dragState.el.classList.remove("dragging");
+  dragState = null;
 }
 
 /* ---------- App bodies ---------- */
@@ -823,181 +957,281 @@ function renderSettings(body, w) {
   const ui = w.ui;
   const cfg = ui.config;
   const cat = cfg.categories.find(c => c.id === ui.selectedCategoryId) || cfg.categories[0];
+  const pend = ui.pending;
 
-  body.innerHTML = `
-    <div class="settings">
-      <div class="settings-side">
-        ${cfg.categories.map(c => `
-          <div class="cat ${c.id === ui.selectedCategoryId ? "selected" : ""}" data-cat="${c.id}">
-            <span class="ci">${c.icon}</span>${esc(c.title)}
-          </div>`).join("")}
-      </div>
-      <div class="settings-main">
-        <h3 class="settings-h">${esc(cat.title)}</h3>
-        <p class="settings-rev">config revision ${esc(cfg.revision)} · control-plane managed</p>
-        ${cat.settings.map(s => widgetHtml(cat.id, s)).join("")}
-        <div class="cp-bar ${ui.pending ? "" : "hidden"}" id="cp-bar">
-          <div class="cp-text">
-            <span class="cp-phase">${ui.pending ? ui.pending.phase : ""}</span>
-            ${ui.pending ? `&nbsp;·&nbsp;${esc(ui.pending.label)} → <b>${esc(String(ui.pending.value))}</b>` : ""}
-          </div>
-          <button class="btn ghost" data-cp="rollback">Discard</button>
-          <button class="btn primary" data-cp="apply">Apply</button>
-        </div>
-      </div>
-    </div>`;
+  body.innerHTML =
+    '<div class="settings">' +
+      '<div class="settings-side">' +
+        cat0List(cfg, ui) +
+      '</div>' +
+      '<div class="settings-main">' +
+        '<h3 class="settings-h">' + esc(cat.title) + '</h3>' +
+        '<p class="settings-rev">config revision ' + esc(cfg.revision) + ' · control-plane managed</p>' +
+        cat.settings.map(s => widgetHtml(cat.id, s, pend)).join("") +
+        '<div class="cp-bar ' + (pend ? "" : "hidden") + '" id="cp-bar">' +
+          '<div class="cp-text">' +
+            '<span class="cp-phase">' + (pend ? esc(pend.phase) : "") + '</span>' +
+            (pend ? '&nbsp;·&nbsp;' + esc(pend.label) + ' → <b>' + esc(String(pend.value)) + '</b>' : "") +
+          '</div>' +
+          '<button class="btn ghost" data-cp="rollback">Discard</button>' +
+          '<button class="btn primary" data-cp="apply">Apply</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
 
   body.querySelectorAll(".cat").forEach(c => c.addEventListener("click", () => {
     ui.selectedCategoryId = c.dataset.cat; renderSettings(body, w);
   }));
+
   // widget edits => create a "preview" pending edit (control-plane.preview)
   body.querySelectorAll("[data-toggle]").forEach(t => t.addEventListener("click", () => {
+    if (t.disabled) return;
     const s = findSetting(cfg, cat.id, t.dataset.toggle);
-    if (s.id === "secureboot" || s.id === "verity") return; // read-only, enforced
-    stagePreview(ui, cat.id, s, !s.value, body, w);
+    if (!s || READONLY_SETTINGS.has(s.id)) return; // read-only, enforced
+    stagePreview(ui, cat.id, s, !currentValue(ui, cat.id, s), body, w);
   }));
   body.querySelectorAll("[data-num]").forEach(inp => inp.addEventListener("change", () => {
     const s = findSetting(cfg, cat.id, inp.dataset.num);
-    stagePreview(ui, cat.id, s, Number(inp.value), body, w);
+    const v = Number(inp.value);
+    if (!s) return;
+    if (inp.value.trim() === "" || !Number.isFinite(v)) {
+      // settingAcceptsValue() rejects non-finite numbers -> reflect invalid, no preview
+      inp.classList.add("invalid");
+      inp.value = String(currentValue(ui, cat.id, s));
+      setTimeout(() => inp.classList.remove("invalid"), 900);
+      return;
+    }
+    stagePreview(ui, cat.id, s, v, body, w);
   }));
   body.querySelectorAll("[data-text]").forEach(inp => inp.addEventListener("change", () => {
     const s = findSetting(cfg, cat.id, inp.dataset.text);
+    if (!s) return;
     stagePreview(ui, cat.id, s, inp.value, body, w);
   }));
+
   const cpBar = body.querySelector("#cp-bar");
-  if (cpBar) {
+  if (cpBar && pend) {
     cpBar.querySelector('[data-cp="apply"]').addEventListener("click", () => {
       // control-plane.apply: commit the desired value into config
       const p = ui.pending; if (!p) return;
-      findSetting(cfg, p.categoryId, p.settingId).value = p.value;
+      const target = findSetting(cfg, p.categoryId, p.settingId);
+      if (target) target.value = p.value;
       ui.pending = null;
+      ui.selectedCategoryId = p.categoryId;
       renderSettings(body, w);
-      pushNotification({ id: "set-" + Date.now(), title: "Setting applied", severity: "success",
-        body: `${p.label} committed via control plane.`, source: "settings", ttlMs: 5000 });
+      pushNotification({ id: "set-" + p.categoryId + "-" + p.settingId, title: "Setting applied",
+        severity: "success", body: p.label + " committed via control plane.", source: "settings", ttlMs: 5000 });
     });
     cpBar.querySelector('[data-cp="rollback"]').addEventListener("click", () => {
       ui.pending = null; renderSettings(body, w);   // rollback the preview
     });
   }
 }
-function widgetHtml(catId, s) {
-  const ro = (s.id === "secureboot" || s.id === "verity");
+function cat0List(cfg, ui) {
+  return cfg.categories.map(c =>
+    '<div class="cat ' + (c.id === ui.selectedCategoryId ? "selected" : "") + '" data-cat="' + c.id + '">' +
+      '<span class="ci">' + c.icon + '</span>' + esc(c.title) +
+    '</div>').join("");
+}
+// The displayed value reflects a live preview (if pending targets this setting), else committed.
+function currentValue(ui, catId, s) {
+  const p = ui.pending;
+  if (p && p.categoryId === catId && p.settingId === s.id) return p.value;
+  return s.value;
+}
+function widgetHtml(catId, s, pend) {
+  const ro = READONLY_SETTINGS.has(s.id);
+  const isPending = pend && pend.categoryId === catId && pend.settingId === s.id;
+  const val = isPending ? pend.value : s.value;
   let control = "";
-  if (s.kind === "toggle") control = `<button class="toggle ${s.value ? "on" : ""}" data-toggle="${s.id}" ${ro ? "disabled style='opacity:.6;cursor:default'" : ""} aria-label="${esc(s.label)}"></button>`;
-  else if (s.kind === "number") control = `<input class="num-field" type="number" data-num="${s.id}" value="${esc(String(s.value))}" />`;
-  else control = `<input class="text-field" type="text" data-text="${s.id}" value="${esc(String(s.value))}" />`;
-  return `<div class="widget">
-    <div><label>${esc(s.label)}</label>${s.sub ? `<div class="wsub">${esc(s.sub)}</div>` : ""}</div>
-    ${control}
-  </div>`;
+  if (s.kind === "toggle") {
+    control = '<button class="toggle ' + (val ? "on" : "") + '" data-toggle="' + s.id + '" ' +
+      (ro ? "disabled" : "") + ' aria-label="' + esc(s.label) + '"></button>';
+  } else if (s.kind === "number") {
+    control = '<input class="num-field" type="number" data-num="' + s.id + '" value="' + esc(String(val)) + '" />';
+  } else {
+    control = '<input class="text-field" type="text" data-text="' + s.id + '" value="' + esc(String(val)) + '" />';
+  }
+  return '<div class="widget ' + (isPending ? "pending" : "") + '">' +
+    '<div><label>' + esc(s.label) + '</label>' +
+      (s.sub ? '<div class="wsub">' + esc(s.sub) + '</div>' : "") +
+      (isPending ? '<div class="wpend">preview · not yet committed</div>' : "") +
+    '</div>' + control +
+  '</div>';
 }
 function stagePreview(ui, categoryId, s, value, body, w) {
   ui.pending = { phase: "preview", categoryId, settingId: s.id, label: s.label, value };
   renderSettings(body, w);
 }
 function findSetting(cfg, catId, settingId) {
-  return cfg.categories.find(c => c.id === catId).settings.find(s => s.id === settingId);
+  const c = cfg.categories.find(c => c.id === catId);
+  return c ? c.settings.find(s => s.id === settingId) : undefined;
 }
 
 /* FILE MANAGER (path bar + entries, stat-before-read, fail-closed) */
 function renderFiles(body, w) {
   if (!w.ui) w.ui = { grant: "grant:home", path: "/home/lewis", selected: null, status: "ready", error: null };
   const ui = w.ui;
-  const entries = fsList(ui.path);
-  if (entries === null) { ui.status = "forbidden"; ui.error = "AccessForbidden: no grant covers this path"; }
+  const listing = fsList(ui.path);
 
-  const rows = (entries || []).map(e => {
+  // Derive status/error from the listing for THIS render (no sticky mutation across renders).
+  let entries = [];
+  let statusText;
+  if (listing.forbidden) {
+    statusText = "forbidden";
+    ui.error = "AccessForbidden: no grant covers this path";
+  } else if (listing.missing) {
+    statusText = "error";
+    ui.error = "NotFound: directory does not exist";
+  } else {
+    entries = listing.entries;
+    statusText = ui.selected ? "preview" : "ready";
+    ui.error = null;
+  }
+
+  const showUp = ui.path !== GRANT_ROOT; // "↑" is floored at the grant root
+  const rows = entries.map(e => {
     const glyph = e.kind === "dir" ? "▸" : e.kind === "file" ? "▤" : "⊘";
     const gclass = e.kind === "dir" ? "dir" : e.kind === "file" ? "file" : "skip";
     const sizeTxt = e.kind === "file" ? fmtSize(e.size) : (e.kind === "dir" ? "—" : "skip");
     const kindTxt = e.kind === "symlink-skipped" ? "symlink (skipped)" : e.kind;
     const sel = ui.selected === e.name ? "selected" : "";
-    return `<div class="fm-row ${sel}" data-entry="${esc(e.name)}" data-kind="${e.kind}">
-      <span class="fm-name"><span class="fm-glyph ${gclass}">${glyph}</span>${esc(e.name)}</span>
-      <span class="fm-size">${sizeTxt}</span>
-      <span class="fm-kind">${esc(kindTxt)}</span>
-      <span class="fm-mtime">${esc(e.mtime || "")}</span>
-    </div>`;
+    return '<div class="fm-row ' + sel + '" data-entry="' + esc(e.name) + '" data-kind="' + e.kind + '">' +
+      '<span class="fm-name"><span class="fm-glyph ' + gclass + '">' + glyph + '</span>' + esc(e.name) + '</span>' +
+      '<span class="fm-size">' + sizeTxt + '</span>' +
+      '<span class="fm-kind">' + esc(kindTxt) + '</span>' +
+      '<span class="fm-mtime">' + esc(e.mtime || "") + '</span>' +
+    '</div>';
   }).join("");
 
-  body.innerHTML = `
-    <div class="fm">
-      <div class="fm-pathbar">
-        <button class="fm-up" title="Parent (..)" ${ui.path === "/" ? "disabled" : ""}>↑</button>
-        <div class="fm-path">${esc(ui.path)}</div>
-        <div class="fm-grant">grant <b>${esc(ui.grant)}</b></div>
-      </div>
-      <div class="fm-cols"><span>Name</span><span>Size</span><span>Type</span><span>Modified</span></div>
-      <div class="fm-list">
-        ${ui.status === "forbidden" ? `<div class="launcher-empty">⊘ Access forbidden — this path is outside the capability grant.</div>` : rows}
-      </div>
-      <div class="fm-status">
-        <span>${(entries || []).length} entries · stat-before-read · fail-closed</span>
-        <span class="${ui.error ? "err" : ""}">${ui.error ? esc(ui.error) : (ui.selected ? "selected: " + esc(ui.selected) : "status: " + ui.status)}</span>
-      </div>
-    </div>`;
+  let listHtml;
+  if (listing.forbidden) {
+    listHtml = '<div class="fm-empty">⊘ Access forbidden — this path is outside the capability grant.</div>';
+  } else if (listing.missing) {
+    listHtml = '<div class="fm-empty">Directory not found.</div>';
+  } else if (entries.length === 0) {
+    listHtml = '<div class="fm-empty">This folder is empty.</div>';
+  } else {
+    listHtml = rows;
+  }
+
+  const rightStatus = ui.error
+    ? '<span class="right err">' + esc(ui.error) + '</span>'
+    : '<span class="right">' + (ui.selected ? "selected: " + esc(ui.selected) : "status: " + statusText) + '</span>';
+
+  body.innerHTML =
+    '<div class="fm">' +
+      '<div class="fm-pathbar">' +
+        '<button class="fm-up" title="Parent (..)" ' + (showUp ? "" : "disabled") + '>↑</button>' +
+        '<div class="fm-path" title="' + esc(ui.path) + '">' + esc(ui.path) + '</div>' +
+        '<div class="fm-grant">grant <b>' + esc(ui.grant) + '</b></div>' +
+      '</div>' +
+      '<div class="fm-cols"><span>Name</span><span>Size</span><span>Type</span><span>Modified</span></div>' +
+      '<div class="fm-list">' + listHtml + '</div>' +
+      '<div class="fm-status">' +
+        '<span>' + entries.length + ' entries · stat-before-read · fail-closed</span>' +
+        rightStatus +
+      '</div>' +
+    '</div>';
 
   const up = body.querySelector(".fm-up");
-  up.addEventListener("click", () => { navFiles(ui, "..", body, w); });
+  if (showUp) up.addEventListener("click", () => navFiles(ui, "..", body, w));
   body.querySelectorAll(".fm-row").forEach(row => {
-    row.addEventListener("click", () => { ui.selected = row.dataset.entry; renderFiles(body, w); });
+    row.addEventListener("click", () => {
+      if (row.dataset.kind === "symlink-skipped") return; // not selectable
+      ui.selected = row.dataset.entry; renderFiles(body, w);
+    });
     row.addEventListener("dblclick", () => navFiles(ui, row.dataset.entry, body, w));
   });
 }
 function navFiles(ui, name, body, w) {
-  // stat-before-read: resolve target, only descend into dirs
-  let target;
-  if (name === "..") target = parentPath(ui.path);
-  else target = joinPath(ui.path, name);
-  const at = fsList(ui.path) ? fsList(ui.path).find(e => e.name === name) : null;
-  if (name !== ".." && at && at.kind !== "dir") {
-    ui.selected = name; ui.status = "preview"; ui.error = null;
-    w.title = "Files — " + ui.path; renderFiles(body, w); return;
+  // stat-before-read: resolve target, only descend into dirs; files become a "preview".
+  if (name === "..") {
+    // ".." is floored at the grant root — going above it fails closed (fail-closed grant).
+    if (ui.path === GRANT_ROOT) {
+      ui.selected = null;
+      pushNotification({ id: "fm-forbidden", title: "Access forbidden", severity: "warning",
+        body: "Parent of " + GRANT_ROOT + " is outside the capability grant.", source: "files", ttlMs: 5000 });
+      renderFiles(body, w);
+      return;
+    }
+    ui.path = parentPath(ui.path);
+    ui.selected = null; ui.status = "ready"; ui.error = null;
+    setWindowTitle(w, "Files — " + ui.path);
+    renderFiles(body, w);
+    return;
   }
-  ui.path = target; ui.selected = null; ui.status = "ready"; ui.error = null;
-  w.title = "Files — " + ui.path;
-  renderFiles(body, w);
-  const t = w.id && document.querySelector(`[data-win-id="${cssEsc(w.id)}"] .win-title`);
-  if (t) t.textContent = w.title;
+  const listing = fsList(ui.path);
+  const at = listing.entries ? listing.entries.find(e => e.name === name) : null;
+  if (!at) return;
+  if (at.kind === "dir") {
+    ui.path = joinPath(ui.path, name);
+    ui.selected = null; ui.status = "ready"; ui.error = null;
+    setWindowTitle(w, "Files — " + ui.path);
+    renderFiles(body, w);
+  } else if (at.kind === "file") {
+    // stat-before-read landed on a file -> select + preview (no descent)
+    ui.selected = name; ui.status = "preview"; ui.error = null;
+    renderFiles(body, w);
+  }
+  // symlink-skipped: ignored (fail-closed on symlinks)
+}
+function setWindowTitle(w, title) {
+  w.title = title;
+  const t = document.querySelector('[data-win-id="' + cssEsc(w.id) + '"] .win-title');
+  if (t) t.textContent = title;
   renderPanel();
 }
 
 /* SHELL INSPECTOR (composite layout tree + preview/apply/rollback/fallback) */
 function renderShellInspector(body, w) {
-  if (!w.ui) w.ui = { source: "configured" };
+  if (!w.ui) w.ui = { source: "configured", previewing: false };
   const ui = w.ui;
-  const tree = ui.source === "fallback" ? FALLBACK_TREE : SHELL_TREE;
-  body.innerHTML = `
-    <div class="shellview">
-      <div class="sv-top">
-        <p>The desktop is a composite TSX/CSS layout. Components register a <span style="color:var(--accent-2)">layer</span>
-        and <span style="color:var(--info)">zone</span>; a shell config composes them into the surface tree below.
-        Edits are managed: <b>preview → apply</b> with <b>rollback</b>, and a known-good <b>fallback shell</b> if an edit fails closed.</p>
-        <div class="sv-actions">
-          <button class="btn" data-sv="preview">Preview edit</button>
-          <button class="btn primary" data-sv="apply">Apply</button>
-          <button class="btn ghost" data-sv="rollback">Rollback</button>
-          <button class="btn ghost" data-sv="fallback">Force fallback</button>
-          <span class="sv-state ${ui.source}">source: ${ui.source}</span>
-        </div>
-      </div>
-      <div class="sv-tree">${tree.map(n => shellNodeHtml(n)).join("")}</div>
-    </div>`;
-  body.querySelector('[data-sv="preview"]').addEventListener("click", () =>
+  let tree;
+  if (ui.source === "fallback") tree = FALLBACK_TREE;
+  else if (ui.previewing) tree = SHELL_TREE_PREVIEW;
+  else tree = SHELL_TREE;
+
+  body.innerHTML =
+    '<div class="shellview">' +
+      '<div class="sv-top">' +
+        '<p>The desktop is a composite TSX/CSS layout. Components register a ' +
+          '<span style="color:var(--accent-2)">layer</span> and ' +
+          '<span style="color:var(--info)">zone</span>; a shell config composes them into the ' +
+          'surface tree below. Edits are managed: <b>preview → apply</b> with <b>rollback</b>, ' +
+          'and a known-good <b>fallback shell</b> if an edit fails closed.</p>' +
+        '<div class="sv-actions">' +
+          '<button class="btn" data-sv="preview">Preview edit</button>' +
+          '<button class="btn primary" data-sv="apply">Apply</button>' +
+          '<button class="btn ghost" data-sv="rollback">Rollback</button>' +
+          '<button class="btn ghost" data-sv="fallback">Force fallback</button>' +
+          '<span class="sv-state ' + ui.source + '">source: ' + ui.source +
+            (ui.previewing && ui.source !== "fallback" ? " (preview)" : "") + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="sv-tree">' + tree.map(n => shellNodeHtml(n)).join("") + '</div>' +
+    '</div>';
+
+  body.querySelector('[data-sv="preview"]').addEventListener("click", () => {
+    if (ui.source === "fallback") ui.source = "configured";
+    ui.previewing = true; renderShellInspector(body, w);
     pushNotification({ id: "sh-prev", title: "Shell preview composed", severity: "info",
-      body: "diff: +1 component (no surfaces removed). Apply to commit.", source: "shell", ttlMs: 6000 }));
+      body: "diff: +1 component (vita.app.text @desktop:center). Apply to commit.", source: "shell", ttlMs: 6000 });
+  });
   body.querySelector('[data-sv="apply"]').addEventListener("click", () => {
-    ui.source = "configured"; renderShellInspector(body, w);
+    const wasPreviewing = ui.previewing;
+    ui.source = "configured"; ui.previewing = false; renderShellInspector(body, w);
     pushNotification({ id: "sh-apply", title: "Shell applied", severity: "success",
-      body: "ManagedShellConfigController committed the new layout.", source: "shell", ttlMs: 5000 });
+      body: wasPreviewing ? "ManagedShellConfigController committed the previewed layout."
+                          : "No pending preview — layout unchanged.", source: "shell", ttlMs: 5000 });
   });
   body.querySelector('[data-sv="rollback"]').addEventListener("click", () => {
-    ui.source = "configured"; renderShellInspector(body, w);
+    ui.source = "configured"; ui.previewing = false; renderShellInspector(body, w);
     pushNotification({ id: "sh-rb", title: "Shell rolled back", severity: "warning",
       body: "Restored the previous known-good layout.", source: "shell", ttlMs: 5000 });
   });
   body.querySelector('[data-sv="fallback"]').addEventListener("click", () => {
-    ui.source = "fallback"; renderShellInspector(body, w);
+    ui.source = "fallback"; ui.previewing = false; renderShellInspector(body, w);
     pushNotification({ id: "sh-fb", title: "Failed closed to fallback", severity: "critical",
       body: "Edit rejected — desktop is on vita.shell.fallback (owner not locked out).", source: "shell", ttlMs: 7000 });
   });
@@ -1010,48 +1244,47 @@ const SHELL_TREE = [
   { d: 1, comp: "vita.app.settings",               layer: "desktop", zone: "center" },
   { d: 1, comp: "vita.app.file-manager",           layer: "desktop", zone: "center" },
 ];
+const SHELL_TREE_PREVIEW = SHELL_TREE.concat([
+  { d: 1, comp: "vita.app.text", layer: "desktop", zone: "center", added: true },
+]);
 const FALLBACK_TREE = [
   { d: 0, comp: "vita.shell.fallback", layer: "overlay", zone: "center" },
 ];
 function shellNodeHtml(n) {
   const indent = "  ".repeat(n.d);
   const branch = n.d > 0 ? "└─ " : "";
-  return `<div class="sv-node">${indent}${branch}<span class="comp">${n.comp}</span>  ` +
-    `<span class="layer">@${n.layer}</span>:<span class="zone">${n.zone}</span></div>`;
+  return '<div class="sv-node ' + (n.added ? "added" : "") + '">' + indent + branch +
+    '<span class="comp">' + n.comp + '</span>  ' +
+    '<span class="layer">@' + n.layer + '</span>:<span class="zone">' + n.zone + '</span>' +
+    (n.added ? '  <span style="color:var(--ok)">(+)</span>' : "") + '</div>';
 }
 
 function renderPlaceholder(body, w) {
-  body.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
-                height:100%;gap:12px;color:var(--text-faint);text-align:center;padding:24px;">
-      <div class="win-icon ${w.glyph}" style="width:48px;height:48px;font-size:22px;border-radius:12px;">${w.icon}</div>
-      <div style="font-size:15px;color:var(--text);font-weight:500">${esc(w.title)}</div>
-      <div style="font-size:12.5px;max-width:300px;line-height:1.5">
-        Windowed surface placeholder. In the real PSD desktop this app is a TSX / web / WASM / OCI
-        capsule rendered offscreen into a GPU texture and composited by the native core.
-      </div>
-    </div>`;
+  body.innerHTML =
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+                'height:100%;gap:12px;color:var(--text-faint);text-align:center;padding:24px;">' +
+      '<div class="win-icon ' + w.glyph + '" style="width:48px;height:48px;font-size:22px;border-radius:12px;">' + w.icon + '</div>' +
+      '<div style="font-size:15px;color:var(--text);font-weight:500">' + esc(w.title) + '</div>' +
+      '<div style="font-size:12.5px;max-width:300px;line-height:1.5">' +
+        'Windowed surface placeholder. In the real PSD desktop this app is a TSX / web / WASM / OCI ' +
+        'capsule rendered offscreen into a GPU texture and composited by the native core.' +
+      '</div>' +
+    '</div>';
 }
 
 /* ===================================================================================== */
 /* PANEL / CHROME                                                                         */
 /* ===================================================================================== */
 
-const tray = [
-  { id: "power", label: "86%", status: "ok" },
-  { id: "net", label: "Mesh", status: "ok" },
-  { id: "trust", label: "Trusted boot", status: "ok" },
-];
-
 function renderPanel() {
   const focused = focusedWindowId();
   const fw = focused ? state.windows.find(w => w.id === focused) : null;
   const ft = document.getElementById("focused-title");
-  ft.innerHTML = fw ? `<b>${esc(fw.title)}</b>` : `<span style="color:var(--text-faint)">Vita desktop</span>`;
-  document.getElementById("layout-label").textContent =
-    cap(state.workspaceLayout[state.activeWorkspaceId]);
-  document.getElementById("layout-toggle").classList.toggle("active",
-    state.workspaceLayout[state.activeWorkspaceId] === "stack");
+  ft.innerHTML = fw ? '<b>' + esc(fw.title) + '</b>'
+                    : '<span style="color:var(--text-faint)">Vita desktop</span>';
+  const layoutMode = state.workspaceLayout[state.activeWorkspaceId];
+  document.getElementById("layout-label").textContent = cap(layoutMode);
+  document.getElementById("layout-toggle").classList.toggle("active", layoutMode === "stack");
 }
 
 function renderWorkspaces() {
@@ -1059,10 +1292,15 @@ function renderWorkspaces() {
   pager.innerHTML = WS.map((ws, i) => {
     const count = state.windows.filter(w => w.workspaceId === ws && !w.minimized).length;
     const active = ws === state.activeWorkspaceId;
-    return `<div class="ws-dot ${active ? "active" : ""}" data-ws="${ws}" title="${ws} (${count} windows)">${i + 1}</div>`;
+    return '<div class="ws-dot ' + (active ? "active " : "") + (count ? "has-windows" : "") +
+      '" data-ws="' + ws + '" role="button" tabindex="0" title="' + ws + ' (' + count + ' windows)">' + (i + 1) + '</div>';
   }).join("");
-  pager.querySelectorAll(".ws-dot").forEach(d =>
-    d.addEventListener("click", () => switchWorkspace(d.dataset.ws)));
+  pager.querySelectorAll(".ws-dot").forEach(d => {
+    d.addEventListener("click", () => switchWorkspace(d.dataset.ws));
+    d.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); switchWorkspace(d.dataset.ws); }
+    });
+  });
 }
 
 /* clock — live (panel clockLabel) */
@@ -1080,7 +1318,10 @@ setInterval(tickClock, 1000); tickClock();
 /* ===================================================================================== */
 
 let launcherSel = 0;
+const GRID_COLS = 4;
+function launcherIsOpen() { return document.getElementById("launcher").classList.contains("open"); }
 function openLauncher() {
+  if (launcherIsOpen()) return;
   const l = document.getElementById("launcher");
   l.classList.add("open");
   document.getElementById("activities").classList.add("active");
@@ -1090,11 +1331,12 @@ function openLauncher() {
   setTimeout(() => inp.focus(), 0);
 }
 function closeLauncher() {
+  if (!launcherIsOpen()) return;
   document.getElementById("launcher").classList.remove("open");
   document.getElementById("activities").classList.remove("active");
 }
 function toggleLauncher() {
-  document.getElementById("launcher").classList.contains("open") ? closeLauncher() : openLauncher();
+  launcherIsOpen() ? closeLauncher() : openLauncher();
 }
 
 /* filterLauncherApps: match id / name / subtitle / keywords */
@@ -1114,14 +1356,14 @@ function renderAppGrid(query) {
   if (launcherSel >= results.length) launcherSel = Math.max(0, results.length - 1);
   empty.style.display = results.length ? "none" : "block";
   grid.style.display = results.length ? "grid" : "none";
-  grid.innerHTML = results.map((a, i) => `
-    <div class="app-cell ${i === launcherSel ? "kbsel" : ""}" data-app="${a.id}">
-      <div class="app-ico ${a.glyph}">${a.icon}</div>
-      <div class="app-name">${esc(a.name)}</div>
-      <div class="app-sub">${esc(a.subtitle || "")}</div>
-    </div>`).join("");
+  grid.innerHTML = results.map((a, i) =>
+    '<div class="app-cell ' + (i === launcherSel ? "kbsel" : "") + '" data-app="' + a.id + '">' +
+      '<div class="app-ico ' + a.glyph + '">' + a.icon + '</div>' +
+      '<div class="app-name">' + esc(a.name) + '</div>' +
+      '<div class="app-sub">' + esc(a.subtitle || "") + '</div>' +
+    '</div>').join("");
   grid.querySelectorAll(".app-cell").forEach(c =>
-    c.addEventListener("click", () => { launch(c.dataset.app); }));
+    c.addEventListener("click", () => launch(c.dataset.app)));
 }
 function launch(appId) {
   closeLauncher();
@@ -1133,7 +1375,10 @@ function launch(appId) {
 /* NOTIFICATIONS (add / dismiss / expire)                                                 */
 /* ===================================================================================== */
 
-const notifications = [];  // {id, title, severity, body, source, expiresAt}
+const notifications = [];  // {id, title, severity, body, source, createdAt, expiresAt}
+const seenNotifIds = new Set(); // ids that already played the enter animation
+let expireTimer = null;
+
 function pushNotification(n) {
   const now = Date.now();
   const item = {
@@ -1141,45 +1386,97 @@ function pushNotification(n) {
     body: n.body || "", source: n.source || "", createdAt: now,
     expiresAt: n.ttlMs ? now + n.ttlMs : (n.expiresAtMs || undefined),
   };
-  // de-dupe by id, newest first
+  // de-dupe by id, newest first (mirrors addNotification replacing same-id)
   const idx = notifications.findIndex(x => x.id === item.id);
-  if (idx >= 0) notifications.splice(idx, 1);
+  if (idx >= 0) { notifications.splice(idx, 1); seenNotifIds.delete(item.id); }
   notifications.unshift(item);
   renderNotifications();
+  scheduleExpiry();
 }
 function dismissNotification(id) {
   const i = notifications.findIndex(n => n.id === id);
-  if (i >= 0) { notifications.splice(i, 1); renderNotifications(); }
+  if (i < 0) return;
+  // play the leave animation, then remove
+  const el = document.querySelector('#notifs .notif[data-nid="' + cssEsc(id) + '"]');
+  const finish = () => {
+    const j = notifications.findIndex(n => n.id === id);
+    if (j >= 0) notifications.splice(j, 1);
+    seenNotifIds.delete(id);
+    renderNotifications();
+  };
+  if (el) {
+    el.classList.add("leaving");
+    el.addEventListener("animationend", finish, { once: true });
+    // safety: if animationend never fires, still clean up
+    setTimeout(() => { if (notifications.find(n => n.id === id)) finish(); }, 400);
+  } else {
+    finish();
+  }
 }
 function expireNotifications() {
   const now = Date.now();
-  let changed = false;
-  for (let i = notifications.length - 1; i >= 0; i--) {
-    if (notifications[i].expiresAt && notifications[i].expiresAt <= now) { notifications.splice(i, 1); changed = true; }
-  }
-  if (changed) renderNotifications();
+  const expired = notifications.filter(n => n.expiresAt && n.expiresAt <= now);
+  expired.forEach(n => dismissNotification(n.id));
+  scheduleExpiry();
 }
-setInterval(expireNotifications, 700);
+// Schedule a single timer to the next expiry instead of polling every 700ms.
+function scheduleExpiry() {
+  if (expireTimer) { clearTimeout(expireTimer); expireTimer = null; }
+  const upcoming = notifications.map(n => n.expiresAt).filter(Boolean);
+  if (upcoming.length === 0) return;
+  const next = Math.max(0, Math.min(...upcoming) - Date.now());
+  expireTimer = setTimeout(expireNotifications, next + 30);
+}
 
 function renderNotifications() {
   const c = document.getElementById("notifs");
-  c.innerHTML = notifications.map(n => `
-    <div class="notif severity-${n.severity}" data-nid="${n.id}">
-      <div class="notif-head">
-        <span class="notif-title">${esc(n.title)}</span>
-        ${n.source ? `<span class="notif-src">${esc(n.source)}</span>` : ""}
-        <button class="notif-x" title="Dismiss">✕</button>
-      </div>
-      ${n.body ? `<div class="notif-body">${esc(n.body)}</div>` : ""}
-    </div>`).join("");
-  c.querySelectorAll(".notif-x").forEach(b =>
-    b.addEventListener("click", () => dismissNotification(b.closest(".notif").dataset.nid)));
+  // Reconcile rather than blow away innerHTML, so existing cards don't replay their
+  // enter animation and dismissals can animate out.
+  const wanted = new Map(notifications.map(n => [n.id, n]));
+
+  // remove DOM cards that are no longer present (and not mid-leave)
+  [...c.children].forEach(el => {
+    if (!wanted.has(el.dataset.nid) && !el.classList.contains("leaving")) el.remove();
+  });
+
+  // upsert in order (newest first)
+  notifications.forEach(n => {
+    let el = c.querySelector('.notif[data-nid="' + cssEsc(n.id) + '"]');
+    const isNew = !el;
+    if (!el) {
+      el = document.createElement("div");
+      el.dataset.nid = n.id;
+      c.appendChild(el); // order fixed below
+    }
+    el.className = "notif severity-" + n.severity + (seenNotifIds.has(n.id) ? "" : " entering");
+    if (!seenNotifIds.has(n.id)) {
+      seenNotifIds.add(n.id);
+      el.addEventListener("animationend", () => el.classList.remove("entering"), { once: true });
+    }
+    el.innerHTML =
+      '<div class="notif-head">' +
+        '<span class="notif-title">' + esc(n.title) + '</span>' +
+        (n.source ? '<span class="notif-src">' + esc(n.source) + '</span>' : "") +
+        '<button class="notif-x" title="Dismiss">✕</button>' +
+      '</div>' +
+      (n.body ? '<div class="notif-body">' + esc(n.body) + '</div>' : "");
+    el.querySelector(".notif-x").addEventListener("click", () => dismissNotification(n.id));
+  });
+
+  // enforce DOM order = notifications order (newest first)
+  notifications.forEach((n, i) => {
+    const el = c.querySelector('.notif[data-nid="' + cssEsc(n.id) + '"]');
+    if (el && c.children[i] !== el) c.insertBefore(el, c.children[i] || null);
+  });
+
   const badge = document.getElementById("notif-badge");
   const crit = notifications.filter(n => n.severity === "critical").length;
   if (notifications.length) {
     badge.style.display = "flex"; badge.textContent = notifications.length;
     badge.style.background = crit ? "var(--critical)" : "var(--info)";
-  } else badge.style.display = "none";
+  } else {
+    badge.style.display = "none";
+  }
 }
 
 /* ===================================================================================== */
@@ -1190,29 +1487,53 @@ document.getElementById("activities").addEventListener("click", toggleLauncher);
 document.getElementById("layout-toggle").addEventListener("click", () =>
   setWorkspaceLayout(state.workspaceLayout[state.activeWorkspaceId] === "tile" ? "stack" : "tile"));
 document.getElementById("notif-bell").addEventListener("click", () =>
-  pushNotification({ id: "ping-" + Date.now(), title: "Notification center", severity: "info",
+  pushNotification({ id: "ping", title: "Notification center", severity: "info",
     body: "This is the chrome notification stack — add / dismiss / auto-expire.", source: "chrome", ttlMs: 5000 }));
+
+// Close the launcher when clicking its dimmed backdrop (but not the panel itself).
+document.getElementById("launcher").addEventListener("mousedown", (e) => {
+  if (e.target.id === "launcher") closeLauncher();
+});
 
 const lInput = document.getElementById("launcher-input");
 lInput.addEventListener("input", () => { launcherSel = 0; renderAppGrid(lInput.value); });
 lInput.addEventListener("keydown", (e) => {
   const results = filterApps(lInput.value);
-  if (e.key === "ArrowRight" || (e.key === "Tab" && !e.shiftKey)) { e.preventDefault(); launcherSel = Math.min(results.length - 1, launcherSel + 1); renderAppGrid(lInput.value); }
-  else if (e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey)) { e.preventDefault(); launcherSel = Math.max(0, launcherSel - 1); renderAppGrid(lInput.value); }
-  else if (e.key === "ArrowDown") { e.preventDefault(); launcherSel = Math.min(results.length - 1, launcherSel + 4); renderAppGrid(lInput.value); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); launcherSel = Math.max(0, launcherSel - 4); renderAppGrid(lInput.value); }
-  else if (e.key === "Enter") { e.preventDefault(); if (results[launcherSel]) launch(results[launcherSel].id); }
+  if (e.key === "ArrowRight" || (e.key === "Tab" && !e.shiftKey)) {
+    e.preventDefault(); launcherSel = Math.min(results.length - 1, launcherSel + 1); renderAppGrid(lInput.value);
+  } else if (e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey)) {
+    e.preventDefault(); launcherSel = Math.max(0, launcherSel - 1); renderAppGrid(lInput.value);
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault(); launcherSel = Math.min(results.length - 1, launcherSel + GRID_COLS); renderAppGrid(lInput.value);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault(); launcherSel = Math.max(0, launcherSel - GRID_COLS); renderAppGrid(lInput.value);
+  } else if (e.key === "Enter") {
+    e.preventDefault(); if (results[launcherSel]) launch(results[launcherSel].id);
+  } else if (e.key === "Escape") {
+    e.preventDefault(); closeLauncher();
+  }
 });
 
 document.addEventListener("keydown", (e) => {
-  // Super (Meta) or the "Activities" affordance toggles the launcher; Esc closes it.
-  if (e.key === "Meta" || e.key === "OS" || (e.key === " " && e.target === document.body)) {
-    e.preventDefault(); toggleLauncher();
-  } else if (e.key === "Escape") {
-    closeLauncher();
-  } else if ((e.key === "l" || e.key === "L") && (e.metaKey || e.altKey)) {
+  const typingInField = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+
+  // Esc closes the launcher from anywhere.
+  if (e.key === "Escape") { closeLauncher(); return; }
+
+  // Super (Meta) toggles the launcher — but ignore it when it's a modifier for a chord
+  // (e.g. Super+L) and when typing in a field.
+  if ((e.key === "Meta" || e.key === "OS") && !e.repeat && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault(); toggleLauncher(); return;
+  }
+  // Spacebar toggles the launcher only from the bare desktop (not while typing).
+  if (e.key === " " && !typingInField && e.target === document.body) {
+    e.preventDefault(); toggleLauncher(); return;
+  }
+  // Super/Alt + L toggles tile/stack layout.
+  if ((e.key === "l" || e.key === "L") && (e.metaKey || e.altKey)) {
     e.preventDefault();
     setWorkspaceLayout(state.workspaceLayout[state.activeWorkspaceId] === "tile" ? "stack" : "tile");
+    return;
   }
 });
 
@@ -1220,13 +1541,17 @@ document.addEventListener("keydown", (e) => {
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function cssEsc(s) { return String(s).replace(/["\\]/g, "\\$&"); }
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
-function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 function fmtSize(b) { if (b < 1024) return b + " B"; if (b < 1048576) return (b / 1024).toFixed(1) + " KB"; return (b / 1048576).toFixed(1) + " MB"; }
 function joinPath(base, name) { if (base === "/") return "/" + name; return base.replace(/\/+$/, "") + "/" + name; }
 function parentPath(p) { const t = p.replace(/\/+$/, ""); if (!t || t === "/") return "/"; const i = t.lastIndexOf("/"); return i <= 0 ? "/" : t.slice(0, i); }
 
-/* reflow on resize (re-tile) */
-window.addEventListener("resize", () => renderWindows());
+/* reflow on resize (re-tile) — coalesced to one frame */
+let resizeRaf = null;
+window.addEventListener("resize", () => {
+  if (resizeRaf) return;
+  resizeRaf = requestAnimationFrame(() => { resizeRaf = null; renderWindows(); });
+});
 
 /* ---------- Seed the session ---------- */
 openWindow("settings");
