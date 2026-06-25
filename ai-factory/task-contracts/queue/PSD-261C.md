@@ -6,7 +6,7 @@ phase: 6
 pod: desktop
 risk_class: R1
 fr: []
-depends_on: [PSD-201]
+depends_on: [PSD-021]
 target_paths:
   - ui_kits/desktop/viewmodels
   - sdk/typescript/test/ui-kits
