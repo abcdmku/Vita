@@ -10,7 +10,7 @@ depends_on: [PSD-021]
 target_paths:
   - ui_kits/desktop/viewmodels/shortcuts.ts
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/default-commands*.test.ts sdk/typescript/test/ui-kits/when-context*.test.ts"
+acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/default-commands.test.ts sdk/typescript/test/ui-kits/when-context.test.ts"
 allowed_network: false
 budget_minutes: 90
 ---
@@ -112,3 +112,6 @@ Pure, headless, deterministic (no timers, no network, no ambient I/O).
   register/rebind/reset/normalize/conflict/dispatch behavior unchanged; both new test suites exist and the
   `acceptance_command` passes with every branch above (incl. all fail-closed paths) asserted; typecheck
   clean. R1.
+
+## REVISION 1 (prior run was an EMPTY vacuous pass — Codex usage limit — 2026-06-25)
+The previous dispatch produced NO files yet 'passed' (a `*.test.ts` glob matched nothing -> 0 tests -> exit 0). You MUST create the impl + test file(s) named in this contract with REAL deterministic assertions. The acceptance now uses EXACT test paths (no glob) so a missing file fails the run. An empty branch is a FAILURE.

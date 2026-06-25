@@ -10,7 +10,7 @@ depends_on: [PSD-260C, PSD-021]
 target_paths:
   - ui_kits/desktop/viewmodels/keyboard-settings.ts
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/keyboard-settings*.test.ts"
+acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/keyboard-settings.test.ts"
 allowed_network: false
 budget_minutes: 90
 ---
@@ -99,3 +99,6 @@ headless, deterministic (no timers, no network, no ambient I/O).
   exist; `acceptance_command` passes; capture→preview→apply round-trips, reset/reset-all, profile
   select persistence, and all fail-closed paths (invalid chord/key-event, conflict, missing
   `settings.write`, absent settings port) are asserted; deterministic; typecheck clean. R1.
+
+## REVISION 1 (prior run was an EMPTY vacuous pass — Codex usage limit — 2026-06-25)
+The previous dispatch produced NO files yet 'passed' (a `*.test.ts` glob matched nothing -> 0 tests -> exit 0). You MUST create the impl + test file(s) named in this contract with REAL deterministic assertions. The acceptance now uses EXACT test paths (no glob) so a missing file fails the run. An empty branch is a FAILURE.

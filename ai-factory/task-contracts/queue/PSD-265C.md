@@ -11,7 +11,7 @@ target_paths:
   - ui_kits/desktop/runtime
   - ui_kits/desktop/viewmodels
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/ShortcutsBinding*.test.ts"
+acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/ShortcutsBinding.test.ts"
 allowed_network: false
 budget_minutes: 90
 ---
@@ -66,3 +66,6 @@ target is editable (`input`/`textarea`/`contenteditable`) while a modified chord
 ## Definition of done
 - `ui_kits/desktop/runtime/shortcuts-binding.ts` + `sdk/typescript/test/ui-kits/ShortcutsBinding.test.ts`,
   deterministic, typecheck clean. R1.
+
+## REVISION 1 (prior run was an EMPTY vacuous pass — Codex usage limit — 2026-06-25)
+The previous dispatch produced NO files yet 'passed' (a `*.test.ts` glob matched nothing -> 0 tests -> exit 0). You MUST create the impl + test file(s) named in this contract with REAL deterministic assertions. The acceptance now uses EXACT test paths (no glob) so a missing file fails the run. An empty branch is a FAILURE.

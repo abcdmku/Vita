@@ -11,7 +11,7 @@ target_paths:
   - ui_kits/desktop/viewmodels/shortcut-cheatsheet.ts
   - ui_kits/desktop/viewmodels/reserved-chords.ts
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/shortcut-cheatsheet*.test.ts sdk/typescript/test/ui-kits/reserved-chords*.test.ts"
+acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/shortcut-cheatsheet.test.ts sdk/typescript/test/ui-kits/reserved-chords.test.ts"
 allowed_network: false
 budget_minutes: 90
 ---
@@ -71,3 +71,6 @@ New files only; no edits to existing modules. Revert by deleting the two view-mo
 - `ui_kits/desktop/viewmodels/shortcut-cheatsheet.ts` + `ui_kits/desktop/viewmodels/reserved-chords.ts` +
   `sdk/typescript/test/ui-kits/shortcut-cheatsheet.test.ts` + `sdk/typescript/test/ui-kits/reserved-chords.test.ts`,
   deterministic, typecheck clean, `acceptance_command` green. R1.
+
+## REVISION 1 (prior run was an EMPTY vacuous pass — Codex usage limit — 2026-06-25)
+The previous dispatch produced NO files yet 'passed' (a `*.test.ts` glob matched nothing -> 0 tests -> exit 0). You MUST create the impl + test file(s) named in this contract with REAL deterministic assertions. The acceptance now uses EXACT test paths (no glob) so a missing file fails the run. An empty branch is a FAILURE.
