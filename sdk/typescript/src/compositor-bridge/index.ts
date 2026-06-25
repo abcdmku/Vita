@@ -144,6 +144,12 @@ const SHELL_LAYER_ORDER = Object.freeze([
 ]);
 const SHELL_LAYER_WIDTH = 10_000;
 const WINDOW_LAYER_BASE = 2 * SHELL_LAYER_WIDTH;
+const ZERO_RECT: CompositorRect = Object.freeze({
+  height: 0,
+  width: 0,
+  x: 0,
+  y: 0,
+});
 
 export class CompositorDriver {
   readonly #port: CompositorPort;
@@ -406,16 +412,43 @@ function applyWindowIntent(
   }
 
   const id = intent.textureId;
-  const existing = desired.get(id) ?? current.get(id);
 
-  if (existing === undefined) {
-    if (intent.type === "setTextureVisibility" && !intent.visible) {
+  if (intent.type === "setTextureVisibility") {
+    const desiredSurface = desired.get(id);
+
+    if (desiredSurface === undefined && !intent.visible) {
       return {
         ok: true,
         surfaces: Object.freeze([]),
       };
     }
 
+    const existing = desiredSurface ?? current.get(id) ?? provisionalWindowSurface(id, desired);
+
+    if (existing.source !== "window") {
+      return {
+        error: {
+          code: "INVALID_SURFACE",
+          message: `Window intent references non-window compositor surface '${id}'.`,
+          path: `${path}/textureId`,
+        },
+        ok: false,
+      };
+    }
+
+    desired.set(id, Object.freeze({
+      ...existing,
+      visible: intent.visible,
+    }));
+    return {
+      ok: true,
+      surfaces: Object.freeze([]),
+    };
+  }
+
+  const existing = desired.get(id) ?? current.get(id);
+
+  if (existing === undefined) {
     return {
       error: {
         code: "UNKNOWN_WINDOW_SURFACE",
@@ -463,14 +496,42 @@ function applyWindowIntent(
     };
   }
 
-  desired.set(id, Object.freeze({
-    ...existing,
-    visible: intent.visible,
-  }));
   return {
     ok: true,
     surfaces: Object.freeze([]),
   };
+}
+
+function provisionalWindowSurface(
+  id: string,
+  desired: ReadonlyMap<string, DesiredSurfaceState>,
+): DesiredSurfaceState {
+  return Object.freeze({
+    id,
+    kind: "window",
+    rect: ZERO_RECT,
+    size: sizeFromRect(ZERO_RECT),
+    source: "window",
+    visible: true,
+    z: nextWindowIntentZ(desired),
+  });
+}
+
+function nextWindowIntentZ(desired: ReadonlyMap<string, DesiredSurfaceState>): number {
+  let next = 0;
+
+  for (const surface of desired.values()) {
+    if (surface.source !== "window") {
+      continue;
+    }
+
+    const offset = surface.z - WINDOW_LAYER_BASE;
+    if (Number.isSafeInteger(offset) && offset >= next) {
+      next = offset + 1;
+    }
+  }
+
+  return WINDOW_LAYER_BASE + next;
 }
 
 function diffCommands(

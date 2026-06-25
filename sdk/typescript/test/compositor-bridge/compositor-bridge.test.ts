@@ -118,7 +118,7 @@ test("move and resize reconcile as updatePlacement only", async () => {
   assert.equal(calls.some((call) => call.type === "removeSurface"), false);
 });
 
-test("restack and WM visibility intents update placement without removing hidden surfaces", async () => {
+test("restack and WM visibility intents update placement without removing desired hidden surfaces", async () => {
   const calls: CompositorCommand[] = [];
   const driver = new CompositorDriver(recordingPort(calls));
   await mustReconcile(driver, {
@@ -139,6 +139,7 @@ test("restack and WM visibility intents update placement without removing hidden
   const restackedHidden = await driver.reconcile({
     shell: chromeLikeShell(),
     windows: [
+      windowSurface("chat", rect(160, 120, 500, 360), 2),
       windowSurface("mail", rect(80, 72, 600, 440), 3),
     ],
     windowIntents: [
@@ -172,11 +173,128 @@ test("restack and WM visibility intents update placement without removing hidden
   const second = await driver.reconcile({
     shell: chromeLikeShell(),
     windows: [
+      windowSurface("chat", rect(160, 120, 500, 360), 2),
       windowSurface("mail", rect(80, 72, 600, 440), 3),
     ],
     windowIntents: [
       hiddenIntent,
     ],
+  });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.commands, []);
+  assert.deepEqual(calls, []);
+});
+
+test("WM stream registering a newly visible window emits register and placement commands", async () => {
+  const calls: CompositorCommand[] = [];
+  const driver = new CompositorDriver(recordingPort(calls));
+  await mustReconcile(driver, {
+    shell: chromeLikeShell(),
+    windows: [],
+  });
+
+  calls.length = 0;
+  const visibleIntent: WindowManagerIntent = Object.freeze({
+    textureId: "texture-files",
+    type: "setTextureVisibility",
+    visible: true,
+    windowId: "files",
+  });
+  const repositionIntent: WindowManagerIntent = Object.freeze({
+    rect: rect(40, 56, 720, 540),
+    textureId: "texture-files",
+    type: "repositionTexture",
+    windowId: "files",
+  });
+  const opened = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      visibleIntent,
+      repositionIntent,
+    ],
+    windows: [],
+  });
+
+  assert.equal(opened.ok, true);
+  assert.deepEqual(projectCommands(opened.commands), [
+    {
+      id: "texture-files",
+      kind: "window",
+      type: "registerSurface",
+    },
+    {
+      id: "texture-files",
+      rect: rect(40, 56, 720, 540),
+      type: "updatePlacement",
+      visible: true,
+      z: 20_000,
+    },
+    {
+      type: "present",
+    },
+  ]);
+  assert.deepEqual(calls, opened.commands);
+
+  calls.length = 0;
+  const second = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      visibleIntent,
+      repositionIntent,
+    ],
+    windows: [],
+  });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.commands, []);
+  assert.deepEqual(calls, []);
+});
+
+test("WM stream hiding an absent desired window removes the compositor surface", async () => {
+  const calls: CompositorCommand[] = [];
+  const driver = new CompositorDriver(recordingPort(calls));
+  await mustReconcile(driver, {
+    shell: chromeLikeShell(),
+    windows: [
+      windowSurface("mail", rect(80, 72, 600, 440), 1),
+    ],
+  });
+
+  calls.length = 0;
+  const hiddenIntent: WindowManagerIntent = Object.freeze({
+    textureId: "texture-mail",
+    type: "setTextureVisibility",
+    visible: false,
+    windowId: "mail",
+  });
+  const removed = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      hiddenIntent,
+    ],
+    windows: [],
+  });
+
+  assert.equal(removed.ok, true);
+  assert.deepEqual(projectCommands(removed.commands), [
+    {
+      id: "texture-mail",
+      type: "removeSurface",
+    },
+    {
+      type: "present",
+    },
+  ]);
+  assert.equal(calls.some((call) => call.type === "updatePlacement" && call.id === "texture-mail"), false);
+
+  calls.length = 0;
+  const second = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      hiddenIntent,
+    ],
+    windows: [],
   });
 
   assert.equal(second.ok, true);
