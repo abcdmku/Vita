@@ -268,18 +268,20 @@ export class AppHost {
       );
     }
 
+    const pendingCleanup = this.#firstPendingCleanup();
+
+    if (pendingCleanup !== undefined) {
+      return reject(
+        "APP_LAUNCH_CLEANUP_PENDING",
+        `app '${pendingCleanup.appId}' has a failed lifecycle awaiting cleanup before '${app.id}' can launch.`,
+        `/apps/${pathToken(pendingCleanup.appId)}/cleanup`,
+      );
+    }
+
     if (this.#launches.has(app.id)) {
       return reject(
         "APP_ALREADY_RUNNING",
         `app '${app.id}' is already running.`,
-        `/apps/${pathToken(app.id)}`,
-      );
-    }
-
-    if (this.#pendingCleanup.has(app.id)) {
-      return reject(
-        "APP_LAUNCH_CLEANUP_PENDING",
-        `app '${app.id}' has a failed launch awaiting cleanup.`,
         `/apps/${pathToken(app.id)}`,
       );
     }
@@ -366,6 +368,16 @@ export class AppHost {
 
     if (pendingCleanup !== undefined) return this.#cleanupPendingApp(pendingCleanup);
 
+    const blockingCleanup = this.#firstPendingCleanup();
+
+    if (blockingCleanup !== undefined) {
+      return reject(
+        "APP_STOP_CLEANUP_PENDING",
+        `app '${blockingCleanup.appId}' has a failed lifecycle awaiting cleanup before '${appId}' can stop.`,
+        `/apps/${pathToken(blockingCleanup.appId)}/cleanup`,
+      );
+    }
+
     const launch = this.#launches.get(appId);
 
     if (launch === undefined) {
@@ -438,6 +450,14 @@ export class AppHost {
       apps: Object.freeze([...this.#launches.values()].sort(compareLaunches)),
       windowModel: this.#windowModel,
     });
+  }
+
+  #firstPendingCleanup(): PendingAppCleanup | undefined {
+    for (const cleanup of this.#pendingCleanup.values()) {
+      return cleanup;
+    }
+
+    return undefined;
   }
 
   #bindRuntime(

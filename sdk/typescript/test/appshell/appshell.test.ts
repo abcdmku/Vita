@@ -727,6 +727,105 @@ test("pending cleanup retry keeps the window model open when WM close intents fa
   assert.equal(host.snapshot().windowModel.windows.length, 0);
 });
 
+test("pending cleanup blocks unrelated launch and stop until retry clears it", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  let failWm = false;
+  const first = tiledTsxApp("com.vita.pending-one", "com.vita.pending-one.component");
+  const second = tiledTsxApp("com.vita.pending-two", "com.vita.pending-two.component");
+  const third = tiledTsxApp("com.vita.pending-three", "com.vita.pending-three.component");
+  const host = new AppHost({
+    initialWindowModel: createWindowModel({
+      activeWorkspaceId: "main",
+    }),
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: conditionalThrowingWm(wmCalls, () => failWm),
+    },
+  });
+
+  assertLaunchSucceeded(host.launch(first), "expected first app launch to succeed");
+  assertLaunchSucceeded(host.launch(second), "expected second app launch to succeed");
+  wmCalls.length = 0;
+  failWm = true;
+
+  const failedStop = host.stop(second);
+
+  assert.equal(failedStop.ok, false);
+  if (failedStop.ok) {
+    assert.fail("expected stop to leave pending cleanup");
+  }
+  assert.equal(failedStop.error.code, "WM_INTENT_FAILED");
+  assert.deepEqual(removed, [appSurfaceId(second.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), [
+    "tsx:com.vita.pending-two.component",
+  ]);
+  assert.equal(host.snapshot().apps.length, 1);
+  assert.equal(host.snapshot().windowModel.windows.length, 2);
+
+  const createdAfterPending = created.length;
+  const removedAfterPending = removed.length;
+  const mountsAfterPending = mounts.length;
+  const unmountsAfterPending = unmounts.length;
+  const wmCallsAfterPending = wmCalls.length;
+
+  const blockedLaunch = host.launch(third);
+
+  assert.equal(blockedLaunch.ok, false);
+  if (blockedLaunch.ok) {
+    assert.fail("expected unrelated launch to be blocked by pending cleanup");
+  }
+  assert.equal(blockedLaunch.error.code, "APP_LAUNCH_CLEANUP_PENDING");
+  assert.equal(created.length, createdAfterPending);
+  assert.equal(mounts.length, mountsAfterPending);
+  assert.equal(wmCalls.length, wmCallsAfterPending);
+
+  const blockedStop = host.stop(first);
+
+  assert.equal(blockedStop.ok, false);
+  if (blockedStop.ok) {
+    assert.fail("expected unrelated stop to be blocked by pending cleanup");
+  }
+  assert.equal(blockedStop.error.code, "APP_STOP_CLEANUP_PENDING");
+  assert.equal(removed.length, removedAfterPending);
+  assert.equal(unmounts.length, unmountsAfterPending);
+  assert.equal(wmCalls.length, wmCallsAfterPending);
+  assert.equal(host.snapshot().apps.length, 1);
+  assert.equal(host.snapshot().windowModel.windows.length, 2);
+
+  failWm = false;
+  wmCalls.length = 0;
+
+  const cleanupStop = host.stop(second);
+
+  assert.equal(cleanupStop.ok, true);
+  assert.equal(host.snapshot().apps.length, 1);
+  assert.equal(host.snapshot().windowModel.windows.length, 1);
+
+  assertLaunchSucceeded(host.launch(third), "expected launch to resume after cleanup");
+  assert.equal(created.length, createdAfterPending + 1);
+  assert.equal(mounts.length, mountsAfterPending + 1);
+
+  const stopFirst = host.stop(first);
+
+  assert.equal(stopFirst.ok, true);
+  assert.deepEqual(removed, [
+    appSurfaceId(second.id),
+    appSurfaceId(first.id),
+  ]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), [
+    "tsx:com.vita.pending-two.component",
+    "tsx:com.vita.pending-one.component",
+  ]);
+});
+
 const WM_FAILURE_POSITIONS = Object.freeze([
   Object.freeze({
     index: 0,
