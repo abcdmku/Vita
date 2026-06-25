@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   CompositorDriver,
+  NativeCompositorPort,
   compositorWindowPlacement,
 } from "../../src/compositor-bridge/index.ts";
 import type {
@@ -15,6 +16,31 @@ import type {
 } from "../../src/compositor-bridge/index.ts";
 import type { ShellComposedLayout, ShellResolvedSurface } from "../../src/shell/index.ts";
 import type { Rect, WindowManagerIntent, WindowPlacement } from "../../src/wm/policy.ts";
+
+test("native compositor port emits deterministic wire lines through injected writer", async () => {
+  const lines: string[] = [];
+  const port = new NativeCompositorPort({
+    write(line): void {
+      lines.push(line);
+    },
+  }, {
+    colors: Object.freeze({
+      "surface:panel": "#ABCDEF80",
+    }),
+  });
+
+  await port.registerSurface("surface:panel", "shell:panel", size(1280, 42));
+  await port.updatePlacement("surface:panel", rect(0, 0, 1280, 42), 30_001, true);
+  await port.removeSurface("texture-files");
+  await port.present();
+
+  assert.deepEqual(lines, [
+    "registerSurface surface:panel 1280 42 abcdef80\n",
+    "updatePlacement surface:panel 0 0 1280 42 30001 true\n",
+    "removeSurface texture-files\n",
+    "present\n",
+  ]);
+});
 
 test("initial reconcile registers and places shell plus WM surfaces in stable z order", async () => {
   const calls: CompositorCommand[] = [];

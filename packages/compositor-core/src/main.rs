@@ -613,3 +613,194 @@ fn command_failsafe_reason(error: &CompositorError) -> String {
         _ => error.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use vita_compositor_core::{
+        CompositeReport, GpuTextureHandle, RenderSurface, TextureFormat, TextureHandleKind,
+    };
+
+    #[test]
+    fn command_session_presents_registered_surface_layout() {
+        let report = run_commands(&[
+            "registerSurface surface:files 32 24 e6edf2ff",
+            "updatePlacement surface:files 4 5 32 24 7 true",
+            "present",
+        ])
+        .expect("registered and placed surface should present");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 1);
+        assert!(report.reposition_no_repaint);
+        assert_eq!(
+            report.marker_line(),
+            "VITA-COMPOSITOR: gpu=command-test-gpu surfaces=1 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unverified"
+        );
+    }
+
+    #[test]
+    fn command_session_allows_remove_before_final_present() {
+        let report = run_commands(&[
+            "registerSurface surface:files 32 24 e6edf2ff",
+            "updatePlacement surface:files 4 5 32 24 7 true",
+            "removeSurface surface:files",
+            "present",
+        ])
+        .expect("removed surface should still allow the final scene to present");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 0);
+    }
+
+    #[test]
+    fn command_session_rejects_mutation_after_present_without_fresh_present() {
+        let error = run_commands(&[
+            "registerSurface surface:files 32 24 e6edf2ff",
+            "updatePlacement surface:files 4 5 32 24 7 true",
+            "present",
+            "removeSurface surface:files",
+        ])
+        .expect_err("post-present mutation must not report OK with a stale frame");
+
+        assert_eq!(
+            error,
+            CompositorError::Protocol("command stream ended before present".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_session_rejects_malformed_protocol_line() {
+        let error = run_commands(&["registerSurface oops"])
+            .expect_err("malformed registerSurface line must fail closed");
+
+        assert_eq!(
+            error,
+            CompositorError::Protocol("registerSurface expects 4 fields".to_owned())
+        );
+    }
+
+    fn run_commands(commands: &[&str]) -> Result<SelfTestReport, CompositorError> {
+        let mut session = CommandDrivenSession::new(CommandTestBackend::new(), 64, 64)?;
+        let mut input = String::new();
+
+        for command in commands {
+            input.push_str(command);
+            input.push('\n');
+        }
+
+        session.run(Cursor::new(input))
+    }
+
+    #[derive(Debug, Clone)]
+    struct CommandTestTexture {
+        handle: i64,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    }
+
+    struct CommandTestBackend {
+        next_handle: i64,
+        repaint_count: u64,
+    }
+
+    impl CommandTestBackend {
+        fn new() -> Self {
+            Self {
+                next_handle: 1,
+                repaint_count: 0,
+            }
+        }
+    }
+
+    impl RenderBackend for CommandTestBackend {
+        type Texture = CommandTestTexture;
+
+        fn backend_name(&self) -> &str {
+            "command-test-gpu"
+        }
+
+        fn presentation_mode(&self) -> vita_compositor_core::PresentationMode {
+            vita_compositor_core::PresentationMode::RECORDING
+        }
+
+        fn input_availability(&self) -> InputAvailability {
+            InputAvailability::Unverified
+        }
+
+        fn create_test_texture(
+            &mut self,
+            width: u32,
+            height: u32,
+            pattern: &TestPattern,
+        ) -> Result<Self::Texture, CompositorError> {
+            let handle = self.next_handle;
+            self.next_handle += 1;
+            self.repaint_count += 1;
+
+            Ok(CommandTestTexture {
+                bytes: pattern.rgba_bytes(width, height)?,
+                handle,
+                height,
+                width,
+            })
+        }
+
+        fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {
+            GpuTextureHandle {
+                format: TextureFormat::Rgba8Unorm,
+                height: texture.height,
+                kind: TextureHandleKind::TestOnly,
+                value: texture.handle,
+                width: texture.width,
+            }
+        }
+
+        fn composite(
+            &mut self,
+            surfaces: &[RenderSurface<Self::Texture>],
+            _placements: &[Placement],
+            damage: &[Rect],
+            _output_width: u32,
+            _output_height: u32,
+        ) -> Result<CompositeReport, CompositorError> {
+            Ok(CompositeReport {
+                composited: true,
+                damage_rects: damage.len(),
+                surfaces: surfaces.len(),
+            })
+        }
+
+        fn read_texture_rgba_for_test(
+            &mut self,
+            texture: &Self::Texture,
+        ) -> Result<Vec<u8>, CompositorError> {
+            Ok(texture.bytes.clone())
+        }
+
+        fn read_output_rgba(
+            &mut self,
+            output_width: u32,
+            output_height: u32,
+        ) -> Result<Vec<u8>, CompositorError> {
+            let byte_count = (output_width as usize)
+                .checked_mul(output_height as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| {
+                    CompositorError::Backend("recording output dimensions overflowed".to_owned())
+                })?;
+
+            Ok(vec![0_u8; byte_count])
+        }
+
+        fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
+            Ok(Vec::new())
+        }
+
+        fn source_repaint_count(&self) -> u64 {
+            self.repaint_count
+        }
+    }
+}

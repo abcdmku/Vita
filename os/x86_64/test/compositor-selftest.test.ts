@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const rustHelperUrl = new URL("../../../tools/build/rust-in-docker.mjs", import.meta.url);
+const repoRootUrl = new URL("../../..", import.meta.url);
 const buildAndBootUrl = new URL("../build-and-boot.mjs", import.meta.url);
 const serviceUnitUrl = new URL(
   "../smoke-overlay/usr/lib/systemd/system/vita-compositor-selftest.service",
@@ -28,7 +34,7 @@ const smokeCommandsUrl = new URL(
   "../smoke-overlay/usr/lib/vita/compositor/vita-compositor-smoke.commands",
   import.meta.url,
 );
-const smokeLayoutGeneratorUrl = new URL("../compositor-smoke-layout.mjs", import.meta.url);
+const execFileAsync = promisify(execFile);
 
 test("rust-in-docker builds the compositor as a locked linux x86_64 release binary", async () => {
   const helper = await readText(rustHelperUrl);
@@ -146,16 +152,34 @@ test("self-test wrapper emits VITA-COMPOSITOR FAILSAFE instead of failing or han
 });
 
 test("smoke layout commands are generated from the TS compositor bridge shape", async () => {
-  const generator = await readText(smokeLayoutGeneratorUrl);
-  const commands = await readText(smokeCommandsUrl);
+  const expected = await readText(smokeCommandsUrl);
+  const tempDir = await mkdtemp(join(tmpdir(), "vita-compositor-smoke-"));
+  const outputPath = join(tempDir, "vita-compositor-smoke.commands");
 
-  assertContains(generator, "CompositorDriver");
-  assertContains(generator, "NativeCompositorPort");
-  assertContains(generator, "compositorWindowPlacement");
-  assertContains(commands, "registerSurface surface:desktop 1280 720 18344eff");
-  assertContains(commands, "updatePlacement surface:panel 0 0 1280 42 30001 true");
-  assertContains(commands, "present");
-  assert.doesNotMatch(commands, /demo/u);
+  try {
+    const execution = await execFileAsync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "os/x86_64/compositor-smoke-layout.mjs",
+        outputPath,
+      ],
+      {
+        cwd: fileURLToPath(repoRootUrl),
+        encoding: "utf8",
+      },
+    );
+    const actual = await readText(pathToFileURL(outputPath));
+
+    assert.equal(execution.stdout, "");
+    assert.equal(actual, expected);
+    assert.doesNotMatch(actual, /demo/u);
+  } finally {
+    await rm(tempDir, {
+      force: true,
+      recursive: true,
+    });
+  }
 });
 
 async function readText(url: URL): Promise<string> {
