@@ -37,7 +37,7 @@ RemainAfterExit=yes
 # Invoke the pinned, vendored runtime explicitly (not a PATH lookup) so we run exactly the staged
 # binary. The only --allow-* grants are scoped to agentd.sock; --no-remote/--cached-only forbid any
 # network or cache module resolution so only the vendored relative imports under /usr/lib/vita/ts can load.
-ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet --allow-read=/run/vita-agent/agentd.sock,/usr/lib/vita/owner --allow-write=/run/vita-agent/agentd.sock /usr/lib/vita/ts/main.ts
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet --allow-read=/run/vita-agent/agentd.sock,/usr/lib/vita/owner,/var/lib/vita/runtime/volumes/com.vita.desktop.stub/desktop-session --allow-write=/run/vita-agent/agentd.sock,/var/lib/vita/runtime/volumes/com.vita.desktop.stub/desktop-session /usr/lib/vita/ts/main.ts
 StandardOutput=journal+console
 StandardError=journal+console
 

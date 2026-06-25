@@ -1,0 +1,41 @@
+{
+  "packageClass": "desktop",
+  "id": "com.vita.desktop.stub",
+  "name": "Vita Desktop Stub",
+  "version": "1.0.0",
+  "substrate": {
+    "interfaceId": "com.vita.desktop-substrate",
+    "version": "1.0.0",
+    "operations": ["discover", "launch", "stop", "heartbeat"],
+    "capabilities": [
+      "capsule.registry",
+      "capsule.execute",
+      "capsule.lifecycle",
+      "desktop.session"
+    ]
+  },
+  "capsule": {
+    "id": "com.vita.desktop.stub",
+    "version": "1.0.0",
+    "integrity": "sha256-vmMPj1OdsPFfOWQkLTE85Icq63HO7q2HwAiBlZz/NwQ=",
+    "ref": "file:///usr/lib/vita/capsule-bundles/com.vita.desktop.stub.tar.zst",
+    "executionPackageClass": "ts-service",
+    "entrypoint": "main.ts"
+  },
+  "security": {
+    "unprivileged": true,
+    "dynamicUser": true,
+    "capabilities": [],
+    "seccompProfile": "capsule-default",
+    "network": "none"
+  },
+  "session": {
+    "id": "stub-session",
+    "heartbeatIntervalMs": 1000,
+    "heartbeatChannel": {
+      "volumeName": "desktop-session",
+      "fileName": "heartbeat.line",
+      "nonceFileName": "launch-nonce"
+    }
+  }
+}

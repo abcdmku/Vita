@@ -1,0 +1,42 @@
+{
+  "id": "com.vita.desktop.stub",
+  "version": "1.0.0",
+  "integrity": "sha256-vmMPj1OdsPFfOWQkLTE85Icq63HO7q2HwAiBlZz/NwQ=",
+  "packageClass": "ts-service",
+  "runtime": {
+    "typescript": {
+      "entrypoint": "main.ts"
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  },
+  "data": {
+    "classes": [
+      "app-state"
+    ],
+    "volumes": [
+      {
+        "name": "desktop-session",
+        "mountPath": "/var/lib/vita/runtime/volumes/com.vita.desktop.stub/desktop-session",
+        "class": "app-state",
+        "access": "read-write",
+        "persistence": "persistent",
+        "backup": false,
+        "sizeMiB": 8
+      }
+    ]
+  },
+  "healthChecks": [
+    {
+      "name": "lifecycle",
+      "type": "lifecycle",
+      "target": "self",
+      "intervalSeconds": 5,
+      "timeoutSeconds": 2
+    }
+  ]
+}

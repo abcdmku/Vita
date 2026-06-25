@@ -24,6 +24,10 @@ import {
   ON_DEVICE_CAPSULE_REGISTRY,
   readCapsuleRegistryPreview,
 } from "./vita/capsule-preview.ts";
+import {
+  formatDesktopPackageProofMarker,
+  runDesktopPackageProof,
+} from "./vita/desktop-package.ts";
 import { formatAgentStateMarker, readAgentStateSummary } from "./vita/agent-state.ts";
 import { validateStorageHealthState } from "./vita/storage-health-model.ts";
 import { formatPdsSyncStateReadMarker, readPdsSyncStateSummary } from "./vita/pds-read.ts";
@@ -97,7 +101,7 @@ import type {
   ApplyNodeConfigResult,
   ApplyNodeTransport,
 } from "./vita/apply-node-config.ts";
-import type { CapsuleEntry } from "./vita/capsule-registry-model.ts";
+import type { CapsuleEntry, CapsuleRegistry } from "./vita/capsule-registry-model.ts";
 import type { CapabilityManifest } from "./vita/capability-manifest.ts";
 import type {
   ControllerShellApplyRouteResult,
@@ -669,6 +673,13 @@ function emit(line: string): void {
   console.log(line);
 }
 
+async function observeLiveHeadlessBoundary(
+  client: Pick<AgentClient, "getOperations" | "getState">,
+): Promise<boolean> {
+  const state = await readAgentStateSummary(client);
+  return state.ok && state.state.caps > 0;
+}
+
 async function main(): Promise<number> {
   emit(`${TS_MARKER}: hello from Deno ${Deno.version.deno} status=OK`);
 
@@ -852,8 +863,9 @@ async function emitAgentdConnectMarker(): Promise<void> {
     await emitApplyMarkers(state.state.hostname, agentTransport);
     await emitControllerShellMarkers(state.state.hostname, client, agentTransport);
     await emitOwnerMarkers(agentTransport);
-    if (await emitCapsulePreviewMarker(client)) {
-      await emitCapsuleMarkers(agentTransport);
+
+    if (await emitCapsulePreviewMarker(client, ON_DEVICE_CAPSULE_REGISTRY)) {
+      await emitCapsuleMarkers(agentTransport, ON_DEVICE_CAPSULE_REGISTRY);
     } else {
       emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
       emit(`${CAPSULE_FETCH_ERROR_MARKER}: status=FAILSAFE`);
@@ -902,6 +914,32 @@ async function emitAgentdConnectMarker(): Promise<void> {
   await emitBackupArchiveMarkers(agentTransport);
   await emitProtectionDashboardMarkers(client);
   await emitFullRestoreMarkers(agentTransport);
+  const desktopClient = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+  const desktopProof = await runDesktopPackageProof(desktopClient, {
+    observeHeadlessBoundary: () => observeLiveHeadlessBoundary(desktopClient),
+    sessionIO: {
+      readTextFile: (path) => Deno.readTextFile(path),
+      removeFile: async (path) => {
+        try {
+          await Deno.remove(path);
+        } catch (cause) {
+          if (!(cause instanceof Deno.errors.NotFound)) {
+            throw cause;
+          }
+        }
+      },
+      writeTextFile: async (path, data) => {
+        Deno.writeTextFileSync(path, data);
+      },
+    },
+  });
+  if (desktopProof.heartbeatLine !== undefined) {
+    emit(desktopProof.heartbeatLine);
+  }
+  emit(formatDesktopPackageProofMarker(desktopProof));
 }
 
 async function emitApplyMarkers(
@@ -1451,8 +1489,11 @@ function stringArraysEqual(left: readonly string[], right: readonly string[]): b
   return true;
 }
 
-async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void> {
-  const config = buildCapsuleRegistryConfig(ON_DEVICE_CAPSULE_REGISTRY);
+async function emitCapsuleMarkers(
+  agentTransport: AgentTransport,
+  registry: CapsuleRegistry = ON_DEVICE_CAPSULE_REGISTRY,
+): Promise<void> {
+  const config = buildCapsuleRegistryConfig(registry);
 
   if (!config.ok) {
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -1509,8 +1550,9 @@ async function emitCapsuleMarkers(agentTransport: AgentTransport): Promise<void>
 
 async function emitCapsulePreviewMarker(
   client: Pick<AgentClient, "getState">,
+  desired: unknown = ON_DEVICE_CAPSULE_REGISTRY,
 ): Promise<boolean> {
-  const result = await readCapsuleRegistryPreview(client);
+  const result = await readCapsuleRegistryPreview(client, desired);
   emit(formatCapsuleRegistryPreviewMarker(result));
   return result.ok;
 }
