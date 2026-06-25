@@ -2,7 +2,13 @@ export type WindowId = string;
 export type WorkspaceId = string;
 export type TextureId = string;
 
-export type WorkspaceLayoutMode = "tile" | "stack";
+export type WorkspaceLayoutMode =
+  | "floating"
+  | "columns"
+  | "master-stack"
+  | "grid"
+  | "tile"
+  | "stack";
 export type WindowMode = "tiled" | "floating";
 
 export interface Rect {
@@ -113,6 +119,14 @@ export type WindowManagerEvent =
       readonly windowId: WindowId;
     }
   | {
+      readonly type: "focusNext" | "focus-next";
+      readonly workspaceId?: WorkspaceId;
+    }
+  | {
+      readonly type: "focusPrevious" | "focusPrev" | "focus-previous" | "focus-prev";
+      readonly workspaceId?: WorkspaceId;
+    }
+  | {
       readonly type: "moveResize";
       readonly windowId: WindowId;
       readonly rect: Rect;
@@ -210,6 +224,14 @@ export function reduceWindowModel(
       return closeWindow(model, event.windowId);
     case "focus":
       return focusWindow(model, event.windowId);
+    case "focusNext":
+    case "focus-next":
+      return focusNextWindow(model, event.workspaceId ?? model.activeWorkspaceId);
+    case "focusPrevious":
+    case "focusPrev":
+    case "focus-previous":
+    case "focus-prev":
+      return focusPreviousWindow(model, event.workspaceId ?? model.activeWorkspaceId);
     case "move":
     case "moveResize":
     case "resize":
@@ -299,6 +321,22 @@ export function focusWindow(model: WindowModel, windowId: WindowId): WindowModel
     workspaces: ensureWorkspace(model.workspaces, target.workspaceId),
   });
 }
+
+export function focusNextWindow(
+  model: WindowModel,
+  workspaceId: WorkspaceId = model.activeWorkspaceId,
+): WindowModel {
+  return focusWindowInRing(model, workspaceId, 1);
+}
+
+export function focusPreviousWindow(
+  model: WindowModel,
+  workspaceId: WorkspaceId = model.activeWorkspaceId,
+): WindowModel {
+  return focusWindowInRing(model, workspaceId, -1);
+}
+
+export const focusPrevWindow = focusPreviousWindow;
 
 export function requestMoveResize(
   model: WindowModel,
@@ -635,11 +673,14 @@ function layoutRects(
   const rects = new Map<WindowId, Rect>();
   const maximized = windows.filter((window) => window.maximized);
   const rest = windows.filter((window) => !window.maximized);
-  const tiled = rest.filter((window) => window.mode === "tiled");
-  const floating = rest.filter((window) => window.mode === "floating");
-  const tiledRects = layoutMode === "stack"
-    ? stackRects(tiled, bounds, gap)
-    : tileRects(tiled, bounds, gap);
+  const sizing = layoutSizing(constraints);
+  const tiled = layoutMode === "floating"
+    ? Object.freeze([])
+    : rest.filter((window) => window.mode === "tiled");
+  const floating = layoutMode === "floating"
+    ? rest
+    : rest.filter((window) => window.mode === "floating");
+  const tiledRects = tiledLayoutRects(tiled, layoutMode, bounds, gap, sizing);
 
   for (const [windowId, rect] of tiledRects) {
     rects.set(windowId, rect);
@@ -664,10 +705,45 @@ function layoutRects(
   return rects;
 }
 
-function tileRects(
+function tiledLayoutRects(
+  windows: readonly WindowState[],
+  layoutMode: WorkspaceLayoutMode,
+  bounds: Rect,
+  gap: number,
+  sizing: LayoutSizing,
+): ReadonlyMap<WindowId, Rect> {
+  switch (layoutMode) {
+    case "floating":
+      return new Map<WindowId, Rect>();
+    case "columns":
+      return columnRects(windows, bounds, gap, sizing);
+    case "grid":
+      return gridRects(windows, bounds, gap, sizing);
+    case "stack":
+      return stackRects(windows, bounds, gap, sizing);
+    case "master-stack":
+    case "tile":
+      return masterStackRects(windows, bounds, gap, sizing);
+  }
+}
+
+interface LayoutSizing {
+  readonly minWidth: number;
+  readonly minHeight: number;
+}
+
+function layoutSizing(constraints: LayoutConstraints): LayoutSizing {
+  return Object.freeze({
+    minHeight: normalizeDimension(constraints.minHeight ?? 1),
+    minWidth: normalizeDimension(constraints.minWidth ?? 1),
+  });
+}
+
+function masterStackRects(
   windows: readonly WindowState[],
   bounds: Rect,
   gap: number,
+  sizing: LayoutSizing,
 ): ReadonlyMap<WindowId, Rect> {
   const rects = new Map<WindowId, Rect>();
 
@@ -675,7 +751,14 @@ function tileRects(
     return rects;
   }
 
-  const content = insetRect(bounds, gap);
+  const masterColumns = windows.length === 1 ? 1 : 2;
+  const stackRows = Math.max(1, windows.length - 1);
+  const content = layoutContentRect(
+    bounds,
+    gap,
+    sizing.minWidth * masterColumns,
+    sizing.minHeight * stackRows,
+  );
   const first = windows[0];
 
   if (first === undefined) {
@@ -687,13 +770,18 @@ function tileRects(
     return rects;
   }
 
-  const splitGap = Math.min(gap, content.width);
-  const masterWidth = Math.floor((content.width - splitGap) / 2);
-  const stackWidth = Math.max(0, content.width - splitGap - masterWidth);
+  const columns = splitSpans(content.width, 2, gap, sizing.minWidth);
+  const masterColumn = columns[0];
+  const stackColumn = columns[1];
+
+  if (masterColumn === undefined || stackColumn === undefined) {
+    return rects;
+  }
+
   rects.set(first.id, freezeRect({
     height: content.height,
-    width: masterWidth,
-    x: content.x,
+    width: masterColumn.size,
+    x: content.x + masterColumn.offset,
     y: content.y,
   }));
 
@@ -701,12 +789,13 @@ function tileRects(
   const stackRects = verticalSplitRects(
     freezeRect({
       height: content.height,
-      width: stackWidth,
-      x: content.x + masterWidth + splitGap,
+      width: stackColumn.size,
+      x: content.x + stackColumn.offset,
       y: content.y,
     }),
     stackWindows.length,
     gap,
+    sizing.minHeight,
   );
 
   for (let index = 0; index < stackWindows.length; index += 1) {
@@ -721,13 +810,92 @@ function tileRects(
   return rects;
 }
 
+function columnRects(
+  windows: readonly WindowState[],
+  bounds: Rect,
+  gap: number,
+  sizing: LayoutSizing,
+): ReadonlyMap<WindowId, Rect> {
+  const rects = new Map<WindowId, Rect>();
+
+  if (windows.length === 0) {
+    return rects;
+  }
+
+  const content = layoutContentRect(
+    bounds,
+    gap,
+    sizing.minWidth * windows.length,
+    sizing.minHeight,
+  );
+  const columns = splitSpans(content.width, windows.length, gap, sizing.minWidth);
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+    const column = columns[index];
+
+    if (window !== undefined && column !== undefined) {
+      rects.set(window.id, freezeRect({
+        height: content.height,
+        width: column.size,
+        x: content.x + column.offset,
+        y: content.y,
+      }));
+    }
+  }
+
+  return rects;
+}
+
+function gridRects(
+  windows: readonly WindowState[],
+  bounds: Rect,
+  gap: number,
+  sizing: LayoutSizing,
+): ReadonlyMap<WindowId, Rect> {
+  const rects = new Map<WindowId, Rect>();
+
+  if (windows.length === 0) {
+    return rects;
+  }
+
+  const columnsCount = Math.max(1, Math.ceil(Math.sqrt(windows.length)));
+  const rowsCount = Math.max(1, Math.ceil(windows.length / columnsCount));
+  const content = layoutContentRect(
+    bounds,
+    gap,
+    sizing.minWidth * columnsCount,
+    sizing.minHeight * rowsCount,
+  );
+  const columns = splitSpans(content.width, columnsCount, gap, sizing.minWidth);
+  const rows = splitSpans(content.height, rowsCount, gap, sizing.minHeight);
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+    const column = columns[index % columnsCount];
+    const row = rows[Math.floor(index / columnsCount)];
+
+    if (window !== undefined && column !== undefined && row !== undefined) {
+      rects.set(window.id, freezeRect({
+        height: row.size,
+        width: column.size,
+        x: content.x + column.offset,
+        y: content.y + row.offset,
+      }));
+    }
+  }
+
+  return rects;
+}
+
 function stackRects(
   windows: readonly WindowState[],
   bounds: Rect,
   gap: number,
+  sizing: LayoutSizing,
 ): ReadonlyMap<WindowId, Rect> {
   const rects = new Map<WindowId, Rect>();
-  const content = insetRect(bounds, gap);
+  const content = layoutContentRect(bounds, gap, sizing.minWidth, sizing.minHeight);
 
   for (let index = 0; index < windows.length; index += 1) {
     const window = windows[index];
@@ -740,30 +908,95 @@ function stackRects(
   return rects;
 }
 
-function verticalSplitRects(bounds: Rect, count: number, gap: number): readonly Rect[] {
+function verticalSplitRects(
+  bounds: Rect,
+  count: number,
+  gap: number,
+  minHeight = 1,
+): readonly Rect[] {
   if (count <= 0) {
     return Object.freeze([]);
   }
 
-  const splitGap = count === 1 ? 0 : Math.min(gap, Math.floor(bounds.height / (count - 1)));
-  const available = Math.max(0, bounds.height - splitGap * (count - 1));
-  const base = Math.floor(available / count);
-  const extra = available - base * count;
+  const spans = splitSpans(bounds.height, count, gap, minHeight);
   const rects: Rect[] = [];
-  let y = bounds.y;
 
   for (let index = 0; index < count; index += 1) {
-    const height = base + (index < extra ? 1 : 0);
+    const span = spans[index];
+
+    if (span === undefined) {
+      continue;
+    }
+
     rects.push(freezeRect({
-      height,
+      height: span.size,
       width: bounds.width,
       x: bounds.x,
-      y,
+      y: bounds.y + span.offset,
     }));
-    y += height + splitGap;
   }
 
   return Object.freeze(rects);
+}
+
+interface AxisSpan {
+  readonly offset: number;
+  readonly size: number;
+}
+
+function splitSpans(total: number, count: number, requestedGap: number, minSize: number): readonly AxisSpan[] {
+  if (count <= 0) {
+    return Object.freeze([]);
+  }
+
+  const safeTotal = normalizeDimension(total);
+  const safeMin = normalizeDimension(minSize);
+  const gap = splitGapFor(safeTotal, count, requestedGap, safeMin);
+  const available = Math.max(0, safeTotal - gap * Math.max(0, count - 1));
+  const base = available >= safeMin * count
+    ? safeMin + Math.floor((available - safeMin * count) / count)
+    : Math.floor(available / count);
+  const extra = available - base * count;
+  const spans: AxisSpan[] = [];
+  let offset = 0;
+
+  for (let index = 0; index < count; index += 1) {
+    const size = base + (index < extra ? 1 : 0);
+    spans.push(Object.freeze({
+      offset,
+      size,
+    }) satisfies AxisSpan);
+    offset += size + gap;
+  }
+
+  return Object.freeze(spans);
+}
+
+function splitGapFor(
+  total: number,
+  count: number,
+  requestedGap: number,
+  minSize: number,
+): number {
+  if (count <= 1) {
+    return 0;
+  }
+
+  const safeGap = normalizeDimension(requestedGap);
+  const maxByTotal = Math.floor(total / (count - 1));
+
+  if (minSize === 0) {
+    return Math.min(safeGap, maxByTotal);
+  }
+
+  const minTotal = minSize * count;
+
+  if (total < minTotal) {
+    return 0;
+  }
+
+  const maxByMin = Math.floor((total - minTotal) / (count - 1));
+  return Math.min(safeGap, maxByTotal, maxByMin);
 }
 
 function zIndexByWindowId(
@@ -836,6 +1069,51 @@ function focusedWindowIdForWorkspace(
   const last = windows[windows.length - 1];
 
   return last?.id ?? null;
+}
+
+function focusWindowInRing(
+  model: WindowModel,
+  workspaceId: WorkspaceId,
+  direction: 1 | -1,
+): WindowModel {
+  const ring = windowsForWorkspace(model.windows, workspaceId, true);
+
+  if (ring.length === 0) {
+    return switchWorkspace(model, workspaceId);
+  }
+
+  const currentId = focusedWindowIdForWorkspace(model, workspaceId);
+  const currentIndex = currentId === null
+    ? -1
+    : indexOfWindowId(ring, currentId);
+  const nextIndex = currentIndex < 0
+    ? (direction > 0 ? 0 : ring.length - 1)
+    : modulo(currentIndex + direction, ring.length);
+  const target = ring[nextIndex];
+
+  if (target === undefined) {
+    return switchWorkspace(model, workspaceId);
+  }
+
+  return focusWindow(model, target.id);
+}
+
+function indexOfWindowId(windows: readonly WindowState[], windowId: WindowId): number {
+  for (let index = 0; index < windows.length; index += 1) {
+    if (windows[index]?.id === windowId) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function modulo(value: number, modulus: number): number {
+  if (modulus <= 0) {
+    return 0;
+  }
+
+  return ((value % modulus) + modulus) % modulus;
 }
 
 function windowsForWorkspace(
@@ -1093,18 +1371,36 @@ function fitRect(rect: Rect, bounds: Rect, constraints: LayoutConstraints): Rect
   });
 }
 
-function insetRect(rect: Rect, inset: number): Rect {
-  const safeInset = Math.min(
-    Math.max(0, inset),
-    Math.floor(Math.min(rect.width, rect.height) / 2),
-  );
+function layoutContentRect(
+  rect: Rect,
+  requestedGap: number,
+  minContentWidth: number,
+  minContentHeight: number,
+): Rect {
+  const gapX = outerGapFor(rect.width, requestedGap, minContentWidth);
+  const gapY = outerGapFor(rect.height, requestedGap, minContentHeight);
 
   return freezeRect({
-    height: Math.max(0, rect.height - safeInset * 2),
-    width: Math.max(0, rect.width - safeInset * 2),
-    x: rect.x + safeInset,
-    y: rect.y + safeInset,
+    height: Math.max(0, rect.height - gapY * 2),
+    width: Math.max(0, rect.width - gapX * 2),
+    x: rect.x + gapX,
+    y: rect.y + gapY,
   });
+}
+
+function outerGapFor(total: number, requestedGap: number, minContentSize: number): number {
+  const safeTotal = normalizeDimension(total);
+  const safeMin = normalizeDimension(minContentSize);
+  const safeGap = Math.min(
+    normalizeDimension(requestedGap),
+    Math.floor(safeTotal / 2),
+  );
+
+  if (safeMin === 0 || safeTotal < safeMin) {
+    return safeGap;
+  }
+
+  return Math.min(safeGap, Math.floor((safeTotal - safeMin) / 2));
 }
 
 function sameRect(left: Rect, right: Rect): boolean {
