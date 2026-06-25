@@ -1,0 +1,17 @@
+[package]
+name = "vita-compositor-core"
+version = "0.1.0"
+edition = "2021"
+description = "Thin Vita native compositor substrate core"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "vita_compositor_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vita-compositor-core"
+path = "src/main.rs"
+
+[dependencies]

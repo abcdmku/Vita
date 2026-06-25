@@ -18,6 +18,13 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "initramfs-tools",
   "iproute2",
   "kmod",
+  "libdrm2",
+  "libegl-mesa0",
+  "libegl1",
+  "libgbm1",
+  "libgl1-mesa-dri",
+  "libgles2",
+  "libinput10",
   "linux-image-amd64",
   "nftables",
   "systemd",
@@ -55,6 +62,13 @@ Packages=
     initramfs-tools
     iproute2
     kmod
+    libdrm2
+    libegl-mesa0
+    libegl1
+    libgbm1
+    libgl1-mesa-dri
+    libgles2
+    libinput10
     linux-image-amd64
     nftables
     systemd
@@ -88,6 +102,13 @@ Packages=
     initramfs-tools
     iproute2
     kmod
+    libdrm2
+    libegl-mesa0
+    libegl1
+    libgbm1
+    libgl1-mesa-dri
+    libgles2
+    libinput10
     linux-image-amd64
     nftables
     systemd
