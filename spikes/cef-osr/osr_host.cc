@@ -41,6 +41,10 @@
 
 namespace {
 
+// Forward decl: the M4 streaming pump (OsrClient::StreamFrameTick, a method defined
+// inside the class below) emits frames via this free function, which is defined later.
+bool EmitCompositorFrame();
+
 // --- configuration (fixed CEF view surface) ---
 constexpr int kWidth = 1280;
 constexpr int kHeight = 800;
@@ -56,6 +60,16 @@ std::string g_url;
 std::string g_out_png;          // M0: PNG path; empty when in compositor-stream mode.
 std::string g_compositor_out;   // M1: command-stream path ("-" = stdout); empty = off.
 std::string g_surface_id = "cef:desktop";
+// M4: number of frames to stream into the compositor. 1 (default) = M1 one-shot
+// (registerBufferSurface + updatePlacement + present, then quit). >1 = the long-lived
+// incremental path: register once, then `updateBufferSurface`/`present` per subsequent
+// OnPaint, so the compositor composites a sequence and reads back the latest. The
+// service uses this so the LIVE (hydrated) desktop — after bootstrap.js runs — is what
+// the compositor presents and reads back on the real KMS scanout.
+int g_frames = 1;
+// M4 streaming-mode interval between emitted frames (ms). Spaced so the page paints
+// new content (clock, hydration, lucide icons) between captures.
+constexpr int kFrameIntervalMs = 350;
 
 std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
@@ -122,8 +136,10 @@ class OsrClient : public CefClient,
             httpStatusCode, kSettleMs);
     // The flagship HTML loads lucide.min.js (a UMD bundle exposing window.lucide)
     // but the icon render is driven by runtime/bootstrap.js. Drive createIcons()
-    // ourselves so the <i data-lucide> placeholders become inline SVGs even when
-    // bootstrap.js is absent. This also proves CEF executes page JS.
+    // ourselves so the <i data-lucide> placeholders become inline SVGs even if
+    // bootstrap.js's own pass races us. This also proves CEF executes page JS;
+    // bootstrap.js itself still runs (it is a <script type=module>) and hydrates
+    // the live desktop — the M4 readback captures that hydrated state.
     frame->ExecuteJavaScript(
         "try{ if(window.lucide&&lucide.createIcons){lucide.createIcons();} }"
         "catch(e){ console.error('lucide',e); }",
@@ -153,9 +169,42 @@ class OsrClient : public CefClient,
     }
     fprintf(stderr, "[osr] capture: have_frame=%d paints=%d\n",
             g_have_frame.load() ? 1 : 0, g_paint_count);
+    // PNG (M0) and one-shot compositor (M1) modes: the post-loop WritePng/
+    // EmitCompositorFrame in main() handles the single capture; just close.
+    // Streaming (M4) compositor mode: pump frames live on the UI thread so the
+    // command sink stays open and the compositor composites a sequence.
+    if (!g_compositor_out.empty() && g_frames > 1) {
+      StreamFrameTick();
+      return;
+    }
     if (browser_ && browser_->GetHost()) {
       browser_->GetHost()->CloseBrowser(true);
     }
+  }
+
+  // M4 streaming pump: emit the current frame to the compositor sink, then either
+  // schedule the next tick or close the browser once g_frames have been emitted.
+  void StreamFrameTick() {
+    CEF_REQUIRE_UI_THREAD();
+    if (browser_ && browser_->GetHost()) {
+      browser_->GetHost()->Invalidate(PET_VIEW);
+    }
+    if (!EmitCompositorFrame()) {
+      fprintf(stderr, "[osr] stream: frame emit failed at #%d/%d — closing\n",
+              frames_emitted_ + 1, g_frames);
+      if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
+      return;
+    }
+    frames_emitted_++;
+    if (frames_emitted_ >= g_frames) {
+      fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
+      if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
+      return;
+    }
+    CefPostDelayedTask(
+        TID_UI,
+        CefCreateClosureTask(base::BindOnce(&OsrClient::StreamFrameTick, this)),
+        kFrameIntervalMs);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -167,6 +216,7 @@ class OsrClient : public CefClient,
  private:
   CefRefPtr<OsrRenderHandler> render_handler_;
   CefRefPtr<CefBrowser> browser_;
+  int frames_emitted_ = 0;  // M4 streaming: frames pushed to the compositor sink
 
   IMPLEMENT_REFCOUNTING(OsrClient);
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
@@ -290,56 +340,89 @@ void WritePng() {
   }
 }
 
-// M1 path: emit the compositor command stream for the captured frame.
-// register the buffer surface (downscaled 1280x720 RGBA hex), place it full-screen,
-// and present. The stream is consumed by `vita-compositor --commands --screenshot`.
-bool WriteCompositorStream() {
+// --- compositor output sink ---------------------------------------------------
+// In one-shot (M1) mode the whole stream is written once (file or stdout). In
+// streaming (M4) mode the sink stays open for the life of the process and each
+// frame's commands are appended + flushed so the downstream `vita-compositor
+// --commands` (reading the pipe) composites them as they arrive.
+std::FILE* g_sink = nullptr;  // open stream sink (stdout or fopen'd file)
+bool g_registered = false;    // M4: registerBufferSurface emitted yet?
+
+bool OpenSink() {
+  if (g_compositor_out == "-") {
+    g_sink = stdout;
+    return true;
+  }
+  g_sink = std::fopen(g_compositor_out.c_str(), "wb");
+  if (!g_sink) {
+    fprintf(stderr, "[osr] ERROR: cannot open compositor-out %s\n",
+            g_compositor_out.c_str());
+    return false;
+  }
+  return true;
+}
+
+void CloseSink() {
+  if (g_sink && g_sink != stdout) std::fclose(g_sink);
+  g_sink = nullptr;
+}
+
+bool WriteToSink(const std::string& s) {
+  if (!g_sink) return false;
+  size_t n = std::fwrite(s.data(), 1, s.size(), g_sink);
+  std::fflush(g_sink);
+  return n == s.size();
+}
+
+// Build the downscaled (1280x720) RGBA hex for the current captured frame.
+bool CurrentFrameHex(std::string* hex) {
   if (!g_have_frame.load() ||
       g_last_frame.size() != (size_t)kWidth * kHeight * 4) {
+    return false;
+  }
+  std::vector<unsigned char> rgba = BgraToRgba(g_last_frame);
+  std::vector<unsigned char> scaled =
+      DownscaleVerticalRgba(rgba, kWidth, kHeight, kCompHeight);
+  HexEncode(scaled, hex);
+  return true;
+}
+
+// M1/M4 path: emit one frame to the compositor command sink. The FIRST frame
+// registers the buffer surface + places it full-screen; subsequent frames push
+// new pixels via updateBufferSurface. Every frame ends with present so the
+// compositor composites + (on EOF) reads back the latest presented frame.
+bool EmitCompositorFrame() {
+  std::string hex;
+  if (!CurrentFrameHex(&hex)) {
     fprintf(stderr,
             "[osr] ERROR: no full-surface frame for compositor stream "
             "(have=%d size=%zu)\n",
             g_have_frame.load() ? 1 : 0, g_last_frame.size());
     return false;
   }
-  std::vector<unsigned char> rgba = BgraToRgba(g_last_frame);
-  std::vector<unsigned char> scaled =
-      DownscaleVerticalRgba(rgba, kWidth, kHeight, kCompHeight);
-  std::string hex;
-  HexEncode(scaled, &hex);
-
   std::string stream;
   stream.reserve(hex.size() + 256);
-  stream += "registerBufferSurface " + g_surface_id + " " +
-            std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) + " " +
-            hex + "\n";
-  stream += "updatePlacement " + g_surface_id + " 0 0 " +
-            std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
-            " 0 true\n";
-  stream += "present\n";
-
-  if (g_compositor_out == "-") {
-    fwrite(stream.data(), 1, stream.size(), stdout);
-    fflush(stdout);
+  if (!g_registered) {
+    stream += "registerBufferSurface " + g_surface_id + " " +
+              std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
+              " " + hex + "\n";
+    stream += "updatePlacement " + g_surface_id + " 0 0 " +
+              std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
+              " 0 true\n";
+    g_registered = true;
   } else {
-    std::ofstream f(g_compositor_out, std::ios::binary | std::ios::trunc);
-    if (!f) {
-      fprintf(stderr, "[osr] ERROR: cannot open compositor-out %s\n",
-              g_compositor_out.c_str());
-      return false;
-    }
-    f.write(stream.data(), static_cast<std::streamsize>(stream.size()));
-    f.close();
-    if (!f) {
-      fprintf(stderr, "[osr] ERROR: write failed for %s\n",
-              g_compositor_out.c_str());
-      return false;
-    }
+    stream += "updateBufferSurface " + g_surface_id + " " + hex + "\n";
+  }
+  stream += "present\n";
+  if (!WriteToSink(stream)) {
+    fprintf(stderr, "[osr] ERROR: write failed for %s\n",
+            g_compositor_out.c_str());
+    return false;
   }
   fprintf(stderr,
-          "[osr] wrote compositor stream (%zu bytes, surface=%s %dx%d) -> %s\n",
+          "[osr] emitted compositor frame (%zu bytes, surface=%s %dx%d, %s) -> %s\n",
           stream.size(), g_surface_id.c_str(), kCompWidth, kCompHeight,
-          g_compositor_out.c_str());
+          g_registered ? "incremental" : "register", g_compositor_out.c_str());
   return true;
 }
 
@@ -360,11 +443,23 @@ int main(int argc, char* argv[]) {
     else if (a.rfind("--out=", 0) == 0) g_out_png = a.substr(6);
     else if (a.rfind("--compositor-out=", 0) == 0) g_compositor_out = a.substr(17);
     else if (a.rfind("--surface-id=", 0) == 0) g_surface_id = a.substr(13);
+    else if (a.rfind("--frames=", 0) == 0) {
+      g_frames = std::atoi(a.substr(9).c_str());
+      if (g_frames < 1) g_frames = 1;
+    }
   }
   const bool compositor_mode = !g_compositor_out.empty();
-  fprintf(stderr, "[osr] url=%s mode=%s out=%s\n", g_url.c_str(),
-          compositor_mode ? "compositor-stream" : "png",
-          compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
+  const bool streaming = compositor_mode && g_frames > 1;
+  fprintf(stderr, "[osr] url=%s mode=%s frames=%d out=%s\n", g_url.c_str(),
+          compositor_mode ? (streaming ? "compositor-stream(live)" : "compositor-stream")
+                          : "png",
+          g_frames, compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
+
+  // Open the compositor sink up front: streaming (M4) writes to it live on the UI
+  // thread during the message loop; one-shot (M1) writes the single frame after it.
+  if (compositor_mode && !OpenSink()) {
+    return 1;
+  }
 
   CefSettings settings;
   settings.no_sandbox = true;
@@ -374,6 +469,7 @@ int main(int argc, char* argv[]) {
 
   if (!CefInitialize(main_args, settings, app, nullptr)) {
     fprintf(stderr, "[osr] CefInitialize failed\n");
+    CloseSink();
     return 1;
   }
 
@@ -381,7 +477,10 @@ int main(int argc, char* argv[]) {
 
   bool ok = false;
   if (compositor_mode) {
-    ok = WriteCompositorStream();
+    // Streaming mode emitted its frames live during the loop (g_registered is set if
+    // any went out). One-shot mode emits its single frame now.
+    ok = streaming ? g_registered : EmitCompositorFrame();
+    CloseSink();  // EOF: lets the downstream compositor finish + read back.
   } else {
     WritePng();
     ok = g_have_frame.load();
