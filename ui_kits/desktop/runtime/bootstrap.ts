@@ -77,8 +77,13 @@ export async function bootstrapDesktop(
   const modules = options.modules ?? DEFAULT_SCREEN_MODULES;
   const transport = options.host === undefined ? resolveTransport(options) : undefined;
 
-  if (options.host === undefined && transport === undefined) return runtime(Object.freeze([]));
-
+  // ADR 0013 §3, lifecycle step (2): with no CEF<->host channel, run DEGRADED rather
+  // than inert. `createSurfaceHost(undefined)` returns a fail-closed host (required
+  // methods return {ok:false}; optional ports absent), so screens still hydrate and
+  // LOCAL interactions (palette re-rank, selection, theme class toggles) + lucide icons
+  // work in a plain browser while host actions fail closed. Previously this early-returned
+  // an empty runtime, leaving the desktop inert with no signal — the silent-failure mode
+  // the ADR explicitly warns against.
   const host = options.host ?? createSurfaceHost(transport);
   const roots = selectScreenRoots(options);
   const screens: HydratedScreen[] = [];
@@ -211,7 +216,11 @@ function findScreenModule(
 }
 
 function documentFromGlobal(globalObject: BootstrapGlobal): BootstrapDocument | undefined {
-  const document = readOwnData(globalObject, "document");
+  // Browsers expose `window.document` as an OWN accessor (getter), not a data
+  // property, so read both shapes: prefer an own data value, else invoke an own
+  // accessor's getter. We stay within OWN properties of the global (no prototype
+  // walk) and validate the result structurally, preserving the fail-closed posture.
+  const document = readOwnAny(globalObject, "document");
 
   return isBootstrapDocument(document) ? document : undefined;
 }
@@ -248,6 +257,24 @@ function readOwnData(source: object, key: string): unknown {
     }
 
     return descriptor.value;
+  } catch {
+    return undefined;
+  }
+}
+
+// Like readOwnData but also resolves an OWN accessor property by invoking its
+// getter (browsers expose `window.document` this way). Still OWN-only — no
+// prototype walk — so it cannot pick up inherited or injected-prototype traps.
+function readOwnAny(source: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+
+    if (descriptor === undefined) return undefined;
+    if (Object.prototype.hasOwnProperty.call(descriptor, "value")) return descriptor.value;
+
+    const getter = descriptor.get;
+
+    return typeof getter === "function" ? Reflect.apply(getter, source, []) : undefined;
   } catch {
     return undefined;
   }
