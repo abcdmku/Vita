@@ -1,6 +1,10 @@
 export {
   SDK_VERSION,
 } from "./version.ts";
+export {
+  themeTokens,
+  themeVar,
+} from "./theme-tokens.ts";
 
 export {
   defineShellComponent,
@@ -266,3 +270,13 @@ export type {
   DesktopUiValidationError,
   DesktopUiValidationResult,
 } from "./loader.ts";
+export type {
+  VitaThemeCssVariableName,
+  VitaThemeTokenGroup,
+  VitaThemeTokenGroups,
+  VitaThemeTokenMap,
+  VitaThemeTokenName,
+  VitaThemeTokens,
+  VitaThemeVarReference,
+  VitaThemeVariant,
+} from "./theme-tokens.ts";
