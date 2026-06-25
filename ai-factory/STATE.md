@@ -17,7 +17,7 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 HEADLESS DESKTOP CORE (22) + GPU COMPOSITOR VISIBLE on VMware.
+## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 DESKTOP PIPELINE COMPLETE end-to-end (TS model → real GPU windows), GPU-verified on VMware.
 **GPU COMPOSITOR VISIBLE 2026-06-25 (PSD-VIS1 MERGED)** — the compositor renders a desktop-LAYOUT demo (1280x720:
 checkered wallpaper + top panel + 3 windows w/ titlebars = surfaces=8) + a `glReadPixels` readback → PNG (vendored `png`
 crate). GPU-verified on vmwgfx: `present=kms` + `VITA-COMPOSITOR-SHOT`, PNG copied out via vmtoolsd to
@@ -27,8 +27,13 @@ one-char `0_c_int` parse error in `linux.rs` (added w/ the VT-takeover) blocked 
 ([[vita-verification-pipeline]]). PSD-009 (shell/WM→compositor driving seam: CompositorPort + CompositorDriver,
 no-repaint, delta WM-intents, fail-closed) MERGED (R1, 10 tests). PSD-008 (unified windowed-app model) at rev9 — a long
 but real 8-rev fail-closed-consistency hardening (lifecycle partial-failure + pathToken injectivity + pending-cleanup
-interleaving gate + untrusted-descriptor snapshot), 29 tests, converging. PSD-010 (native compositor binding: drive REAL
-shell/WM windows on the GPU from the TS driver, solid-color v1) DISPATCHED. NEXT: land PSD-008/PSD-010, then PSD-003
+interleaving gate + untrusted-descriptor snapshot), 31 tests, R2 APPROVED + MERGED. PSD-010 (native compositor binding)
+MERGED + GPU-VERIFIED: the TS desktop model now drives REAL windows on the GPU end-to-end — command-driven compositor
+(registerSurface/updatePlacement/removeSurface/present over a protocol, same DRM/KMS+GBM path, no-repaint, dirty-since-
+present FAILSAFE) ← TS CompositorPort native binding ← CompositorDriver (PSD-009) ← shell/WM model; driver-produced layout
+renders on vmwgfx (present=kms, readback PNG), 22 headless markers intact (build bakes the COMMITTED smoke commands —
+the smoke build must NOT import .ts since the build host lacks TS support). **PHASE 6 DESKTOP PIPELINE COMPLETE end-to-end
++ GPU-verified.** NEXT: PSD-003
 (web→GPU texture bridge) for real app content → progressively replace the solid-color demo with the actual TSX/web desktop.
 **Phase 6 headless desktop MERGED + (foundation) BOOT-VERIFIED 2026-06-25** — 5 slices: PSD-001 (separable-package
 foundation; `VITA-DESKTOP-PKG` MEASURED on boot — real install/launch/stop + agentd-mediated heartbeat + live
