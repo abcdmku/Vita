@@ -1,0 +1,6 @@
+{
+  "//": "Bundle-time import map for the desktop in-surface runtime. Substitutes the Node-only `node:util` (used by @vita/desktop-sdk loader/safe-normalize/shell for types.isProxy) with an offline browser shim so the bundle runs in a plain browser / CEF surface. No remote imports.",
+  "imports": {
+    "node:util": "./node-util-shim.ts"
+  }
+}
