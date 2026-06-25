@@ -113,7 +113,9 @@ function parseArgs(argv) {
       case "--guest-file": {
         // Format: <guestPath>:<hostPath> — copy a file out of the guest after markers pass.
         const raw = needValue();
-        const sep = raw.lastIndexOf(":");
+        // Split on the FIRST colon: the guest path is POSIX (no colon), the host may be a
+        // Windows path with a drive colon (C:\...), so the first colon is the separator.
+        const sep = raw.indexOf(":");
         if (sep <= 0) {
           throw new Error("--guest-file expects <guestPath>:<hostPath>");
         }
