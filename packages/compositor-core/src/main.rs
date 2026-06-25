@@ -9,13 +9,14 @@ use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
 };
 use vita_compositor_core::{
-    failsafe_report, run_reposition_self_test_or_failsafe, start_desktop_demo_or_failsafe,
-    Compositor, CompositorError, DamageReport, InputAvailability, InputEvent, Placement,
-    PointerButtonState, Rect, RenderBackend, SelfTestReport, SelfTestStatus, SurfaceId,
-    TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
+    failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
+    start_desktop_demo_or_failsafe, Compositor, CompositorError, DamageReport, InputAvailability,
+    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, SelfTestReport, SelfTestStatus,
+    SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
 };
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
+const MAX_COMMAND_RGBA_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -292,6 +293,8 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
 
         match *command {
             "registerSurface" => self.register_surface(&fields),
+            "registerBufferSurface" => self.register_buffer_surface(&fields),
+            "updateBufferSurface" => self.update_buffer_surface(&fields),
             "updatePlacement" => self.update_placement(&fields),
             "removeSurface" => self.remove_surface(&fields),
             "present" => self.present(&fields),
@@ -315,6 +318,38 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         )?;
         // Mutating the scene invalidates the last present: a fresh present must follow before the
         // stream can succeed (otherwise a screenshot would show the stale pre-mutation frame).
+        self.presented = false;
+        Ok(())
+    }
+
+    fn register_buffer_surface(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 5, "registerBufferSurface")?;
+        let id = SurfaceId::new(required_field(fields, 1, "surface id")?)?;
+        let width = parse_u32(required_field(fields, 2, "width")?, "width")?;
+        let height = parse_u32(required_field(fields, 3, "height")?, "height")?;
+        let expected_len = checked_command_rgba_len(width, height)?;
+        let rgba = parse_buffer_payload(required_field(fields, 4, "rgba")?, expected_len)?;
+        self.compositor
+            .register_buffer_surface(id, width, height, &rgba)?;
+        // Mutating the scene invalidates the last present: a fresh present must follow before the
+        // stream can succeed (otherwise a screenshot would show the stale pre-mutation frame).
+        self.presented = false;
+        Ok(())
+    }
+
+    fn update_buffer_surface(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 3, "updateBufferSurface")?;
+        let id = SurfaceId::new(required_field(fields, 1, "surface id")?)?;
+        let expected_len = self.compositor.surface_rgba_byte_len(&id)?;
+        if expected_len > MAX_COMMAND_RGBA_BYTES {
+            return Err(CompositorError::Protocol(
+                "rgba payload exceeds maximum command size".to_owned(),
+            ));
+        }
+        let rgba = parse_buffer_payload(required_field(fields, 2, "rgba")?, expected_len)?;
+        let damage = self.compositor.update_buffer_surface(&id, &rgba)?;
+        self.merge_damage(damage);
+        // Scene changed: invalidate the last present (see register_surface).
         self.presented = false;
         Ok(())
     }
@@ -554,6 +589,168 @@ fn parse_rgba(value: &str) -> Result<[u8; 4], CompositorError> {
     ])
 }
 
+fn checked_command_rgba_len(width: u32, height: u32) -> Result<usize, CompositorError> {
+    let expected_len = rgba_buffer_byte_len(width, height)?;
+    if expected_len > MAX_COMMAND_RGBA_BYTES {
+        return Err(CompositorError::Protocol(
+            "rgba payload exceeds maximum command size".to_owned(),
+        ));
+    }
+    Ok(expected_len)
+}
+
+fn parse_buffer_payload(value: &str, expected_len: usize) -> Result<Vec<u8>, CompositorError> {
+    if expected_len > MAX_COMMAND_RGBA_BYTES
+        || value.len() > MAX_COMMAND_RGBA_BYTES.saturating_mul(2)
+    {
+        return Err(CompositorError::Protocol(
+            "rgba payload exceeds maximum command size".to_owned(),
+        ));
+    }
+
+    let hex = if value.len() % 2 == 0 && value.bytes().all(is_hex_digit) {
+        Some(decode_hex_payload(value)?)
+    } else {
+        None
+    };
+
+    if let Some(bytes) = &hex {
+        if bytes.len() == expected_len {
+            return Ok(bytes.clone());
+        }
+    }
+
+    match decode_base64_payload(value) {
+        Ok(bytes) if bytes.len() == expected_len => Ok(bytes),
+        Ok(bytes) => {
+            let actual = hex.as_ref().map_or(bytes.len(), Vec::len);
+            Err(CompositorError::InvalidBufferLength {
+                expected: expected_len,
+                actual,
+            })
+        }
+        Err(base64_error) => {
+            if let Some(bytes) = hex {
+                return Err(CompositorError::InvalidBufferLength {
+                    expected: expected_len,
+                    actual: bytes.len(),
+                });
+            }
+            Err(base64_error)
+        }
+    }
+}
+
+fn decode_hex_payload(value: &str) -> Result<Vec<u8>, CompositorError> {
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for chunk in value.as_bytes().chunks_exact(2) {
+        let high = hex_value(chunk[0])?;
+        let low = hex_value(chunk[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn decode_base64_payload(value: &str) -> Result<Vec<u8>, CompositorError> {
+    let mut out = Vec::with_capacity(value.len().saturating_mul(3) / 4);
+    let mut block = [0_u8; 4];
+    let mut block_len = 0_usize;
+    let mut finished = false;
+
+    for byte in value.bytes() {
+        if finished {
+            return Err(CompositorError::Protocol(
+                "invalid base64 rgba payload".to_owned(),
+            ));
+        }
+
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 64,
+            _ => {
+                return Err(CompositorError::Protocol(
+                    "invalid base64 rgba payload".to_owned(),
+                ));
+            }
+        };
+
+        block[block_len] = value;
+        block_len += 1;
+        if block_len == 4 {
+            finished = decode_base64_block(&block, &mut out)?;
+            block_len = 0;
+        }
+    }
+
+    match block_len {
+        0 => Ok(out),
+        2 => {
+            if block[0] == 64 || block[1] == 64 {
+                return Err(CompositorError::Protocol(
+                    "invalid base64 rgba payload".to_owned(),
+                ));
+            }
+            out.push((block[0] << 2) | (block[1] >> 4));
+            Ok(out)
+        }
+        3 => {
+            if block[0] == 64 || block[1] == 64 || block[2] == 64 {
+                return Err(CompositorError::Protocol(
+                    "invalid base64 rgba payload".to_owned(),
+                ));
+            }
+            out.push((block[0] << 2) | (block[1] >> 4));
+            out.push((block[1] << 4) | (block[2] >> 2));
+            Ok(out)
+        }
+        _ => Err(CompositorError::Protocol(
+            "invalid base64 rgba payload".to_owned(),
+        )),
+    }
+}
+
+fn decode_base64_block(block: &[u8; 4], out: &mut Vec<u8>) -> Result<bool, CompositorError> {
+    if block[0] == 64 || block[1] == 64 {
+        return Err(CompositorError::Protocol(
+            "invalid base64 rgba payload".to_owned(),
+        ));
+    }
+
+    out.push((block[0] << 2) | (block[1] >> 4));
+    match (block[2], block[3]) {
+        (64, 64) => Ok(true),
+        (64, _) => Err(CompositorError::Protocol(
+            "invalid base64 rgba payload".to_owned(),
+        )),
+        (third, 64) => {
+            out.push((block[1] << 4) | (third >> 2));
+            Ok(true)
+        }
+        (third, fourth) => {
+            out.push((block[1] << 4) | (third >> 2));
+            out.push((third << 6) | fourth);
+            Ok(false)
+        }
+    }
+}
+
+fn is_hex_digit(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'A'..=b'F')
+}
+
+fn hex_value(byte: u8) -> Result<u8, CompositorError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(CompositorError::Protocol("invalid rgba hex".to_owned())),
+    }
+}
+
 fn parse_placement(value: &str) -> Result<Placement, CompositorError> {
     let parts = value.split(',').collect::<Vec<_>>();
     if parts.len() != 6 {
@@ -681,6 +878,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_session_presents_buffer_surface_and_update_requires_fresh_present() {
+        let report = run_commands(&[
+            "registerBufferSurface surface:buffer 2 1 0a141eff28323cff",
+            "updatePlacement surface:buffer 3 4 2 1 7 true",
+            "present",
+            "updateBufferSurface surface:buffer ZG5keP8AAP8=",
+            "present",
+        ])
+        .expect("registered and updated buffer surface should present");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 1);
+        assert!(report.reposition_no_repaint);
+
+        let error = run_commands(&[
+            "registerBufferSurface surface:buffer 1 1 0a141eff",
+            "updatePlacement surface:buffer 3 4 1 1 7 true",
+            "present",
+            "updateBufferSurface surface:buffer ZG5keA==",
+        ])
+        .expect_err("post-present buffer update must not report OK with a stale frame");
+
+        assert_eq!(
+            error,
+            CompositorError::Protocol("command stream ended before present".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_session_rejects_bad_buffer_length_fail_closed() {
+        let error = run_commands(&["registerBufferSurface surface:buffer 2 2 0a141eff"])
+            .expect_err("short buffer payload must fail closed");
+
+        assert_eq!(
+            error,
+            CompositorError::InvalidBufferLength {
+                expected: 16,
+                actual: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn command_session_rejects_oversized_buffer_payload_fail_closed() {
+        let error = run_commands(&["registerBufferSurface surface:buffer 2049 2048 AA=="])
+            .expect_err("oversized buffer payload must fail closed");
+
+        assert_eq!(
+            error,
+            CompositorError::Protocol("rgba payload exceeds maximum command size".to_owned())
+        );
+    }
+
     fn run_commands(commands: &[&str]) -> Result<SelfTestReport, CompositorError> {
         let mut session = CommandDrivenSession::new(CommandTestBackend::new(), 64, 64)?;
         let mut input = String::new();
@@ -736,16 +987,45 @@ mod tests {
             height: u32,
             pattern: &TestPattern,
         ) -> Result<Self::Texture, CompositorError> {
+            let bytes = pattern.rgba_bytes(width, height)?;
+            self.create_buffer_texture(width, height, &bytes)
+        }
+
+        fn create_buffer_texture(
+            &mut self,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+        ) -> Result<Self::Texture, CompositorError> {
+            vita_compositor_core::validate_rgba_buffer(width, height, rgba)?;
             let handle = self.next_handle;
             self.next_handle += 1;
             self.repaint_count += 1;
 
             Ok(CommandTestTexture {
-                bytes: pattern.rgba_bytes(width, height)?,
+                bytes: rgba.to_vec(),
                 handle,
                 height,
                 width,
             })
+        }
+
+        fn update_texture_rgba(
+            &mut self,
+            texture: &mut Self::Texture,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+        ) -> Result<(), CompositorError> {
+            vita_compositor_core::validate_rgba_buffer(width, height, rgba)?;
+            if texture.width != width || texture.height != height {
+                return Err(CompositorError::Backend(
+                    "command test texture dimensions changed during RGBA update".to_owned(),
+                ));
+            }
+            texture.bytes = rgba.to_vec();
+            self.repaint_count += 1;
+            Ok(())
         }
 
         fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {

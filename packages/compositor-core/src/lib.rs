@@ -16,6 +16,7 @@ pub enum CompositorError {
     Backend(String),
     DuplicatePlacement(SurfaceId),
     DuplicateSurface(SurfaceId),
+    InvalidBufferLength { expected: usize, actual: usize },
     InvalidDimensions { width: u32, height: u32 },
     InvalidOpacity,
     InvalidSurfaceId(String),
@@ -31,6 +32,10 @@ impl Display for CompositorError {
             Self::Backend(reason) => write!(f, "backend error: {reason}"),
             Self::DuplicatePlacement(id) => write!(f, "duplicate placement for surface {id}"),
             Self::DuplicateSurface(id) => write!(f, "duplicate surface {id}"),
+            Self::InvalidBufferLength { expected, actual } => write!(
+                f,
+                "invalid RGBA buffer length {actual} bytes, expected {expected}"
+            ),
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions {width}x{height}")
             }
@@ -343,6 +348,21 @@ pub trait RenderBackend {
         pattern: &TestPattern,
     ) -> Result<Self::Texture, CompositorError>;
 
+    fn create_buffer_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<Self::Texture, CompositorError>;
+
+    fn update_texture_rgba(
+        &mut self,
+        texture: &mut Self::Texture,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), CompositorError>;
+
     fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle;
 
     fn composite(
@@ -435,6 +455,66 @@ impl<B: RenderBackend> Compositor<B> {
         Ok(SurfaceRegistration {
             surface_id: id,
             texture: handle,
+        })
+    }
+
+    pub fn register_buffer_surface(
+        &mut self,
+        id: SurfaceId,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<SurfaceRegistration, CompositorError> {
+        validate_rgba_buffer(width, height, rgba)?;
+        if self.surfaces.contains_key(&id) {
+            return Err(CompositorError::DuplicateSurface(id));
+        }
+
+        let texture = self.backend.create_buffer_texture(width, height, rgba)?;
+        let handle = self.backend.export_handle(&texture);
+        self.surfaces.insert(
+            id.clone(),
+            SurfaceState {
+                id: id.clone(),
+                width,
+                height,
+                texture,
+            },
+        );
+
+        Ok(SurfaceRegistration {
+            surface_id: id,
+            texture: handle,
+        })
+    }
+
+    pub fn update_buffer_surface(
+        &mut self,
+        id: &SurfaceId,
+        rgba: &[u8],
+    ) -> Result<DamageReport, CompositorError> {
+        let surface = self
+            .surfaces
+            .get_mut(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
+        validate_rgba_buffer(surface.width, surface.height, rgba)?;
+        self.backend.update_texture_rgba(
+            &mut surface.texture,
+            surface.width,
+            surface.height,
+            rgba,
+        )?;
+
+        let mut rects = Vec::new();
+        for placement in &self.placements {
+            if &placement.surface_id == id {
+                push_unique_rect(&mut rects, placement.rect());
+            }
+        }
+
+        Ok(DamageReport {
+            changed_surfaces: vec![id.clone()],
+            rects,
         })
     }
 
@@ -591,6 +671,14 @@ impl<B: RenderBackend> Compositor<B> {
 
     pub fn has_surface(&self, id: &SurfaceId) -> bool {
         self.surfaces.contains_key(id)
+    }
+
+    pub fn surface_rgba_byte_len(&self, id: &SurfaceId) -> Result<usize, CompositorError> {
+        let surface = self
+            .surfaces
+            .get(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
+        rgba_buffer_byte_len(surface.width, surface.height)
     }
 }
 
@@ -1079,6 +1167,25 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), CompositorError> {
     Ok(())
 }
 
+pub fn rgba_buffer_byte_len(width: u32, height: u32) -> Result<usize, CompositorError> {
+    validate_dimensions(width, height)?;
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(CompositorError::InvalidDimensions { width, height })
+}
+
+pub fn validate_rgba_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<(), CompositorError> {
+    let expected = rgba_buffer_byte_len(width, height)?;
+    if rgba.len() != expected {
+        return Err(CompositorError::InvalidBufferLength {
+            expected,
+            actual: rgba.len(),
+        });
+    }
+    Ok(())
+}
+
 fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
     let mut map = BTreeMap::new();
     for placement in placements {
@@ -1427,6 +1534,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn buffer_surface_composites_exact_rgba_pixels_at_placement() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 6, 5).unwrap();
+        let surface = SurfaceId::new("surface-buffer").unwrap();
+        let rgba = vec![
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        ];
+        compositor
+            .register_buffer_surface(surface.clone(), 2, 2, &rgba)
+            .unwrap();
+
+        let damage = compositor
+            .update_placements(vec![Placement::new(surface.clone(), 2, 1, 2, 2, 0).unwrap()])
+            .unwrap();
+        compositor.composite(&damage).unwrap();
+
+        let surface_readback = compositor.surface_readback_rgba_for_test(&surface).unwrap();
+        assert_eq!(surface_readback, rgba);
+        let output = compositor.output_readback_rgba().unwrap();
+        assert_output_pixel(&output, 6, 2, 1, [10, 20, 30, 255]);
+        assert_output_pixel(&output, 6, 3, 1, [40, 50, 60, 255]);
+        assert_output_pixel(&output, 6, 2, 2, [70, 80, 90, 255]);
+        assert_output_pixel(&output, 6, 3, 2, [100, 110, 120, 255]);
+        assert_output_pixel(&output, 6, 1, 1, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn buffer_surface_update_reuploads_pixels_and_marks_visible_damage() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 6, 5).unwrap();
+        let surface = SurfaceId::new("surface-buffer").unwrap();
+        compositor
+            .register_buffer_surface(surface.clone(), 1, 1, &[10, 20, 30, 255])
+            .unwrap();
+        compositor
+            .update_placements(vec![Placement::new(surface.clone(), 4, 3, 1, 1, 0).unwrap()])
+            .unwrap();
+
+        let damage = compositor
+            .update_buffer_surface(&surface, &[200, 150, 100, 255])
+            .unwrap();
+        assert_eq!(damage.changed_surfaces, vec![surface.clone()]);
+        assert_eq!(damage.rects, vec![Rect::new(4, 3, 1, 1).unwrap()]);
+
+        compositor.composite(&damage).unwrap();
+        let output = compositor.output_readback_rgba().unwrap();
+        assert_output_pixel(&output, 6, 4, 3, [200, 150, 100, 255]);
+    }
+
+    #[test]
+    fn buffer_surface_rejects_mismatched_lengths_fail_closed() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 6, 5).unwrap();
+        let surface = SurfaceId::new("surface-buffer").unwrap();
+        let err = compositor
+            .register_buffer_surface(surface.clone(), 2, 2, &[1, 2, 3])
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CompositorError::InvalidBufferLength {
+                expected: 16,
+                actual: 3,
+            }
+        );
+        assert!(!compositor.has_surface(&surface));
+
+        compositor
+            .register_buffer_surface(surface.clone(), 1, 1, &[10, 20, 30, 255])
+            .unwrap();
+        let err = compositor
+            .update_buffer_surface(&surface, &[1, 2, 3])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CompositorError::InvalidBufferLength {
+                expected: 4,
+                actual: 3,
+            }
+        );
+        assert_eq!(
+            compositor.surface_readback_rgba_for_test(&surface).unwrap(),
+            vec![10, 20, 30, 255]
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct RecordingTexture {
         id: u64,
@@ -1531,6 +1722,17 @@ mod tests {
             height: u32,
             pattern: &TestPattern,
         ) -> Result<Self::Texture, CompositorError> {
+            let bytes = pattern.rgba_bytes(width, height)?;
+            self.create_buffer_texture(width, height, &bytes)
+        }
+
+        fn create_buffer_texture(
+            &mut self,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+        ) -> Result<Self::Texture, CompositorError> {
+            validate_rgba_buffer(width, height, rgba)?;
             let id = self.next_id;
             self.next_id += 1;
             self.repaint_count += 1;
@@ -1539,8 +1741,26 @@ mod tests {
                 id,
                 width,
                 height,
-                bytes: pattern.rgba_bytes(width, height)?,
+                bytes: rgba.to_vec(),
             })
+        }
+
+        fn update_texture_rgba(
+            &mut self,
+            texture: &mut Self::Texture,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+        ) -> Result<(), CompositorError> {
+            validate_rgba_buffer(width, height, rgba)?;
+            if texture.width != width || texture.height != height {
+                return Err(CompositorError::Backend(
+                    "recording texture dimensions changed during RGBA update".to_owned(),
+                ));
+            }
+            texture.bytes = rgba.to_vec();
+            self.repaint_count += 1;
+            Ok(())
         }
 
         fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {
@@ -1670,6 +1890,11 @@ mod tests {
 
     fn assert_pixel(rgba: &[u8], x: u32, y: u32, expected: [u8; 4]) {
         let offset = ((y * DESKTOP_DEMO_OUTPUT_WIDTH + x) * 4) as usize;
+        assert_eq!(rgba[offset..offset + 4], expected);
+    }
+
+    fn assert_output_pixel(rgba: &[u8], width: u32, x: u32, y: u32, expected: [u8; 4]) {
+        let offset = ((y * width + x) * 4) as usize;
         assert_eq!(rgba[offset..offset + 4], expected);
     }
 }
