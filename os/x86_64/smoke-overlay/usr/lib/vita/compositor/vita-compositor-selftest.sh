@@ -49,6 +49,10 @@ if [ ! -e /dev/dri/card0 ]; then
   exit 0
 fi
 
+# DMABUF GBM round-trip self-test (PSD-020): emits VITA-DMABUF — the vmwgfx zero-copy de-risk measurement.
+# Best-effort + before the demo; its own marker tells us if CEF accelerated-OSR (DMABUF->EGLImage) is viable on vmwgfx.
+"$BIN" --dmabuf-self-test 2>&1 | while IFS= read -r dline; do emit_line "$dline"; done || true
+
 TMP=$(mktemp /run/vita-compositor-selftest.XXXXXX 2>/dev/null || mktemp /tmp/vita-compositor-selftest.XXXXXX)
 : > "$TMP"
 rc=0
