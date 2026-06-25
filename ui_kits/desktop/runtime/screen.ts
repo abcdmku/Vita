@@ -46,6 +46,7 @@ export interface ScreenModule<
   ViewModel extends ScreenViewModel<State> = ScreenViewModel<State>,
 > {
   readonly id: DesktopScreenId | string;
+  readonly eventTypes?: readonly string[];
   selectPorts(host: DesktopHost): Ports;
   createViewModel(ports: Ports): DesktopMaybePromise<ViewModel>;
   readonly actions: ScreenActionMap<ViewModel, State>;

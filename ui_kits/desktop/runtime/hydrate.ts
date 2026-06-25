@@ -132,13 +132,24 @@ function activateScreen<
   const state = store(initial.value);
   let disposed = false;
   let unsubscribe: StoreUnsubscribe | null = null;
-  let binding = createBinder(root, {
+  const binderOptions: {
+    actions: VitaActionMap<State>;
+    binds: VitaBindMap<State>;
+    eventTypes?: readonly string[];
+    snapshot: () => State;
+  } = {
     actions: buildActionMap(module.actions, viewModel, state, () => disposed, () => {
       dispose();
     }),
     binds: buildBindMap(module.binds),
     snapshot: () => state.get(),
-  });
+  };
+
+  if (module.eventTypes !== undefined) {
+    binderOptions.eventTypes = module.eventTypes;
+  }
+
+  let binding = createBinder(root, binderOptions);
 
   function dispose(): void {
     if (disposed) return;
