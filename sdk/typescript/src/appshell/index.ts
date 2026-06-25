@@ -8,7 +8,6 @@ import {
   closeWindow,
   collectWindowManagerIntents,
   createWindowModel,
-  emitWindowManagerIntents,
   openWindow,
 } from "../wm/policy.ts";
 import type {
@@ -203,7 +202,27 @@ interface PendingAppCleanup {
   readonly textureId: string;
   readonly windowId: string;
   readonly windowOpen: boolean;
+  readonly windowCleanupIntents?: readonly WindowManagerIntent[];
+  readonly windowMaybeLandedIntents?: readonly WindowManagerIntent[];
 }
+
+interface WindowManagerEmitProgress {
+  readonly requestedIntents: readonly WindowManagerIntent[];
+  readonly completedIntents: readonly WindowManagerIntent[];
+  readonly maybeLandedIntents: readonly WindowManagerIntent[];
+  readonly failedIntent?: WindowManagerIntent;
+}
+
+type WindowManagerEmitResult =
+  | {
+      readonly ok: true;
+      readonly value: WindowManagerEmitProgress;
+    }
+  | {
+      readonly ok: false;
+      readonly error: AppHostError;
+      readonly progress: WindowManagerEmitProgress;
+    };
 
 const DEFAULT_RECT = Object.freeze({
   height: 480,
@@ -273,6 +292,8 @@ export class AppHost {
         surfaceId,
         windowId,
         true,
+        undefined,
+        undefined,
       );
 
       if (!rolledBack.ok) {
@@ -295,17 +316,24 @@ export class AppHost {
     const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(app.id)}/wm`);
 
     if (!emitted.ok) {
+      const windowCleanupIntents = collectWindowManagerIntents(
+        nextWindowModel,
+        previousWindowModel,
+        this.#layoutConstraints,
+      );
       const rolledBack = this.#rollbackFailedLaunchResources(
         app.id,
         runtime.value,
         surfaceId,
         windowId,
         true,
+        windowCleanupIntents,
+        emitted.progress.maybeLandedIntents,
       );
 
       if (!rolledBack.ok) return rejectRollbackFailure(emitted.error, rolledBack.error);
 
-      return emitted;
+      return reject(emitted.error.code, emitted.error.message, emitted.error.path);
     }
 
     this.#windowModel = nextWindowModel;
@@ -340,6 +368,13 @@ export class AppHost {
       );
     }
 
+    const previousWindowModel = this.#windowModel;
+    const nextWindowModel = closeWindow(previousWindowModel, launch.windowId);
+    const intents = collectWindowManagerIntents(
+      previousWindowModel,
+      nextWindowModel,
+      this.#layoutConstraints,
+    );
     const removed = this.#removeSurface(launch.surfaceId);
     const stopped = this.#unbindRuntime(launch.binding);
 
@@ -352,6 +387,8 @@ export class AppHost {
           launch.windowId,
           !removed.ok,
           true,
+          intents,
+          undefined,
         );
         this.#launches.delete(appId);
       }
@@ -359,19 +396,21 @@ export class AppHost {
       return rejectStopCleanupFailure(stopped, removed);
     }
 
-    const previousWindowModel = this.#windowModel;
-    const nextWindowModel = closeWindow(previousWindowModel, launch.windowId);
-    const intents = collectWindowManagerIntents(
-      previousWindowModel,
-      nextWindowModel,
-      this.#layoutConstraints,
-    );
     const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(appId)}/wm`);
 
     if (!emitted.ok) {
-      this.#rememberPendingCleanup(appId, undefined, launch.surfaceId, launch.windowId, false, true);
+      this.#rememberPendingCleanup(
+        appId,
+        undefined,
+        launch.surfaceId,
+        launch.windowId,
+        false,
+        true,
+        intents,
+        emitted.progress.maybeLandedIntents,
+      );
       this.#launches.delete(appId);
-      return emitted;
+      return reject(emitted.error.code, emitted.error.message, emitted.error.path);
     }
 
     this.#windowModel = nextWindowModel;
@@ -578,14 +617,47 @@ export class AppHost {
   #emitWindowManagerIntents(
     intents: readonly WindowManagerIntent[],
     path: string,
-  ): AppHostResult<true> {
-    try {
-      emitWindowManagerIntents(this.#ports.wm, intents);
-    } catch {
-      return reject("WM_INTENT_FAILED", "window-manager intent port failed closed.", path);
+  ): WindowManagerEmitResult {
+    const completed: WindowManagerIntent[] = [];
+    const requested = freezeIntents(intents);
+
+    for (let index = 0; index < requested.length; index += 1) {
+      const intent = requested[index];
+
+      if (intent === undefined) continue;
+
+      try {
+        emitWindowManagerIntent(this.#ports.wm, intent);
+      } catch {
+        const progress = freezeWindowManagerEmitProgress({
+          completedIntents: completed,
+          failedIntent: intent,
+          maybeLandedIntents: [...completed, intent],
+          requestedIntents: requested,
+        });
+
+        return {
+          error: {
+            code: "WM_INTENT_FAILED",
+            message: "window-manager intent port failed closed.",
+            path,
+          },
+          ok: false,
+          progress,
+        };
+      }
+
+      completed.push(intent);
     }
 
-    return accept(true);
+    return {
+      ok: true,
+      value: freezeWindowManagerEmitProgress({
+        completedIntents: completed,
+        maybeLandedIntents: completed,
+        requestedIntents: requested,
+      }),
+    };
   }
 
   #rollbackSurface(surfaceId: string): AppHostResult<true> {
@@ -602,13 +674,24 @@ export class AppHost {
     surfaceId: string,
     windowId: string,
     surfaceLive: boolean,
+    windowCleanupIntents: readonly WindowManagerIntent[] | undefined,
+    windowMaybeLandedIntents: readonly WindowManagerIntent[] | undefined,
   ): AppHostResult<true> {
     const runtimeRolledBack = this.#rollbackRuntime(binding);
     const surfaceRolledBack: AppHostResult<true> = surfaceLive
       ? this.#rollbackSurface(surfaceId)
       : accept(true);
+    const windowRollbackEmit = windowCleanupIntents === undefined
+      ? undefined
+      : this.#emitWindowManagerIntents(windowCleanupIntents, `/apps/${pathToken(appId)}/wm-rollback`);
+    const windowRolledBack: AppHostResult<true> = windowRollbackEmit === undefined
+      ? accept(true)
+      : emitResultToAppHostResult(windowRollbackEmit);
 
-    if (runtimeRolledBack.ok && surfaceRolledBack.ok) return accept(true);
+    if (runtimeRolledBack.ok && surfaceRolledBack.ok && windowRolledBack.ok) return accept(true);
+    const maybeLandedWindowIntents = windowRollbackEmit !== undefined && !windowRollbackEmit.ok
+      ? windowRollbackEmit.progress.maybeLandedIntents
+      : windowMaybeLandedIntents;
 
     this.#rememberPendingCleanup(
       appId,
@@ -616,10 +699,12 @@ export class AppHost {
       surfaceId,
       windowId,
       surfaceRolledBack.ok ? false : surfaceLive,
-      false,
+      !windowRolledBack.ok,
+      windowCleanupIntents,
+      maybeLandedWindowIntents,
     );
 
-    return rejectRollbackCleanupFailure(runtimeRolledBack, surfaceRolledBack);
+    return rejectRollbackCleanupFailure(runtimeRolledBack, surfaceRolledBack, windowRolledBack);
   }
 
   #rememberPendingCleanup(
@@ -629,6 +714,8 @@ export class AppHost {
     windowId: string,
     surfaceLive: boolean,
     windowOpen: boolean,
+    windowCleanupIntents: readonly WindowManagerIntent[] | undefined,
+    windowMaybeLandedIntents: readonly WindowManagerIntent[] | undefined,
   ): void {
     const cleanup: {
       appId: string;
@@ -638,6 +725,8 @@ export class AppHost {
       textureId: string;
       windowId: string;
       windowOpen: boolean;
+      windowCleanupIntents?: readonly WindowManagerIntent[];
+      windowMaybeLandedIntents?: readonly WindowManagerIntent[];
     } = {
       appId,
       surfaceId,
@@ -648,6 +737,12 @@ export class AppHost {
     };
 
     if (binding !== undefined) cleanup.binding = binding;
+    if (windowCleanupIntents !== undefined) {
+      cleanup.windowCleanupIntents = freezeIntents(windowCleanupIntents);
+    }
+    if (windowMaybeLandedIntents !== undefined) {
+      cleanup.windowMaybeLandedIntents = freezeIntents(windowMaybeLandedIntents);
+    }
 
     this.#pendingCleanup.set(appId, Object.freeze(cleanup));
   }
@@ -669,23 +764,24 @@ export class AppHost {
         cleanup.windowId,
         removed.ok ? false : cleanup.surfaceLive,
         cleanup.windowOpen,
+        cleanup.windowCleanupIntents,
+        cleanup.windowMaybeLandedIntents,
       );
 
       return rejectStopCleanupFailure(stopped, removed);
     }
 
     let intents: readonly WindowManagerIntent[] = Object.freeze([]);
-    let emitted: AppHostResult<true> = accept(true);
 
     if (cleanup.windowOpen) {
       const previousWindowModel = this.#windowModel;
       const nextWindowModel = closeWindow(previousWindowModel, cleanup.windowId);
-      intents = collectWindowManagerIntents(
+      intents = cleanup.windowCleanupIntents ?? collectWindowManagerIntents(
         previousWindowModel,
         nextWindowModel,
         this.#layoutConstraints,
       );
-      emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(cleanup.appId)}/wm`);
+      const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(cleanup.appId)}/wm`);
       if (!emitted.ok) {
         this.#rememberPendingCleanup(
           cleanup.appId,
@@ -694,16 +790,16 @@ export class AppHost {
           cleanup.windowId,
           false,
           true,
+          intents,
+          emitted.progress.maybeLandedIntents,
         );
-        return emitted;
+        return reject(emitted.error.code, emitted.error.message, emitted.error.path);
       }
 
       this.#windowModel = nextWindowModel;
     }
 
     this.#pendingCleanup.delete(cleanup.appId);
-
-    if (!emitted.ok) return emitted;
 
     return accept(Object.freeze({
       appId: cleanup.appId,
@@ -838,6 +934,57 @@ function freezeLaunch(input: {
   });
 }
 
+function emitWindowManagerIntent(
+  port: WindowManagerSubstratePort,
+  intent: WindowManagerIntent,
+): void {
+  switch (intent.type) {
+    case "repositionTexture":
+      port.repositionTexture(intent.textureId, intent.rect, intent.windowId);
+      break;
+    case "setFocus":
+      port.setFocus(intent.windowId);
+      break;
+    case "setTextureVisibility":
+      if (port.setTextureVisibility !== undefined) {
+        port.setTextureVisibility(intent.textureId, intent.visible, intent.windowId);
+      }
+      break;
+  }
+}
+
+function freezeWindowManagerEmitProgress(input: {
+  readonly requestedIntents: readonly WindowManagerIntent[];
+  readonly completedIntents: readonly WindowManagerIntent[];
+  readonly maybeLandedIntents: readonly WindowManagerIntent[];
+  readonly failedIntent?: WindowManagerIntent;
+}): WindowManagerEmitProgress {
+  const output: {
+    requestedIntents: readonly WindowManagerIntent[];
+    completedIntents: readonly WindowManagerIntent[];
+    maybeLandedIntents: readonly WindowManagerIntent[];
+    failedIntent?: WindowManagerIntent;
+  } = {
+    completedIntents: freezeIntents(input.completedIntents),
+    maybeLandedIntents: freezeIntents(input.maybeLandedIntents),
+    requestedIntents: freezeIntents(input.requestedIntents),
+  };
+
+  if (input.failedIntent !== undefined) output.failedIntent = input.failedIntent;
+
+  return Object.freeze(output);
+}
+
+function emitResultToAppHostResult(result: WindowManagerEmitResult): AppHostResult<true> {
+  if (result.ok) return accept(true);
+
+  return reject(result.error.code, result.error.message, result.error.path);
+}
+
+function freezeIntents(intents: readonly WindowManagerIntent[]): readonly WindowManagerIntent[] {
+  return Object.freeze([...intents]);
+}
+
 function freezeRect(rect: Rect): Rect {
   return Object.freeze({
     height: normalizeDimension(rect.height),
@@ -878,7 +1025,7 @@ function pathToken(value: string): string {
       (code >= 65 && code <= 90) ||
       (code >= 97 && code <= 122);
 
-    if (isAlphaNumeric || code === 45 || code === 46 || code === 95) {
+    if (isAlphaNumeric || code === 45 || code === 46) {
       token += value[index] ?? "";
     } else {
       token += `_${code.toString(16).padStart(4, "0")}`;
@@ -927,11 +1074,13 @@ function rejectRollbackFailure<T>(
 function rejectRollbackCleanupFailure(
   runtimeRolledBack: AppHostResult<true>,
   surfaceRolledBack: AppHostResult<true>,
+  windowRolledBack: AppHostResult<true> = accept(true),
 ): AppHostResult<true> {
   const failures: AppHostError[] = [];
 
   if (!runtimeRolledBack.ok) failures.push(runtimeRolledBack.error);
   if (!surfaceRolledBack.ok) failures.push(surfaceRolledBack.error);
+  if (!windowRolledBack.ok) failures.push(windowRolledBack.error);
 
   const first = failures[0];
 
