@@ -7,6 +7,8 @@ import {
   createWindowModel,
   emitWindowManagerIntents,
   focusedWindowId,
+  focusNextWindow,
+  focusPreviousWindow,
   focusWindow,
   layout,
   maximizeWindow,
@@ -14,6 +16,7 @@ import {
   moveWindowToWorkspace,
   openWindow,
   requestMoveResize,
+  reduceWindowModel,
   setWorkspaceLayout,
   switchWorkspace,
 } from "../../src/wm/policy.ts";
@@ -56,6 +59,13 @@ test("tile layout is deterministic, stable, and focus annotated", () => {
   });
 
   assert.deepEqual(projectPlacements(second), projectPlacements(first));
+  assert.deepEqual(
+    projectPlacements(layout(setWorkspaceLayout(model, "main", "master-stack"), {
+      bounds: SCREEN,
+      gap: 10,
+    })),
+    projectPlacements(first),
+  );
   assert.deepEqual(projectPlacements(first), [
     {
       focused: false,
@@ -96,6 +106,274 @@ test("tile layout is deterministic, stable, and focus annotated", () => {
   ]);
 });
 
+test("columns layout splits tiled windows across deterministic columns", () => {
+  let model = createWindowModel({
+    activeWorkspaceId: "main",
+    workspaces: [
+      {
+        id: "main",
+        layout: "columns",
+      },
+    ],
+  });
+  model = open(model, "a");
+  model = open(model, "b");
+  model = open(model, "c");
+
+  assert.deepEqual(projectPlacements(layout(model, {
+    bounds: SCREEN,
+    gap: 10,
+    minWidth: 300,
+  })), [
+    {
+      focused: false,
+      rect: {
+        height: 580,
+        width: 320,
+        x: 10,
+        y: 10,
+      },
+      textureId: "texture-a",
+      windowId: "a",
+      zIndex: 0,
+    },
+    {
+      focused: false,
+      rect: {
+        height: 580,
+        width: 320,
+        x: 340,
+        y: 10,
+      },
+      textureId: "texture-b",
+      windowId: "b",
+      zIndex: 1,
+    },
+    {
+      focused: true,
+      rect: {
+        height: 580,
+        width: 320,
+        x: 670,
+        y: 10,
+      },
+      textureId: "texture-c",
+      windowId: "c",
+      zIndex: 2,
+    },
+  ]);
+});
+
+test("grid layout fills a stable row-major grid", () => {
+  let model = createWindowModel({
+    activeWorkspaceId: "main",
+    workspaces: [
+      {
+        id: "main",
+        layout: "grid",
+      },
+    ],
+  });
+
+  for (const id of ["a", "b", "c", "d", "e"]) {
+    model = open(model, id);
+  }
+
+  assert.deepEqual(projectPlacements(layout(model, {
+    bounds: SCREEN,
+    gap: 10,
+    minHeight: 100,
+    minWidth: 100,
+  })), [
+    {
+      focused: false,
+      rect: {
+        height: 285,
+        width: 320,
+        x: 10,
+        y: 10,
+      },
+      textureId: "texture-a",
+      windowId: "a",
+      zIndex: 0,
+    },
+    {
+      focused: false,
+      rect: {
+        height: 285,
+        width: 320,
+        x: 340,
+        y: 10,
+      },
+      textureId: "texture-b",
+      windowId: "b",
+      zIndex: 1,
+    },
+    {
+      focused: false,
+      rect: {
+        height: 285,
+        width: 320,
+        x: 670,
+        y: 10,
+      },
+      textureId: "texture-c",
+      windowId: "c",
+      zIndex: 2,
+    },
+    {
+      focused: false,
+      rect: {
+        height: 285,
+        width: 320,
+        x: 10,
+        y: 305,
+      },
+      textureId: "texture-d",
+      windowId: "d",
+      zIndex: 3,
+    },
+    {
+      focused: true,
+      rect: {
+        height: 285,
+        width: 320,
+        x: 340,
+        y: 305,
+      },
+      textureId: "texture-e",
+      windowId: "e",
+      zIndex: 4,
+    },
+  ]);
+});
+
+test("tiling layouts shrink inner gaps before violating satisfiable min sizes", () => {
+  let model = createWindowModel({
+    activeWorkspaceId: "main",
+    workspaces: [
+      {
+        id: "main",
+        layout: "columns",
+      },
+    ],
+  });
+  model = open(model, "a");
+  model = open(model, "b");
+  model = open(model, "c");
+
+  assert.deepEqual(projectPlacements(layout(model, {
+    bounds: {
+      height: 100,
+      width: 220,
+      x: 0,
+      y: 0,
+    },
+    gap: 20,
+    minWidth: 50,
+  })).map((placement) => placement.rect), [
+    {
+      height: 60,
+      width: 50,
+      x: 20,
+      y: 20,
+    },
+    {
+      height: 60,
+      width: 50,
+      x: 85,
+      y: 20,
+    },
+    {
+      height: 60,
+      width: 50,
+      x: 150,
+      y: 20,
+    },
+  ]);
+
+  let single = createWindowModel({
+    activeWorkspaceId: "main",
+    workspaces: [
+      {
+        id: "main",
+        layout: "master-stack",
+      },
+    ],
+  });
+  single = open(single, "a");
+
+  assert.deepEqual(projectPlacements(layout(single, {
+    bounds: {
+      height: 100,
+      width: 100,
+      x: 0,
+      y: 0,
+    },
+    gap: 20,
+    minHeight: 70,
+    minWidth: 80,
+  })).map((placement) => placement.rect), [
+    {
+      height: 70,
+      width: 80,
+      x: 10,
+      y: 15,
+    },
+  ]);
+});
+
+test("floating workspace layout preserves clamped window rects", () => {
+  let model = createWindowModel({
+    activeWorkspaceId: "main",
+    workspaces: [
+      {
+        id: "main",
+        layout: "floating",
+      },
+    ],
+  });
+  model = openWindow(model, {
+    id: "a",
+    rect: {
+      height: 20,
+      width: 30,
+      x: -20,
+      y: 20,
+    },
+    textureId: "texture-a",
+  });
+  model = openWindow(model, {
+    id: "b",
+    rect: {
+      height: 300,
+      width: 200,
+      x: 950,
+      y: 500,
+    },
+    textureId: "texture-b",
+  });
+
+  assert.deepEqual(projectPlacements(layout(model, {
+    bounds: SCREEN,
+    minHeight: 80,
+    minWidth: 100,
+  })).map((placement) => placement.rect), [
+    {
+      height: 80,
+      width: 100,
+      x: 0,
+      y: 20,
+    },
+    {
+      height: 300,
+      width: 200,
+      x: 800,
+      y: 300,
+    },
+  ]);
+});
+
 test("focus follows intent and close falls back through the focus stack", () => {
   let model = createWindowModel({ activeWorkspaceId: "main" });
   model = open(model, "a");
@@ -108,6 +386,31 @@ test("focus follows intent and close falls back through the focus stack", () => 
   model = closeWindow(model, "a");
   assert.equal(focusedWindowId(model), "c");
   assert.deepEqual(focusedPlacements(model), ["c"]);
+});
+
+test("focus next and previous cycle the workspace ring and raise on focus intent", () => {
+  let model = createWindowModel({ activeWorkspaceId: "main" });
+  model = open(model, "a");
+  model = open(model, "b");
+  model = open(model, "c");
+
+  const focusedA = focusNextWindow(model);
+  assert.equal(focusedWindowId(focusedA), "a");
+  assert.deepEqual(collectWindowManagerIntents(model, focusedA, { bounds: SCREEN }), [
+    {
+      type: "setFocus",
+      windowId: "a",
+    },
+  ]);
+  assert.equal(projectPlacements(layout(focusedA, { bounds: SCREEN })).at(-1)?.windowId, "a");
+
+  const focusedC = focusPreviousWindow(focusedA);
+  assert.equal(focusedWindowId(focusedC), "c");
+
+  const reduced = reduceWindowModel(focusedC, {
+    type: "focus-next",
+  });
+  assert.equal(focusedWindowId(reduced), "a");
 });
 
 test("workspace switch and move-to-workspace keep focus workspace-local", () => {
