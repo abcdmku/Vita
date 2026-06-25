@@ -3,6 +3,17 @@
 ## Status
 Proposed (2026-06-25). The deferred focused GPU arc; M1 is buildable on the merged compositor.
 
+**Update (2026-06-25): M0 + M1 + the live-on-GPU boot are PROVEN (branch `spike/cef-m4`).** CEF
+software-OSR renders the live flagship desktop, pipes its per-frame command stream into the Vita
+native compositor, and the compositor composites + reads it back on the **real VMware GPU (KMS,
+`gpu=vmwgfx present=kms`)** during an OS boot. `cef-live.png` (1280×720) is a genuine GPU readback
+copied out of the guest. Markers: `VITA-CEF: sink=buffer-surface present=kms status=OK` +
+`VITA-COMPOSITOR: gpu=vmwgfx surfaces=1 … present=kms … status=OK`. See `spikes/cef-osr/RESULTS.md`
+(§M4) for the overlay/service/build wiring + the decisive headless-Ozone fix. The milestone ladder
+below labels the *visible+interactive* rung "M4"; that interactivity (input/resize/damage) and the
+zero-copy accelerated paths (M2/M3) remain future work — what is proven now is the **live visible
+render on the GPU floor**, which is the always-works base the rest builds on.
+
 ## Context — what the codebase already proves (cited)
 - **The single content seam is the `RenderBackend` trait + `Compositor<B>`** (`packages/compositor-core/src/lib.rs:335-391`,
   `:401-683`). Every producer goes through it.

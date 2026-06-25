@@ -19,10 +19,15 @@ use crate::{
 
 const RTLD_NOW: c_int = 2;
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
+// EGL_MESA_platform_surfaceless: a display backed by no native window system,
+// used for the headless software (llvmpipe) readback fallback when no GPU/DRM
+// device is available. Rendering goes to an FBO; there is no scanout.
+const EGL_PLATFORM_SURFACELESS_MESA: u32 = 0x31DD;
 const EGL_OPENGL_ES_API: u32 = 0x30A0;
 const EGL_NONE: i32 = 0x3038;
 const EGL_SURFACE_TYPE: i32 = 0x3033;
 const EGL_WINDOW_BIT: i32 = 0x0004;
+const EGL_PBUFFER_BIT: i32 = 0x0001;
 const EGL_RENDERABLE_TYPE: i32 = 0x3040;
 const EGL_OPENGL_ES2_BIT: i32 = 0x0004;
 const EGL_RED_SIZE: i32 = 0x3024;
@@ -221,13 +226,16 @@ pub struct GpuTexture {
 }
 
 pub struct PlatformGpuBackend {
-    _vt: VtState,
-    drm: File,
-    _render_node: File,
+    // Hardware-scanout members. Present only for the KMS/GBM path; `None` for the
+    // surfaceless software fallback (no DRM device, no display) used for headless
+    // readback verification on hosts without a GPU (e.g. WSL). See `open_surfaceless`.
+    _vt: Option<VtState>,
+    drm: Option<File>,
+    _render_node: Option<File>,
     libinput: Option<LibinputState>,
     input_availability: InputAvailability,
-    kms: KmsState,
-    gbm: Gbm,
+    kms: Option<KmsState>,
+    gbm: Option<Gbm>,
     egl: Egl,
     gl: Gl,
     gbm_device: *mut c_void,
@@ -235,6 +243,10 @@ pub struct PlatformGpuBackend {
     egl_display: EglDisplay,
     egl_context: EglContext,
     egl_surface: EglSurface,
+    // When true, `composite` swaps + KMS-presents to the scanout; when false
+    // (surfaceless) it stops after the FBO render (the readback path is FBO-based).
+    scanout: bool,
+    present_mode: PresentationMode,
     output_texture: GlUInt,
     output_fbo: GlUInt,
     scratch_fbo: GlUInt,
@@ -275,7 +287,21 @@ impl PlatformGpuBackend {
     }
 
     pub fn open_for_self_test(width: u32, height: u32) -> Result<Self, CompositorError> {
-        Self::open_with_input_policy(width, height, InputPolicy::Optional)
+        match Self::open_with_input_policy(width, height, InputPolicy::Optional) {
+            Ok(backend) => Ok(backend),
+            Err(kms_error) => {
+                // No GPU/DRM device (e.g. WSL): fall back to a surfaceless software
+                // (llvmpipe) backend so headless readback verification still exercises
+                // the real GL compositing + buffer-surface sink + glReadPixels path.
+                // The render goes to an FBO; there is no scanout (present=recording).
+                match Self::open_surfaceless(width, height) {
+                    Ok(backend) => Ok(backend),
+                    Err(surfaceless_error) => Err(CompositorError::Unavailable(format!(
+                        "no GPU backend: kms=({kms_error}); surfaceless=({surfaceless_error})"
+                    ))),
+                }
+            }
+        }
     }
 
     fn open_with_input_policy(
@@ -413,13 +439,13 @@ impl PlatformGpuBackend {
 
         let gl = Gl::open(&egl)?;
         let mut backend = Self {
-            _vt: vt,
-            drm,
-            _render_node: render_node,
+            _vt: Some(vt),
+            drm: Some(drm),
+            _render_node: Some(render_node),
             libinput,
             input_availability,
-            kms,
-            gbm,
+            kms: Some(kms),
+            gbm: Some(gbm),
             egl,
             gl,
             gbm_device,
@@ -427,6 +453,8 @@ impl PlatformGpuBackend {
             egl_display,
             egl_context,
             egl_surface,
+            scanout: true,
+            present_mode: PresentationMode::KMS,
             output_texture: 0,
             output_fbo: 0,
             scratch_fbo: 0,
@@ -443,6 +471,110 @@ impl PlatformGpuBackend {
 
         backend.initialize_gl_state()?;
         backend.probe_optional_input(input_policy);
+        Ok(backend)
+    }
+
+    /// Headless software fallback: an EGL surfaceless (EGL_MESA_platform_surfaceless)
+    /// display + GLES2 context made current with no draw surface
+    /// (EGL_KHR_surfaceless_context), backed by Mesa llvmpipe. Renders into the same
+    /// FBO the readback reads from; there is no GBM/DRM/KMS scanout. Used for
+    /// no-GPU headless verification of the compositing + buffer-surface readback path.
+    fn open_surfaceless(width: u32, height: u32) -> Result<Self, CompositorError> {
+        if width == 0 || height == 0 {
+            return Err(CompositorError::InvalidDimensions { width, height });
+        }
+
+        let egl = Egl::open()?;
+        let egl_display = unsafe {
+            (egl.get_platform_display_ext)(
+                EGL_PLATFORM_SURFACELESS_MESA,
+                ptr::null_mut(), // EGL_DEFAULT_DISPLAY
+                ptr::null(),
+            )
+        };
+        if egl_display.is_null() {
+            return Err(CompositorError::Unavailable(
+                "eglGetPlatformDisplayEXT(SURFACELESS_MESA) returned null".to_owned(),
+            ));
+        }
+
+        let mut major = 0_i32;
+        let mut minor = 0_i32;
+        if unsafe { (egl.initialize)(egl_display, &mut major, &mut minor) } == 0 {
+            return Err(CompositorError::Unavailable(
+                "eglInitialize failed for surfaceless display".to_owned(),
+            ));
+        }
+        if unsafe { (egl.bind_api)(EGL_OPENGL_ES_API) } == 0 {
+            unsafe {
+                (egl.terminate)(egl_display);
+            }
+            return Err(CompositorError::Unavailable(
+                "eglBindAPI(OpenGL ES) failed (surfaceless)".to_owned(),
+            ));
+        }
+
+        let config = choose_config_pbuffer(&egl, egl_display)?;
+        let context_attribs = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
+        let egl_context = unsafe {
+            (egl.create_context)(egl_display, config, ptr::null_mut(), context_attribs.as_ptr())
+        };
+        if egl_context.is_null() {
+            unsafe {
+                (egl.terminate)(egl_display);
+            }
+            return Err(CompositorError::Unavailable(
+                "eglCreateContext failed (surfaceless)".to_owned(),
+            ));
+        }
+
+        // Make current with no draw/read surface (requires EGL_KHR_surfaceless_context).
+        if unsafe {
+            (egl.make_current)(egl_display, ptr::null_mut(), ptr::null_mut(), egl_context)
+        } == 0
+        {
+            unsafe {
+                (egl.destroy_context)(egl_display, egl_context);
+                (egl.terminate)(egl_display);
+            }
+            return Err(CompositorError::Unavailable(
+                "eglMakeCurrent(EGL_NO_SURFACE) failed (no surfaceless context support)".to_owned(),
+            ));
+        }
+
+        let gl = Gl::open(&egl)?;
+        let mut backend = Self {
+            _vt: None,
+            drm: None,
+            _render_node: None,
+            libinput: None,
+            input_availability: InputAvailability::Unavailable,
+            kms: None,
+            gbm: None,
+            egl,
+            gl,
+            gbm_device: ptr::null_mut(),
+            gbm_surface: ptr::null_mut(),
+            egl_display,
+            egl_context,
+            egl_surface: ptr::null_mut(),
+            scanout: false,
+            present_mode: PresentationMode::RECORDING,
+            output_texture: 0,
+            output_fbo: 0,
+            scratch_fbo: 0,
+            program: 0,
+            position_attr: -1,
+            uv_attr: -1,
+            sampler_uniform: -1,
+            opacity_uniform: -1,
+            output_width: width,
+            output_height: height,
+            gpu_name: "surfaceless-llvmpipe".to_owned(),
+            repaint_count: 0,
+        };
+
+        backend.initialize_gl_state()?;
         Ok(backend)
     }
 
@@ -756,7 +888,7 @@ impl RenderBackend for PlatformGpuBackend {
     }
 
     fn presentation_mode(&self) -> PresentationMode {
-        PresentationMode::KMS
+        self.present_mode
     }
 
     fn input_availability(&self) -> InputAvailability {
@@ -863,28 +995,48 @@ impl RenderBackend for PlatformGpuBackend {
         unsafe {
             (self.gl.disable)(GL_SCISSOR_TEST);
             (self.gl.flush)();
-            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, 0);
-            (self.gl.viewport)(0, 0, self.output_width as i32, self.output_height as i32);
-            (self.gl.clear_color)(0.0, 0.0, 0.0, 1.0);
-            (self.gl.clear)(GL_COLOR_BUFFER_BIT);
-            (self.gl.use_program)(self.program);
         }
-        let output_placement = Placement::new(
-            crate::SurfaceId::new("kms-output")?,
-            0,
-            0,
-            self.output_width,
-            self.output_height,
-            0,
-        )?;
-        self.draw_placement(self.output_texture, &output_placement)?;
-        if unsafe { (self.egl.swap_buffers)(self.egl_display, self.egl_surface) } == 0 {
-            return Err(CompositorError::Unavailable(
-                "eglSwapBuffers(GBM scanout) failed".to_owned(),
-            ));
+
+        // Surfaceless software path: the composited frame already lives in `output_fbo`
+        // (the texture the readback reads). There is no default framebuffer / scanout,
+        // so stop here. The KMS path below blits to the scanout and page-flips.
+        if self.scanout {
+            unsafe {
+                (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, 0);
+                (self.gl.viewport)(0, 0, self.output_width as i32, self.output_height as i32);
+                (self.gl.clear_color)(0.0, 0.0, 0.0, 1.0);
+                (self.gl.clear)(GL_COLOR_BUFFER_BIT);
+                (self.gl.use_program)(self.program);
+            }
+            let output_placement = Placement::new(
+                crate::SurfaceId::new("kms-output")?,
+                0,
+                0,
+                self.output_width,
+                self.output_height,
+                0,
+            )?;
+            self.draw_placement(self.output_texture, &output_placement)?;
+            if unsafe { (self.egl.swap_buffers)(self.egl_display, self.egl_surface) } == 0 {
+                return Err(CompositorError::Unavailable(
+                    "eglSwapBuffers(GBM scanout) failed".to_owned(),
+                ));
+            }
+            let kms = self
+                .kms
+                .as_mut()
+                .ok_or_else(|| CompositorError::Backend("scanout without KMS state".to_owned()))?;
+            let drm_fd = self
+                .drm
+                .as_ref()
+                .ok_or_else(|| CompositorError::Backend("scanout without DRM device".to_owned()))?
+                .as_raw_fd();
+            let gbm = self
+                .gbm
+                .as_ref()
+                .ok_or_else(|| CompositorError::Backend("scanout without GBM device".to_owned()))?;
+            kms.present(drm_fd, gbm, self.gbm_surface)?;
         }
-        self.kms
-            .present(self.drm.as_raw_fd(), &self.gbm, self.gbm_surface)?;
 
         Ok(CompositeReport {
             surfaces: placements.len(),
@@ -963,13 +1115,18 @@ impl Drop for PlatformGpuBackend {
                 }
                 (self.egl.terminate)(self.egl_display);
             }
-            self.kms
-                .restore_and_release(self.drm.as_raw_fd(), &self.gbm, self.gbm_surface);
-            if !self.gbm_surface.is_null() {
-                (self.gbm.surface_destroy)(self.gbm_surface);
-            }
-            if !self.gbm_device.is_null() {
-                (self.gbm.destroy_device)(self.gbm_device);
+            // KMS/GBM cleanup only applies to the hardware scanout path; the
+            // surfaceless software backend holds none of these.
+            if let (Some(kms), Some(drm), Some(gbm)) =
+                (self.kms.as_mut(), self.drm.as_ref(), self.gbm.as_ref())
+            {
+                kms.restore_and_release(drm.as_raw_fd(), gbm, self.gbm_surface);
+                if !self.gbm_surface.is_null() {
+                    (gbm.surface_destroy)(self.gbm_surface);
+                }
+                if !self.gbm_device.is_null() {
+                    (gbm.destroy_device)(self.gbm_device);
+                }
             }
         }
     }
@@ -997,6 +1154,35 @@ fn choose_config(egl: &Egl, display: EglDisplay) -> Result<EglConfig, Compositor
     if ok == 0 || count == 0 || config.is_null() {
         return Err(CompositorError::Unavailable(
             "eglChooseConfig found no GLES2 RGBA window config".to_owned(),
+        ));
+    }
+    Ok(config)
+}
+
+// Config for the surfaceless software path. Surfaceless contexts render only to
+// FBOs, so a pbuffer-capable RGBA8 GLES2 config is sufficient (no window bit).
+fn choose_config_pbuffer(egl: &Egl, display: EglDisplay) -> Result<EglConfig, CompositorError> {
+    let attrs = [
+        EGL_SURFACE_TYPE,
+        EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE,
+        EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE,
+        8,
+        EGL_GREEN_SIZE,
+        8,
+        EGL_BLUE_SIZE,
+        8,
+        EGL_ALPHA_SIZE,
+        8,
+        EGL_NONE,
+    ];
+    let mut config = ptr::null_mut();
+    let mut count = 0_i32;
+    let ok = unsafe { (egl.choose_config)(display, attrs.as_ptr(), &mut config, 1, &mut count) };
+    if ok == 0 || count == 0 || config.is_null() {
+        return Err(CompositorError::Unavailable(
+            "eglChooseConfig found no GLES2 RGBA pbuffer config (surfaceless)".to_owned(),
         ));
     }
     Ok(config)
