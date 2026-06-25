@@ -346,6 +346,59 @@ test("thrown maybe-landed reconcile removes the compositor window during rollbac
   assert.equal(host.snapshot().pendingCleanup.length, 0);
 });
 
+test("partial thrown launch rollback leaves existing app window intact", async () => {
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+  });
+  const compositor = new ThrowingMaybeLandedCompositorDriver({
+    throwOnWindowReconcile: 2,
+  });
+  const host = new AppWindowHost({
+    appHost,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+  const runningApp = tsxApp();
+  const failedApp = webApp();
+
+  const runningLaunch = await host.launch(runningApp);
+
+  assert.equal(runningLaunch.ok, true);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+    true,
+  );
+
+  const failedLaunch = await host.launch(failedApp);
+
+  assert.equal(failedLaunch.ok, false);
+  if (failedLaunch.ok) {
+    assert.fail("expected thrown compositor reconcile");
+  }
+  assert.equal(failedLaunch.error.code, "COMPOSITOR_RECONCILE_FAILED");
+  assert.deepEqual(compositor.removedSurfaces, [
+    appSurfaceId(failedApp.id),
+  ]);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+    true,
+  );
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(failedApp.id)),
+    false,
+  );
+  assert.deepEqual(appHost.snapshot().apps.map((launch) => launch.app.id), [
+    runningApp.id,
+  ]);
+  assert.deepEqual(host.snapshot().windows.map((window) => window.appId), [
+    runningApp.id,
+  ]);
+  assert.equal(host.snapshot().pendingCleanup.length, 0);
+});
+
 test("compositor teardown failure records pending cleanup and retries idempotently", async () => {
   const calls: CompositorCommand[] = [];
   let failWindowRemove = false;
@@ -633,8 +686,15 @@ class CleanupCapableCompositorDriver implements AppWindowHostCompositorDriverPor
 
 class ThrowingMaybeLandedCompositorDriver implements AppWindowHostCompositorDriverPort {
   readonly #surfaces = new Map<string, CompositorSurfaceSnapshot>();
+  readonly #throwOnWindowReconcile: number;
   readonly removedSurfaces: string[] = [];
-  #throwNextWindowReconcile = true;
+  #windowReconcileCount = 0;
+
+  constructor(options: {
+    readonly throwOnWindowReconcile?: number;
+  } = {}) {
+    this.#throwOnWindowReconcile = options.throwOnWindowReconcile ?? 1;
+  }
 
   reconcile(input: CompositorReconcileInput): CompositorReconcileResult {
     const windows = input.windows ?? Object.freeze([]);
@@ -657,8 +717,14 @@ class ThrowingMaybeLandedCompositorDriver implements AppWindowHostCompositorDriv
       }
     }
 
-    if (this.#throwNextWindowReconcile && windows.length > 0) {
-      this.#throwNextWindowReconcile = false;
+    if (windows.length > 0) {
+      this.#windowReconcileCount += 1;
+    }
+
+    if (
+      windows.length > 0 &&
+      this.#windowReconcileCount === this.#throwOnWindowReconcile
+    ) {
       throw new Error("partial compositor register");
     }
 

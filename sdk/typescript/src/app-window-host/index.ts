@@ -295,7 +295,10 @@ export class AppWindowHost {
     launch: AppLaunch,
     cause: AppWindowHostError,
   ): Promise<AppWindowHostResult<true>> {
-    const maybeLiveWindows = this.#maybeLiveWindowsByError.get(cause) ?? Object.freeze([]);
+    const maybeLiveWindows = maybeLiveWindowsForLaunch(
+      this.#maybeLiveWindowsByError.get(cause) ?? Object.freeze([]),
+      launch,
+    );
     const stopped = await this.#callAppHostStop(launch.app.id);
 
     if (!stopped.ok) {
@@ -706,6 +709,29 @@ function pendingCleanupFromLifecycle(
     textureId: lifecycle.textureId,
     windowId: lifecycle.windowId,
   });
+}
+
+function maybeLiveWindowsForLaunch(
+  windows: readonly AppWindowSurface[],
+  launch: AppLaunch,
+): readonly AppWindowSurface[] {
+  const output: AppWindowSurface[] = [];
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+
+    if (
+      window !== undefined &&
+      window.appId === launch.app.id &&
+      window.surfaceId === launch.surfaceId &&
+      window.textureId === launch.textureId &&
+      window.windowId === launch.windowId
+    ) {
+      output.push(window);
+    }
+  }
+
+  return Object.freeze(output);
 }
 
 function freezePendingCleanup(
