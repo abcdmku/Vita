@@ -10,6 +10,7 @@ import type {
   CompositorPort,
   CompositorRect,
   CompositorSurfaceKind,
+  CompositorSurfaceSize,
   CompositorWindowPlacement,
 } from "../../src/compositor-bridge/index.ts";
 import type { ShellComposedLayout, ShellResolvedSurface } from "../../src/shell/index.ts";
@@ -31,6 +32,7 @@ test("initial reconcile registers and places shell plus WM surfaces in stable z 
     {
       id: "surface:desktop",
       kind: "shell:desktop",
+      size: size(1440, 900),
       type: "registerSurface",
     },
     {
@@ -43,6 +45,7 @@ test("initial reconcile registers and places shell plus WM surfaces in stable z 
     {
       id: "texture-mail",
       kind: "window",
+      size: size(600, 440),
       type: "registerSurface",
     },
     {
@@ -55,6 +58,7 @@ test("initial reconcile registers and places shell plus WM surfaces in stable z 
     {
       id: "surface:panel",
       kind: "shell:panel",
+      size: size(1440, 40),
       type: "registerSurface",
     },
     {
@@ -221,6 +225,7 @@ test("WM stream registering a newly visible window emits register and placement 
     {
       id: "texture-files",
       kind: "window",
+      size: size(720, 540),
       type: "registerSurface",
     },
     {
@@ -244,6 +249,59 @@ test("WM stream registering a newly visible window emits register and placement 
       repositionIntent,
     ],
     windows: [],
+  });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.commands, []);
+  assert.deepEqual(calls, []);
+});
+
+test("delta WM reposition intent leaves unmentioned current surfaces unchanged", async () => {
+  const calls: CompositorCommand[] = [];
+  const driver = new CompositorDriver(recordingPort(calls));
+  await mustReconcile(driver, {
+    shell: chromeLikeShell(),
+    windows: [
+      windowSurface("mail", rect(80, 72, 600, 440), 1),
+      windowSurface("chat", rect(160, 120, 500, 360), 2),
+    ],
+  });
+
+  calls.length = 0;
+  const repositionIntent: WindowManagerIntent = Object.freeze({
+    rect: rect(96, 88, 640, 440),
+    textureId: "texture-mail",
+    type: "repositionTexture",
+    windowId: "mail",
+  });
+  const moved = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      repositionIntent,
+    ],
+  });
+
+  assert.equal(moved.ok, true);
+  assert.deepEqual(projectCommands(moved.commands), [
+    {
+      id: "texture-mail",
+      rect: rect(96, 88, 640, 440),
+      type: "updatePlacement",
+      visible: true,
+      z: 20_001,
+    },
+    {
+      type: "present",
+    },
+  ]);
+  assert.equal(calls.some((call) => call.type === "removeSurface" && call.id === "texture-chat"), false);
+
+  calls.length = 0;
+  const second = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      repositionIntent,
+    ],
   });
 
   assert.equal(second.ok, true);
@@ -329,6 +387,7 @@ test("removed surfaces are reconciled before added surfaces", async () => {
     {
       id: "texture-files",
       kind: "window",
+      size: size(720, 540),
       type: "registerSurface",
     },
     {
@@ -558,6 +617,7 @@ type ProjectedCommand =
       readonly type: "registerSurface";
       readonly id: string;
       readonly kind: CompositorSurfaceKind;
+      readonly size: CompositorSurfaceSize;
     }
   | {
       readonly type: "updatePlacement";
@@ -581,6 +641,7 @@ function projectCommands(commands: readonly CompositorCommand[]): readonly Proje
         return {
           id: command.id,
           kind: command.kind,
+          size: command.size,
           type: command.type,
         };
       case "updatePlacement":
@@ -720,5 +781,12 @@ function rect(x: number, y: number, width: number, height: number): Rect {
     width,
     x,
     y,
+  });
+}
+
+function size(width: number, height: number): CompositorSurfaceSize {
+  return Object.freeze({
+    height,
+    width,
   });
 }

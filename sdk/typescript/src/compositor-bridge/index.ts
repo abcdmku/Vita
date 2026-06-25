@@ -263,6 +263,14 @@ function desiredSurfacesFromInput(
     }
   }
 
+  if (input.windows === undefined && input.windowIntents !== undefined) {
+    for (const surface of current.values()) {
+      if (surface.source === "window") {
+        surfaces.push(surface);
+      }
+    }
+  }
+
   const windows = input.windows ?? Object.freeze([]);
   for (let index = 0; index < windows.length; index += 1) {
     const placement = windows[index];
