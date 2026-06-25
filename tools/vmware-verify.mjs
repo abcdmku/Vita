@@ -110,6 +110,16 @@ function parseArgs(argv) {
       case "--screenshot":
         opts.screenshot = needValue();
         break;
+      case "--guest-file": {
+        // Format: <guestPath>:<hostPath> — copy a file out of the guest after markers pass.
+        const raw = needValue();
+        const sep = raw.lastIndexOf(":");
+        if (sep <= 0) {
+          throw new Error("--guest-file expects <guestPath>:<hostPath>");
+        }
+        opts.guestFile = { guest: raw.slice(0, sep), host: path.resolve(raw.slice(sep + 1)) };
+        break;
+      }
       case "--vmrun":
         opts.vmrun = needValue();
         break;
@@ -545,6 +555,18 @@ async function captureScreen(vmrun, vmxPath, screenshotPath) {
   );
 }
 
+async function copyFileFromGuest(vmrun, vmxPath, guestPath, hostPath) {
+  await fs.mkdir(path.dirname(hostPath), { recursive: true });
+  console.log(`vmrun: copyFileFromGuestToHost ${guestPath} -> ${hostPath}`);
+  // Guest op: needs vmtoolsd running + guest login (verification-only root/vita).
+  await runChecked(
+    "vmrun copyFileFromGuestToHost",
+    vmrun,
+    ["-T", "ws", "-gu", "root", "-gp", "vita", "copyFileFromGuestToHost", vmxPath, guestPath, hostPath],
+    DEFAULT_SCREENSHOT_TIMEOUT_SECONDS * 1000,
+  );
+}
+
 async function runLive(opts) {
   const workspace = buildWorkspace(opts.image, opts);
   const vmrun = resolveVmrun(opts);
@@ -581,6 +603,17 @@ async function runLive(opts) {
       // image. The serial-marker check is the verification gate, so a screenshot failure must NOT
       // fail a boot whose markers passed (GPU visual checks come with a desktop image + VMware Tools).
       console.error(`WARN: screenshot capture failed (needs VMware Tools/guest login in the image): ${error.message}`);
+    }
+
+    // Optional: copy a guest-rendered file out (e.g. the compositor's in-guest GPU-readback PNG),
+    // which captures exactly what the compositor rendered — independent of the VMware display path.
+    if (opts.guestFile) {
+      try {
+        await copyFileFromGuest(vmrun, workspace.vmx, opts.guestFile.guest, opts.guestFile.host);
+        console.log(`guest-file: ${opts.guestFile.host}`);
+      } catch (error) {
+        console.error(`WARN: guest-file copy failed: ${error.message}`);
+      }
     }
 
     if (!markerResult.ok) {
