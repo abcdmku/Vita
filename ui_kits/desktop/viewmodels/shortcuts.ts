@@ -37,6 +37,11 @@ export interface ShortcutBinding {
   readonly source: ShortcutBindingSource;
 }
 
+export interface ShortcutPersistenceBinding {
+  readonly chord: ShortcutChord;
+  readonly commandId: string;
+}
+
 export interface ShortcutConflict {
   readonly chord: ShortcutChord;
   readonly commandIds: readonly string[];
@@ -136,6 +141,8 @@ export type ShortcutCommandPort = Pick<DesktopHost, "emitLauncherIntent" | "pack
 export interface ShortcutsViewModel {
   snapshot(): ShortcutsState;
   list(): readonly ShortcutBinding[];
+  serialize(): readonly ShortcutPersistenceBinding[];
+  deserialize(userOverrides: unknown): ShortcutsViewModel;
   register(chord: unknown, commandId: unknown): ShortcutMutationResult;
   rebind(commandId: unknown, chord: unknown): ShortcutMutationResult;
   reset(commandId: unknown): ShortcutResetResult;
@@ -260,6 +267,20 @@ class DesktopShortcutsViewModel implements ShortcutsViewModel {
 
   list(): readonly ShortcutBinding[] {
     return this.#state.bindings;
+  }
+
+  serialize(): readonly ShortcutPersistenceBinding[] {
+    return serializeUserOverrides(this.#commands, this.#userOverrides);
+  }
+
+  deserialize(userOverrides: unknown): ShortcutsViewModel {
+    const normalizedOverrides = deserializeUserOverrides(userOverrides, this.#commands, this.#defaults);
+
+    return new DesktopShortcutsViewModel(this.#ports, {
+      commands: this.#commands,
+      defaults: this.#defaults,
+      userOverrides: normalizedOverrides,
+    });
   }
 
   register(chord: unknown, commandId: unknown): ShortcutMutationResult {
@@ -837,6 +858,114 @@ function freezeBinding(binding: ShortcutBinding): ShortcutBinding {
   });
 }
 
+function freezePersistenceBinding(binding: ShortcutPersistenceBinding): ShortcutPersistenceBinding {
+  return Object.freeze({
+    chord: binding.chord,
+    commandId: binding.commandId,
+  });
+}
+
+function serializeUserOverrides(
+  commands: readonly ShortcutCommand[],
+  userOverrides: readonly ShortcutBinding[],
+): readonly ShortcutPersistenceBinding[] {
+  const output: ShortcutPersistenceBinding[] = [];
+
+  for (let commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
+    const command = commands[commandIndex];
+
+    if (command === undefined) {
+      continue;
+    }
+
+    for (let overrideIndex = 0; overrideIndex < userOverrides.length; overrideIndex += 1) {
+      const binding = userOverrides[overrideIndex];
+
+      if (binding !== undefined && binding.commandId === command.id) {
+        output.push(freezePersistenceBinding({
+          chord: binding.chord,
+          commandId: binding.commandId,
+        }));
+        break;
+      }
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function deserializeUserOverrides(
+  input: unknown,
+  commands: readonly ShortcutCommand[],
+  defaults: readonly ShortcutBinding[],
+): readonly ShortcutPersistenceBinding[] {
+  const entries = snapshotArray(input);
+
+  if (entries === null) {
+    return Object.freeze([]);
+  }
+
+  const commandById = commandMap(commands);
+  let accepted: readonly ShortcutBinding[] = Object.freeze([]);
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const normalized = normalizePersistenceEntry(entry, commandById);
+
+    if (!normalized.ok || hasUserOverride(accepted, normalized.value.commandId)) {
+      continue;
+    }
+
+    const binding = freezeBinding({
+      chord: normalized.value.chord,
+      commandId: normalized.value.commandId,
+      source: "user",
+    });
+    const proposed = replaceUserOverride(accepted, binding);
+    const proposedState = stateFor(commands, defaults, proposed);
+
+    if (proposedState.conflicts.length === 0) {
+      accepted = proposed;
+    }
+  }
+
+  return serializeUserOverrides(commands, accepted);
+}
+
+function normalizePersistenceEntry(
+  input: unknown,
+  commandById: ReadonlyMap<string, ShortcutCommand>,
+): NormalizeResult<ShortcutPersistenceBinding> {
+  const entry = snapshotObject(input, Object.freeze(["chord", "commandId"]), "INVALID_SHORTCUT_OVERRIDE", "/overrides");
+
+  if (!entry.ok) {
+    return reject(entry.error);
+  }
+
+  const commandId = entry.value.get("commandId");
+
+  if (typeof commandId !== "string" || commandId.length === 0 || !commandById.has(commandId)) {
+    return reject(error("UNKNOWN_COMMAND", "shortcut command is not registered.", "/overrides/commandId"));
+  }
+
+  const chord = entry.value.get("chord");
+
+  if (typeof chord !== "string") {
+    return reject(error("INVALID_CHORD", "shortcut chord must be a string.", "/overrides/chord"));
+  }
+
+  const normalized = normalizeShortcutChord(chord);
+
+  if (!normalized.ok) {
+    return reject(normalized.error);
+  }
+
+  return accept(freezePersistenceBinding({
+    chord: normalized.chord,
+    commandId,
+  }));
+}
+
 function stateFor(
   commands: readonly ShortcutCommand[],
   defaults: readonly ShortcutBinding[],
@@ -1077,6 +1206,91 @@ function snapshotObject(
   } catch {
     return reject(error(code, "value must be a stable plain object.", path));
   }
+}
+
+function snapshotArray(input: unknown): readonly unknown[] | null {
+  try {
+    if (!Array.isArray(input)) {
+      return null;
+    }
+
+    const keys = Reflect.ownKeys(input);
+    const indexed: {
+      readonly index: number;
+      readonly value: unknown;
+    }[] = [];
+
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+      const key = keys[keyIndex];
+
+      if (key === undefined || typeof key === "symbol") {
+        return null;
+      }
+
+      if (key === "length") {
+        continue;
+      }
+
+      const index = arrayIndex(key);
+
+      if (index === null) {
+        return null;
+      }
+
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+
+      if (descriptor === undefined || !isDataDescriptor(descriptor) || descriptor.enumerable !== true) {
+        return null;
+      }
+
+      indexed.push(Object.freeze({
+        index,
+        value: descriptor.value,
+      }));
+    }
+
+    indexed.sort((left, right) => left.index - right.index);
+
+    const output: unknown[] = [];
+
+    for (let index = 0; index < indexed.length; index += 1) {
+      const entry = indexed[index];
+
+      if (entry !== undefined) {
+        output.push(entry.value);
+      }
+    }
+
+    return Object.freeze(output);
+  } catch {
+    return null;
+  }
+}
+
+function arrayIndex(key: string): number | null {
+  if (key.length === 0) {
+    return null;
+  }
+
+  if (key.length > 1 && key[0] === "0") {
+    return null;
+  }
+
+  for (let index = 0; index < key.length; index += 1) {
+    const code = key.charCodeAt(index);
+
+    if (code < 48 || code > 57) {
+      return null;
+    }
+  }
+
+  const value = Number(key);
+
+  if (!Number.isSafeInteger(value) || value < 0 || value >= 4294967295) {
+    return null;
+  }
+
+  return value;
 }
 
 function booleanField(
