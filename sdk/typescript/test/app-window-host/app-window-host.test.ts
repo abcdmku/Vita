@@ -5,8 +5,11 @@ import {
   AppWindowHost,
 } from "../../src/app-window-host/index.ts";
 import type {
+  AppWindowHostAppHostEventsPort,
   AppWindowHostAppHostPort,
   AppWindowHostCompositorDriverPort,
+  AppWindowHostEventListener,
+  AppWindowHostObservedEvent,
 } from "../../src/app-window-host/index.ts";
 import {
   appSurfaceId,
@@ -209,16 +212,14 @@ test("surfaceKind metadata is carried for tsx, wasm, container, and web app wind
   assert.equal(compositor.inputs[3]?.windows?.length, 4);
 });
 
-test("failed compositor window registration rolls back the app launch", async () => {
+test("failed compositor window registration rolls back the app launch and records pending cleanup", async () => {
   const calls: CompositorCommand[] = [];
-  let failWindowRegister = true;
   const appHost = new FakeAppHost({
     bounds: SCREEN,
   });
   const compositor = new CompositorDriver(recordingPort(calls, {
     failWhen(command) {
       return (
-        failWindowRegister &&
         command.type === "registerSurface" &&
         command.id === appSurfaceId(tsxApp().id)
       );
@@ -244,7 +245,57 @@ test("failed compositor window registration rolls back the app launch", async ()
   assert.equal(appHost.snapshot().apps.length, 0);
   assert.equal(appHost.snapshot().windowModel.windows.length, 0);
   assert.equal(host.snapshot().windows.length, 0);
+  assert.equal(host.snapshot().pendingCleanup[0]?.appId, "com.vita.notes");
+  assert.equal(host.snapshot().pendingCleanup[0]?.textureId, appSurfaceId("com.vita.notes"));
+  assert.equal(host.snapshot().pendingCleanup[0]?.reason.code, "APP_WINDOW_CLEANUP_PENDING");
+
+  calls.length = 0;
+
+  const blocked = await host.launch(tsxApp());
+
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) {
+    assert.fail("expected untracked cleanup to block relaunch");
+  }
+  assert.equal(blocked.error.code, "APP_WINDOW_CLEANUP_PENDING");
+  assert.deepEqual(calls, []);
+});
+
+test("failed maybe-landed window registration uses injected cleanup before allowing retry", async () => {
+  const calls: CompositorCommand[] = [];
+  let failWindowRegister = true;
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+  });
+  const compositor = new CleanupCapableCompositorDriver(recordingPort(calls, {
+    failWhen(command) {
+      return (
+        failWindowRegister &&
+        command.type === "registerSurface" &&
+        command.id === appSurfaceId(tsxApp().id)
+      );
+    },
+  }));
+  const host = new AppWindowHost({
+    appHost,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+
+  const launched = await host.launch(tsxApp());
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected compositor registration failure");
+  }
+  assert.deepEqual(compositor.removedSurfaces, [
+    appSurfaceId("com.vita.notes"),
+  ]);
   assert.equal(host.snapshot().pendingCleanup.length, 0);
+  assert.equal(appHost.snapshot().apps.length, 0);
 
   calls.length = 0;
   failWindowRegister = false;
@@ -331,13 +382,16 @@ test("compositor teardown failure records pending cleanup and retries idempotent
   assert.equal(nextLaunch.ok, true);
 });
 
-test("observed AppHost launch and stop events reconcile through the injected compositor port", async () => {
+test("subscribed AppHost launch and stop events reconcile through the injected compositor port", async () => {
+  const events = new FakeAppHostEvents();
   const appHost = new FakeAppHost({
     bounds: SCREEN,
+    events,
   });
   const compositor = new RecordingCompositorDriver();
   const host = new AppWindowHost({
     appHost,
+    appHostEvents: events,
     compositor,
     layoutConstraints: {
       bounds: SCREEN,
@@ -352,12 +406,8 @@ test("observed AppHost launch and stop events reconcile through the injected com
     assert.fail("expected fake app launch");
   }
 
-  const observedLaunch = await host.observe({
-    launch: launched.value,
-    type: "launch",
-  });
+  await events.drain();
 
-  assert.equal(observedLaunch.ok, true);
   assert.equal(compositor.inputs.length, 1);
   assert.deepEqual(
     compositor.inputs[0]?.windowIntents?.map((intent) => intent.type),
@@ -372,28 +422,31 @@ test("observed AppHost launch and stop events reconcile through the injected com
     assert.fail("expected fake app stop");
   }
 
-  const observedStop = await host.observe({
-    stop: stopped.value,
-    type: "stop",
-  });
+  await events.drain();
 
-  assert.equal(observedStop.ok, true);
   assert.equal(compositor.inputs.length, 2);
   assert.equal(compositor.inputs[1]?.windows?.length, 0);
   assert.deepEqual(
     compositor.inputs[1]?.windowIntents?.map((intent) => intent.type),
     stopped.value.intents.map((intent) => intent.type),
   );
+  assert.equal(host.snapshot().windows.length, 0);
 });
+
+interface FakeAppHostOptions extends LayoutConstraints {
+  readonly events?: FakeAppHostEvents;
+}
 
 class FakeAppHost implements AppWindowHostAppHostPort {
   readonly #constraints: LayoutConstraints;
+  readonly #events: FakeAppHostEvents | undefined;
   readonly #launches = new Map<string, AppLaunch>();
   readonly stops: string[] = [];
   #windowModel: WindowModel;
 
-  constructor(constraints: LayoutConstraints) {
-    this.#constraints = constraints;
+  constructor(options: FakeAppHostOptions) {
+    this.#constraints = options;
+    this.#events = options.events;
     this.#windowModel = createWindowModel({
       activeWorkspaceId: "main",
     });
@@ -421,6 +474,10 @@ class FakeAppHost implements AppWindowHostAppHostPort {
 
     this.#windowModel = next;
     this.#launches.set(app.id, launch);
+    this.#events?.emit(Object.freeze({
+      launch,
+      type: "launch",
+    }));
 
     return ok(launch);
   }
@@ -440,14 +497,20 @@ class FakeAppHost implements AppWindowHostAppHostPort {
     const intents = collectWindowManagerIntents(previous, next, this.#constraints);
     this.#windowModel = next;
     this.#launches.delete(appId);
-
-    return ok(Object.freeze({
+    const stop = Object.freeze({
       appId,
       intents,
       surfaceId: launch.surfaceId,
       textureId: launch.textureId,
       windowId: launch.windowId,
-    }) satisfies AppStop);
+    }) satisfies AppStop;
+
+    this.#events?.emit(Object.freeze({
+      stop,
+      type: "stop",
+    }));
+
+    return ok(stop);
   }
 
   snapshot(): AppHostSnapshot {
@@ -460,6 +523,40 @@ class FakeAppHost implements AppWindowHostAppHostPort {
     });
   }
 }
+
+class FakeAppHostEvents implements AppWindowHostAppHostEventsPort {
+  readonly #listeners = new Set<AppWindowHostEventListener>();
+  readonly #pending: Promise<AppWindowHostResultPlaceholder>[] = [];
+
+  subscribe(listener: AppWindowHostEventListener): () => void {
+    this.#listeners.add(listener);
+
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  emit(event: AppWindowHostObservedEvent): void {
+    const listeners = [...this.#listeners];
+
+    for (let index = 0; index < listeners.length; index += 1) {
+      const listener = listeners[index];
+
+      if (listener !== undefined) {
+        this.#pending.push(Promise.resolve(listener(event)));
+      }
+    }
+  }
+
+  async drain(): Promise<void> {
+    while (this.#pending.length > 0) {
+      const pending = this.#pending.splice(0);
+      await Promise.all(pending);
+    }
+  }
+}
+
+type AppWindowHostResultPlaceholder = Awaited<ReturnType<AppWindowHostEventListener>>;
 
 class RecordingCompositorDriver implements AppWindowHostCompositorDriverPort {
   readonly inputs: CompositorReconcileInput[] = [];
@@ -477,6 +574,27 @@ class RecordingCompositorDriver implements AppWindowHostCompositorDriverPort {
 
   snapshot(): readonly CompositorSurfaceSnapshot[] {
     return this.state;
+  }
+}
+
+class CleanupCapableCompositorDriver implements AppWindowHostCompositorDriverPort {
+  readonly #driver: CompositorDriver;
+  readonly removedSurfaces: string[] = [];
+
+  constructor(port: CompositorPort) {
+    this.#driver = new CompositorDriver(port);
+  }
+
+  reconcile(input: CompositorReconcileInput): Promise<CompositorReconcileResult> {
+    return this.#driver.reconcile(input);
+  }
+
+  removeSurface(surfaceId: string): void {
+    this.removedSurfaces.push(surfaceId);
+  }
+
+  snapshot(): readonly CompositorSurfaceSnapshot[] {
+    return this.#driver.snapshot();
   }
 }
 

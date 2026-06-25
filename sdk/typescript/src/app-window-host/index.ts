@@ -11,6 +11,7 @@ import {
   compositorWindowPlacement,
 } from "../compositor-bridge/index.ts";
 import type {
+  CompositorCommand,
   CompositorDriverError,
   CompositorReconcileInput,
   CompositorReconcileResult,
@@ -52,6 +53,7 @@ export interface AppWindowHostAppHostPort {
 
 export interface AppWindowHostCompositorDriverPort {
   readonly reconcile: (input: CompositorReconcileInput) => MaybePromise<CompositorReconcileResult>;
+  readonly removeSurface?: (surfaceId: string) => MaybePromise<void>;
   readonly snapshot?: () => readonly CompositorSurfaceSnapshot[];
 }
 
@@ -66,6 +68,7 @@ export type AppWindowHostShellLayoutSource =
 
 export interface AppWindowHostOptions {
   readonly appHost: AppWindowHostAppHostPort;
+  readonly appHostEvents?: AppWindowHostAppHostEventsPort;
   readonly compositor: AppWindowHostCompositorDriverPort;
   readonly shell: AppWindowHostShellLayoutSource;
   readonly layoutConstraints?: LayoutConstraints;
@@ -90,6 +93,16 @@ export type AppWindowHostObservedEvent =
       readonly type: "stop";
       readonly stop: AppStop;
     };
+
+export type AppWindowHostEventListener = (
+  event: AppWindowHostObservedEvent,
+) => MaybePromise<AppWindowHostResult<AppWindowHostReconcile>>;
+
+export type AppWindowHostUnsubscribe = () => void;
+
+export interface AppWindowHostAppHostEventsPort {
+  readonly subscribe: (listener: AppWindowHostEventListener) => AppWindowHostUnsubscribe;
+}
 
 export type AppWindowHostSuccessfulReconcile = Extract<
   CompositorReconcileResult,
@@ -140,13 +153,18 @@ export class AppWindowHost {
   readonly #compositor: AppWindowHostCompositorDriverPort;
   readonly #shell: AppWindowHostShellLayoutSource;
   readonly #layoutConstraints: LayoutConstraints;
+  readonly #maybeLiveWindowsByError = new WeakMap<AppWindowHostError, readonly AppWindowSurface[]>();
   readonly #pendingCleanup = new Map<string, AppWindowHostPendingCleanup>();
+  readonly #untrackedPendingCleanup = new Set<string>();
+  #eventQueue: Promise<void> = Promise.resolve();
+  #unsubscribe: AppWindowHostUnsubscribe | undefined;
 
   constructor(options: AppWindowHostOptions) {
     this.#appHost = options.appHost;
     this.#compositor = options.compositor;
     this.#shell = options.shell;
     this.#layoutConstraints = options.layoutConstraints ?? DEFAULT_LAYOUT_CONSTRAINTS;
+    this.#unsubscribe = options.appHostEvents?.subscribe((event) => this.#observeSubscribedEvent(event));
   }
 
   async launch(app: AppDescriptor): Promise<AppWindowHostResult<AppWindowHostLaunch>> {
@@ -239,11 +257,24 @@ export class AppWindowHost {
     }
   }
 
+  dispose(): void {
+    const unsubscribe = this.#unsubscribe;
+
+    this.#unsubscribe = undefined;
+    if (unsubscribe !== undefined) unsubscribe();
+  }
+
   async reconcile(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
     const reconciled = await this.#reconcileCurrent();
 
-    if (reconciled.ok) {
-      this.#pendingCleanup.clear();
+    if (!reconciled.ok) return reconciled;
+
+    const untrackedCleanup = await this.#retryUntrackedPendingCleanup();
+
+    if (!untrackedCleanup.ok) return untrackedCleanup;
+
+    if (this.#untrackedPendingCleanup.size === 0) {
+      this.#clearPendingCleanup();
     }
 
     return reconciled;
@@ -264,6 +295,7 @@ export class AppWindowHost {
     launch: AppLaunch,
     cause: AppWindowHostError,
   ): Promise<AppWindowHostResult<true>> {
+    const maybeLiveWindows = this.#maybeLiveWindowsByError.get(cause) ?? Object.freeze([]);
     const stopped = await this.#callAppHostStop(launch.app.id);
 
     if (!stopped.ok) {
@@ -278,6 +310,8 @@ export class AppWindowHost {
         ok: false,
       };
     }
+
+    await this.#cleanupMaybeLiveWindows(stopped.value, maybeLiveWindows);
 
     const reconciled = await this.#reconcileCurrent(stopped.value.intents);
 
@@ -295,6 +329,22 @@ export class AppWindowHost {
     }
 
     return accept(true);
+  }
+
+  #observeSubscribedEvent(
+    event: AppWindowHostObservedEvent,
+  ): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+    const observed = this.#eventQueue.then(
+      () => this.observe(event),
+      () => this.observe(event),
+    );
+
+    this.#eventQueue = observed.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return observed;
   }
 
   async #reconcileCurrent(
@@ -329,8 +379,15 @@ export class AppWindowHost {
     }
 
     if (!reconciled.ok) {
+      const error = compositorError(reconciled.error);
+      const maybeLiveWindows = maybeLiveWindowSurfaces(windowSurfaces, reconciled);
+
+      if (maybeLiveWindows.length > 0) {
+        this.#maybeLiveWindowsByError.set(error, maybeLiveWindows);
+      }
+
       return {
-        error: compositorError(reconciled.error),
+        error,
         ok: false,
       };
     }
@@ -368,9 +425,16 @@ export class AppWindowHost {
   #rememberPendingCleanup(
     lifecycle: AppLaunch | AppStop,
     reason: AppWindowHostError,
+    options: {
+      readonly untrackedSurface?: boolean;
+    } = {},
   ): void {
     const cleanup = pendingCleanupFromLifecycle(lifecycle, reason);
     this.#pendingCleanup.set(cleanup.appId, cleanup);
+
+    if (options.untrackedSurface === true) {
+      this.#untrackedPendingCleanup.add(cleanup.appId);
+    }
   }
 
   #firstPendingCleanup(): AppWindowHostPendingCleanup | undefined {
@@ -379,6 +443,86 @@ export class AppWindowHost {
     }
 
     return undefined;
+  }
+
+  async #cleanupMaybeLiveWindows(
+    lifecycle: AppStop,
+    windows: readonly AppWindowSurface[],
+  ): Promise<void> {
+    const seen = new Set<string>();
+
+    for (let index = 0; index < windows.length; index += 1) {
+      const window = windows[index];
+
+      if (window === undefined || seen.has(window.textureId)) {
+        continue;
+      }
+
+      seen.add(window.textureId);
+
+      const removed = await this.#removeMaybeLiveSurface(window.textureId);
+
+      if (!removed.ok) {
+        this.#rememberPendingCleanup(lifecycle, removed.error, {
+          untrackedSurface: true,
+        });
+      }
+    }
+  }
+
+  async #removeMaybeLiveSurface(surfaceId: string): Promise<AppWindowHostResult<true>> {
+    if (this.#compositor.removeSurface === undefined) {
+      return reject(
+        "APP_WINDOW_CLEANUP_PENDING",
+        `compositor surface '${surfaceId}' may have landed, but no injected cleanup port is available.`,
+        `/surfaces/${pathToken(surfaceId)}/cleanup`,
+      );
+    }
+
+    try {
+      await this.#compositor.removeSurface(surfaceId);
+    } catch {
+      return reject(
+        "COMPOSITOR_SURFACE_CLEANUP_FAILED",
+        `compositor surface '${surfaceId}' may have landed and cleanup failed closed.`,
+        `/surfaces/${pathToken(surfaceId)}/cleanup`,
+      );
+    }
+
+    return accept(true);
+  }
+
+  async #retryUntrackedPendingCleanup(): Promise<AppWindowHostResult<true>> {
+    const pending = freezePendingCleanup([...this.#pendingCleanup.values()])
+      .filter((cleanup) => this.#untrackedPendingCleanup.has(cleanup.appId));
+    const first = pending[0];
+
+    if (first === undefined) return accept(true);
+
+    for (let index = 0; index < pending.length; index += 1) {
+      const cleanup = pending[index];
+
+      if (cleanup === undefined) continue;
+
+      const removed = await this.#removeMaybeLiveSurface(cleanup.textureId);
+
+      if (!removed.ok) {
+        this.#pendingCleanup.set(cleanup.appId, Object.freeze({
+          ...cleanup,
+          reason: removed.error,
+        }));
+        return removed;
+      }
+
+      this.#untrackedPendingCleanup.delete(cleanup.appId);
+    }
+
+    return accept(true);
+  }
+
+  #clearPendingCleanup(): void {
+    this.#pendingCleanup.clear();
+    this.#untrackedPendingCleanup.clear();
   }
 }
 
@@ -446,6 +590,86 @@ function launchesByWindowIdMap(launches: readonly AppLaunch[]): ReadonlyMap<stri
   }
 
   return output;
+}
+
+function maybeLiveWindowSurfaces(
+  windows: readonly AppWindowSurface[],
+  reconciled: Extract<CompositorReconcileResult, { readonly ok: false }>,
+): readonly AppWindowSurface[] {
+  const windowsByTextureId = windowsByTextureIdMap(windows);
+  const maybeLiveTextureIds = new Set<string>();
+
+  collectMaybeLiveWindowRegisterCommands(
+    reconciled.commands,
+    windowsByTextureId,
+    maybeLiveTextureIds,
+  );
+
+  if (reconciled.error.command !== undefined) {
+    collectMaybeLiveWindowRegisterCommand(
+      reconciled.error.command,
+      windowsByTextureId,
+      maybeLiveTextureIds,
+    );
+  }
+
+  if (maybeLiveTextureIds.size === 0) return Object.freeze([]);
+
+  const output: AppWindowSurface[] = [];
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+
+    if (window !== undefined && maybeLiveTextureIds.has(window.textureId)) {
+      output.push(window);
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function windowsByTextureIdMap(
+  windows: readonly AppWindowSurface[],
+): ReadonlyMap<string, AppWindowSurface> {
+  const output = new Map<string, AppWindowSurface>();
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+
+    if (window !== undefined && !output.has(window.textureId)) {
+      output.set(window.textureId, window);
+    }
+  }
+
+  return output;
+}
+
+function collectMaybeLiveWindowRegisterCommands(
+  commands: readonly CompositorCommand[],
+  windowsByTextureId: ReadonlyMap<string, AppWindowSurface>,
+  output: Set<string>,
+): void {
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index];
+
+    if (command !== undefined) {
+      collectMaybeLiveWindowRegisterCommand(command, windowsByTextureId, output);
+    }
+  }
+}
+
+function collectMaybeLiveWindowRegisterCommand(
+  command: CompositorCommand,
+  windowsByTextureId: ReadonlyMap<string, AppWindowSurface>,
+  output: Set<string>,
+): void {
+  if (
+    command.type === "registerSurface" &&
+    command.kind === "window" &&
+    windowsByTextureId.has(command.id)
+  ) {
+    output.add(command.id);
+  }
 }
 
 function shellLayout(source: AppWindowHostShellLayoutSource): ShellComposedLayout {
