@@ -22,10 +22,19 @@ power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery
 `ui_kits/` (commit 0842c3a): `styles.css`→`tokens/*`, `components/`, `guidelines/`, and the desktop kit `ui_kits/desktop/`
 (`index.html` + `kit.css` + Shell/Tiling/Files/Activity/Notifications/Settings/Lock screens, 1280×800) + mobile kit. Made
 Vita-compliant: **lucide vendored offline** (`ui_kits/_vendor/`, no CDN), `../../`→`../` paths fixed; renders standalone.
-**WAVE RUNNING (max-parallelism, owner "use as many subagents as you can"):** 8 Codex builders — PSD-022 rev3 (DesktopUiPackage
-hosts the real design + screens as views), PSD-023 (design tokens→typed SDK theme), PSD-024..029 (headless view-models for
-Files/Settings/Notifications/⌘K-palette/Dock/Tiling on SDK ports) — + deep queue PSD-030..033 (Activity/Shell/Lock/Appearance)
-held for refill. 3 Claude subagents: render+screenshot fidelity check, hydration/binding ADR, CEF live-render bring-up plan.
+**WAVES 1–3 MERGED (owner "build every feature, use many more subagents"):** main now carries the DesktopUiPackage hosting
+the REAL design (PSD-022), the `VitaThemeTokens` catalog (PSD-023, additive — `DesktopThemeTokens` runtime contract kept),
+and **15 headless view-models** — the 8 mockup screens (Files/Settings/Notifications/⌘K-palette/Tiling/Activity/Shell/Lock/
+theme/Dock) PLUS 5 beyond-the-mockups (files-ops, window-snap, workspaces, shortcuts, global-search) — all typecheck-clean,
+**112 tests**, merged in reviewed batches (caught+fixed a theme-contract regression). Fonts vendored offline too (Geist
+.woff2 in `_vendor/fonts`, no Google CDN). **FUNCTIONAL-DESKTOP ARC building** per **ADR-0013** (hydration): runtime
+reactive core + binder + host-bridge MERGED; PSD-043 hydrate/bootstrap in flight → then per-screen wiring (044 palette+dock,
+045 settings, 046 rest, 047 bootstrap+lucide). **EXHAUSTIVE BACKLOG:** a batched (5-at-a-time, throttle-safe) feature-
+decomposition Workflow is authoring the PSD-1xx contracts across 22 OS-feature domains. **LIVE RENDER** per **ADR-0014**
+(CEF): M1 (CEF `OnPaint` → the merged PSD-011 RGBA sink) makes the flagship render live with NO new compositor code, but the
+CEF arc (PSD-050..056) needs the **CEF SDK vendored on the build host** — the one real external dep (prior spike never ran
+CEF). Anthropic burst-throttle lesson saved ([[vita-subagent-burst-throttle]]): >~20 concurrent Claude subagents trips a
+server limit → Codex (separate API) + direct authoring carry on; retry subagents low-concurrency.
 **3-LAYER DESKTOP ARCHITECTURE 2026-06-25 (owner directive: SDK | CEF engine | swappable UI package).** Wave merged:
 PSD-011 (compositor RGBA-buffer content sink + CPU-readback fallback), PSD-014 (WM tiling/workspaces), PSD-016 (shell
 notifications/tray model), and **PSD-021 (`@vita/desktop-sdk` MERGED)** — the stable public SDK surface (internals
