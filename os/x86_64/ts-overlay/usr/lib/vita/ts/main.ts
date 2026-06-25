@@ -71,6 +71,12 @@ import {
   runFullRestoreRoundTrip,
 } from "./vita/full-restore.ts";
 import {
+  formatRestoreReplacementMarker,
+  formatRestoreReplacementRejectMarker,
+  rejectTamperedRestoreReplacement,
+  runRestoreReplacement,
+} from "./vita/restore-replacement.ts";
+import {
   formatExportMarker,
   formatExportRejectMarker,
   rejectInlineSecretExportMetadata,
@@ -825,6 +831,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
     emit(formatBackupArchiveMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatProtectionDashboardErrorMarker("agentd_connect_failed"));
     emit(formatFullRestoreMarker({ ok: false, reason: "agentd connect failed" }));
+    emit(formatRestoreReplacementMarker({ ok: false, reason: "agentd connect failed" }));
     emit(formatPdsRepoMarker({ ok: false, reason: "agentd connect failed" }));
     emit(`${CAPSULE_PREVIEW_ERROR_MARKER}: status=FAILSAFE`);
     emit(`${CAPSULE_ERROR_MARKER}: status=FAILSAFE`);
@@ -914,6 +921,7 @@ async function emitAgentdConnectMarker(): Promise<void> {
   await emitBackupArchiveMarkers(agentTransport);
   await emitProtectionDashboardMarkers(client);
   await emitFullRestoreMarkers(agentTransport);
+  await emitRestoreReplacementMarkers(agentTransport);
   const desktopClient = createAgentClient({
     baseUrl: AGENTD_BASE_URL,
     transport: agentTransport,
@@ -2403,6 +2411,22 @@ async function emitFullRestoreMarkers(agentTransport: AgentTransport): Promise<v
   }
 
   emit(formatFullRestoreRejectMarker(await rejectTamperedFullRestore(client)));
+}
+
+async function emitRestoreReplacementMarkers(agentTransport: AgentTransport): Promise<void> {
+  const client = createAgentClient({
+    baseUrl: AGENTD_BASE_URL,
+    transport: agentTransport,
+  });
+
+  const result = await runRestoreReplacement(client);
+  emit(formatRestoreReplacementMarker(result));
+
+  if (!result.ok) {
+    return;
+  }
+
+  emit(formatRestoreReplacementRejectMarker(await rejectTamperedRestoreReplacement(client)));
 }
 
 async function emitPdsRepoMarkers(

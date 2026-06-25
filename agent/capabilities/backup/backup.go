@@ -493,6 +493,10 @@ func containsInlineSecretMaterial(value string) bool {
 	return longHexPattern.MatchString(value) || longBase64Pattern.MatchString(value)
 }
 
+func ContainsInlineSecretMaterial(value string) bool {
+	return containsInlineSecretMaterial(value)
+}
+
 var cronMacros = map[string]struct{}{
 	"@hourly":  {},
 	"@daily":   {},

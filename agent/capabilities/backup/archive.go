@@ -749,6 +749,97 @@ type archiveManifestSkippedEntry struct {
 	Reason string `json:"reason"`
 }
 
+type VerifiedArchive struct {
+	backupDir string
+	manifest  archiveManifest
+	files     int
+}
+
+func DiscoverVerifiedArchive(ctx context.Context, backupSource string) (VerifiedArchive, error) {
+	if err := ctx.Err(); err != nil {
+		return VerifiedArchive{}, err
+	}
+	if _, err := os.Lstat(filepath.Join(backupSource, archiveManifestName)); err == nil {
+		return VerifyArchiveDirectory(ctx, backupSource)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return VerifiedArchive{}, archiveStepError("verify_manifest_stat", err)
+	}
+
+	entries, err := os.ReadDir(backupSource)
+	if err != nil {
+		return VerifiedArchive{}, archiveStepError("verify_source_read", err)
+	}
+	var archiveDirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(backupSource, entry.Name())
+		if _, err := os.Lstat(filepath.Join(dir, archiveManifestName)); err == nil {
+			archiveDirs = append(archiveDirs, dir)
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return VerifiedArchive{}, archiveStepError("verify_manifest_stat", err)
+		}
+	}
+	sort.Strings(archiveDirs)
+	if len(archiveDirs) == 0 {
+		return VerifiedArchive{}, archiveInvalid("backupSource does not contain a backup archive")
+	}
+	if len(archiveDirs) != 1 {
+		return VerifiedArchive{}, archiveInvalid("backupSource contains multiple backup archives")
+	}
+	return VerifyArchiveDirectory(ctx, archiveDirs[0])
+}
+
+func VerifyArchiveDirectory(ctx context.Context, backupDir string) (VerifiedArchive, error) {
+	result, manifest, err := verifyArchiveDir(ctx, backupDir)
+	if err != nil {
+		return VerifiedArchive{}, err
+	}
+	if !result.OK {
+		return VerifiedArchive{}, &ArchiveVerificationError{Failure: *result.Failure}
+	}
+	return VerifiedArchive{
+		backupDir: backupDir,
+		manifest:  manifest,
+		files:     result.Files,
+	}, nil
+}
+
+func (a VerifiedArchive) BackupID() string {
+	return a.manifest.Digest
+}
+
+func (a VerifiedArchive) Files() int {
+	return a.files
+}
+
+func (a VerifiedArchive) Roots() []string {
+	roots := make([]string, len(a.manifest.Roots))
+	for i, root := range a.manifest.Roots {
+		roots[i] = root.Name
+	}
+	return roots
+}
+
+func (a VerifiedArchive) FileCountForRoot(rootName string) int {
+	files := 0
+	for _, entry := range a.manifest.Entries {
+		if entry.Root == rootName && entry.Type == "file" {
+			files++
+		}
+	}
+	return files
+}
+
+func (a VerifiedArchive) Materialize(ctx context.Context, destination string) error {
+	return materializeArchive(ctx, a.backupDir, a.manifest, destination)
+}
+
+func (a VerifiedArchive) RootMatches(destination string, rootName string) (bool, error) {
+	return rootMatchesManifest(destination, rootName, a.manifest)
+}
+
 func createArchive(ctx context.Context, req ArchiveCreateRequest) (ArchiveCreateResult, transaction.Undo, error) {
 	normalized, err := normalizeArchiveCreateRequest(req)
 	if err != nil {
@@ -1137,21 +1228,40 @@ func sourceModeSkipReason(mode fs.FileMode) (string, bool) {
 }
 
 func verifyArchive(ctx context.Context, target string, backupID string) (ArchiveVerifyResult, archiveManifest, error) {
-	if err := ctx.Err(); err != nil {
-		return ArchiveVerifyResult{}, archiveManifest{}, err
+	result, manifest, err := verifyArchiveDir(ctx, archivePath(target, backupID))
+	if result.BackupID == "" {
+		result.BackupID = backupID
 	}
-	manifest, err := loadArchiveManifest(target, backupID)
-	if err != nil {
+	if err != nil || !result.OK {
+		return result, manifest, err
+	}
+	if manifest.Digest != backupID {
 		return ArchiveVerifyResult{
 			OK:       false,
 			BackupID: backupID,
+			Files:    manifestFileCount(manifest),
+			Failure:  &ArchiveVerificationFailure{Entry: "manifest", Reason: "backup id mismatch"},
+		}, archiveManifest{}, nil
+	}
+	return result, manifest, nil
+}
+
+func verifyArchiveDir(ctx context.Context, backupDir string) (ArchiveVerifyResult, archiveManifest, error) {
+	if err := ctx.Err(); err != nil {
+		return ArchiveVerifyResult{}, archiveManifest{}, err
+	}
+	manifest, err := loadArchiveManifestFromDir(backupDir)
+	if err != nil {
+		return ArchiveVerifyResult{
+			OK:       false,
+			BackupID: "",
 			Failure:  &ArchiveVerificationFailure{Entry: "manifest", Reason: err.Error()},
 		}, archiveManifest{}, nil
 	}
 	if err := validateArchiveManifest(manifest); err != nil {
 		return ArchiveVerifyResult{
 			OK:       false,
-			BackupID: backupID,
+			BackupID: manifest.Digest,
 			Failure:  &ArchiveVerificationFailure{Entry: "manifest", Reason: err.Error()},
 		}, archiveManifest{}, nil
 	}
@@ -1163,21 +1273,13 @@ func verifyArchive(ctx context.Context, target string, backupID string) (Archive
 	if computed != manifest.Digest {
 		return ArchiveVerifyResult{
 			OK:       false,
-			BackupID: backupID,
+			BackupID: manifest.Digest,
 			Files:    manifestFileCount(manifest),
 			Failure:  &ArchiveVerificationFailure{Entry: "manifest", Reason: "digest mismatch"},
 		}, archiveManifest{}, nil
 	}
-	if manifest.Digest != backupID {
-		return ArchiveVerifyResult{
-			OK:       false,
-			BackupID: backupID,
-			Files:    manifestFileCount(manifest),
-			Failure:  &ArchiveVerificationFailure{Entry: "manifest", Reason: "backup id mismatch"},
-		}, archiveManifest{}, nil
-	}
 
-	objectsDir := filepath.Join(archivePath(target, backupID), archiveObjectsDirName)
+	objectsDir := filepath.Join(backupDir, archiveObjectsDirName)
 	for _, entry := range manifest.Entries {
 		if entry.Type != "file" {
 			continue
@@ -1189,7 +1291,7 @@ func verifyArchive(ctx context.Context, target string, backupID string) (Archive
 		if err != nil {
 			return ArchiveVerifyResult{
 				OK:       false,
-				BackupID: backupID,
+				BackupID: manifest.Digest,
 				Files:    manifestFileCount(manifest),
 				Failure:  &ArchiveVerificationFailure{Entry: manifestEntryID(entry), Reason: err.Error()},
 			}, archiveManifest{}, nil
@@ -1197,7 +1299,7 @@ func verifyArchive(ctx context.Context, target string, backupID string) (Archive
 		if digest != entry.Digest {
 			return ArchiveVerifyResult{
 				OK:       false,
-				BackupID: backupID,
+				BackupID: manifest.Digest,
 				Files:    manifestFileCount(manifest),
 				Failure:  &ArchiveVerificationFailure{Entry: manifestEntryID(entry), Reason: "content digest mismatch"},
 			}, archiveManifest{}, nil
@@ -1205,7 +1307,7 @@ func verifyArchive(ctx context.Context, target string, backupID string) (Archive
 		if size != entry.Size {
 			return ArchiveVerifyResult{
 				OK:       false,
-				BackupID: backupID,
+				BackupID: manifest.Digest,
 				Files:    manifestFileCount(manifest),
 				Failure:  &ArchiveVerificationFailure{Entry: manifestEntryID(entry), Reason: "content size mismatch"},
 			}, archiveManifest{}, nil
@@ -1214,13 +1316,17 @@ func verifyArchive(ctx context.Context, target string, backupID string) (Archive
 
 	return ArchiveVerifyResult{
 		OK:       true,
-		BackupID: backupID,
+		BackupID: manifest.Digest,
 		Files:    manifestFileCount(manifest),
 	}, manifest, nil
 }
 
 func loadArchiveManifest(target string, backupID string) (archiveManifest, error) {
-	raw, err := os.ReadFile(filepath.Join(archivePath(target, backupID), archiveManifestName))
+	return loadArchiveManifestFromDir(archivePath(target, backupID))
+}
+
+func loadArchiveManifestFromDir(backupDir string) (archiveManifest, error) {
+	raw, err := os.ReadFile(filepath.Join(backupDir, archiveManifestName))
 	if err != nil {
 		return archiveManifest{}, fmt.Errorf("read manifest: %w", err)
 	}

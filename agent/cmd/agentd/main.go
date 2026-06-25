@@ -24,6 +24,7 @@ import (
 	"github.com/vita/agent/capabilities/owner"
 	"github.com/vita/agent/capabilities/pdsrepo"
 	"github.com/vita/agent/capabilities/pdssync"
+	"github.com/vita/agent/capabilities/restore"
 	"github.com/vita/agent/capabilities/services"
 	"github.com/vita/agent/capabilities/storage"
 	nodetime "github.com/vita/agent/capabilities/time"
@@ -89,6 +90,7 @@ func main() {
 		owner.NewCapability(),
 		pdsrepo.NewCapability(),
 		pdssync.NewCapability(),
+		restore.NewCapability(),
 		services.NewCapability(),
 		storage.NewCapability(),
 		nodetime.NewCapability(),
