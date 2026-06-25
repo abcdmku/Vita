@@ -17,7 +17,19 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 DESKTOP PIPELINE COMPLETE end-to-end (TS model → real GPU windows), GPU-verified on VMware.
+## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 DESKTOP PIPELINE end-to-end GPU-verified + 3-LAYER SDK ARCHITECTURE landed (owner directive).
+**3-LAYER DESKTOP ARCHITECTURE 2026-06-25 (owner directive: SDK | CEF engine | swappable UI package).** Wave merged:
+PSD-011 (compositor RGBA-buffer content sink + CPU-readback fallback), PSD-014 (WM tiling/workspaces), PSD-016 (shell
+notifications/tray model), and **PSD-021 (`@vita/desktop-sdk` MERGED)** — the stable public SDK surface (internals
+hidden) + `DesktopUiPackage` manifest/contract + loader with sdkVersion-compat + swap + poisoning-proof known-good
+fallback; trust-boundary hardened (grant-gated ops, reserved built-in component ids, snapshotted host requests vs TOCTOU).
+The screens/UI/theme are now a SWAPPABLE package built on this SDK; CEF is a separate shared engine. DEFERRED (focused
+efforts, not blockers): PSD-013 app-window-host auto-wiring (async-delivery consistency needs a reconcile-to-snapshot
+rewrite; core 15 tests pass), PSD-020 DMABUF zero-copy import (vmwgfx GPU iteration; PSD-011 CPU-readback unblocks CEF
+content meanwhile), PSD-018 TS-rasterizer (ABANDONED — owner chose CEF-renders-everything). NEXT: (1) the FLAGSHIP desktop
+UI as a separate package built on `@vita/desktop-sdk` (the mockup realized, swappable); (2) the focused CEF arc — PSD-000
+CEF/WPE engine bring-up (offline-vendored capsule) + PSD-020 DMABUF; (3) the PSD-013 reconcile-to-snapshot rewrite.
+
 **GPU COMPOSITOR VISIBLE 2026-06-25 (PSD-VIS1 MERGED)** — the compositor renders a desktop-LAYOUT demo (1280x720:
 checkered wallpaper + top panel + 3 windows w/ titlebars = surfaces=8) + a `glReadPixels` readback → PNG (vendored `png`
 crate). GPU-verified on vmwgfx: `present=kms` + `VITA-COMPOSITOR-SHOT`, PNG copied out via vmtoolsd to
