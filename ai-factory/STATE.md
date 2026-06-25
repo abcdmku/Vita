@@ -17,11 +17,15 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 substantially COMPLETE + boot-verified (21 features on main @ 4cc61a0).
-**P1-087 (household six-role model, R2) MERGED + BOOT-VERIFIED 2026-06-24** — `VITA-ROLES roles=6` measured from
-agentd's GET /roles + `VITA-ROLES-REJECT role_forbidden` measured by omission. Held-slices tail RESOLVED: P1-087 in;
-P1-071/P1-083 (catalog install-resolve/exec) + P1-090 (replacement-restore) DEFERRED with documented design follow-ups
-(integrity-semantic circularity; multi-root single-commit redesign). **NEXT = Phase 6 desktop** (separable package).
+## Status: RUNNING — Phases 2–5 COMPLETE (21 features) + Phase 6 HEADLESS DESKTOP CORE COMPLETE (22nd feature) @ main.
+**Phase 6 headless desktop MERGED + (foundation) BOOT-VERIFIED 2026-06-25** — 5 slices: PSD-001 (separable-package
+foundation; `VITA-DESKTOP-PKG` MEASURED on boot — real install/launch/stop + agentd-mediated heartbeat + live
+headless-boundary re-check, OS still passes all 21 markers headless), PSD-004 (WM policy, pure), PSD-005 (composite TSX
+shell — transactional apply/rollback + fallback), PSD-006 (chrome: panel/launcher/notifications), PSD-007 (settings +
+file-manager apps, capability-mediated). The desktop is a separable first-class package; the OS is provably headless
+without it. Deferred (design follow-ups): P1-071/P1-083 (catalog integrity-semantic), P1-090 (replacement-restore
+redesign). **NEXT = Phase 6 GPU wave** (PSD-002 compositor, PSD-000 CEF-OSR spike, PSD-003 texture bridge) verified on
+the VMware Workstation Pro target (PSD-VH1 harness scaffolded on task/PSD-VH1; needs iteration vs a real 3D-accel VM).
 Owner 2026-06-20: **"continue, don't ask again"** + **"more Opus subagents"** + **"build with TS 7 RC"** +
 **"use opus in the meantime then back to codex after reset"** — run continuously; only stop on "stop" / §24.
 Owner (this session): **"finish 2–5"** then **Phase 6 desktop** (separable first-class package; see
