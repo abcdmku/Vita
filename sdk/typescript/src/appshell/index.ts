@@ -272,7 +272,7 @@ export class AppHost {
         runtime.value,
         surfaceId,
         windowId,
-        false,
+        true,
       );
 
       if (!rolledBack.ok) {

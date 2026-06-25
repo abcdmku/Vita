@@ -523,6 +523,69 @@ test("failed launch records rollback surface removal failure for retry without r
   assert.equal(host.snapshot().windowModel.windows.length, 0);
 });
 
+test("createSurface throw after registration is removed or tracked for pending cleanup", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const removeAttempts: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  let failRemove = true;
+  const app = tsxApp();
+  const host = new AppHost({
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    ports: {
+      shell: fakeShellWithCreateSideEffectThrow(
+        created,
+        removed,
+        removeAttempts,
+        () => failRemove,
+      ),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: fakeWm(wmCalls),
+    },
+  });
+
+  const launched = host.launch(app);
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected createSurface rollback rejection");
+  }
+  assert.equal(launched.error.code, "LAUNCH_ROLLBACK_FAILED");
+  assert.match(launched.error.message, /SHELL_SURFACE_CREATE_FAILED/);
+  assert.match(launched.error.message, /SHELL_SURFACE_REMOVE_FAILED/);
+  assert.equal(created.length, 1);
+  assert.deepEqual(removeAttempts, [appSurfaceId(app.id)]);
+  assert.deepEqual(removed, []);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.equal(wmCalls.length, 0);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+
+  const duplicateLaunch = host.launch(app);
+
+  assert.equal(duplicateLaunch.ok, false);
+  if (duplicateLaunch.ok) {
+    assert.fail("expected cleanup-pending launch rejection");
+  }
+  assert.equal(duplicateLaunch.error.code, "APP_LAUNCH_CLEANUP_PENDING");
+  assert.equal(mounts.length, 1);
+
+  failRemove = false;
+
+  const cleanupStop = host.stop(app);
+
+  assert.equal(cleanupStop.ok, true);
+  assert.deepEqual(removeAttempts, [appSurfaceId(app.id), appSurfaceId(app.id)]);
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
 test("stop records pending cleanup when WM close intents fail before advancing the window model", () => {
   const created: ShellSurfaceCreateRequest[] = [];
   const removed: string[] = [];
@@ -778,6 +841,33 @@ function fakeShellWithRemoveFailure(
         kind: "fake-shell-surface",
         surfaceId: request.surfaceId,
       };
+    },
+    removeSurface(surfaceId) {
+      removeAttempts.push(surfaceId);
+
+      if (shouldFailRemove()) {
+        throw new Error("shell surface removal unavailable");
+      }
+
+      removed.push(surfaceId);
+      return {
+        removed: true,
+        surfaceId,
+      };
+    },
+  };
+}
+
+function fakeShellWithCreateSideEffectThrow(
+  created: ShellSurfaceCreateRequest[],
+  removed: string[],
+  removeAttempts: string[],
+  shouldFailRemove: () => boolean,
+): ShellSubstratePort {
+  return {
+    createSurface(request) {
+      created.push(request);
+      throw new Error("shell surface create registered before failure");
     },
     removeSurface(surfaceId) {
       removeAttempts.push(surfaceId);
