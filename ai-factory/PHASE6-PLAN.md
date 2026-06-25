@@ -20,12 +20,15 @@ with preview/apply/rollback + a known-good fallback shell.
 | **PSD-007** | Settings & file-manager as TSX apps. | PSD-005 | R1 | partial |
 | **PSD-008** | Webview app class — TSX/web/WASM/container apps as ONE windowed-surface class on the capsule runtimes. | PSD-005, capsule runtimes | R2 | partial |
 
-## Critical infra dependency (surface to owner)
-PSD-000 (the spike) + PSD-002/003 (compositor + texture bridge) require **real GPU/display hardware** to verify
-accelerated OSR / DRM-KMS / 60fps. The current verification floor (headless Borg51 WSL + headless QEMU asserting serial
-markers) **cannot** verify GPU compositing. Phase 6 GPU slices need a display/GPU test environment (real hardware, or a
-GPU-passthrough VM). **PSD-001 + the TS-logic parts of PSD-004/005 are verifiable headless now**; the GPU path is gated
-on this infra decision. Build PSD-001 first (foundation, headless), resolve GPU-test infra before PSD-000/002/003.
+## GPU verification target: VMware Workstation Pro (owner-provided, 2026-06-24)
+PSD-000 (spike) + PSD-002/003 (compositor + texture bridge) require **real GPU/display** to verify accelerated OSR /
+DRM-KMS / 60fps — the headless Borg51 WSL + headless QEMU serial-marker floor **cannot** verify GPU compositing. Owner
+resolved this: **use VMware Workstation Pro** as the GPU/display test target (virtual GPU w/ 3D accel + a real display).
+So the GPU slices get a verification floor there (build the desktop image → boot in a VMware VM with 3D acceleration →
+verify accelerated-OSR → shared GPU texture → composite, drag/animate a heavy web app, web NOT repainting; 60fps is
+best-effort on the virtual GPU but the render/composite-split correctness is verifiable). **PSD-001 + the TS-logic parts
+of PSD-004/005 stay headless on Borg51** (faster loop); the GPU path runs on the VMware target. TODO: stand up the Vita
+VMware VM (3D accel on) + a driver analogous to `wsl-verify.sh` that boots it and checks the desktop markers.
 
 ## Build order
 PSD-001 (now, headless) → [resolve GPU-test infra] → PSD-000 spike → PSD-002 → PSD-003 → PSD-004 → PSD-005 →
