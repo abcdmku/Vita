@@ -68,3 +68,18 @@ capture is treated as a guest op. Fix the screenshot path:
    capture AND for a human to watch in the GUI.
 Verify: build (rust-in-docker) + the orchestrator re-images, boots on VMware, and `vmrun captureScreen` SUCCEEDS → a PNG
 of the GPU-rendered desktop layout. 22 markers + VITA-COMPOSITOR present=kms intact.
+
+## REVISION 2 (screenshot shows the CONSOLE, not the compositor — VT takeover needed — 2026-06-25)
+The compositor composites + KMS-presents (`present=kms` confirmed), but the captured PNG shows the boot text console
+(getty login prompt), NOT the compositor's layout — because the compositor doesn't take EXCLUSIVE display/VT ownership,
+so the kernel fbcon + the getty on tty1 keep drawing to the same framebuffer.
+FIX (the correct compositor behavior, for production too): during the demo/run, the compositor must OWN the display:
+1. Open the active/controlling VT, save its mode, set it to **KD_GRAPHICS** (suspends the kernel text console + getty
+   rendering on that VT), and set KDSKBMODE to raw/off so the tty doesn't interfere; restore KD_TEXT on exit.
+2. Hold DRM master + keep the composited frame as the active scanout for the whole `--hold-seconds` window (re-present /
+   keep the CRTC bound) so nothing redraws over it.
+3. Fail-closed if the VT/DRM ownership can't be acquired (FAILSAFE), don't silently present to a non-visible plane.
+Also: on the VERIFICATION image, disable `getty@tty1` (the markers go to the SERIAL console, which the harness reads —
+the framebuffer is the compositor's). Keep `console=ttyS0` for serial markers.
+Verify: orchestrator re-images + boots on VMware + captures DURING the hold → the PNG shows the COMPOSITOR's desktop
+layout (wallpaper + panel + windows), not the console. VITA-COMPOSITOR present=kms intact.
