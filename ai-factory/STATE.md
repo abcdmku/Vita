@@ -17,7 +17,13 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 COMPLETE (21 features) + Phase 6 HEADLESS DESKTOP CORE COMPLETE (22nd feature) @ main.
+## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 HEADLESS DESKTOP CORE (22) + GPU COMPOSITOR PAINTS on VMware.
+**GPU COMPOSITOR GPU-VERIFIED 2026-06-25** — PSD-002 built for linux (rust-in-docker) → baked → booted on a 3D-accel
+VMware VM → MEASURED `VITA-COMPOSITOR: gpu=vmwgfx surfaces=2 composited=OK reposition=no-repaint present=kms damage=OK
+status=OK`. Real vmwgfx GPU open + DRM/KMS modeset + GBM scanout + page-flip present + no-repaint reposition — the
+render/composite split is REAL on the GPU. Build floors earned their keep (caught the linux compile bug + the input
+short-circuit). PSD-008 (unified windowed-app model) in review. NEXT GPU wave: PSD-003 (CEF/web → GPU texture bridge),
+then shell/WM drive the compositor → a visible desktop.
 **Phase 6 headless desktop MERGED + (foundation) BOOT-VERIFIED 2026-06-25** — 5 slices: PSD-001 (separable-package
 foundation; `VITA-DESKTOP-PKG` MEASURED on boot — real install/launch/stop + agentd-mediated heartbeat + live
 headless-boundary re-check, OS still passes all 21 markers headless), PSD-004 (WM policy, pure), PSD-005 (composite TSX
