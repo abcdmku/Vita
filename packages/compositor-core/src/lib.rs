@@ -1,0 +1,1027 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+
+pub mod platform;
+
+pub const VITA_COMPOSITOR_MARKER: &str = "VITA-COMPOSITOR";
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum CompositorError {
+    Backend(String),
+    DuplicatePlacement(SurfaceId),
+    DuplicateSurface(SurfaceId),
+    InvalidDimensions { width: u32, height: u32 },
+    InvalidOpacity,
+    InvalidSurfaceId(String),
+    Protocol(String),
+    UnknownSurface(SurfaceId),
+    Unavailable(String),
+    Verification(String),
+}
+
+impl Display for CompositorError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Backend(reason) => write!(f, "backend error: {reason}"),
+            Self::DuplicatePlacement(id) => write!(f, "duplicate placement for surface {id}"),
+            Self::DuplicateSurface(id) => write!(f, "duplicate surface {id}"),
+            Self::InvalidDimensions { width, height } => {
+                write!(f, "invalid dimensions {width}x{height}")
+            }
+            Self::InvalidOpacity => write!(f, "invalid opacity"),
+            Self::InvalidSurfaceId(id) => write!(f, "invalid surface id {id:?}"),
+            Self::Protocol(reason) => write!(f, "protocol error: {reason}"),
+            Self::UnknownSurface(id) => write!(f, "unknown surface {id}"),
+            Self::Unavailable(reason) => write!(f, "unavailable: {reason}"),
+            Self::Verification(reason) => write!(f, "verification failed: {reason}"),
+        }
+    }
+}
+
+impl Error for CompositorError {}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SurfaceId(String);
+
+impl SurfaceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, CompositorError> {
+        let value = value.into();
+
+        if value.is_empty() || value.len() > 128 {
+            return Err(CompositorError::InvalidSurfaceId(value));
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+        {
+            return Err(CompositorError::InvalidSurfaceId(value));
+        }
+
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for SurfaceId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TextureFormat {
+    Rgba8Unorm,
+}
+
+impl TextureFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rgba8Unorm => "rgba8-unorm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TextureHandleKind {
+    DrmPrimeFd,
+    OpaqueNativeTexture,
+    TestOnly,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GpuTextureHandle {
+    pub kind: TextureHandleKind,
+    pub value: i64,
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SurfaceRegistration {
+    pub surface_id: SurfaceId,
+    pub texture: GpuTextureHandle,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, CompositorError> {
+        validate_dimensions(width, height)?;
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placement {
+    pub surface_id: SurfaceId,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub z_index: i32,
+    pub opacity: f32,
+}
+
+impl Placement {
+    pub fn new(
+        surface_id: SurfaceId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        z_index: i32,
+    ) -> Result<Self, CompositorError> {
+        Self::with_opacity(surface_id, x, y, width, height, z_index, 1.0)
+    }
+
+    pub fn with_opacity(
+        surface_id: SurfaceId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        z_index: i32,
+        opacity: f32,
+    ) -> Result<Self, CompositorError> {
+        validate_dimensions(width, height)?;
+        if !(0.0..=1.0).contains(&opacity) || !opacity.is_finite() {
+            return Err(CompositorError::InvalidOpacity);
+        }
+
+        Ok(Self {
+            surface_id,
+            x,
+            y,
+            width,
+            height,
+            z_index,
+            opacity,
+        })
+    }
+
+    pub fn rect(&self) -> Rect {
+        Rect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PointerButtonState {
+    Pressed,
+    Released,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum InputEvent {
+    Key {
+        key_code: u32,
+        pressed: bool,
+    },
+    PointerButton {
+        button: u32,
+        state: PointerButtonState,
+    },
+    PointerMotion {
+        dx_micropixels: i64,
+        dy_micropixels: i64,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum TestPattern {
+    Solid { rgba: [u8; 4] },
+    Checkerboard { a: [u8; 4], b: [u8; 4], tile: u32 },
+}
+
+impl TestPattern {
+    pub fn rgba_bytes(&self, width: u32, height: u32) -> Result<Vec<u8>, CompositorError> {
+        validate_dimensions(width, height)?;
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or(CompositorError::InvalidDimensions { width, height })?;
+        let byte_count = pixel_count
+            .checked_mul(4)
+            .ok_or(CompositorError::InvalidDimensions { width, height })?;
+        let mut bytes = vec![0_u8; byte_count as usize];
+
+        match self {
+            Self::Solid { rgba } => {
+                for pixel in bytes.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(rgba);
+                }
+            }
+            Self::Checkerboard { a, b, tile } => {
+                if *tile == 0 {
+                    return Err(CompositorError::InvalidDimensions { width, height });
+                }
+                for y in 0..height {
+                    for x in 0..width {
+                        let tile_x = x / *tile;
+                        let tile_y = y / *tile;
+                        let color = if (tile_x + tile_y) % 2 == 0 { a } else { b };
+                        let offset = ((y * width + x) * 4) as usize;
+                        bytes[offset..offset + 4].copy_from_slice(color);
+                    }
+                }
+            }
+        }
+
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DamageReport {
+    pub changed_surfaces: Vec<SurfaceId>,
+    pub rects: Vec<Rect>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompositeReport {
+    pub surfaces: usize,
+    pub composited: bool,
+    pub damage_rects: usize,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum PresentationModeKind {
+    Kms,
+    Recording,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct PresentationMode {
+    kind: PresentationModeKind,
+}
+
+impl PresentationMode {
+    pub const RECORDING: Self = Self {
+        kind: PresentationModeKind::Recording,
+    };
+    pub const UNVERIFIED: Self = Self {
+        kind: PresentationModeKind::Unverified,
+    };
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) const KMS: Self = Self {
+        kind: PresentationModeKind::Kms,
+    };
+
+    pub fn marker_token(self) -> &'static str {
+        match self.kind {
+            PresentationModeKind::Kms => "kms",
+            PresentationModeKind::Recording => "recording",
+            PresentationModeKind::Unverified => "unverified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InputAvailability {
+    Available,
+    Unavailable,
+    Unverified,
+}
+
+impl InputAvailability {
+    pub fn marker_token(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RenderSurface<T> {
+    pub id: SurfaceId,
+    pub width: u32,
+    pub height: u32,
+    pub texture: T,
+}
+
+pub trait RenderBackend {
+    type Texture: Clone;
+
+    fn backend_name(&self) -> &str;
+    fn presentation_mode(&self) -> PresentationMode;
+    fn input_availability(&self) -> InputAvailability {
+        InputAvailability::Unverified
+    }
+
+    fn create_test_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        pattern: &TestPattern,
+    ) -> Result<Self::Texture, CompositorError>;
+
+    fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle;
+
+    fn composite(
+        &mut self,
+        surfaces: &[RenderSurface<Self::Texture>],
+        placements: &[Placement],
+        damage: &[Rect],
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<CompositeReport, CompositorError>;
+
+    fn read_texture_rgba_for_test(
+        &mut self,
+        texture: &Self::Texture,
+    ) -> Result<Vec<u8>, CompositorError>;
+
+    fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError>;
+
+    fn source_repaint_count(&self) -> u64;
+}
+
+#[derive(Debug, Clone)]
+struct SurfaceState<T> {
+    id: SurfaceId,
+    width: u32,
+    height: u32,
+    texture: T,
+}
+
+pub struct Compositor<B: RenderBackend> {
+    backend: B,
+    output_width: u32,
+    output_height: u32,
+    surfaces: BTreeMap<SurfaceId, SurfaceState<B::Texture>>,
+    placements: Vec<Placement>,
+    focus: Option<SurfaceId>,
+}
+
+impl<B: RenderBackend> Compositor<B> {
+    pub fn new(backend: B, output_width: u32, output_height: u32) -> Result<Self, CompositorError> {
+        validate_dimensions(output_width, output_height)?;
+        Ok(Self {
+            backend,
+            output_width,
+            output_height,
+            surfaces: BTreeMap::new(),
+            placements: Vec::new(),
+            focus: None,
+        })
+    }
+
+    pub fn backend_name(&self) -> &str {
+        self.backend.backend_name()
+    }
+
+    pub fn presentation_mode(&self) -> PresentationMode {
+        self.backend.presentation_mode()
+    }
+
+    pub fn register_test_surface(
+        &mut self,
+        id: SurfaceId,
+        width: u32,
+        height: u32,
+        pattern: TestPattern,
+    ) -> Result<SurfaceRegistration, CompositorError> {
+        validate_dimensions(width, height)?;
+        if self.surfaces.contains_key(&id) {
+            return Err(CompositorError::DuplicateSurface(id));
+        }
+
+        let texture = self.backend.create_test_texture(width, height, &pattern)?;
+        let handle = self.backend.export_handle(&texture);
+        self.surfaces.insert(
+            id.clone(),
+            SurfaceState {
+                id: id.clone(),
+                width,
+                height,
+                texture,
+            },
+        );
+
+        Ok(SurfaceRegistration {
+            surface_id: id,
+            texture: handle,
+        })
+    }
+
+    pub fn update_placements(
+        &mut self,
+        mut placements: Vec<Placement>,
+    ) -> Result<DamageReport, CompositorError> {
+        let mut seen = BTreeSet::new();
+        for placement in &placements {
+            if !self.surfaces.contains_key(&placement.surface_id) {
+                return Err(CompositorError::UnknownSurface(
+                    placement.surface_id.clone(),
+                ));
+            }
+            if !seen.insert(placement.surface_id.clone()) {
+                return Err(CompositorError::DuplicatePlacement(
+                    placement.surface_id.clone(),
+                ));
+            }
+        }
+
+        placements.sort_by(|left, right| {
+            left.z_index
+                .cmp(&right.z_index)
+                .then_with(|| left.surface_id.cmp(&right.surface_id))
+        });
+
+        let old_by_id = placement_map(&self.placements);
+        let new_by_id = placement_map(&placements);
+        let mut ids = BTreeSet::new();
+        ids.extend(old_by_id.keys().cloned());
+        ids.extend(new_by_id.keys().cloned());
+
+        let mut changed_surfaces = Vec::new();
+        let mut rects = Vec::new();
+        for id in ids {
+            let old = old_by_id.get(&id);
+            let new = new_by_id.get(&id);
+            if old == new {
+                continue;
+            }
+            changed_surfaces.push(id);
+            if let Some(old_placement) = old {
+                push_unique_rect(&mut rects, old_placement.rect());
+            }
+            if let Some(new_placement) = new {
+                push_unique_rect(&mut rects, new_placement.rect());
+            }
+        }
+
+        self.placements = placements;
+        Ok(DamageReport {
+            changed_surfaces,
+            rects,
+        })
+    }
+
+    pub fn composite(&mut self, damage: &DamageReport) -> Result<CompositeReport, CompositorError> {
+        let surfaces = self
+            .surfaces
+            .values()
+            .map(|surface| RenderSurface {
+                id: surface.id.clone(),
+                width: surface.width,
+                height: surface.height,
+                texture: surface.texture.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        self.backend.composite(
+            &surfaces,
+            &self.placements,
+            &damage.rects,
+            self.output_width,
+            self.output_height,
+        )
+    }
+
+    pub fn set_focus(&mut self, focus: Option<SurfaceId>) -> Result<(), CompositorError> {
+        if let Some(id) = &focus {
+            if !self.surfaces.contains_key(id) {
+                return Err(CompositorError::UnknownSurface(id.clone()));
+            }
+        }
+        self.focus = focus;
+        Ok(())
+    }
+
+    pub fn focus(&self) -> Option<&SurfaceId> {
+        self.focus.as_ref()
+    }
+
+    pub fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
+        self.backend.poll_input_events()
+    }
+
+    pub fn surface_readback_rgba_for_test(
+        &mut self,
+        id: &SurfaceId,
+    ) -> Result<Vec<u8>, CompositorError> {
+        let texture = self
+            .surfaces
+            .get(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?
+            .texture
+            .clone();
+        self.backend.read_texture_rgba_for_test(&texture)
+    }
+
+    pub fn source_repaint_count(&self) -> u64 {
+        self.backend.source_repaint_count()
+    }
+
+    pub fn surface_count(&self) -> usize {
+        self.surfaces.len()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SelfTestReport {
+    pub gpu: String,
+    pub surfaces: usize,
+    pub composited_ok: bool,
+    pub reposition_no_repaint: bool,
+    pub present: PresentationMode,
+    pub damage_ok: bool,
+    pub input: InputAvailability,
+    pub status: SelfTestStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SelfTestStatus {
+    Ok,
+    Failsafe,
+}
+
+impl SelfTestReport {
+    pub fn marker_line(&self) -> String {
+        match self.status {
+            SelfTestStatus::Ok => format!(
+                "{VITA_COMPOSITOR_MARKER}: gpu={} surfaces={} composited=OK reposition=no-repaint present={} damage=OK status=OK input={}",
+                marker_token(&self.gpu),
+                self.surfaces,
+                self.present.marker_token(),
+                self.input.marker_token()
+            ),
+            SelfTestStatus::Failsafe => format!(
+                "{VITA_COMPOSITOR_MARKER}: gpu={} surfaces={} composited={} reposition={} present={} damage={} status=FAILSAFE reason={} input={}",
+                marker_token(&self.gpu),
+                self.surfaces,
+                if self.composited_ok { "OK" } else { "FAIL" },
+                if self.reposition_no_repaint {
+                    "no-repaint"
+                } else {
+                    "unverified"
+                },
+                self.present.marker_token(),
+                if self.damage_ok { "OK" } else { "FAIL" },
+                marker_token(self.reason.as_deref().unwrap_or("unavailable")),
+                self.input.marker_token()
+            ),
+        }
+    }
+}
+
+pub fn failsafe_report(gpu: impl Into<String>, reason: impl Into<String>) -> SelfTestReport {
+    failsafe_report_for_gpu(
+        gpu,
+        PresentationMode::UNVERIFIED,
+        InputAvailability::Unverified,
+        reason,
+    )
+}
+
+fn failsafe_report_for_gpu(
+    gpu: impl Into<String>,
+    present: PresentationMode,
+    input: InputAvailability,
+    reason: impl Into<String>,
+) -> SelfTestReport {
+    SelfTestReport {
+        gpu: gpu.into(),
+        surfaces: 0,
+        composited_ok: false,
+        reposition_no_repaint: false,
+        present,
+        damage_ok: false,
+        input,
+        status: SelfTestStatus::Failsafe,
+        reason: Some(reason.into()),
+    }
+}
+
+pub fn run_reposition_self_test_or_failsafe<B: RenderBackend>(
+    backend: Result<B, CompositorError>,
+) -> SelfTestReport {
+    let backend = match backend {
+        Ok(backend) => backend,
+        Err(error) => {
+            return failsafe_report("unavailable", failsafe_reason(&error));
+        }
+    };
+    let gpu = backend.backend_name().to_owned();
+    let present = backend.presentation_mode();
+    let input = backend.input_availability();
+
+    match run_reposition_self_test(backend) {
+        Ok(report) => report,
+        Err(error) => failsafe_report_for_gpu(gpu, present, input, failsafe_reason(&error)),
+    }
+}
+
+pub fn run_reposition_self_test<B: RenderBackend>(
+    backend: B,
+) -> Result<SelfTestReport, CompositorError> {
+    let gpu = backend.backend_name().to_owned();
+    let input = backend.input_availability();
+    let mut compositor = Compositor::new(backend, 96, 64)?;
+    let present = compositor.presentation_mode();
+    let surface_a = SurfaceId::new("surface-a")?;
+    let surface_b = SurfaceId::new("surface-b")?;
+
+    compositor.register_test_surface(
+        surface_a.clone(),
+        16,
+        16,
+        TestPattern::Checkerboard {
+            a: [255, 0, 0, 255],
+            b: [0, 255, 0, 255],
+            tile: 4,
+        },
+    )?;
+    compositor.register_test_surface(
+        surface_b.clone(),
+        12,
+        12,
+        TestPattern::Solid {
+            rgba: [0, 0, 255, 255],
+        },
+    )?;
+
+    let initial = compositor.update_placements(vec![
+        Placement::new(surface_a.clone(), 4, 4, 16, 16, 0)?,
+        Placement::new(surface_b, 32, 4, 12, 12, 1)?,
+    ])?;
+    let initial_report = compositor.composite(&initial)?;
+    let before_repaint_count = compositor.source_repaint_count();
+    let before = compositor.surface_readback_rgba_for_test(&surface_a)?;
+
+    let moved = compositor.update_placements(vec![
+        Placement::new(surface_a.clone(), 40, 24, 16, 16, 0)?,
+        Placement::new(SurfaceId::new("surface-b")?, 32, 4, 12, 12, 1)?,
+    ])?;
+    let moved_report = compositor.composite(&moved)?;
+    let after = compositor.surface_readback_rgba_for_test(&surface_a)?;
+    let after_repaint_count = compositor.source_repaint_count();
+
+    let damage_ok = moved.rects == vec![Rect::new(4, 4, 16, 16)?, Rect::new(40, 24, 16, 16)?];
+    let reposition_no_repaint = before == after && before_repaint_count == after_repaint_count;
+    let composited_ok = initial_report.composited && moved_report.composited;
+
+    if !composited_ok {
+        return Err(CompositorError::Verification(
+            "composite did not complete".to_owned(),
+        ));
+    }
+    if !damage_ok {
+        return Err(CompositorError::Verification(
+            "move damage did not cover old and new rects".to_owned(),
+        ));
+    }
+    if !reposition_no_repaint {
+        return Err(CompositorError::Verification(
+            "surface content changed during reposition".to_owned(),
+        ));
+    }
+
+    Ok(SelfTestReport {
+        gpu,
+        surfaces: compositor.surface_count(),
+        composited_ok,
+        reposition_no_repaint,
+        present,
+        damage_ok,
+        input,
+        status: SelfTestStatus::Ok,
+        reason: None,
+    })
+}
+
+fn validate_dimensions(width: u32, height: u32) -> Result<(), CompositorError> {
+    if width == 0 || height == 0 {
+        return Err(CompositorError::InvalidDimensions { width, height });
+    }
+    Ok(())
+}
+
+fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
+    let mut map = BTreeMap::new();
+    for placement in placements {
+        map.insert(placement.surface_id.clone(), placement);
+    }
+    map
+}
+
+fn push_unique_rect(rects: &mut Vec<Rect>, rect: Rect) {
+    if !rects.contains(&rect) {
+        rects.push(rect);
+    }
+}
+
+fn marker_token(value: &str) -> String {
+    let token = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if token.is_empty() {
+        "unknown".to_owned()
+    } else {
+        token
+    }
+}
+
+fn failsafe_reason(error: &CompositorError) -> String {
+    match error {
+        CompositorError::Unavailable(reason) | CompositorError::Backend(reason)
+            if reason.starts_with("input_unavailable") =>
+        {
+            "input_unavailable".to_owned()
+        }
+        _ => error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_changes_damage_without_repainting_source_texture() {
+        let report = run_reposition_self_test(RecordingBackend::new("test-gpu"))
+            .expect("self-test should pass");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 2);
+        assert!(report.reposition_no_repaint);
+        assert_eq!(
+            report.marker_line(),
+            "VITA-COMPOSITOR: gpu=test-gpu surfaces=2 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unverified"
+        );
+    }
+
+    #[test]
+    fn recording_backend_never_emits_kms_ok_acceptance_marker() {
+        let report = run_reposition_self_test(RecordingBackend::new("vmwgfx"))
+            .expect("recording self-test should pass");
+        let marker = report.marker_line();
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.present, PresentationMode::RECORDING);
+        assert!(marker.contains("present=recording damage=OK status=OK"));
+        assert!(!marker.contains("present=kms damage=OK status=OK"));
+    }
+
+    #[test]
+    fn self_test_does_not_failsafe_when_input_is_unavailable() {
+        let report = run_reposition_self_test(RecordingBackend::with_input(
+            "vmwgfx",
+            InputAvailability::Unavailable,
+        ))
+        .expect("GPU self-test should not depend on input availability");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.input, InputAvailability::Unavailable);
+        assert_eq!(
+            report.marker_line(),
+            "VITA-COMPOSITOR: gpu=vmwgfx surfaces=2 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unavailable"
+        );
+    }
+
+    #[test]
+    fn self_test_gpu_path_failure_still_returns_failsafe_marker() {
+        let report =
+            run_reposition_self_test_or_failsafe(Ok(RecordingBackend::failing_composite("vmwgfx")));
+
+        assert_eq!(report.status, SelfTestStatus::Failsafe);
+        assert_eq!(report.gpu, "vmwgfx");
+        assert_eq!(report.present, PresentationMode::RECORDING);
+        let marker = report.marker_line();
+        assert!(marker.starts_with("VITA-COMPOSITOR: gpu=vmwgfx "));
+        assert!(marker.contains("status=FAILSAFE"));
+        assert!(marker.contains("reason=unavailable:_injected_composite_failure"));
+    }
+
+    #[test]
+    fn input_unavailable_failure_uses_stable_failsafe_reason() {
+        let report = run_reposition_self_test_or_failsafe::<RecordingBackend>(Err(
+            CompositorError::Unavailable("input_unavailable: failed to load libinput".to_owned()),
+        ));
+
+        assert_eq!(report.status, SelfTestStatus::Failsafe);
+        assert_eq!(report.reason.as_deref(), Some("input_unavailable"));
+        assert_eq!(
+            report.marker_line(),
+            "VITA-COMPOSITOR: gpu=unavailable surfaces=0 composited=FAIL reposition=unverified present=unverified damage=FAIL status=FAILSAFE reason=input_unavailable input=unverified"
+        );
+    }
+
+    #[test]
+    fn placement_update_rejects_unknown_and_duplicate_surfaces() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 64, 64).unwrap();
+        let surface = SurfaceId::new("surface-a").unwrap();
+        compositor
+            .register_test_surface(
+                surface.clone(),
+                8,
+                8,
+                TestPattern::Solid {
+                    rgba: [1, 2, 3, 255],
+                },
+            )
+            .unwrap();
+
+        let unknown = SurfaceId::new("missing").unwrap();
+        let unknown_err = compositor
+            .update_placements(vec![Placement::new(unknown.clone(), 0, 0, 8, 8, 0).unwrap()])
+            .unwrap_err();
+        assert_eq!(unknown_err, CompositorError::UnknownSurface(unknown));
+
+        let duplicate_err = compositor
+            .update_placements(vec![
+                Placement::new(surface.clone(), 0, 0, 8, 8, 0).unwrap(),
+                Placement::new(surface.clone(), 2, 2, 8, 8, 1).unwrap(),
+            ])
+            .unwrap_err();
+        assert_eq!(duplicate_err, CompositorError::DuplicatePlacement(surface));
+    }
+
+    #[test]
+    fn focus_is_mechanism_only_and_requires_registered_surface() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 64, 64).unwrap();
+        let surface = SurfaceId::new("surface-a").unwrap();
+        compositor
+            .register_test_surface(
+                surface.clone(),
+                8,
+                8,
+                TestPattern::Solid {
+                    rgba: [1, 2, 3, 255],
+                },
+            )
+            .unwrap();
+
+        compositor.set_focus(Some(surface.clone())).unwrap();
+        assert_eq!(compositor.focus(), Some(&surface));
+        compositor.set_focus(None).unwrap();
+        assert_eq!(compositor.focus(), None);
+
+        let missing = SurfaceId::new("missing").unwrap();
+        assert_eq!(
+            compositor.set_focus(Some(missing.clone())).unwrap_err(),
+            CompositorError::UnknownSurface(missing)
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingTexture {
+        id: u64,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    }
+
+    struct RecordingBackend {
+        name: String,
+        next_id: u64,
+        repaint_count: u64,
+        fail_composite: bool,
+        input: InputAvailability,
+    }
+
+    impl RecordingBackend {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_owned(),
+                next_id: 1,
+                repaint_count: 0,
+                fail_composite: false,
+                input: InputAvailability::Unverified,
+            }
+        }
+
+        fn failing_composite(name: &str) -> Self {
+            Self {
+                name: name.to_owned(),
+                next_id: 1,
+                repaint_count: 0,
+                fail_composite: true,
+                input: InputAvailability::Unverified,
+            }
+        }
+
+        fn with_input(name: &str, input: InputAvailability) -> Self {
+            Self {
+                name: name.to_owned(),
+                next_id: 1,
+                repaint_count: 0,
+                fail_composite: false,
+                input,
+            }
+        }
+    }
+
+    impl RenderBackend for RecordingBackend {
+        type Texture = RecordingTexture;
+
+        fn backend_name(&self) -> &str {
+            &self.name
+        }
+
+        fn presentation_mode(&self) -> PresentationMode {
+            PresentationMode::RECORDING
+        }
+
+        fn input_availability(&self) -> InputAvailability {
+            self.input
+        }
+
+        fn create_test_texture(
+            &mut self,
+            width: u32,
+            height: u32,
+            pattern: &TestPattern,
+        ) -> Result<Self::Texture, CompositorError> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.repaint_count += 1;
+
+            Ok(RecordingTexture {
+                id,
+                width,
+                height,
+                bytes: pattern.rgba_bytes(width, height)?,
+            })
+        }
+
+        fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {
+            GpuTextureHandle {
+                kind: TextureHandleKind::TestOnly,
+                value: texture.id as i64,
+                width: texture.width,
+                height: texture.height,
+                format: TextureFormat::Rgba8Unorm,
+            }
+        }
+
+        fn composite(
+            &mut self,
+            _surfaces: &[RenderSurface<Self::Texture>],
+            _placements: &[Placement],
+            damage: &[Rect],
+            _output_width: u32,
+            _output_height: u32,
+        ) -> Result<CompositeReport, CompositorError> {
+            if self.fail_composite {
+                return Err(CompositorError::Unavailable(
+                    "injected composite failure".to_owned(),
+                ));
+            }
+
+            Ok(CompositeReport {
+                surfaces: _placements.len(),
+                composited: true,
+                damage_rects: damage.len(),
+            })
+        }
+
+        fn read_texture_rgba_for_test(
+            &mut self,
+            texture: &Self::Texture,
+        ) -> Result<Vec<u8>, CompositorError> {
+            Ok(texture.bytes.clone())
+        }
+
+        fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
+            Ok(Vec::new())
+        }
+
+        fn source_repaint_count(&self) -> u64 {
+            self.repaint_count
+        }
+    }
+}

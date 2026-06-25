@@ -5,6 +5,9 @@ export const DESKTOP_PACKAGE_CLASS = "desktop";
 export const DESKTOP_SUBSTRATE_INTERFACE_ID = "com.vita.desktop-substrate";
 export const DESKTOP_SUBSTRATE_VERSION = "1.0.0";
 export const DESKTOP_PACKAGE_MARKER = "VITA-DESKTOP-PKG";
+export const DESKTOP_COMPOSITOR_INTERFACE_ID = "com.vita.desktop-substrate.compositor";
+export const DESKTOP_COMPOSITOR_VERSION = "0.1.0";
+export const DESKTOP_COMPOSITOR_MARKER = "VITA-COMPOSITOR";
 
 export type DesktopPackageClass = typeof DESKTOP_PACKAGE_CLASS;
 export type DesktopCapsuleExecutionPackageClass = "ts-service";
@@ -16,6 +19,24 @@ export type DesktopSubstrateCapability =
   | "capsule.execute"
   | "capsule.lifecycle"
   | "desktop.session";
+export type DesktopCompositorOperation =
+  | "register-surface"
+  | "update-placements"
+  | "set-focus"
+  | "input-events";
+export type DesktopCompositorCapability =
+  | "gpu-texture.registry"
+  | "gpu-texture.composite"
+  | "desktop.input";
+export type DesktopCompositorMode = "drm-kms" | "headless-test";
+export type DesktopCompositorStatus = "OK" | "FAILSAFE";
+export type DesktopCompositorPresent = "kms" | "recording" | "unverified";
+export type DesktopGpuTextureFormat = "rgba8-unorm";
+export type DesktopGpuTextureHandleKind =
+  | "drm-prime-fd"
+  | "opaque-native-texture"
+  | "test-only";
+export type DesktopInputButtonState = "pressed" | "released";
 
 export interface DesktopSubstrateDescriptor {
   readonly interfaceId: typeof DESKTOP_SUBSTRATE_INTERFACE_ID;
@@ -30,6 +51,109 @@ export interface DesktopSubstrateRequirement {
   readonly version: typeof DESKTOP_SUBSTRATE_VERSION;
   readonly operations: readonly DesktopSubstrateOperation[];
   readonly capabilities: readonly DesktopSubstrateCapability[];
+}
+
+export interface DesktopCompositorSubstrateDescriptor {
+  readonly interfaceId: typeof DESKTOP_SUBSTRATE_INTERFACE_ID;
+  readonly extensionInterfaceId: typeof DESKTOP_COMPOSITOR_INTERFACE_ID;
+  readonly version: typeof DESKTOP_COMPOSITOR_VERSION;
+  readonly mode: DesktopCompositorMode;
+  readonly operations: readonly DesktopCompositorOperation[];
+  readonly capabilities: readonly DesktopCompositorCapability[];
+  readonly cpuReadback: "tests-screenshots-only";
+}
+
+export interface DesktopGpuTextureHandle {
+  readonly kind: DesktopGpuTextureHandleKind;
+  readonly value: number;
+  readonly width: number;
+  readonly height: number;
+  readonly format: DesktopGpuTextureFormat;
+}
+
+export interface DesktopSurfaceRegistrationRequest {
+  readonly surfaceId: string;
+  readonly width: number;
+  readonly height: number;
+  readonly format: DesktopGpuTextureFormat;
+}
+
+export interface DesktopSurfaceRegistration {
+  readonly surfaceId: string;
+  readonly texture: DesktopGpuTextureHandle;
+}
+
+export interface DesktopSurfacePlacement {
+  readonly surfaceId: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly zIndex: number;
+  readonly opacity?: number;
+}
+
+export interface DesktopDamageRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface DesktopPlacementUpdate {
+  readonly sequence: number;
+  readonly placements: readonly DesktopSurfacePlacement[];
+}
+
+export interface DesktopPlacementUpdateResult {
+  readonly sequence: number;
+  readonly composited: true;
+  readonly damage: readonly DesktopDamageRect[];
+}
+
+export interface DesktopFocusRequest {
+  readonly surfaceId: string | null;
+}
+
+export type DesktopInputEvent =
+  | {
+      readonly kind: "key";
+      readonly keyCode: number;
+      readonly pressed: boolean;
+    }
+  | {
+      readonly kind: "pointer-button";
+      readonly button: number;
+      readonly state: DesktopInputButtonState;
+    }
+  | {
+      readonly kind: "pointer-motion";
+      readonly dxMicropixels: number;
+      readonly dyMicropixels: number;
+    };
+
+export interface DesktopCompositorMeasurement {
+  readonly marker: typeof DESKTOP_COMPOSITOR_MARKER;
+  readonly gpu: string;
+  readonly surfaces: number;
+  readonly composited: "OK" | "FAIL";
+  readonly reposition: "no-repaint" | "unverified";
+  readonly present: DesktopCompositorPresent;
+  readonly damage: "OK" | "FAIL";
+  readonly status: DesktopCompositorStatus;
+  readonly reason?: string;
+}
+
+export interface DesktopNativeCompositorSubstrate {
+  readonly descriptor: DesktopCompositorSubstrateDescriptor;
+  readonly registerSurface: (
+    request: DesktopSurfaceRegistrationRequest,
+  ) => Promise<DesktopSurfaceRegistration>;
+  readonly updatePlacements: (
+    update: DesktopPlacementUpdate,
+  ) => Promise<DesktopPlacementUpdateResult>;
+  readonly setFocus: (request: DesktopFocusRequest) => Promise<void>;
+  readonly inputEvents: AsyncIterable<DesktopInputEvent>;
 }
 
 export interface DesktopCapsuleRuntimeRef {
@@ -742,6 +866,32 @@ export function formatDesktopPackageMarker(proof: DesktopPackageProof): string {
     "class=desktop installed=FAIL launched=FAIL heartbeat=FAIL " +
     `headless-boundary=FAIL status=FAILSAFE reason=${reason}`
   );
+}
+
+export function formatDesktopCompositorMarker(measurement: DesktopCompositorMeasurement): string {
+  const nativeOnlyKmsOk = measurement.present === "kms" && measurement.status === "OK";
+  const composited = nativeOnlyKmsOk ? "FAIL" : measurement.composited;
+  const reposition = nativeOnlyKmsOk ? "unverified" : measurement.reposition;
+  const damage = nativeOnlyKmsOk ? "FAIL" : measurement.damage;
+  const status: DesktopCompositorStatus = nativeOnlyKmsOk ? "FAILSAFE" : measurement.status;
+  const base =
+    `${DESKTOP_COMPOSITOR_MARKER}: ` +
+    `gpu=${markerToken(measurement.gpu)} ` +
+    `surfaces=${measurement.surfaces} ` +
+    `composited=${composited} ` +
+    `reposition=${reposition} ` +
+    `present=${measurement.present} ` +
+    `damage=${damage} ` +
+    `status=${status}`;
+
+  if (status === "OK") {
+    return base;
+  }
+
+  const reason = nativeOnlyKmsOk
+    ? "native_kms_marker_only"
+    : measurement.reason ?? "unavailable";
+  return `${base} reason=${markerToken(reason)}`;
 }
 
 function readSubstrateRequirement(
