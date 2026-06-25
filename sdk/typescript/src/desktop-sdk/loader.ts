@@ -1,7 +1,9 @@
 import { types as nodeTypes } from "node:util";
 
 import {
+  defineShellComponent,
   knownGoodFallbackShellConfig,
+  shellSurface,
 } from "../shell/index.ts";
 import type {
   RegisteredShellComponent,
@@ -118,6 +120,25 @@ export const knownGoodDesktopUiPackage: DesktopUiPackage = Object.freeze({
   }),
   mount(host: DesktopHost): DesktopUiInstance {
     const config = knownGoodFallbackShellConfig();
+    const registered = host.registerComponent(defineShellComponent({
+      defaultPlacement: {
+        layer: "overlay",
+        order: 0,
+        zone: "center",
+      },
+      id: config.id,
+      render: () => shellSurface({
+        message: "Shell edit failed closed to the known-good fallback.",
+        safeMode: true,
+        title: "Vita Fallback Shell",
+      }),
+      role: "fallback",
+    }));
+
+    if (!registered.ok && registered.error.code !== "DUPLICATE_COMPONENT") {
+      throw new DesktopUiPackageLoadError("FALLBACK_REGISTER_FAILED", registered.error.message, registered.error.path);
+    }
+
     const preview = host.previewShell(config);
 
     if (!preview.ok) {
@@ -428,6 +449,10 @@ export function createDesktopHostForPackage(
       return host.rollbackShell();
     },
     stopApp(appId) {
+      if (!hasDesktopCapabilityGrant(manifest, "apps.stop", appId)) {
+        return hostReject("MISSING_CAPABILITY", "package cannot stop this app.", "/capabilityGrants/apps.stop");
+      }
+
       return host.stopApp(appId);
     },
   };
@@ -827,6 +852,7 @@ function requiredString(
 function isDesktopCapability(value: PlainJson | undefined): value is DesktopCapability {
   return (
     value === "apps.launch" ||
+    value === "apps.stop" ||
     value === "files.read" ||
     value === "files.write" ||
     value === "launcher.launch" ||

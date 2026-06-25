@@ -24,6 +24,7 @@ export type DesktopMaybePromise<T> = T | Promise<T>;
 
 export type DesktopCapability =
   | "apps.launch"
+  | "apps.stop"
   | "files.read"
   | "files.write"
   | "launcher.launch"

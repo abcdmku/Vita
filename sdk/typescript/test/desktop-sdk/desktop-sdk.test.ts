@@ -6,6 +6,7 @@ import {
   DesktopUiPackageLoader,
   KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID,
   SDK_VERSION,
+  createDesktopHostForPackage,
   hasDesktopCapabilityGrant,
   isSdkVersionCompatible,
   loadUiPackage,
@@ -33,6 +34,8 @@ import type {
   TrayItemInput,
 } from "../../src/desktop-sdk/index.ts";
 import {
+  ManagedShellConfigController,
+  ShellComponentRegistry,
   composeKnownGoodFallbackShell,
 } from "../../src/shell/index.ts";
 
@@ -246,6 +249,45 @@ test("loadUiPackage mounts a fake UI package against a scoped fake host", async 
   ]);
 });
 
+test("scoped host denies stopApp without an app-scoped stop grant", async () => {
+  const events: string[] = [];
+  const host = fakeHost(events);
+  const scoped = createDesktopHostForPackage(host, manifest("ui.no-stop", {
+    capabilityGrants: Object.freeze([]),
+  }));
+
+  const denied = await scoped.stopApp("victim.app");
+
+  assert.equal(denied.ok, false);
+  if (denied.ok) {
+    assert.fail("expected stopApp to fail closed without apps.stop");
+  }
+  assert.equal(denied.error.code, "MISSING_CAPABILITY");
+  assert.deepEqual(events, []);
+
+  const validatedStopGrant = validateDesktopUiPackageManifest(manifest("ui.stopper", {
+    capabilityGrants: Object.freeze([
+      Object.freeze({
+        capability: "apps.stop",
+        resourceId: "victim.app",
+      }),
+    ]),
+  }));
+
+  assert.equal(validatedStopGrant.ok, true);
+  if (!validatedStopGrant.ok) {
+    assert.fail("expected apps.stop grant to validate");
+  }
+
+  const allowed = createDesktopHostForPackage(host, validatedStopGrant.value);
+  const stopped = await allowed.stopApp("victim.app");
+
+  assert.equal(stopped.ok, true);
+  assert.deepEqual(events, [
+    "stop:victim.app",
+  ]);
+});
+
 test("loader swap unmounts the current package before mounting the next package", async () => {
   const events: string[] = [];
   const loader = new DesktopUiPackageLoader(fakeHost(events), {
@@ -318,7 +360,7 @@ test("incompatible package never mounts and recovers to built-in known-good fall
     },
   });
 
-  const recovered = await loadUiPackage(incompatible, fakeHost(events));
+  const recovered = await loadUiPackage(incompatible, realShellBackedHost(events));
 
   assert.equal(recovered.ok, true);
   if (!recovered.ok) {
@@ -328,6 +370,7 @@ test("incompatible package never mounts and recovers to built-in known-good fall
   assert.equal(recovered.loaded.manifest.id, KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID);
   assert.equal(recovered.recoveredFrom?.code, "SDK_VERSION_INCOMPATIBLE");
   assert.deepEqual(events, [
+    "register:vita.shell.fallback",
     "preview:vita.shell.fallback",
     "apply:vita.shell.fallback",
   ]);
@@ -489,6 +532,8 @@ function fakeHost(events: string[]): DesktopHost {
       return shellRollback();
     },
     stopApp(appId: string): DesktopHostResult<DesktopAppStop> {
+      events.push(`stop:${appId}`);
+
       return {
         ok: true,
         value: Object.freeze({
@@ -496,6 +541,39 @@ function fakeHost(events: string[]): DesktopHost {
           intents: Object.freeze([]),
         }),
       };
+    },
+  });
+}
+
+function realShellBackedHost(events: string[]): DesktopHost {
+  const registry = new ShellComponentRegistry();
+  const controller = new ManagedShellConfigController(registry);
+  const base = fakeHost(events);
+
+  return Object.freeze({
+    ...base,
+    applyShell(definition: Parameters<DesktopHost["applyShell"]>[0]) {
+      events.push(`apply:${definition.id}`);
+
+      return controller.apply(definition);
+    },
+    currentShell() {
+      return controller.current();
+    },
+    previewShell(definition: Parameters<DesktopHost["previewShell"]>[0]) {
+      events.push(`preview:${definition.id}`);
+
+      return controller.preview(definition);
+    },
+    registerComponent(definition: ShellComponentDefinition) {
+      events.push(`register:${definition.id}`);
+
+      return registry.register(definition);
+    },
+    rollbackShell() {
+      events.push("rollback");
+
+      return controller.rollback();
     },
   });
 }
