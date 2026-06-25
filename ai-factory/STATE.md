@@ -17,7 +17,15 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 DESKTOP PIPELINE end-to-end GPU-verified + 3-LAYER SDK ARCHITECTURE landed (owner directive).
+## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 DESKTOP PIPELINE end-to-end GPU-verified + 3-LAYER SDK ARCHITECTURE landed + FLAGSHIP DESIGN IMPORTED (owner directive).
+**FLAGSHIP DESKTOP DESIGN IMPORTED 2026-06-25 (owner handoff ZIP).** The full Vita design system + desktop UI kit landed at
+`ui_kits/` (commit 0842c3a): `styles.css`→`tokens/*`, `components/`, `guidelines/`, and the desktop kit `ui_kits/desktop/`
+(`index.html` + `kit.css` + Shell/Tiling/Files/Activity/Notifications/Settings/Lock screens, 1280×800) + mobile kit. Made
+Vita-compliant: **lucide vendored offline** (`ui_kits/_vendor/`, no CDN), `../../`→`../` paths fixed; renders standalone.
+**WAVE RUNNING (max-parallelism, owner "use as many subagents as you can"):** 8 Codex builders — PSD-022 rev3 (DesktopUiPackage
+hosts the real design + screens as views), PSD-023 (design tokens→typed SDK theme), PSD-024..029 (headless view-models for
+Files/Settings/Notifications/⌘K-palette/Dock/Tiling on SDK ports) — + deep queue PSD-030..033 (Activity/Shell/Lock/Appearance)
+held for refill. 3 Claude subagents: render+screenshot fidelity check, hydration/binding ADR, CEF live-render bring-up plan.
 **3-LAYER DESKTOP ARCHITECTURE 2026-06-25 (owner directive: SDK | CEF engine | swappable UI package).** Wave merged:
 PSD-011 (compositor RGBA-buffer content sink + CPU-readback fallback), PSD-014 (WM tiling/workspaces), PSD-016 (shell
 notifications/tray model), and **PSD-021 (`@vita/desktop-sdk` MERGED)** — the stable public SDK surface (internals
