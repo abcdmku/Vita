@@ -1028,6 +1028,67 @@ test("app surface ids escape underscores injectively", () => {
   assert.equal(appSurfaceId("_002f"), "surface:vita.app:_005f002f");
 });
 
+test("empty app id fails closed before allocating resources", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  const app = tiledTsxApp("", "com.vita.empty.component");
+  const host = new AppHost({
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: fakeWm(wmCalls),
+    },
+  });
+
+  const launched = host.launch(app);
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected empty app id launch to fail closed");
+  }
+
+  assert.equal(launched.error.code, "APP_ID_INVALID");
+  assert.deepEqual(mounts, []);
+  assert.deepEqual(created, []);
+  assert.deepEqual(wmCalls, []);
+  assert.deepEqual(unmounts, []);
+  assert.deepEqual(removed, []);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
+test("empty and app ids have distinct surface identities", () => {
+  assert.equal(appSurfaceId(""), "surface:vita.app:");
+  assert.notEqual(appSurfaceId(""), appSurfaceId("app"));
+});
+
+test("distinct representative app ids do not share surface identities", () => {
+  const ids = Object.freeze([
+    "",
+    "app",
+    "/",
+    "_002f",
+    "_",
+    "_005f",
+    "a_b",
+    "a_005fb",
+    "com.vita.notes",
+  ]);
+  const seen = new Set<string>();
+
+  for (const id of ids) {
+    const surfaceId = appSurfaceId(id);
+
+    assert.equal(seen.has(surfaceId), false, `duplicate surface id for '${id}'`);
+    seen.add(surfaceId);
+  }
+
+  assert.equal(seen.size, ids.length);
+});
+
 function tsxApp(): AppDescriptor {
   return Object.freeze({
     defaultWindow: {

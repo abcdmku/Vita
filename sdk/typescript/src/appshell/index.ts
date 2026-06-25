@@ -260,6 +260,14 @@ export class AppHost {
   }
 
   launch(app: AppDescriptor): AppHostResult<AppLaunch> {
+    if (app.id.length === 0) {
+      return reject(
+        "APP_ID_INVALID",
+        "app id must not be empty.",
+        "/apps",
+      );
+    }
+
     if (this.#launches.has(app.id)) {
       return reject(
         "APP_ALREADY_RUNNING",
@@ -1032,7 +1040,7 @@ function pathToken(value: string): string {
     }
   }
 
-  return token.length === 0 ? "app" : token;
+  return token;
 }
 
 function compareLaunches(left: AppLaunch, right: AppLaunch): number {
