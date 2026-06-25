@@ -17,13 +17,19 @@ then **Phase 5 data product** (files/folders, backup+restore UI, remote-access m
 and **Phase 3 storage durability** (LUKS2 + TPM sealing + recovery-key [owner §16], btrfs snapshots,
 power-loss/restore resilience, Pi 5 image). Owner-gated (§16): release/recovery/TPM keys + public ingress.
 
-## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 HEADLESS DESKTOP CORE (22) + GPU COMPOSITOR PAINTS on VMware.
-**GPU COMPOSITOR GPU-VERIFIED 2026-06-25** — PSD-002 built for linux (rust-in-docker) → baked → booted on a 3D-accel
-VMware VM → MEASURED `VITA-COMPOSITOR: gpu=vmwgfx surfaces=2 composited=OK reposition=no-repaint present=kms damage=OK
-status=OK`. Real vmwgfx GPU open + DRM/KMS modeset + GBM scanout + page-flip present + no-repaint reposition — the
-render/composite split is REAL on the GPU. Build floors earned their keep (caught the linux compile bug + the input
-short-circuit). PSD-008 (unified windowed-app model) in review. NEXT GPU wave: PSD-003 (CEF/web → GPU texture bridge),
-then shell/WM drive the compositor → a visible desktop.
+## Status: RUNNING — Phases 2–5 COMPLETE (21) + Phase 6 HEADLESS DESKTOP CORE (22) + GPU COMPOSITOR VISIBLE on VMware.
+**GPU COMPOSITOR VISIBLE 2026-06-25 (PSD-VIS1 MERGED)** — the compositor renders a desktop-LAYOUT demo (1280x720:
+checkered wallpaper + top panel + 3 windows w/ titlebars = surfaces=8) + a `glReadPixels` readback → PNG (vendored `png`
+crate). GPU-verified on vmwgfx: `present=kms` + `VITA-COMPOSITOR-SHOT`, PNG copied out via vmtoolsd to
+`C:\Users\Borg\vita-vmware\gpu-demo.png` (matches a CPU-rendered control). ROOT-CAUSED a ~6-iteration screenshot saga: a
+one-char `0_c_int` parse error in `linux.rs` (added w/ the VT-takeover) blocked the linux build, and piping
+`rust-in-docker | grep` in `&&` chains masked the failure → every build staged a STALE rev1 binary. FIXED; lesson saved
+([[vita-verification-pipeline]]). PSD-009 (shell/WM→compositor driving seam: CompositorPort + CompositorDriver,
+no-repaint, delta WM-intents, fail-closed) MERGED (R1, 10 tests). PSD-008 (unified windowed-app model) at rev9 — a long
+but real 8-rev fail-closed-consistency hardening (lifecycle partial-failure + pathToken injectivity + pending-cleanup
+interleaving gate + untrusted-descriptor snapshot), 29 tests, converging. PSD-010 (native compositor binding: drive REAL
+shell/WM windows on the GPU from the TS driver, solid-color v1) DISPATCHED. NEXT: land PSD-008/PSD-010, then PSD-003
+(web→GPU texture bridge) for real app content → progressively replace the solid-color demo with the actual TSX/web desktop.
 **Phase 6 headless desktop MERGED + (foundation) BOOT-VERIFIED 2026-06-25** — 5 slices: PSD-001 (separable-package
 foundation; `VITA-DESKTOP-PKG` MEASURED on boot — real install/launch/stop + agentd-mediated heartbeat + live
 headless-boundary re-check, OS still passes all 21 markers headless), PSD-004 (WM policy, pure), PSD-005 (composite TSX
