@@ -242,6 +242,11 @@ class OsrApp : public CefApp, public CefBrowserProcessHandler {
     command_line->AppendSwitchWithValue("use-gl", "disabled");
     command_line->AppendSwitchWithValue("use-angle", "swiftshader");
     command_line->AppendSwitch("hide-scrollbars");
+    // Headless Ozone: windowless OSR must NOT require an X server / $DISPLAY. Without this CEF's
+    // Ozone defaults to X11 and aborts ("Missing X server or $DISPLAY" -> platform init failed)
+    // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
+    // VMware-boot 0.3s early-exit. ANGLE swiftshader keeps GL software so no GPU process is needed.
+    command_line->AppendSwitchWithValue("ozone-platform", "headless");
   }
 
   void OnContextInitialized() override {
@@ -466,6 +471,16 @@ int main(int argc, char* argv[]) {
   settings.windowless_rendering_enabled = true;
   settings.multi_threaded_message_loop = false;
   settings.log_severity = LOGSEVERITY_WARNING;
+  // CEF needs a WRITABLE cache/root_cache_path or it warns about process-singleton and can fail
+  // to init when HOME/XDG point at a read-only path (the OS boot service runs with a minimal env
+  // and a read-only /usr). Pin it to a writable location: $VITA_CEF_CACHE if set (the service
+  // points it at /run), else /tmp. Same for the per-instance root cache. This is the fix for the
+  // 0.3s no-frame early-exit seen on the VMware boot (M4) where the default cache path was unusable.
+  {
+    const char* cache_env = std::getenv("VITA_CEF_CACHE");
+    std::string cache = cache_env && *cache_env ? cache_env : "/tmp/vita-cef-cache";
+    CefString(&settings.root_cache_path).FromString(cache);
+  }
 
   if (!CefInitialize(main_args, settings, app, nullptr)) {
     fprintf(stderr, "[osr] CefInitialize failed\n");

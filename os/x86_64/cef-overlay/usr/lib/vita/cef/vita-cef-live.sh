@@ -52,7 +52,17 @@ while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
 done
 if [ ! -e /dev/dri/card0 ]; then emit_failsafe "dri_card0_absent"; exit 0; fi
 
-emit_line "$MARKER: stage=start frames=$FRAMES url=$URL card0=present"
+# CEF needs a WRITABLE cache + a HOME/XDG/TMPDIR or it can fail to init (process-singleton,
+# read-only default cache) — the boot service runs with a minimal env and a read-only /usr.
+# Point everything at writable /run (tmpfs, shared namespace). osr_host reads VITA_CEF_CACHE.
+export VITA_CEF_CACHE=/run/vita-cef-cache
+export HOME=/run/vita-cef-home
+export XDG_CACHE_HOME=/run/vita-cef-cache
+export XDG_CONFIG_HOME=/run/vita-cef-home/.config
+export TMPDIR=/run
+mkdir -p "$VITA_CEF_CACHE" "$HOME" "$XDG_CONFIG_HOME" 2>/dev/null
+
+emit_line "$MARKER: stage=start frames=$FRAMES url=$URL card0=present cache=$VITA_CEF_CACHE"
 
 # --- run the pipe ------------------------------------------------------------
 # CEF needs libcef.so + its sibling runtime libs on the loader path; co-located in
@@ -61,15 +71,19 @@ emit_line "$MARKER: stage=start frames=$FRAMES url=$URL card0=present"
 # writes the readback PNG to the SHARED /run (the unit must NOT set PrivateTmp, or the
 # PNG lands in a private namespace and vmtoolsd copy-out cannot see it).
 rm -f "$PNG"
+CEF_LOG=/run/vita-cef-osr.log
 COMP_LOG=$(mktemp /run/vita-cef-comp.XXXXXX 2>/dev/null || mktemp /tmp/vita-cef-comp.XXXXXX)
 
 cd "$CEF_DIR" || { emit_failsafe "cef_dir_cd"; exit 0; }
 set -o pipefail
 LD_LIBRARY_PATH="$CEF_DIR" \
-  timeout 90s "$OSR" --url="$URL" --compositor-out=- --frames="$FRAMES" 2>/run/vita-cef-osr.log \
+  timeout 90s "$OSR" --url="$URL" --compositor-out=- --frames="$FRAMES" 2>"$CEF_LOG" \
   | LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
     timeout 90s "$COMPOSITOR" --commands --hold-seconds 0 --screenshot "$PNG" > "$COMP_LOG" 2>&1
 rc=$?
+# Surface a one-line CEF diagnostic to serial (frames emitted, or the failure reason).
+cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
+emit_line "$MARKER: cef_diag=${cef_tail:-none}"
 
 # Surface the compositor's own marker line to serial (carries gpu=… present=kms/…).
 while IFS= read -r line; do
