@@ -1,0 +1,12 @@
+{
+  "name": "@vita/spike-cef-osr",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "build:native": "cmake -S native -B build/native && cmake --build build/native --config Release",
+    "measure": "node --experimental-strip-types src/run-measurement.ts"
+  }
+}
