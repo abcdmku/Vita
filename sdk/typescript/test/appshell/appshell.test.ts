@@ -275,7 +275,7 @@ test("unavailable capsule runtime fails closed without registering a surface", (
   assert.equal(host.snapshot().apps.length, 0);
 });
 
-test("runtime stop failure leaves a launched app consistently running for retry", () => {
+test("runtime stop failure records pending cleanup for retry after surface teardown", () => {
   const created: ShellSurfaceCreateRequest[] = [];
   const removed: string[] = [];
   const wmCalls: WindowManagerIntent[] = [];
@@ -307,11 +307,19 @@ test("runtime stop failure leaves a launched app consistently running for retry"
     assert.fail("expected runtime stop rejection");
   }
   assert.equal(failedStop.error.code, "RUNTIME_STOP_FAILED");
-  assert.deepEqual(removed, []);
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
   assert.deepEqual(wmCalls, []);
   assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
-  assert.equal(host.snapshot().apps.length, 1);
+  assert.equal(host.snapshot().apps.length, 0);
   assert.equal(host.snapshot().windowModel.windows.length, 1);
+
+  const duplicateLaunch = host.launch(app);
+
+  assert.equal(duplicateLaunch.ok, false);
+  if (duplicateLaunch.ok) {
+    assert.fail("expected cleanup-pending launch rejection");
+  }
+  assert.equal(duplicateLaunch.error.code, "APP_LAUNCH_CLEANUP_PENDING");
 
   failUnmount = false;
 

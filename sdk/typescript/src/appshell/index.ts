@@ -231,7 +231,7 @@ export class AppHost {
   readonly #ports: AppHostPorts;
   readonly #layoutConstraints: LayoutConstraints;
   readonly #launches = new Map<string, AppLaunch>();
-  readonly #pendingCleanups = new Map<string, PendingAppCleanup>();
+  readonly #pendingCleanup = new Map<string, PendingAppCleanup>();
   #windowModel: WindowModel;
 
   constructor(options: AppHostOptions) {
@@ -249,7 +249,7 @@ export class AppHost {
       );
     }
 
-    if (this.#pendingCleanups.has(app.id)) {
+    if (this.#pendingCleanup.has(app.id)) {
       return reject(
         "APP_LAUNCH_CLEANUP_PENDING",
         `app '${app.id}' has a failed launch awaiting cleanup.`,
@@ -326,18 +326,37 @@ export class AppHost {
 
   stop(app: AppDescriptor | string): AppHostResult<AppStop> {
     const appId = typeof app === "string" ? app : app.id;
+    const pendingCleanup = this.#pendingCleanup.get(appId);
+
+    if (pendingCleanup !== undefined) return this.#cleanupPendingApp(pendingCleanup);
+
     const launch = this.#launches.get(appId);
 
     if (launch === undefined) {
-      const pendingCleanup = this.#pendingCleanups.get(appId);
-
-      if (pendingCleanup !== undefined) return this.#cleanupPendingApp(pendingCleanup);
-
       return reject(
         "APP_NOT_RUNNING",
         `app '${appId}' is not running.`,
         `/apps/${pathToken(appId)}`,
       );
+    }
+
+    const removed = this.#removeSurface(launch.surfaceId);
+    const stopped = this.#unbindRuntime(launch.binding);
+
+    if (!removed.ok || !stopped.ok) {
+      if (removed.ok || stopped.ok) {
+        this.#rememberPendingCleanup(
+          appId,
+          stopped.ok ? undefined : launch.binding,
+          launch.surfaceId,
+          launch.windowId,
+          !removed.ok,
+          true,
+        );
+        this.#launches.delete(appId);
+      }
+
+      return rejectStopCleanupFailure(stopped, removed);
     }
 
     const previousWindowModel = this.#windowModel;
@@ -347,18 +366,6 @@ export class AppHost {
       nextWindowModel,
       this.#layoutConstraints,
     );
-    const stopped = this.#unbindRuntime(launch.binding);
-
-    if (!stopped.ok) return stopped;
-
-    const removed = this.#removeSurface(launch.surfaceId);
-
-    if (!removed.ok) {
-      this.#launches.delete(appId);
-      this.#rememberPendingCleanup(appId, undefined, launch.surfaceId, launch.windowId, true, true);
-      return removed;
-    }
-
     const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(appId)}/wm`);
 
     this.#windowModel = nextWindowModel;
@@ -637,31 +644,29 @@ export class AppHost {
 
     if (binding !== undefined) cleanup.binding = binding;
 
-    this.#pendingCleanups.set(appId, Object.freeze(cleanup));
+    this.#pendingCleanup.set(appId, Object.freeze(cleanup));
   }
 
   #cleanupPendingApp(cleanup: PendingAppCleanup): AppHostResult<AppStop> {
     const binding = cleanup.binding;
+    const stopped: AppHostResult<true> = binding === undefined
+      ? accept(true)
+      : this.#unbindRuntime(binding);
+    const removed: AppHostResult<true> = cleanup.surfaceLive
+      ? this.#removeSurface(cleanup.surfaceId)
+      : accept(true);
 
-    if (binding !== undefined) {
-      const stopped = this.#unbindRuntime(binding);
-
-      if (!stopped.ok) return stopped;
-    }
-
-    const removed = cleanup.surfaceLive ? this.#removeSurface(cleanup.surfaceId) : accept(true);
-
-    if (!removed.ok) {
+    if (!stopped.ok || !removed.ok) {
       this.#rememberPendingCleanup(
         cleanup.appId,
-        undefined,
+        stopped.ok ? undefined : binding,
         cleanup.surfaceId,
         cleanup.windowId,
-        true,
+        removed.ok ? false : cleanup.surfaceLive,
         cleanup.windowOpen,
       );
 
-      return removed;
+      return rejectStopCleanupFailure(stopped, removed);
     }
 
     let intents: readonly WindowManagerIntent[] = Object.freeze([]);
@@ -679,7 +684,7 @@ export class AppHost {
       this.#windowModel = nextWindowModel;
     }
 
-    this.#pendingCleanups.delete(cleanup.appId);
+    this.#pendingCleanup.delete(cleanup.appId);
 
     if (!emitted.ok) return emitted;
 
@@ -918,6 +923,35 @@ function rejectRollbackCleanupFailure(
   return reject(
     "ROLLBACK_CLEANUP_FAILED",
     `rollback cleanup failed: ${failures
+      .map((failure) => `${failure.code}: ${failure.message}`)
+      .join("; ")}`,
+    first.path,
+  );
+}
+
+function rejectStopCleanupFailure<T>(
+  runtimeStopped: AppHostResult<true>,
+  surfaceRemoved: AppHostResult<true>,
+): AppHostResult<T> {
+  const failures: AppHostError[] = [];
+
+  if (!surfaceRemoved.ok) failures.push(surfaceRemoved.error);
+  if (!runtimeStopped.ok) failures.push(runtimeStopped.error);
+
+  const first = failures[0];
+
+  if (first === undefined) {
+    return reject(
+      "STOP_CLEANUP_FAILED",
+      "stop cleanup failed without a recorded failure.",
+      "/apps",
+    );
+  }
+  if (failures.length === 1) return reject(first.code, first.message, first.path);
+
+  return reject(
+    "STOP_CLEANUP_FAILED",
+    `stop cleanup failed: ${failures
       .map((failure) => `${failure.code}: ${failure.message}`)
       .join("; ")}`,
     first.path,
