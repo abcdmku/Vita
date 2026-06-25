@@ -201,6 +201,20 @@ interface FoundMenuItem {
   readonly path: readonly string[];
 }
 
+interface StoredNotificationEntry {
+  readonly appId: string;
+  readonly notificationId: string;
+  readonly notification: ShellNotification;
+}
+
+interface StaticCapabilityGrantSet {
+  wildcard: boolean;
+  readonly resources: Set<string>;
+}
+
+type NotificationStore = Map<string, Map<string, ShellNotification>>;
+type StaticCapabilityGrants = Map<string, Map<ShellGrantCapability, StaticCapabilityGrantSet>>;
+
 const EMPTY_CHILDREN: readonly ShellElement[] = Object.freeze([]);
 const EMPTY_ACTIONS: readonly NotificationAction[] = Object.freeze([]);
 const EMPTY_NOTIFICATIONS: readonly ShellNotification[] = Object.freeze([]);
@@ -257,7 +271,7 @@ export class NotificationCenter {
   readonly #clock: NotificationClock;
   readonly #capabilities: ShellCapabilityPort | undefined;
   readonly #maxVisible: number;
-  readonly #notifications = new Map<string, ShellNotification>();
+  readonly #notifications: NotificationStore = new Map();
 
   constructor(options: NotificationCenterOptions) {
     this.#clock = options.clock;
@@ -288,7 +302,7 @@ export class NotificationCenter {
 
     const notification = buildNotification(app.value, normalized.value, now.value);
 
-    this.#notifications.set(notificationStorageKey(notification.appId, notification.id), notification);
+    storeNotification(this.#notifications, notification);
     return accept(notification);
   }
 
@@ -306,30 +320,26 @@ export class NotificationCenter {
 
       if (!app.ok) return app;
 
-      const key = notificationStorageKey(app.value, id.value);
-      const existing = this.#notifications.get(key);
+      const existing = deleteStoredNotification(this.#notifications, app.value, id.value);
 
       if (existing === undefined) {
         return accept(EMPTY_NOTIFICATIONS);
       }
 
-      this.#notifications.delete(key);
       return accept(Object.freeze([existing]));
     }
 
     const removed: ShellNotification[] = [];
-    const keys = [...this.#notifications.keys()].sort(compareStrings);
+    const entries = storedNotificationEntries(this.#notifications);
 
-    for (let index = 0; index < keys.length; index += 1) {
-      const key = keys[index];
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
 
-      if (key === undefined) continue;
+      if (entry === undefined) continue;
 
-      const notification = this.#notifications.get(key);
-
-      if (notification !== undefined && notification.id === id.value) {
-        removed.push(notification);
-        this.#notifications.delete(key);
+      if (entry.notification.id === id.value) {
+        removed.push(entry.notification);
+        deleteStoredNotification(this.#notifications, entry.appId, entry.notificationId);
       }
     }
 
@@ -343,18 +353,16 @@ export class NotificationCenter {
     if (!now.ok) return now;
 
     const expired: ShellNotification[] = [];
-    const keys = [...this.#notifications.keys()].sort(compareStrings);
+    const entries = storedNotificationEntries(this.#notifications);
 
-    for (let index = 0; index < keys.length; index += 1) {
-      const key = keys[index];
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
 
-      if (key === undefined) continue;
+      if (entry === undefined) continue;
 
-      const notification = this.#notifications.get(key);
-
-      if (notification !== undefined && isExpired(notification, now.value)) {
-        expired.push(notification);
-        this.#notifications.delete(key);
+      if (isExpired(entry.notification, now.value)) {
+        expired.push(entry.notification);
+        deleteStoredNotification(this.#notifications, entry.appId, entry.notificationId);
       }
     }
 
@@ -394,7 +402,7 @@ export class NotificationCenter {
   }
 
   snapshot(): NotificationCenterSnapshot {
-    return snapshotNotifications([...this.#notifications.values()], this.#maxVisible);
+    return snapshotNotifications(storedNotificationValues(this.#notifications), this.#maxVisible);
   }
 
   panelElement(options: ShellNotificationsElementOptions = Object.freeze({})): ShellElement {
@@ -430,7 +438,7 @@ export class NotificationCenter {
 
       if (!app.ok) return app;
 
-      const notification = this.#notifications.get(notificationStorageKey(app.value, id.value));
+      const notification = readStoredNotification(this.#notifications, app.value, id.value);
 
       if (notification !== undefined) return accept(notification);
       return reject("UNKNOWN_NOTIFICATION", "notification is not registered.", "/notificationId");
@@ -600,22 +608,19 @@ export class TrayModel {
 export function createStaticShellCapabilityPort(
   grants: readonly ShellCapabilityGrant[],
 ): ShellCapabilityPort {
-  const granted = new Set<string>();
+  const granted: StaticCapabilityGrants = new Map();
 
   for (let index = 0; index < grants.length; index += 1) {
     const grant = grants[index];
 
     if (grant === undefined || grant.appId.length === 0) continue;
 
-    granted.add(grantKey(grant.appId, grant.capability, grant.resourceId));
+    addStaticGrant(granted, grant);
   }
 
   return Object.freeze({
     hasGrant(request: ShellCapabilityRequest): boolean {
-      return (
-        granted.has(grantKey(request.appId, request.capability, request.resourceId)) ||
-        granted.has(grantKey(request.appId, request.capability, undefined))
-      );
+      return hasStaticGrant(granted, request);
     },
   });
 }
@@ -940,6 +945,101 @@ function buildNotification(
   }
 
   return freezeNotification(output);
+}
+
+function storeNotification(store: NotificationStore, notification: ShellNotification): void {
+  const appNotifications = notificationBucket(store, notification.appId);
+
+  appNotifications.set(notification.id, notification);
+}
+
+function readStoredNotification(
+  store: NotificationStore,
+  appId: string,
+  notificationId: string,
+): ShellNotification | undefined {
+  return store.get(appId)?.get(notificationId);
+}
+
+function deleteStoredNotification(
+  store: NotificationStore,
+  appId: string,
+  notificationId: string,
+): ShellNotification | undefined {
+  const appNotifications = store.get(appId);
+
+  if (appNotifications === undefined) return undefined;
+
+  const existing = appNotifications.get(notificationId);
+
+  if (existing === undefined) return undefined;
+
+  appNotifications.delete(notificationId);
+  if (appNotifications.size === 0) store.delete(appId);
+
+  return existing;
+}
+
+function storedNotificationValues(store: NotificationStore): readonly ShellNotification[] {
+  const values: ShellNotification[] = [];
+  const entries = storedNotificationEntries(store);
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+
+    if (entry !== undefined) values.push(entry.notification);
+  }
+
+  return Object.freeze(values);
+}
+
+function storedNotificationEntries(store: NotificationStore): readonly StoredNotificationEntry[] {
+  const entries: StoredNotificationEntry[] = [];
+  const appIds = [...store.keys()].sort(compareStrings);
+
+  for (let appIndex = 0; appIndex < appIds.length; appIndex += 1) {
+    const appId = appIds[appIndex];
+
+    if (appId === undefined) continue;
+
+    const appNotifications = store.get(appId);
+
+    if (appNotifications === undefined) continue;
+
+    const notificationIds = [...appNotifications.keys()].sort(compareStrings);
+
+    for (let notificationIndex = 0; notificationIndex < notificationIds.length; notificationIndex += 1) {
+      const notificationId = notificationIds[notificationIndex];
+
+      if (notificationId === undefined) continue;
+
+      const notification = appNotifications.get(notificationId);
+
+      if (notification !== undefined) {
+        entries.push(Object.freeze({
+          appId,
+          notification,
+          notificationId,
+        }));
+      }
+    }
+  }
+
+  return Object.freeze(entries);
+}
+
+function notificationBucket(
+  store: NotificationStore,
+  appId: string,
+): Map<string, ShellNotification> {
+  let appNotifications = store.get(appId);
+
+  if (appNotifications === undefined) {
+    appNotifications = new Map();
+    store.set(appId, appNotifications);
+  }
+
+  return appNotifications;
 }
 
 function snapshotNotifications(
@@ -1385,6 +1485,60 @@ function authorizeCapability(
   return reject("MISSING_CAPABILITY", "app does not hold the required shell capability.", "/capabilities");
 }
 
+function addStaticGrant(
+  grants: StaticCapabilityGrants,
+  grant: ShellCapabilityGrant,
+): void {
+  const grantSet = staticGrantSet(grants, grant.appId, grant.capability);
+
+  if (grant.resourceId === undefined) {
+    grantSet.wildcard = true;
+    return;
+  }
+
+  grantSet.resources.add(grant.resourceId);
+}
+
+function hasStaticGrant(
+  grants: StaticCapabilityGrants,
+  request: ShellCapabilityRequest,
+): boolean {
+  const appGrants = grants.get(request.appId);
+
+  if (appGrants === undefined) return false;
+
+  const grantSet = appGrants.get(request.capability);
+
+  if (grantSet === undefined) return false;
+
+  return grantSet.wildcard || grantSet.resources.has(request.resourceId);
+}
+
+function staticGrantSet(
+  grants: StaticCapabilityGrants,
+  appId: string,
+  capability: ShellGrantCapability,
+): StaticCapabilityGrantSet {
+  let appGrants = grants.get(appId);
+
+  if (appGrants === undefined) {
+    appGrants = new Map();
+    grants.set(appId, appGrants);
+  }
+
+  let grantSet = appGrants.get(capability);
+
+  if (grantSet === undefined) {
+    grantSet = {
+      resources: new Set<string>(),
+      wildcard: false,
+    };
+    appGrants.set(capability, grantSet);
+  }
+
+  return grantSet;
+}
+
 function freezeNotification(notification: ShellNotification): ShellNotification {
   const output: {
     appId: string;
@@ -1520,18 +1674,6 @@ function compareTrayItems(left: TrayItem, right: TrayItem): number {
   if (app !== 0) return app;
 
   return compareStrings(left.id, right.id);
-}
-
-function notificationStorageKey(appId: string, notificationId: string): string {
-  return `${appId}\u0000${notificationId}`;
-}
-
-function grantKey(
-  appId: string,
-  capability: ShellGrantCapability,
-  resourceId: string | undefined,
-): string {
-  return `${appId}\u0000${capability}\u0000${resourceId ?? "*"}`;
 }
 
 function trayClickIntent(item: TrayItem): TrayIntent {

@@ -248,6 +248,138 @@ test("notification dismiss and expiry are deterministic through the injected clo
   assert.equal(center.snapshot().totalCount, 0);
 });
 
+test("notification storage keeps delimiter-colliding app and notification ids isolated", () => {
+  const separator = "\u0000";
+  const firstAppId = "a";
+  const firstNotificationId = `b${separator}c`;
+  const secondAppId = `a${separator}b`;
+  const secondNotificationId = "c";
+  let nowMs = 4_000;
+  const center = new NotificationCenter({
+    capabilities: createStaticShellCapabilityPort([
+      {
+        appId: firstAppId,
+        capability: "shell.notifications.post",
+      },
+      {
+        appId: secondAppId,
+        capability: "shell.notifications.post",
+      },
+    ]),
+    clock: manualClock(() => nowMs),
+  });
+
+  assertPosted(center.post(firstAppId, {
+    id: firstNotificationId,
+    title: "First tuple",
+  }));
+
+  nowMs = 4_010;
+  assertPosted(center.post(secondAppId, {
+    id: secondNotificationId,
+    title: "Second tuple",
+  }));
+
+  assert.equal(center.snapshot().totalCount, 2);
+
+  const dismissedFirst = center.dismiss(firstAppId, firstNotificationId);
+
+  assert.equal(dismissedFirst.ok, true);
+  if (!dismissedFirst.ok) {
+    assert.fail("expected delimiter-colliding notification dismiss to succeed");
+  }
+  assert.deepEqual(dismissedFirst.value.map((notification) => notification.title), ["First tuple"]);
+  assert.deepEqual(center.snapshot().notifications.map((notification) => ({
+    appId: notification.appId,
+    id: notification.id,
+    title: notification.title,
+  })), [
+    {
+      appId: secondAppId,
+      id: secondNotificationId,
+      title: "Second tuple",
+    },
+  ]);
+
+  const dismissedSecond = center.dismiss(secondAppId, secondNotificationId);
+
+  assert.equal(dismissedSecond.ok, true);
+  if (!dismissedSecond.ok) {
+    assert.fail("expected second delimiter-colliding notification dismiss to succeed");
+  }
+  assert.deepEqual(dismissedSecond.value.map((notification) => notification.title), ["Second tuple"]);
+  assert.equal(center.snapshot().totalCount, 0);
+});
+
+test("static shell grants keep tuple-colliding resources and literal star distinct from wildcard", () => {
+  const separator = "\u0000";
+  const tupleResourceId = `b${separator}shell.tray.register${separator}c`;
+  const port = createStaticShellCapabilityPort([
+    {
+      appId: "literal-star",
+      capability: "shell.notifications.post",
+      resourceId: "*",
+    },
+    {
+      appId: "wildcard",
+      capability: "shell.notifications.post",
+    },
+    {
+      appId: "a",
+      capability: "shell.notifications.post",
+      resourceId: tupleResourceId,
+    },
+  ]);
+
+  assert.equal(port.hasGrant({
+    appId: "literal-star",
+    capability: "shell.notifications.post",
+    resourceId: "*",
+  }), true);
+  assert.equal(port.hasGrant({
+    appId: "literal-star",
+    capability: "shell.notifications.post",
+    resourceId: "not-star",
+  }), false);
+  assert.equal(port.hasGrant({
+    appId: "wildcard",
+    capability: "shell.notifications.post",
+    resourceId: "any-resource",
+  }), true);
+  assert.equal(port.hasGrant({
+    appId: "a",
+    capability: "shell.notifications.post",
+    resourceId: tupleResourceId,
+  }), true);
+  assert.equal(port.hasGrant({
+    appId: `a${separator}shell.notifications.post${separator}b`,
+    capability: "shell.tray.register",
+    resourceId: "c",
+  }), false);
+
+  const center = new NotificationCenter({
+    capabilities: port,
+    clock: manualClock(() => 4_500),
+  });
+
+  assertPosted(center.post("literal-star", {
+    id: "*",
+    title: "Literal star only",
+  }));
+
+  const denied = center.post("literal-star", {
+    id: "not-star",
+    title: "Not covered",
+  });
+
+  assert.equal(denied.ok, false);
+  if (denied.ok) {
+    assert.fail("expected literal star grant not to authorize another resource");
+  }
+  assert.equal(denied.error.code, "MISSING_CAPABILITY");
+  assert.equal(center.snapshot().totalCount, 1);
+});
+
 test("notification posting and tray registration fail closed without grants", () => {
   let clockReads = 0;
   const deniedNotifications = new NotificationCenter({
