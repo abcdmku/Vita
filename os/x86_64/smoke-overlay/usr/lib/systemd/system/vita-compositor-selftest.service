@@ -1,0 +1,28 @@
+# Vita SMOKE VM only - run the Rust compositor KMS self-test once and emit VITA-COMPOSITOR to serial.
+# Verification-only overlay: this is not part of the production OS image.
+[Unit]
+Description=Vita compositor KMS self-test (smoke verification)
+After=systemd-modules-load.service systemd-udev-trigger.service
+Wants=systemd-udev-trigger.service
+Before=serial-getty@ttyS0.service getty.target multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/lib/vita/compositor/vita-compositor-selftest.sh
+TimeoutStartSec=35s
+StandardOutput=journal+console
+StandardError=journal+console
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+DeviceAllow=char-input r
+
+[Install]
+WantedBy=multi-user.target

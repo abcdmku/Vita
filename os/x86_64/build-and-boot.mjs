@@ -364,6 +364,23 @@ function installAgentOverlay() {
   return useNative ? overlayHost : "/work/os/x86_64/agent-overlay";
 }
 
+function installCompositorOverlay() {
+  const overlayHost = join(HERE, "smoke-overlay");
+  const binDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor");
+  const buildArgs = [
+    "tools/build/rust-in-docker.mjs",
+    "--dir",
+    "packages/compositor-core",
+    "--out",
+    "os/x86_64/smoke-overlay/usr/lib/vita/compositor/vita-compositor",
+  ];
+  run("1b · build vita compositor self-test (linux x86_64 Rust binary)", "node", buildArgs);
+  if (!DRY && !existsSync(binDest)) {
+    fail(`compositor build did not stage ${binDest} — check rust-in-docker.mjs`);
+  }
+  return useNative ? overlayHost : "/work/os/x86_64/smoke-overlay";
+}
+
 log(`  engine=${useNative ? "host-native mkosi" : `docker ${PINNED_MKOSI_IMAGE}`}`);
 
 // ── Step 0: ensure the mkosi engine is available (docker pull only; native skips the registry) ─────────────
@@ -388,12 +405,12 @@ if (MODE === "smoke") {
   // Login: ship an explicit serial-getty autologin drop-in via --extra-tree (reliable across mkosi versions,
   // unlike --autologin), AND set a root password (root/vita) as a fallback. Smoke/test only — full image gets
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
-  const smokeOverlay = useNative ? join(HERE, "smoke-overlay") : "/work/os/x86_64/smoke-overlay";
   const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
+  const smokeOverlay = installCompositorOverlay(); // build + stage the compositor self-test into smoke-overlay
   // P1-030: stage the pinned Deno runtime into ts-overlay (ts-image.mjs fetches + sha256-verifies + extracts the
   // binary to ts-overlay/usr/lib/vita/deno), then ship the on-device TS runtime + entrypoint via --extra-tree.
   const tsOverlay = useNative ? join(HERE, "ts-overlay") : "/work/os/x86_64/ts-overlay";
-  if (!DRY) run("1b · stage Deno runtime (ts-image.mjs)", "node", [join(HERE, "ts-image.mjs")]);
+  if (!DRY) run("1c · stage Deno runtime (ts-image.mjs)", "node", [join(HERE, "ts-image.mjs")]);
   // --incremental: mkosi caches the package-installed rootfs, so re-builds only re-apply the overlays/cmdline
   // (seconds) instead of re-installing all of Debian (~5 min). Smoke is iterate-fast; full keeps it off for
   // byte-reproducibility. Override with VITA_INCREMENTAL=0.
