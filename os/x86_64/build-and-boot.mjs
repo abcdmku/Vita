@@ -25,10 +25,12 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -443,21 +445,34 @@ function installCefOverlay() {
     }
     // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
     // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
+    // Preserve the COMMITTED launch script across the clean (it lives in this dir, under git).
+    const launchBody = readFileSync(launchSh);
     rmSync(cefDst, { recursive: true, force: true });
     mkdirSync(cefDst, { recursive: true });
     cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
     cpSync(cefResources, cefDst, { recursive: true, dereference: true });
     copyFileSync(osrBin, join(cefDst, "vita_cef_osr"));
     chmodSync(join(cefDst, "vita_cef_osr"), 0o755);
-    // Re-stage the committed launch script (cpSync of Release may not have touched it; it lives
-    // in git under cef-overlay and we copied the runtime AROUND it, so it persists — assert it).
-    if (!existsSync(launchSh)) fail(`1d0 · launch script vanished during staging: ${launchSh}`);
+    // Restore the committed launch script into the freshly-staged runtime dir.
+    writeFileSync(launchSh, launchBody);
     chmodSync(launchSh, 0o755);
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
     // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
     rmSync(uikitsDst, { recursive: true, force: true });
     mkdirSync(dirname(uikitsDst), { recursive: true });
     cpSync(join(REPO, "ui_kits"), uikitsDst, { recursive: true, dereference: true });
+    // Materialize the multi-user.target.wants entry as a REAL symlink (committed as a text file
+    // for cross-platform checkout; the sibling vita-agentd/vita-ts entries ship as symlinks). A
+    // regular file here is empirically followed by this systemd, but a true relative symlink is the
+    // unambiguous enablement — make it one on the ext4 staging tree before mkosi --extra-tree.
+    const wantsLink = join(overlayHost, "usr", "lib", "systemd", "system",
+                           "multi-user.target.wants", "vita-cef-live.service");
+    if (existsSync(wantsLink) && !lstatSync(wantsLink).isSymbolicLink()) {
+      rmSync(wantsLink, { force: true });
+    }
+    if (!existsSync(wantsLink)) {
+      symlinkSync("../vita-cef-live.service", wantsLink);
+    }
   }
   return useNative ? overlayHost : "/work/os/x86_64/cef-overlay";
 }
