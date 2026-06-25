@@ -1159,6 +1159,165 @@ test("empty app id fails closed before allocating resources", () => {
   assert.equal(host.snapshot().windowModel.windows.length, 0);
 });
 
+test("app descriptor id accessors fail closed before lifecycle work", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  let idReads = 0;
+  const app = {
+    get id(): string {
+      idReads += 1;
+      return idReads === 1 ? "com.vita.getter-one" : "com.vita.getter-two";
+    },
+    runtime: {
+      componentId: "com.vita.getter.component",
+    },
+    surfaceKind: "tsx",
+    title: "Getter",
+  } as unknown as AppDescriptor;
+  const host = new AppHost({
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: fakeWm(wmCalls),
+    },
+  });
+
+  const launched = host.launch(app);
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected accessor descriptor launch to fail closed");
+  }
+
+  assert.equal(launched.error.code, "APP_DESCRIPTOR_INVALID");
+  assert.equal(idReads, 0);
+  assert.deepEqual(mounts, []);
+  assert.deepEqual(created, []);
+  assert.deepEqual(wmCalls, []);
+  assert.deepEqual(unmounts, []);
+  assert.deepEqual(removed, []);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
+test("launch snapshots mutable app descriptors and stop uses the launch identity", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  const app: {
+    defaultWindow: {
+      rect: Rect;
+      workspaceId: string;
+    };
+    id: string;
+    runtime: {
+      componentId: string;
+      props: {
+        documentId: string;
+      };
+    };
+    surfaceKind: "tsx";
+    title: string;
+  } = {
+    defaultWindow: {
+      rect: {
+        height: 420,
+        width: 640,
+        x: 24,
+        y: 32,
+      },
+      workspaceId: "main",
+    },
+    id: "com.vita.mutable",
+    runtime: {
+      componentId: "com.vita.mutable.component",
+      props: {
+        documentId: "before",
+      },
+    },
+    surfaceKind: "tsx",
+    title: "Mutable",
+  };
+  const host = new AppHost({
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: fakeWm(wmCalls),
+    },
+  });
+
+  const launched = host.launch(app);
+
+  assert.equal(launched.ok, true);
+  if (!launched.ok) {
+    assert.fail("expected mutable descriptor launch to succeed");
+  }
+
+  assert.notStrictEqual(launched.value.app, app);
+  assert.equal(launched.value.app.id, "com.vita.mutable");
+  assert.equal(launched.value.app.title, "Mutable");
+  assert.equal(launched.value.app.surfaceKind, "tsx");
+  if (launched.value.app.surfaceKind !== "tsx") {
+    assert.fail("expected TSX snapshot");
+  }
+  assert.equal(launched.value.app.runtime.componentId, "com.vita.mutable.component");
+  assert.equal(launched.value.app.runtime.props?.["documentId"], "before");
+  assert.equal(created[0]?.payload["appId"], "com.vita.mutable");
+  assert.equal(created[0]?.payload["componentId"], "com.vita.mutable.component");
+  assert.deepEqual(created[0]?.payload["props"], {
+    documentId: "before",
+  });
+
+  app.id = "com.vita.mutable-renamed";
+  app.title = "Renamed";
+  app.runtime.componentId = "com.vita.renamed.component";
+  app.runtime.props.documentId = "after";
+  app.defaultWindow.rect = {
+    height: 100,
+    width: 100,
+    x: 500,
+    y: 500,
+  };
+
+  const storedLaunch = host.snapshot().apps[0];
+
+  if (storedLaunch === undefined) {
+    assert.fail("expected stored launch snapshot");
+  }
+  assert.equal(storedLaunch.app.id, "com.vita.mutable");
+  assert.equal(storedLaunch.app.title, "Mutable");
+  assert.equal(storedLaunch.app.surfaceKind, "tsx");
+  if (storedLaunch.app.surfaceKind !== "tsx") {
+    assert.fail("expected stored TSX snapshot");
+  }
+  assert.equal(storedLaunch.app.runtime.componentId, "com.vita.mutable.component");
+  assert.equal(storedLaunch.app.runtime.props?.["documentId"], "before");
+
+  wmCalls.length = 0;
+
+  const stopped = host.stop(app);
+
+  assert.equal(stopped.ok, true);
+  if (!stopped.ok) {
+    assert.fail("expected stop to use original launch identity");
+  }
+  assert.deepEqual(removed, [appSurfaceId("com.vita.mutable")]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), [
+    "tsx:com.vita.mutable.component",
+  ]);
+  assert.equal(stopped.value.appId, "com.vita.mutable");
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
 test("empty and app ids have distinct surface identities", () => {
   assert.equal(appSurfaceId(""), "surface:vita.app:");
   assert.notEqual(appSurfaceId(""), appSurfaceId("app"));

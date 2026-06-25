@@ -1,3 +1,4 @@
+import { safeNormalize } from "../safe-normalize.ts";
 import type { PlainJson, PlainJsonObject } from "../safe-normalize.ts";
 import type {
   ShellPlacement,
@@ -246,11 +247,40 @@ const DEFAULT_SHELL_PLACEMENT = Object.freeze({
   zone: "center",
 }) satisfies ShellPlacement;
 
+const APP_DESCRIPTOR_FIELDS = new Set<string>([
+  "defaultWindow",
+  "id",
+  "runtime",
+  "surfaceKind",
+  "title",
+]);
+const APP_WINDOW_HINT_FIELDS = new Set<string>([
+  "anchor",
+  "className",
+  "layer",
+  "mode",
+  "order",
+  "rect",
+  "workspaceId",
+  "zone",
+]);
+const RECT_FIELDS = new Set<string>(["height", "width", "x", "y"]);
+const TSX_RUNTIME_FIELDS = new Set<string>(["componentId", "props"]);
+const CAPSULE_RUNTIME_FIELDS = new Set<string>([
+  "entrypoint",
+  "id",
+  "integrity",
+  "ref",
+  "version",
+]);
+const WEBVIEW_RUNTIME_FIELDS = new Set<string>(["partition", "url"]);
+
 export class AppHost {
   readonly #ports: AppHostPorts;
   readonly #layoutConstraints: LayoutConstraints;
   readonly #launches = new Map<string, AppLaunch>();
   readonly #pendingCleanup = new Map<string, PendingAppCleanup>();
+  readonly #descriptorLaunchIds = new WeakMap<object, string>();
   #windowModel: WindowModel;
 
   constructor(options: AppHostOptions) {
@@ -260,44 +290,45 @@ export class AppHost {
   }
 
   launch(app: AppDescriptor): AppHostResult<AppLaunch> {
-    if (app.id.length === 0) {
-      return reject(
-        "APP_ID_INVALID",
-        "app id must not be empty.",
-        "/apps",
-      );
-    }
+    const snapshot = snapshotAppDescriptor(app);
+
+    if (!snapshot.ok) return snapshot;
+
+    const appSnapshot = snapshot.value;
+    const appId = appSnapshot.id;
 
     const pendingCleanup = this.#firstPendingCleanup();
 
     if (pendingCleanup !== undefined) {
       return reject(
         "APP_LAUNCH_CLEANUP_PENDING",
-        `app '${pendingCleanup.appId}' has a failed lifecycle awaiting cleanup before '${app.id}' can launch.`,
+        `app '${pendingCleanup.appId}' has a failed lifecycle awaiting cleanup before '${appId}' can launch.`,
         `/apps/${pathToken(pendingCleanup.appId)}/cleanup`,
       );
     }
 
-    if (this.#launches.has(app.id)) {
+    if (this.#launches.has(appId)) {
       return reject(
         "APP_ALREADY_RUNNING",
-        `app '${app.id}' is already running.`,
-        `/apps/${pathToken(app.id)}`,
+        `app '${appId}' is already running.`,
+        `/apps/${pathToken(appId)}`,
       );
     }
 
-    const surfaceId = appSurfaceId(app.id);
-    const windowId = appWindowId(app.id);
-    const runtime = this.#bindRuntime(app, surfaceId, windowId);
+    const surfaceId = appSurfaceId(appId);
+    const windowId = appWindowId(appId);
+    const runtime = this.#bindRuntime(appSnapshot, surfaceId, windowId);
 
     if (!runtime.ok) return runtime;
 
-    const surfaceRequest = buildSurfaceCreateRequest(app, runtime.value, surfaceId);
+    this.#descriptorLaunchIds.set(app, appId);
+
+    const surfaceRequest = buildSurfaceCreateRequest(appSnapshot, runtime.value, surfaceId);
     const createdSurface = this.#createSurface(surfaceRequest);
 
     if (!createdSurface.ok) {
       const rolledBack = this.#rollbackFailedLaunchResources(
-        app.id,
+        appId,
         runtime.value,
         surfaceId,
         windowId,
@@ -310,20 +341,21 @@ export class AppHost {
         return rejectRollbackFailure(createdSurface.error, rolledBack.error);
       }
 
+      this.#descriptorLaunchIds.delete(app);
       return createdSurface;
     }
 
     const previousWindowModel = this.#windowModel;
     const nextWindowModel = openWindow(
       previousWindowModel,
-      buildWindowOpenRequest(app, surfaceId, windowId),
+      buildWindowOpenRequest(appSnapshot, surfaceId, windowId),
     );
     const intents = collectWindowManagerIntents(
       previousWindowModel,
       nextWindowModel,
       this.#layoutConstraints,
     );
-    const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(app.id)}/wm`);
+    const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(appId)}/wm`);
 
     if (!emitted.ok) {
       const windowCleanupIntents = collectWindowManagerIntents(
@@ -332,7 +364,7 @@ export class AppHost {
         this.#layoutConstraints,
       );
       const rolledBack = this.#rollbackFailedLaunchResources(
-        app.id,
+        appId,
         runtime.value,
         surfaceId,
         windowId,
@@ -343,13 +375,14 @@ export class AppHost {
 
       if (!rolledBack.ok) return rejectRollbackFailure(emitted.error, rolledBack.error);
 
+      this.#descriptorLaunchIds.delete(app);
       return reject(emitted.error.code, emitted.error.message, emitted.error.path);
     }
 
     this.#windowModel = nextWindowModel;
 
     const launch = freezeLaunch({
-      app,
+      app: appSnapshot,
       binding: runtime.value,
       intents,
       surfaceId,
@@ -357,16 +390,26 @@ export class AppHost {
       textureId: surfaceId,
       windowId,
     });
-    this.#launches.set(app.id, launch);
+    this.#launches.set(appId, launch);
 
     return accept(launch);
   }
 
   stop(app: AppDescriptor | string): AppHostResult<AppStop> {
-    const appId = typeof app === "string" ? app : app.id;
+    const stopAppId = this.#resolveStopAppId(app);
+
+    if (!stopAppId.ok) return stopAppId;
+
+    const appId = stopAppId.value;
     const pendingCleanup = this.#pendingCleanup.get(appId);
 
-    if (pendingCleanup !== undefined) return this.#cleanupPendingApp(pendingCleanup);
+    if (pendingCleanup !== undefined) {
+      const cleaned = this.#cleanupPendingApp(pendingCleanup);
+
+      if (cleaned.ok && typeof app !== "string") this.#descriptorLaunchIds.delete(app);
+
+      return cleaned;
+    }
 
     const blockingCleanup = this.#firstPendingCleanup();
 
@@ -435,6 +478,7 @@ export class AppHost {
 
     this.#windowModel = nextWindowModel;
     this.#launches.delete(appId);
+    if (typeof app !== "string") this.#descriptorLaunchIds.delete(app);
 
     return accept(Object.freeze({
       appId,
@@ -450,6 +494,20 @@ export class AppHost {
       apps: Object.freeze([...this.#launches.values()].sort(compareLaunches)),
       windowModel: this.#windowModel,
     });
+  }
+
+  #resolveStopAppId(app: AppDescriptor | string): AppHostResult<string> {
+    if (typeof app === "string") return accept(app);
+
+    const trackedId = this.#descriptorLaunchIds.get(app);
+
+    if (trackedId !== undefined) return accept(trackedId);
+
+    const snapshot = snapshotAppDescriptor(app);
+
+    if (!snapshot.ok) return snapshot;
+
+    return accept(snapshot.value.id);
   }
 
   #firstPendingCleanup(): PendingAppCleanup | undefined {
@@ -845,6 +903,443 @@ export function appSurfaceId(appId: string): string {
 
 export function appWindowId(appId: string): string {
   return `window:${appId}`;
+}
+
+function snapshotAppDescriptor(value: unknown): AppHostResult<AppDescriptor> {
+  const normalized = safeNormalize(value);
+
+  if (!normalized.ok || !isPlainJsonObject(normalized.value)) {
+    return invalidAppDescriptor("app descriptor must be a plain data object.", "/apps");
+  }
+
+  const descriptor = normalized.value;
+  const fields = expectOnlyFields(descriptor, APP_DESCRIPTOR_FIELDS, "/apps");
+
+  if (!fields.ok) return fields;
+
+  const id = requiredStringField(descriptor, "id", "/apps/id");
+
+  if (!id.ok) return id;
+  if (id.value.length === 0) {
+    return reject(
+      "APP_ID_INVALID",
+      "app id must not be empty.",
+      "/apps",
+    );
+  }
+
+  const title = requiredStringField(descriptor, "title", "/apps/title");
+
+  if (!title.ok) return title;
+
+  const surfaceKind = requiredStringField(descriptor, "surfaceKind", "/apps/surfaceKind");
+
+  if (!surfaceKind.ok) return surfaceKind;
+
+  const defaultWindow = optionalWindowHintsField(descriptor, "defaultWindow", "/apps/defaultWindow");
+
+  if (!defaultWindow.ok) return defaultWindow;
+
+  const runtimeValue = field(descriptor, "runtime");
+
+  switch (surfaceKind.value) {
+    case "tsx": {
+      const runtime = snapshotTsxRuntime(runtimeValue, "/apps/runtime");
+
+      if (!runtime.ok) return runtime;
+
+      const output: {
+        id: string;
+        title: string;
+        surfaceKind: "tsx";
+        runtime: TsxComponentRef;
+        defaultWindow?: AppWindowHints;
+      } = {
+        id: id.value,
+        runtime: runtime.value,
+        surfaceKind: "tsx",
+        title: title.value,
+      };
+
+      if (defaultWindow.value !== undefined) output.defaultWindow = defaultWindow.value;
+
+      return accept(Object.freeze(output));
+    }
+    case "wasm": {
+      const runtime = snapshotCapsuleRuntime(runtimeValue, "/apps/runtime");
+
+      if (!runtime.ok) return runtime;
+
+      const output: {
+        id: string;
+        title: string;
+        surfaceKind: "wasm";
+        runtime: CapsuleRuntimeRef;
+        defaultWindow?: AppWindowHints;
+      } = {
+        id: id.value,
+        runtime: runtime.value,
+        surfaceKind: "wasm",
+        title: title.value,
+      };
+
+      if (defaultWindow.value !== undefined) output.defaultWindow = defaultWindow.value;
+
+      return accept(Object.freeze(output));
+    }
+    case "container": {
+      const runtime = snapshotCapsuleRuntime(runtimeValue, "/apps/runtime");
+
+      if (!runtime.ok) return runtime;
+
+      const output: {
+        id: string;
+        title: string;
+        surfaceKind: "container";
+        runtime: CapsuleRuntimeRef;
+        defaultWindow?: AppWindowHints;
+      } = {
+        id: id.value,
+        runtime: runtime.value,
+        surfaceKind: "container",
+        title: title.value,
+      };
+
+      if (defaultWindow.value !== undefined) output.defaultWindow = defaultWindow.value;
+
+      return accept(Object.freeze(output));
+    }
+    case "web": {
+      const runtime = snapshotWebviewRuntime(runtimeValue, "/apps/runtime");
+
+      if (!runtime.ok) return runtime;
+
+      const output: {
+        id: string;
+        title: string;
+        surfaceKind: "web";
+        runtime: WebviewRuntimeRef;
+        defaultWindow?: AppWindowHints;
+      } = {
+        id: id.value,
+        runtime: runtime.value,
+        surfaceKind: "web",
+        title: title.value,
+      };
+
+      if (defaultWindow.value !== undefined) output.defaultWindow = defaultWindow.value;
+
+      return accept(Object.freeze(output));
+    }
+    default:
+      return invalidAppDescriptor(
+        "app surfaceKind must be one of tsx, wasm, container, or web.",
+        "/apps/surfaceKind",
+      );
+  }
+}
+
+function snapshotTsxRuntime(
+  value: PlainJson | undefined,
+  path: string,
+): AppHostResult<TsxComponentRef> {
+  if (!isPlainJsonObject(value)) {
+    return invalidAppDescriptor("tsx runtime must be a plain data object.", path);
+  }
+
+  const fields = expectOnlyFields(value, TSX_RUNTIME_FIELDS, path);
+
+  if (!fields.ok) return fields;
+
+  const componentId = requiredStringField(value, "componentId", `${path}/componentId`);
+
+  if (!componentId.ok) return componentId;
+
+  const propsValue = field(value, "props");
+  const output: {
+    componentId: string;
+    props?: PlainJsonObject;
+  } = {
+    componentId: componentId.value,
+  };
+
+  if (propsValue !== undefined) {
+    if (!isPlainJsonObject(propsValue)) {
+      return invalidAppDescriptor("tsx runtime props must be a plain data object.", `${path}/props`);
+    }
+
+    output.props = propsValue;
+  }
+
+  return accept(Object.freeze(output));
+}
+
+function snapshotCapsuleRuntime(
+  value: PlainJson | undefined,
+  path: string,
+): AppHostResult<CapsuleRuntimeRef> {
+  if (!isPlainJsonObject(value)) {
+    return invalidAppDescriptor("capsule runtime must be a plain data object.", path);
+  }
+
+  const fields = expectOnlyFields(value, CAPSULE_RUNTIME_FIELDS, path);
+
+  if (!fields.ok) return fields;
+
+  const id = requiredStringField(value, "id", `${path}/id`);
+  const version = requiredStringField(value, "version", `${path}/version`);
+  const integrity = requiredStringField(value, "integrity", `${path}/integrity`);
+  const ref = requiredStringField(value, "ref", `${path}/ref`);
+  const entrypoint = optionalStringField(value, "entrypoint", `${path}/entrypoint`);
+
+  if (!id.ok) return id;
+  if (!version.ok) return version;
+  if (!integrity.ok) return integrity;
+  if (!ref.ok) return ref;
+  if (!entrypoint.ok) return entrypoint;
+
+  const output: {
+    id: string;
+    version: string;
+    integrity: string;
+    ref: string;
+    entrypoint?: string;
+  } = {
+    id: id.value,
+    integrity: integrity.value,
+    ref: ref.value,
+    version: version.value,
+  };
+
+  if (entrypoint.value !== undefined) output.entrypoint = entrypoint.value;
+
+  return accept(Object.freeze(output));
+}
+
+function snapshotWebviewRuntime(
+  value: PlainJson | undefined,
+  path: string,
+): AppHostResult<WebviewRuntimeRef> {
+  if (!isPlainJsonObject(value)) {
+    return invalidAppDescriptor("webview runtime must be a plain data object.", path);
+  }
+
+  const fields = expectOnlyFields(value, WEBVIEW_RUNTIME_FIELDS, path);
+
+  if (!fields.ok) return fields;
+
+  const url = requiredStringField(value, "url", `${path}/url`);
+  const partition = optionalStringField(value, "partition", `${path}/partition`);
+
+  if (!url.ok) return url;
+  if (!partition.ok) return partition;
+
+  const output: {
+    url: string;
+    partition?: string;
+  } = {
+    url: url.value,
+  };
+
+  if (partition.value !== undefined) output.partition = partition.value;
+
+  return accept(Object.freeze(output));
+}
+
+function optionalWindowHintsField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<AppWindowHints | undefined> {
+  const hints = field(value, key);
+
+  if (hints === undefined) return accept(undefined);
+  if (!isPlainJsonObject(hints)) {
+    return invalidAppDescriptor("defaultWindow must be a plain data object.", path);
+  }
+
+  const fields = expectOnlyFields(hints, APP_WINDOW_HINT_FIELDS, path);
+
+  if (!fields.ok) return fields;
+
+  const workspaceId = optionalStringField(hints, "workspaceId", `${path}/workspaceId`);
+  const mode = optionalWindowModeField(hints, "mode", `${path}/mode`);
+  const zone = optionalStringField(hints, "zone", `${path}/zone`);
+  const layer = optionalStringField(hints, "layer", `${path}/layer`);
+  const order = optionalNumberField(hints, "order", `${path}/order`);
+  const anchor = optionalStringField(hints, "anchor", `${path}/anchor`);
+  const className = optionalStringField(hints, "className", `${path}/className`);
+  const rect = optionalRectField(hints, "rect", `${path}/rect`);
+
+  if (!workspaceId.ok) return workspaceId;
+  if (!mode.ok) return mode;
+  if (!zone.ok) return zone;
+  if (!layer.ok) return layer;
+  if (!order.ok) return order;
+  if (!anchor.ok) return anchor;
+  if (!className.ok) return className;
+  if (!rect.ok) return rect;
+
+  const output: {
+    workspaceId?: string;
+    rect?: Rect;
+    mode?: WindowMode;
+    zone?: string;
+    layer?: string;
+    order?: number;
+    anchor?: string;
+    className?: string;
+  } = {};
+
+  if (workspaceId.value !== undefined) output.workspaceId = workspaceId.value;
+  if (rect.value !== undefined) output.rect = rect.value;
+  if (mode.value !== undefined) output.mode = mode.value;
+  if (zone.value !== undefined) output.zone = zone.value;
+  if (layer.value !== undefined) output.layer = layer.value;
+  if (order.value !== undefined) output.order = order.value;
+  if (anchor.value !== undefined) output.anchor = anchor.value;
+  if (className.value !== undefined) output.className = className.value;
+
+  return accept(Object.freeze(output));
+}
+
+function optionalRectField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<Rect | undefined> {
+  const rect = field(value, key);
+
+  if (rect === undefined) return accept(undefined);
+  if (!isPlainJsonObject(rect)) {
+    return invalidAppDescriptor("window rect must be a plain data object.", path);
+  }
+
+  const fields = expectOnlyFields(rect, RECT_FIELDS, path);
+
+  if (!fields.ok) return fields;
+
+  const x = requiredNumberField(rect, "x", `${path}/x`);
+  const y = requiredNumberField(rect, "y", `${path}/y`);
+  const width = requiredNumberField(rect, "width", `${path}/width`);
+  const height = requiredNumberField(rect, "height", `${path}/height`);
+
+  if (!x.ok) return x;
+  if (!y.ok) return y;
+  if (!width.ok) return width;
+  if (!height.ok) return height;
+
+  return accept(freezeRect({
+    height: height.value,
+    width: width.value,
+    x: x.value,
+    y: y.value,
+  }));
+}
+
+function requiredStringField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<string> {
+  const current = field(value, key);
+
+  if (typeof current !== "string") {
+    return invalidAppDescriptor(`${key} must be a string.`, path);
+  }
+
+  return accept(current);
+}
+
+function optionalStringField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<string | undefined> {
+  const current = field(value, key);
+
+  if (current === undefined) return accept(undefined);
+  if (typeof current !== "string") {
+    return invalidAppDescriptor(`${key} must be a string when present.`, path);
+  }
+
+  return accept(current);
+}
+
+function requiredNumberField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<number> {
+  const current = field(value, key);
+
+  if (typeof current !== "number") {
+    return invalidAppDescriptor(`${key} must be a number.`, path);
+  }
+
+  return accept(current);
+}
+
+function optionalNumberField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<number | undefined> {
+  const current = field(value, key);
+
+  if (current === undefined) return accept(undefined);
+  if (typeof current !== "number") {
+    return invalidAppDescriptor(`${key} must be a number when present.`, path);
+  }
+
+  return accept(current);
+}
+
+function optionalWindowModeField(
+  value: PlainJsonObject,
+  key: string,
+  path: string,
+): AppHostResult<WindowMode | undefined> {
+  const current = field(value, key);
+
+  if (current === undefined) return accept(undefined);
+  if (current !== "floating" && current !== "tiled") {
+    return invalidAppDescriptor("window mode must be floating or tiled when present.", path);
+  }
+
+  return accept(current);
+}
+
+function expectOnlyFields(
+  value: PlainJsonObject,
+  allowed: ReadonlySet<string>,
+  path: string,
+): AppHostResult<true> {
+  const keys = Reflect.ownKeys(value);
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined || typeof key === "symbol" || !allowed.has(key)) {
+      return invalidAppDescriptor("app descriptor contains an unsupported field.", path);
+    }
+  }
+
+  return accept(true);
+}
+
+function field(value: PlainJsonObject, key: string): PlainJson | undefined {
+  if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
+
+  return value[key];
+}
+
+function isPlainJsonObject(value: PlainJson | undefined): value is PlainJsonObject {
+  return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidAppDescriptor<T>(message: string, path: string): AppHostResult<T> {
+  return reject("APP_DESCRIPTOR_INVALID", message, path);
 }
 
 function buildWindowOpenRequest(
