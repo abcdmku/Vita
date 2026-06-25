@@ -139,6 +139,8 @@ export interface AppWindowHostSnapshot {
   readonly compositor: readonly CompositorSurfaceSnapshot[];
 }
 
+type AppWindowHostQueuedOperation<T> = () => MaybePromise<AppWindowHostResult<T>>;
+
 const DEFAULT_LAYOUT_CONSTRAINTS = Object.freeze({
   bounds: Object.freeze({
     height: 720,
@@ -156,6 +158,7 @@ export class AppWindowHost {
   readonly #maybeLiveWindowsByError = new WeakMap<AppWindowHostError, readonly AppWindowSurface[]>();
   readonly #pendingCleanup = new Map<string, AppWindowHostPendingCleanup>();
   readonly #pendingRollbackStops = new Set<string>();
+  readonly #processedObservedEvents = new Map<string, AppWindowHostResult<AppWindowHostReconcile>>();
   readonly #untrackedPendingCleanup = new Set<string>();
   #eventQueue: Promise<void> = Promise.resolve();
   #unsubscribe: AppWindowHostUnsubscribe | undefined;
@@ -169,6 +172,40 @@ export class AppWindowHost {
   }
 
   async launch(app: AppDescriptor): Promise<AppWindowHostResult<AppWindowHostLaunch>> {
+    return this.#enqueueLifecycle(() => this.#launchQueued(app));
+  }
+
+  async stop(app: AppDescriptor | string): Promise<AppWindowHostResult<AppWindowHostStop>> {
+    return this.#enqueueLifecycle(() => this.#stopQueued(app));
+  }
+
+  async observe(event: AppWindowHostObservedEvent): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+    return this.#enqueueLifecycle(() => this.#observeQueued(event));
+  }
+
+  dispose(): void {
+    const unsubscribe = this.#unsubscribe;
+
+    this.#unsubscribe = undefined;
+    if (unsubscribe !== undefined) unsubscribe();
+  }
+
+  async reconcile(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+    return this.#enqueueLifecycle(() => this.#reconcileQueued());
+  }
+
+  snapshot(): AppWindowHostSnapshot {
+    const appSnapshot = this.#appHost.snapshot();
+
+    return Object.freeze({
+      apps: freezeLaunches(appSnapshot.apps),
+      compositor: this.#compositor.snapshot?.() ?? Object.freeze([]),
+      pendingCleanup: freezePendingCleanup([...this.#pendingCleanup.values()]),
+      windows: appWindowSurfaces(appSnapshot, this.#layoutConstraints),
+    });
+  }
+
+  async #launchQueued(app: AppDescriptor): Promise<AppWindowHostResult<AppWindowHostLaunch>> {
     const pendingCleanup = this.#firstPendingCleanup();
 
     if (pendingCleanup !== undefined) {
@@ -183,9 +220,16 @@ export class AppWindowHost {
 
     if (!launched.ok) return fromAppHostError(launched.error);
 
+    this.#forgetProcessedStopForLaunch(launched.value);
+
     const reconciled = await this.#reconcileCurrent(launched.value.intents);
 
     if (reconciled.ok) {
+      this.#rememberProcessedObservedEvent({
+        launch: launched.value,
+        type: "launch",
+      }, accept(reconciled.value));
+
       return accept(Object.freeze({
         launch: launched.value,
         reconcile: reconciled.value,
@@ -194,15 +238,31 @@ export class AppWindowHost {
 
     const rolledBack = await this.#rollbackLaunch(launched.value, reconciled.error);
 
-    if (!rolledBack.ok) return rolledBack;
+    if (!rolledBack.ok) {
+      this.#rememberProcessedObservedEvent({
+        launch: launched.value,
+        type: "launch",
+      }, {
+        error: rolledBack.error,
+        ok: false,
+      });
+      return rolledBack;
+    }
 
-    return {
+    const failed = {
       error: reconciled.error,
       ok: false,
-    };
+    } satisfies AppWindowHostResult<AppWindowHostReconcile>;
+
+    this.#rememberProcessedObservedEvent({
+      launch: launched.value,
+      type: "launch",
+    }, failed);
+
+    return failed;
   }
 
-  async stop(app: AppDescriptor | string): Promise<AppWindowHostResult<AppWindowHostStop>> {
+  async #stopQueued(app: AppDescriptor | string): Promise<AppWindowHostResult<AppWindowHostStop>> {
     const pendingCleanup = this.#firstPendingCleanup();
 
     if (pendingCleanup !== undefined) {
@@ -217,15 +277,26 @@ export class AppWindowHost {
 
     if (!stopped.ok) return fromAppHostError(stopped.error);
 
+    this.#forgetProcessedLaunchForStop(stopped.value);
+
     const reconciled = await this.#reconcileCurrent(stopped.value.intents);
 
     if (!reconciled.ok) {
       this.#rememberPendingCleanup(stopped.value, reconciled.error);
+      this.#rememberProcessedObservedEvent({
+        stop: stopped.value,
+        type: "stop",
+      }, reconciled);
       return {
         error: reconciled.error,
         ok: false,
       };
     }
+
+    this.#rememberProcessedObservedEvent({
+      stop: stopped.value,
+      type: "stop",
+    }, reconciled);
 
     return accept(Object.freeze({
       reconcile: reconciled.value,
@@ -233,7 +304,21 @@ export class AppWindowHost {
     }));
   }
 
-  async observe(event: AppWindowHostObservedEvent): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+  async #observeQueued(event: AppWindowHostObservedEvent): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+    const eventKey = observedEventKey(event);
+    const processed = this.#processedObservedEvents.get(eventKey);
+
+    if (processed !== undefined) {
+      this.#processedObservedEvents.delete(eventKey);
+      return processed;
+    }
+
+    return this.#processObservedEvent(event);
+  }
+
+  async #processObservedEvent(
+    event: AppWindowHostObservedEvent,
+  ): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
     switch (event.type) {
       case "launch": {
         const reconciled = await this.#reconcileCurrent(event.launch.intents);
@@ -258,14 +343,7 @@ export class AppWindowHost {
     }
   }
 
-  dispose(): void {
-    const unsubscribe = this.#unsubscribe;
-
-    this.#unsubscribe = undefined;
-    if (unsubscribe !== undefined) unsubscribe();
-  }
-
-  async reconcile(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+  async #reconcileQueued(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
     const untrackedCleanup = await this.#retryUntrackedPendingCleanup();
 
     if (!untrackedCleanup.ok) return untrackedCleanup;
@@ -279,17 +357,6 @@ export class AppWindowHost {
     }
 
     return reconciled;
-  }
-
-  snapshot(): AppWindowHostSnapshot {
-    const appSnapshot = this.#appHost.snapshot();
-
-    return Object.freeze({
-      apps: freezeLaunches(appSnapshot.apps),
-      compositor: this.#compositor.snapshot?.() ?? Object.freeze([]),
-      pendingCleanup: freezePendingCleanup([...this.#pendingCleanup.values()]),
-      windows: appWindowSurfaces(appSnapshot, this.#layoutConstraints),
-    });
   }
 
   async #rollbackLaunch(
@@ -330,6 +397,10 @@ export class AppWindowHost {
     await this.#cleanupMaybeLiveWindows(stopped.value, maybeLiveWindows);
 
     const reconciled = await this.#reconcileCurrent(stopped.value.intents);
+    this.#rememberProcessedObservedEvent({
+      stop: stopped.value,
+      type: "stop",
+    }, reconciled);
 
     if (!reconciled.ok) {
       const rollbackError = rejectError(
@@ -350,17 +421,38 @@ export class AppWindowHost {
   #observeSubscribedEvent(
     event: AppWindowHostObservedEvent,
   ): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
-    const observed = this.#eventQueue.then(
-      () => this.observe(event),
-      () => this.observe(event),
+    return this.#enqueueLifecycle(() => this.#observeQueued(event));
+  }
+
+  #enqueueLifecycle<T>(
+    operation: AppWindowHostQueuedOperation<T>,
+  ): Promise<AppWindowHostResult<T>> {
+    const queued = this.#eventQueue.then(
+      () => operation(),
+      () => operation(),
     );
 
-    this.#eventQueue = observed.then(
+    this.#eventQueue = queued.then(
       () => undefined,
       () => undefined,
     );
 
-    return observed;
+    return queued;
+  }
+
+  #rememberProcessedObservedEvent(
+    event: AppWindowHostObservedEvent,
+    result: AppWindowHostResult<AppWindowHostReconcile>,
+  ): void {
+    this.#processedObservedEvents.set(observedEventKey(event), result);
+  }
+
+  #forgetProcessedStopForLaunch(launch: AppLaunch): void {
+    this.#processedObservedEvents.delete(stopEventKeyForLaunch(launch));
+  }
+
+  #forgetProcessedLaunchForStop(stop: AppStop): void {
+    this.#processedObservedEvents.delete(launchEventKeyForStop(stop));
   }
 
   async #reconcileCurrent(
@@ -788,6 +880,75 @@ function pendingCleanupFromLifecycle(
     textureId: lifecycle.textureId,
     windowId: lifecycle.windowId,
   });
+}
+
+function observedEventKey(event: AppWindowHostObservedEvent): string {
+  switch (event.type) {
+    case "launch":
+      return launchEventKeyForLaunch(event.launch);
+    case "stop":
+      return stopEventKeyForStop(event.stop);
+  }
+}
+
+function launchEventKeyForLaunch(launch: AppLaunch): string {
+  return lifecycleEventKey(
+    "launch",
+    launch.app.id,
+    launch.surfaceId,
+    launch.textureId,
+    launch.windowId,
+  );
+}
+
+function launchEventKeyForStop(stop: AppStop): string {
+  return lifecycleEventKey(
+    "launch",
+    stop.appId,
+    stop.surfaceId,
+    stop.textureId,
+    stop.windowId,
+  );
+}
+
+function stopEventKeyForLaunch(launch: AppLaunch): string {
+  return lifecycleEventKey(
+    "stop",
+    launch.app.id,
+    launch.surfaceId,
+    launch.textureId,
+    launch.windowId,
+  );
+}
+
+function stopEventKeyForStop(stop: AppStop): string {
+  return lifecycleEventKey(
+    "stop",
+    stop.appId,
+    stop.surfaceId,
+    stop.textureId,
+    stop.windowId,
+  );
+}
+
+function lifecycleEventKey(
+  type: "launch" | "stop",
+  appId: string,
+  surfaceId: string,
+  textureId: string,
+  windowId: string,
+): string {
+  return [
+    type,
+    keyPart(appId),
+    keyPart(surfaceId),
+    keyPart(textureId),
+    keyPart(windowId),
+  ].join("|");
+}
+
+function keyPart(value: string): string {
+  return `${value.length}:${value}`;
 }
 
 function maybeLiveWindowsForLaunch(

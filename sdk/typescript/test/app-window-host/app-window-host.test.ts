@@ -672,6 +672,56 @@ test("subscribed AppHost launch and stop events reconcile through the injected c
   assert.equal(host.snapshot().windows.length, 0);
 });
 
+test("wrapper launch and subscribed launch event coalesce to one rollback on compositor failure", async () => {
+  const events = new FakeAppHostEvents();
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+    events,
+  });
+  const compositor = new ThrowingMaybeLandedCompositorDriver();
+  const host = new AppWindowHost({
+    appHost,
+    appHostEvents: events,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+  const app = tsxApp();
+
+  const launched = await host.launch(app);
+  await events.drain();
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected compositor failure");
+  }
+  assert.equal(launched.error.code, "COMPOSITOR_RECONCILE_FAILED");
+  assert.deepEqual(appHost.stops, [
+    app.id,
+  ]);
+  assert.deepEqual(compositor.removedSurfaces, [
+    appSurfaceId(app.id),
+  ]);
+  assert.equal(appHost.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windows.length, 0);
+  assert.equal(host.snapshot().pendingCleanup.length, 0);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(app.id)),
+    false,
+  );
+
+  const swept = await host.reconcile();
+  await events.drain();
+
+  assert.equal(swept.ok, true);
+  assert.deepEqual(appHost.stops, [
+    app.id,
+  ]);
+  assert.equal(host.snapshot().pendingCleanup.length, 0);
+});
+
 interface FakeAppHostOptions extends LayoutConstraints {
   readonly events?: FakeAppHostEvents;
   readonly failStopWhen?: (appId: string) => boolean;
