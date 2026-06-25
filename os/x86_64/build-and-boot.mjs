@@ -368,6 +368,15 @@ function installAgentOverlay() {
 function installCompositorOverlay() {
   const overlayHost = join(HERE, "smoke-overlay");
   const binDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor");
+  const commandDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor-smoke.commands");
+  // The driver-produced command stream is COMMITTED at commandDest and baked as-is. We do NOT regenerate it here:
+  // the generator imports the .ts compositor bridge and the build HOST's Node may lack TS support entirely
+  // (ERR_NO_TYPESCRIPT — see the smoke-must-not-import-.ts note above). Freshness/no-drift between the TS model and the
+  // baked commands is enforced by the os smoke TEST (compositor-selftest.test.ts), which runs the generator on a
+  // TS-capable Node and asserts byte-equality with this committed file.
+  if (!DRY && !existsSync(commandDest)) {
+    fail(`1b0 · committed compositor smoke layout missing: ${commandDest}`);
+  }
   const buildArgs = [
     "tools/build/rust-in-docker.mjs",
     "--dir",

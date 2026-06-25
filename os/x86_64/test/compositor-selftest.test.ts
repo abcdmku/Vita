@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const rustHelperUrl = new URL("../../../tools/build/rust-in-docker.mjs", import.meta.url);
+const repoRootUrl = new URL("../../..", import.meta.url);
 const buildAndBootUrl = new URL("../build-and-boot.mjs", import.meta.url);
 const serviceUnitUrl = new URL(
   "../smoke-overlay/usr/lib/systemd/system/vita-compositor-selftest.service",
@@ -24,6 +30,11 @@ const wrapperUrl = new URL(
   "../smoke-overlay/usr/lib/vita/compositor/vita-compositor-selftest.sh",
   import.meta.url,
 );
+const smokeCommandsUrl = new URL(
+  "../smoke-overlay/usr/lib/vita/compositor/vita-compositor-smoke.commands",
+  import.meta.url,
+);
+const execFileAsync = promisify(execFile);
 
 test("rust-in-docker builds the compositor as a locked linux x86_64 release binary", async () => {
   const helper = await readText(rustHelperUrl);
@@ -57,6 +68,9 @@ test("smoke build stages the compositor before mkosi consumes smoke-overlay", as
   const buildAndBoot = await readText(buildAndBootUrl);
 
   assertContains(buildAndBoot, "function installCompositorOverlay()");
+  assertContains(buildAndBoot, '"compositor-smoke-layout.mjs"');
+  assertContains(buildAndBoot, '"--experimental-strip-types"');
+  assertContains(buildAndBoot, '"vita-compositor-smoke.commands"');
   assertContains(buildAndBoot, '"tools/build/rust-in-docker.mjs"');
   assertContains(buildAndBoot, '"packages/compositor-core"');
   assertContains(buildAndBoot, '"os/x86_64/smoke-overlay/usr/lib/vita/compositor/vita-compositor"');
@@ -115,16 +129,18 @@ test("self-test wrapper emits VITA-COMPOSITOR FAILSAFE instead of failing or han
 
   assertContains(wrapper, "MARKER=VITA-COMPOSITOR");
   assertContains(wrapper, "BIN=/usr/lib/vita/compositor/vita-compositor");
+  assertContains(wrapper, "COMMANDS=/usr/lib/vita/compositor/vita-compositor-smoke.commands");
   assertContains(wrapper, "TTY=/dev/ttyS0");
   assertContains(wrapper, "HOLD_SECONDS=30");
-  assertContains(wrapper, "SCREENSHOT=/run/vita-compositor-demo.png");
+  assertContains(wrapper, "SCREENSHOT=/run/vita-compositor-driver.png");
   assertContains(wrapper, 'status=FAILSAFE reason=$1"');
   assertContains(wrapper, 'emit_failsafe "binary_missing"');
+  assertContains(wrapper, 'emit_failsafe "commands_missing"');
   assertContains(wrapper, 'emit_failsafe "dri_card0_absent"');
   assertContains(wrapper, 'rm -f "$SCREENSHOT"');
   assertContains(
     wrapper,
-    'timeout 45s "$BIN" --demo --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS"',
+    'timeout 45s "$BIN" --commands --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" < "$COMMANDS"',
   );
   assertContains(wrapper, 'grep -q "^$MARKER: .* status=OK " "$TMP"');
   assertContains(wrapper, '[ -s "$SCREENSHOT" ]');
@@ -133,6 +149,37 @@ test("self-test wrapper emits VITA-COMPOSITOR FAILSAFE instead of failing or han
   assertContains(wrapper, 'emit_failsafe "screenshot_missing"');
   assertContains(wrapper, 'emit_failsafe "exit_$rc"');
   assertContains(wrapper, 'exit 0');
+});
+
+test("smoke layout commands are generated from the TS compositor bridge shape", async () => {
+  const expected = await readText(smokeCommandsUrl);
+  const tempDir = await mkdtemp(join(tmpdir(), "vita-compositor-smoke-"));
+  const outputPath = join(tempDir, "vita-compositor-smoke.commands");
+
+  try {
+    const execution = await execFileAsync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "os/x86_64/compositor-smoke-layout.mjs",
+        outputPath,
+      ],
+      {
+        cwd: fileURLToPath(repoRootUrl),
+        encoding: "utf8",
+      },
+    );
+    const actual = await readText(pathToFileURL(outputPath));
+
+    assert.equal(execution.stdout, "");
+    assert.equal(actual, expected);
+    assert.doesNotMatch(actual, /demo/u);
+  } finally {
+    await rm(tempDir, {
+      force: true,
+      recursive: true,
+    });
+  }
 });
 
 async function readText(url: URL): Promise<string> {

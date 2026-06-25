@@ -1,7 +1,7 @@
-# Vita SMOKE VM only - run the Rust compositor KMS self-test once and emit VITA-COMPOSITOR to serial.
+# Vita SMOKE VM only - run the Rust compositor with a TS driver-produced layout and emit VITA-COMPOSITOR to serial.
 # Verification-only overlay: this is not part of the production OS image.
 [Unit]
-Description=Vita compositor KMS self-test (smoke verification)
+Description=Vita compositor command-driven KMS smoke verification
 After=systemd-modules-load.service systemd-udev-trigger.service open-vm-tools.service
 Wants=systemd-udev-trigger.service open-vm-tools.service
 

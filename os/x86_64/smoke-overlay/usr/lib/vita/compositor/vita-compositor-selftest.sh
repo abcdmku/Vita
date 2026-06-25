@@ -1,13 +1,14 @@
 #!/bin/bash
-# Vita SMOKE VM only - run the compositor KMS self-test once and always emit a VITA-COMPOSITOR marker.
+# Vita SMOKE VM only - render the TS driver-produced compositor layout once and always emit a marker.
 set -u
 
 MARKER=VITA-COMPOSITOR
 BIN=/usr/lib/vita/compositor/vita-compositor
+COMMANDS=/usr/lib/vita/compositor/vita-compositor-smoke.commands
 TTY=/dev/ttyS0
 TMP=
 HOLD_SECONDS=30
-SCREENSHOT=/run/vita-compositor-demo.png
+SCREENSHOT=/run/vita-compositor-driver.png
 
 emit_line() {
   printf '%s\n' "$1"
@@ -32,6 +33,11 @@ if [ ! -x "$BIN" ]; then
   exit 0
 fi
 
+if [ ! -s "$COMMANDS" ]; then
+  emit_failsafe "commands_missing"
+  exit 0
+fi
+
 tries=10
 while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
   sleep 1
@@ -47,7 +53,7 @@ TMP=$(mktemp /run/vita-compositor-selftest.XXXXXX 2>/dev/null || mktemp /tmp/vit
 : > "$TMP"
 rc=0
 rm -f "$SCREENSHOT"
-timeout 45s "$BIN" --demo --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" 2>&1 | while IFS= read -r line; do
+timeout 45s "$BIN" --commands --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" < "$COMMANDS" 2>&1 | while IFS= read -r line; do
   printf '%s\n' "$line" >> "$TMP"
   emit_line "$line"
 done
