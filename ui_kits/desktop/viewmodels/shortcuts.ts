@@ -1,5 +1,11 @@
 import {
+  closeWindow,
   hasDesktopCapabilityGrant,
+  maximizeWindow,
+  minimizeWindow,
+  moveWindowToWorkspace,
+  setWorkspaceLayout,
+  switchWorkspace,
 } from "../../../sdk/typescript/src/desktop-sdk/index.ts";
 import type {
   DesktopHost,
@@ -225,6 +231,304 @@ export const DEFAULT_SHORTCUT_BINDINGS = Object.freeze([
   }),
 ] satisfies readonly ShortcutBindingInput[]);
 
+// ---------------------------------------------------------------------------
+// PSD-263C — cross-domain default commands + per-app keymap scoping (when-context)
+//
+// Additive layer over the V1 launcher-only keymap above. The V1 sets stay
+// byte-identical (PSD-260C pins them); these `*_V2` exports broaden the default
+// keymap to window-management / workspace / theme / snap verbs and add a
+// fail-closed when-context resolver so the same chord can mean different things
+// per focus. Everything here is pure / deterministic and depends ONLY on
+// `@vita/desktop-sdk` public ports — it returns typed action descriptors; the
+// host is what applies them.
+// ---------------------------------------------------------------------------
+
+/**
+ * The SDK window-manager / workspace policy verbs a cross-domain command can
+ * name. Each value is the exact named export of `@vita/desktop-sdk`'s WM policy
+ * (`closeWindow` / `maximizeWindow` / ... ) — the action descriptors below carry
+ * one so the host can resolve it to the real reducer without re-deriving it.
+ */
+export type ShortcutPolicyVerb =
+  | "switchWorkspace"
+  | "moveWindowToWorkspace"
+  | "maximizeWindow"
+  | "minimizeWindow"
+  | "closeWindow"
+  | "setWorkspaceLayout";
+
+/**
+ * Binds each {@link ShortcutPolicyVerb} name to the real `@vita/desktop-sdk` WM
+ * policy reducer it targets. The host (and tests) use this to confirm a
+ * cross-domain command's `policyVerb` resolves to an existing SDK function
+ * rather than a dangling string.
+ */
+export const SHORTCUT_POLICY_VERBS = Object.freeze({
+  closeWindow,
+  maximizeWindow,
+  minimizeWindow,
+  moveWindowToWorkspace,
+  setWorkspaceLayout,
+  switchWorkspace,
+}) satisfies Readonly<Record<ShortcutPolicyVerb, (...args: never[]) => unknown>>;
+
+export type ShortcutSnapDirection = "left" | "right" | "up" | "down";
+
+/**
+ * A typed cross-domain action descriptor. Every variant either targets a real
+ * SDK policy verb (`policyVerb`) or, for `launcher.intent`, a real
+ * `DesktopLauncherIntent` dispatched through the existing `emitLauncherIntent`
+ * port. No effects are performed here — the descriptor is the contract.
+ */
+export type ShortcutCrossDomainAction =
+  | {
+      readonly kind: "launcher.intent";
+      readonly intent: DesktopLauncherIntent;
+    }
+  | {
+      readonly kind: "wm.snap";
+      readonly direction: ShortcutSnapDirection;
+      readonly policyVerb: "maximizeWindow";
+    }
+  | {
+      readonly kind: "wm.maximize";
+      readonly policyVerb: "maximizeWindow";
+    }
+  | {
+      readonly kind: "wm.minimize";
+      readonly policyVerb: "minimizeWindow";
+    }
+  | {
+      readonly kind: "wm.close";
+      readonly policyVerb: "closeWindow";
+    }
+  | {
+      readonly kind: "workspace.switch";
+      readonly index: number;
+      readonly policyVerb: "switchWorkspace";
+    }
+  | {
+      readonly kind: "workspace.move";
+      readonly direction: "left" | "right";
+      readonly policyVerb: "moveWindowToWorkspace";
+    }
+  | {
+      readonly kind: "theme.toggle";
+      readonly intent: DesktopLauncherIntent;
+    }
+  | {
+      readonly kind: "layout.toggle";
+      readonly policyVerb: "setWorkspaceLayout";
+    };
+
+export type ShortcutCrossDomainActionKind = ShortcutCrossDomainAction["kind"];
+
+/** A V2 cross-domain command: a launcher-or-policy command plus its typed action. */
+export interface ShortcutCommandV2 {
+  readonly id: string;
+  readonly title: string;
+  /**
+   * Present iff the action dispatches through the launcher (`launcher.intent` /
+   * `theme.toggle`). Kept structurally compatible with {@link ShortcutCommand}
+   * so V2 commands can also seed the existing launcher-only registry.
+   */
+  readonly intent: DesktopLauncherIntent;
+  readonly action: ShortcutCrossDomainAction;
+}
+
+export const SHORTCUT_COMMAND_IDS_V2 = Object.freeze({
+  closeWindow: "desktop.wm.window.close",
+  layoutToggle: "desktop.wm.layout.toggle",
+  maximizeWindow: "desktop.wm.window.maximize",
+  minimizeWindow: "desktop.wm.window.minimize",
+  moveWorkspaceLeft: "desktop.workspace.move.left",
+  moveWorkspaceRight: "desktop.workspace.move.right",
+  snapDown: "desktop.wm.snap.down",
+  snapLeft: "desktop.wm.snap.left",
+  snapRight: "desktop.wm.snap.right",
+  snapUp: "desktop.wm.snap.up",
+  switchWorkspace1: "desktop.workspace.switch.1",
+  switchWorkspace2: "desktop.workspace.switch.2",
+  switchWorkspace3: "desktop.workspace.switch.3",
+  switchWorkspace4: "desktop.workspace.switch.4",
+  switchWorkspace5: "desktop.workspace.switch.5",
+  switchWorkspace6: "desktop.workspace.switch.6",
+  switchWorkspace7: "desktop.workspace.switch.7",
+  switchWorkspace8: "desktop.workspace.switch.8",
+  switchWorkspace9: "desktop.workspace.switch.9",
+});
+
+const THEME_TOGGLE_INTENT: DesktopLauncherIntent = Object.freeze({
+  appId: "vita.command.toggle-dark-mode",
+  query: "theme.dark.toggle",
+  type: "launcher.launch",
+});
+
+function workspaceSwitchCommand(index: number, id: string): ShortcutCommandV2 {
+  return Object.freeze({
+    action: Object.freeze({
+      index,
+      kind: "workspace.switch",
+      policyVerb: "switchWorkspace",
+    }),
+    id,
+    intent: THEME_TOGGLE_INTENT,
+    title: `Switch to Workspace ${index}`,
+  });
+}
+
+/**
+ * Expanded cross-domain default command set (window-snap, max/min/close,
+ * workspace switch 1..9, move-window-to-workspace, theme + layout toggle). The
+ * V1 launcher commands are NOT included here — this set targets WM/workspace
+ * policy verbs and the theme launcher intent.
+ */
+export const DEFAULT_SHORTCUT_COMMANDS_V2 = Object.freeze([
+  Object.freeze({
+    action: Object.freeze({ direction: "left", kind: "wm.snap", policyVerb: "maximizeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.snapLeft,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Snap Window Left",
+  }),
+  Object.freeze({
+    action: Object.freeze({ direction: "right", kind: "wm.snap", policyVerb: "maximizeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.snapRight,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Snap Window Right",
+  }),
+  Object.freeze({
+    action: Object.freeze({ direction: "down", kind: "wm.snap", policyVerb: "maximizeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.snapDown,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Snap Window Down",
+  }),
+  Object.freeze({
+    action: Object.freeze({ kind: "wm.maximize", policyVerb: "maximizeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.maximizeWindow,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Maximize Window",
+  }),
+  Object.freeze({
+    action: Object.freeze({ kind: "wm.minimize", policyVerb: "minimizeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.minimizeWindow,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Minimize Window",
+  }),
+  Object.freeze({
+    action: Object.freeze({ kind: "wm.close", policyVerb: "closeWindow" }),
+    id: SHORTCUT_COMMAND_IDS_V2.closeWindow,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Close Window",
+  }),
+  workspaceSwitchCommand(1, SHORTCUT_COMMAND_IDS_V2.switchWorkspace1),
+  workspaceSwitchCommand(2, SHORTCUT_COMMAND_IDS_V2.switchWorkspace2),
+  workspaceSwitchCommand(3, SHORTCUT_COMMAND_IDS_V2.switchWorkspace3),
+  workspaceSwitchCommand(4, SHORTCUT_COMMAND_IDS_V2.switchWorkspace4),
+  workspaceSwitchCommand(5, SHORTCUT_COMMAND_IDS_V2.switchWorkspace5),
+  workspaceSwitchCommand(6, SHORTCUT_COMMAND_IDS_V2.switchWorkspace6),
+  workspaceSwitchCommand(7, SHORTCUT_COMMAND_IDS_V2.switchWorkspace7),
+  workspaceSwitchCommand(8, SHORTCUT_COMMAND_IDS_V2.switchWorkspace8),
+  workspaceSwitchCommand(9, SHORTCUT_COMMAND_IDS_V2.switchWorkspace9),
+  Object.freeze({
+    action: Object.freeze({ direction: "left", kind: "workspace.move", policyVerb: "moveWindowToWorkspace" }),
+    id: SHORTCUT_COMMAND_IDS_V2.moveWorkspaceLeft,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Move Window to Previous Workspace",
+  }),
+  Object.freeze({
+    action: Object.freeze({ direction: "right", kind: "workspace.move", policyVerb: "moveWindowToWorkspace" }),
+    id: SHORTCUT_COMMAND_IDS_V2.moveWorkspaceRight,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Move Window to Next Workspace",
+  }),
+  Object.freeze({
+    action: Object.freeze({ intent: THEME_TOGGLE_INTENT, kind: "theme.toggle" }),
+    id: SHORTCUT_COMMAND_IDS.toggleDarkMode,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Toggle Theme",
+  }),
+  Object.freeze({
+    action: Object.freeze({ kind: "layout.toggle", policyVerb: "setWorkspaceLayout" }),
+    id: SHORTCUT_COMMAND_IDS_V2.layoutToggle,
+    intent: THEME_TOGGLE_INTENT,
+    title: "Toggle Tiling / Stacking Layout",
+  }),
+] satisfies readonly ShortcutCommandV2[]);
+
+/**
+ * Cross-domain default keymap. Conflict-free under {@link detectShortcutConflicts}.
+ * `Super+Up` is the canonical "maximize"; snap-up therefore reuses maximize and
+ * is exposed via the dedicated maximize binding rather than a duplicate chord.
+ */
+export const DEFAULT_SHORTCUT_BINDINGS_V2 = Object.freeze([
+  Object.freeze({ chord: "Super+ArrowLeft", commandId: SHORTCUT_COMMAND_IDS_V2.snapLeft }),
+  Object.freeze({ chord: "Super+ArrowRight", commandId: SHORTCUT_COMMAND_IDS_V2.snapRight }),
+  Object.freeze({ chord: "Super+ArrowDown", commandId: SHORTCUT_COMMAND_IDS_V2.snapDown }),
+  Object.freeze({ chord: "Super+ArrowUp", commandId: SHORTCUT_COMMAND_IDS_V2.maximizeWindow }),
+  Object.freeze({ chord: "Super+H", commandId: SHORTCUT_COMMAND_IDS_V2.minimizeWindow }),
+  Object.freeze({ chord: "Super+W", commandId: SHORTCUT_COMMAND_IDS_V2.closeWindow }),
+  Object.freeze({ chord: "Super+1", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace1 }),
+  Object.freeze({ chord: "Super+2", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace2 }),
+  Object.freeze({ chord: "Super+3", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace3 }),
+  Object.freeze({ chord: "Super+4", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace4 }),
+  Object.freeze({ chord: "Super+5", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace5 }),
+  Object.freeze({ chord: "Super+6", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace6 }),
+  Object.freeze({ chord: "Super+7", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace7 }),
+  Object.freeze({ chord: "Super+8", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace8 }),
+  Object.freeze({ chord: "Super+9", commandId: SHORTCUT_COMMAND_IDS_V2.switchWorkspace9 }),
+  Object.freeze({ chord: "Super+Shift+ArrowLeft", commandId: SHORTCUT_COMMAND_IDS_V2.moveWorkspaceLeft }),
+  Object.freeze({ chord: "Super+Shift+ArrowRight", commandId: SHORTCUT_COMMAND_IDS_V2.moveWorkspaceRight }),
+  Object.freeze({ chord: "Super+Shift+D", commandId: SHORTCUT_COMMAND_IDS.toggleDarkMode }),
+  Object.freeze({ chord: "Super+Shift+L", commandId: SHORTCUT_COMMAND_IDS_V2.layoutToggle }),
+] satisfies readonly ShortcutBindingInput[]);
+
+// --- When-context resolver -------------------------------------------------
+
+/**
+ * Frozen focus snapshot a scoped binding's `when` expression is evaluated
+ * against. `focusedApp`/`surface` are equality targets; `modal`/`editable` are
+ * boolean flags. Absent string fields read as the empty string; absent flags
+ * read as `false`.
+ */
+export interface WhenContext {
+  readonly focusedApp?: string;
+  readonly surface?: string;
+  readonly modal?: boolean;
+  readonly editable?: boolean;
+}
+
+/** A binding that may be scoped to a `when` context-expression over {@link WhenContext}. */
+export interface ScopedShortcutBinding {
+  readonly chord: string;
+  readonly commandId: string;
+  readonly when?: string;
+}
+
+export type WhenContextResult =
+  | {
+      readonly ok: true;
+      readonly value: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly error: ShortcutError;
+    };
+
+export type ScopedResolveResult =
+  | {
+      readonly ok: true;
+      readonly binding: ScopedShortcutBinding;
+      readonly scope: "scoped" | "global";
+    }
+  | {
+      readonly ok: false;
+      readonly error: ShortcutError;
+    };
+
+const WHEN_CONTEXT_FIELDS = Object.freeze(["focusedApp", "surface", "modal", "editable"]);
+const WHEN_STRING_IDENTIFIERS = Object.freeze(["focusedApp", "surface"]);
+const WHEN_FLAG_IDENTIFIERS = Object.freeze(["modal", "editable"]);
+
 export function createShortcutsViewModel(
   ports: ShortcutCommandPort,
   options: ShortcutRegistryOptions = Object.freeze({}),
@@ -242,6 +546,489 @@ export function normalizeShortcutChord(input: unknown): ShortcutNormalizeResult 
 
 export function detectShortcutConflicts(bindings: readonly ShortcutBinding[]): readonly ShortcutConflict[] {
   return conflictsForBindings(normalizeConflictBindings(bindings));
+}
+
+/**
+ * Evaluate a `when` context-expression against a {@link WhenContext} snapshot.
+ *
+ * Grammar (fixed, small): equality on `focusedApp`/`surface`
+ * (`focusedApp == "vita.app.files"`, `surface == files`), boolean flags
+ * `modal`/`editable`, combined with `&&`, `||`, `!`, and parentheses.
+ *
+ * Fail-closed: a malformed/unparseable expression or an unknown identifier
+ * yields a typed `INVALID_WHEN`; a context that is not a plain object yields
+ * `INVALID_CONTEXT`. It NEVER throws and NEVER reads non-allowlisted accessors.
+ */
+export function evaluateWhenContext(expression: unknown, context: unknown): WhenContextResult {
+  const snapshot = snapshotWhenContext(context);
+
+  if (!snapshot.ok) {
+    return Object.freeze({ error: snapshot.error, ok: false });
+  }
+
+  if (typeof expression !== "string") {
+    return Object.freeze({
+      error: error("INVALID_WHEN", "when expression must be a string.", "/when"),
+      ok: false,
+    });
+  }
+
+  const tokens = tokenizeWhen(expression);
+
+  if (tokens === null) {
+    return Object.freeze({
+      error: error("INVALID_WHEN", "when expression contains an invalid token.", "/when"),
+      ok: false,
+    });
+  }
+
+  const parser = new WhenParser(tokens, snapshot.value);
+  const value = parser.parse();
+
+  if (value === null) {
+    return Object.freeze({
+      error: error("INVALID_WHEN", "when expression is malformed or names an unknown identifier.", "/when"),
+      ok: false,
+    });
+  }
+
+  return Object.freeze({ ok: true, value });
+}
+
+/**
+ * Resolve a chord against scoped + global bindings under a focus context.
+ *
+ * The most-specific *matching* scoped binding wins (scoped binding order = its
+ * specificity, earliest first); if no scoped `when` matches, the global
+ * (un-`when`'d) binding for the chord wins; if neither exists → `UNBOUND_CHORD`.
+ * A scoped binding whose `when` fails closed (malformed / unknown id / bad
+ * context) is treated as non-matching and can NEVER be selected by accident.
+ */
+export function resolveScoped(
+  chord: unknown,
+  context: unknown,
+  bindings: readonly ScopedShortcutBinding[],
+): ScopedResolveResult {
+  const snapshot = snapshotWhenContext(context);
+
+  if (!snapshot.ok) {
+    return Object.freeze({ error: snapshot.error, ok: false });
+  }
+
+  const normalized = normalizeShortcutChord(chord);
+
+  if (!normalized.ok) {
+    return Object.freeze({ error: normalized.error, ok: false });
+  }
+
+  const candidates = scopedCandidatesForChord(bindings, normalized.chord);
+  let globalBinding: ScopedShortcutBinding | null = null;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+
+    if (candidate === undefined) {
+      continue;
+    }
+
+    if (candidate.when === undefined) {
+      if (globalBinding === null) {
+        globalBinding = candidate;
+      }
+      continue;
+    }
+
+    const evaluated = evaluateWhenContext(candidate.when, snapshot.value);
+
+    if (evaluated.ok && evaluated.value) {
+      return Object.freeze({
+        binding: freezeScopedBinding(candidate, normalized.chord),
+        ok: true,
+        scope: "scoped",
+      });
+    }
+  }
+
+  if (globalBinding !== null) {
+    return Object.freeze({
+      binding: freezeScopedBinding(globalBinding, normalized.chord),
+      ok: true,
+      scope: "global",
+    });
+  }
+
+  return Object.freeze({
+    error: error("UNBOUND_CHORD", "shortcut chord is not bound.", `/bindings/${pathToken(normalized.chord)}`),
+    ok: false,
+  });
+}
+
+interface WhenContextSnapshot {
+  readonly focusedApp: string;
+  readonly surface: string;
+  readonly modal: boolean;
+  readonly editable: boolean;
+}
+
+function snapshotWhenContext(context: unknown): NormalizeResult<WhenContextSnapshot> {
+  const snapshot = snapshotObject(context, WHEN_CONTEXT_FIELDS, "INVALID_CONTEXT", "/context");
+
+  if (!snapshot.ok) {
+    return reject(snapshot.error);
+  }
+
+  const focusedApp = snapshot.value.get("focusedApp");
+  const surface = snapshot.value.get("surface");
+  const modal = snapshot.value.get("modal");
+  const editable = snapshot.value.get("editable");
+
+  if (focusedApp !== undefined && typeof focusedApp !== "string") {
+    return reject(error("INVALID_CONTEXT", "when context 'focusedApp' must be a string.", "/context/focusedApp"));
+  }
+  if (surface !== undefined && typeof surface !== "string") {
+    return reject(error("INVALID_CONTEXT", "when context 'surface' must be a string.", "/context/surface"));
+  }
+  if (modal !== undefined && typeof modal !== "boolean") {
+    return reject(error("INVALID_CONTEXT", "when context 'modal' must be a boolean.", "/context/modal"));
+  }
+  if (editable !== undefined && typeof editable !== "boolean") {
+    return reject(error("INVALID_CONTEXT", "when context 'editable' must be a boolean.", "/context/editable"));
+  }
+
+  return accept(Object.freeze({
+    editable: editable === true,
+    focusedApp: typeof focusedApp === "string" ? focusedApp : "",
+    modal: modal === true,
+    surface: typeof surface === "string" ? surface : "",
+  }));
+}
+
+type WhenToken =
+  | { readonly kind: "ident"; readonly value: string }
+  | { readonly kind: "string"; readonly value: string }
+  | { readonly kind: "eq" }
+  | { readonly kind: "and" }
+  | { readonly kind: "or" }
+  | { readonly kind: "not" }
+  | { readonly kind: "lparen" }
+  | { readonly kind: "rparen" };
+
+function tokenizeWhen(expression: string): readonly WhenToken[] | null {
+  const tokens: WhenToken[] = [];
+  let index = 0;
+
+  while (index < expression.length) {
+    const char = expression[index];
+
+    if (char === undefined) {
+      return null;
+    }
+
+    if (char === " " || char === "\t") {
+      index += 1;
+      continue;
+    }
+
+    if (char === "(") {
+      tokens.push({ kind: "lparen" });
+      index += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      tokens.push({ kind: "rparen" });
+      index += 1;
+      continue;
+    }
+
+    if (char === "!") {
+      tokens.push({ kind: "not" });
+      index += 1;
+      continue;
+    }
+
+    if (char === "&") {
+      if (expression[index + 1] !== "&") {
+        return null;
+      }
+      tokens.push({ kind: "and" });
+      index += 2;
+      continue;
+    }
+
+    if (char === "|") {
+      if (expression[index + 1] !== "|") {
+        return null;
+      }
+      tokens.push({ kind: "or" });
+      index += 2;
+      continue;
+    }
+
+    if (char === "=") {
+      if (expression[index + 1] !== "=") {
+        return null;
+      }
+      tokens.push({ kind: "eq" });
+      index += 2;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      const quote = char;
+      let value = "";
+      let cursor = index + 1;
+      let closed = false;
+
+      while (cursor < expression.length) {
+        const inner = expression[cursor];
+
+        if (inner === undefined) {
+          return null;
+        }
+
+        if (inner === quote) {
+          closed = true;
+          cursor += 1;
+          break;
+        }
+
+        value += inner;
+        cursor += 1;
+      }
+
+      if (!closed) {
+        return null;
+      }
+
+      tokens.push({ kind: "string", value });
+      index = cursor;
+      continue;
+    }
+
+    if (isIdentStart(char)) {
+      let value = "";
+      let cursor = index;
+
+      while (cursor < expression.length) {
+        const inner = expression[cursor];
+
+        if (inner === undefined || !isIdentChar(inner)) {
+          break;
+        }
+
+        value += inner;
+        cursor += 1;
+      }
+
+      tokens.push({ kind: "ident", value });
+      index = cursor;
+      continue;
+    }
+
+    return null;
+  }
+
+  return Object.freeze(tokens);
+}
+
+function isIdentStart(char: string): boolean {
+  const code = char.charCodeAt(0);
+
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || char === "_";
+}
+
+function isIdentChar(char: string): boolean {
+  if (isIdentStart(char)) {
+    return true;
+  }
+
+  const code = char.charCodeAt(0);
+
+  return (code >= 48 && code <= 57) || char === "." || char === "-";
+}
+
+/**
+ * Recursive-descent parser/evaluator for the fixed when-grammar. Returns the
+ * boolean result, or `null` on any structural error or unknown identifier
+ * (caller maps `null` to a typed `INVALID_WHEN`). It never throws.
+ *
+ * Precedence (lowest → highest): `||`, `&&`, `!`/primary.
+ */
+class WhenParser {
+  readonly #tokens: readonly WhenToken[];
+  readonly #context: WhenContextSnapshot;
+  #position: number;
+  #failed: boolean;
+
+  constructor(tokens: readonly WhenToken[], context: WhenContextSnapshot) {
+    this.#tokens = tokens;
+    this.#context = context;
+    this.#position = 0;
+    this.#failed = false;
+  }
+
+  parse(): boolean | null {
+    if (this.#tokens.length === 0) {
+      return null;
+    }
+
+    const value = this.#parseOr();
+
+    if (this.#failed || this.#position !== this.#tokens.length) {
+      return null;
+    }
+
+    return value;
+  }
+
+  #peek(): WhenToken | null {
+    return this.#tokens[this.#position] ?? null;
+  }
+
+  #advance(): WhenToken | null {
+    const token = this.#tokens[this.#position] ?? null;
+
+    if (token !== null) {
+      this.#position += 1;
+    }
+
+    return token;
+  }
+
+  #parseOr(): boolean {
+    let left = this.#parseAnd();
+
+    while (!this.#failed && this.#peek()?.kind === "or") {
+      this.#advance();
+      const right = this.#parseAnd();
+      left = left || right;
+    }
+
+    return left;
+  }
+
+  #parseAnd(): boolean {
+    let left = this.#parseUnary();
+
+    while (!this.#failed && this.#peek()?.kind === "and") {
+      this.#advance();
+      const right = this.#parseUnary();
+      left = left && right;
+    }
+
+    return left;
+  }
+
+  #parseUnary(): boolean {
+    if (this.#peek()?.kind === "not") {
+      this.#advance();
+
+      return !this.#parseUnary();
+    }
+
+    return this.#parsePrimary();
+  }
+
+  #parsePrimary(): boolean {
+    const token = this.#advance();
+
+    if (token === null) {
+      return this.#fail();
+    }
+
+    if (token.kind === "lparen") {
+      const value = this.#parseOr();
+
+      if (this.#advance()?.kind !== "rparen") {
+        return this.#fail();
+      }
+
+      return value;
+    }
+
+    if (token.kind === "ident") {
+      return this.#parseFromIdent(token.value);
+    }
+
+    return this.#fail();
+  }
+
+  #parseFromIdent(identifier: string): boolean {
+    if (this.#peek()?.kind === "eq") {
+      this.#advance();
+
+      return this.#parseEquality(identifier);
+    }
+
+    if (contains(WHEN_FLAG_IDENTIFIERS, identifier)) {
+      return identifier === "modal" ? this.#context.modal : this.#context.editable;
+    }
+
+    return this.#fail();
+  }
+
+  #parseEquality(identifier: string): boolean {
+    if (!contains(WHEN_STRING_IDENTIFIERS, identifier)) {
+      return this.#fail();
+    }
+
+    const right = this.#advance();
+
+    if (right === null || (right.kind !== "string" && right.kind !== "ident")) {
+      return this.#fail();
+    }
+
+    const actual = identifier === "focusedApp" ? this.#context.focusedApp : this.#context.surface;
+
+    return actual === right.value;
+  }
+
+  #fail(): boolean {
+    this.#failed = true;
+
+    return false;
+  }
+}
+
+function scopedCandidatesForChord(
+  bindings: readonly ScopedShortcutBinding[],
+  chord: ShortcutChord,
+): readonly ScopedShortcutBinding[] {
+  const output: ScopedShortcutBinding[] = [];
+
+  for (let index = 0; index < bindings.length; index += 1) {
+    const binding = bindings[index];
+
+    if (binding === undefined || typeof binding.chord !== "string" || typeof binding.commandId !== "string") {
+      continue;
+    }
+
+    const normalized = normalizeShortcutChord(binding.chord);
+
+    if (normalized.ok && normalized.chord === chord) {
+      output.push(binding);
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function freezeScopedBinding(binding: ScopedShortcutBinding, chord: ShortcutChord): ScopedShortcutBinding {
+  const output: {
+    chord: ShortcutChord;
+    commandId: string;
+    when?: string;
+  } = {
+    chord,
+    commandId: binding.commandId,
+  };
+
+  if (binding.when !== undefined) {
+    output.when = binding.when;
+  }
+
+  return Object.freeze(output);
 }
 
 class DesktopShortcutsViewModel implements ShortcutsViewModel {
