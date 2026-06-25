@@ -648,10 +648,7 @@ test("subscribed AppHost launch and stop events reconcile through the injected c
   await events.drain();
 
   assert.equal(compositor.inputs.length, 1);
-  assert.deepEqual(
-    compositor.inputs[0]?.windowIntents?.map((intent) => intent.type),
-    launched.value.intents.map((intent) => intent.type),
-  );
+  assert.equal(compositor.inputs[0]?.windowIntents, undefined);
   assert.equal(compositor.inputs[0]?.windows?.[0]?.textureId, appSurfaceId(app.id));
 
   const stopped = appHost.stop(app.id);
@@ -665,11 +662,88 @@ test("subscribed AppHost launch and stop events reconcile through the injected c
 
   assert.equal(compositor.inputs.length, 2);
   assert.equal(compositor.inputs[1]?.windows?.length, 0);
-  assert.deepEqual(
-    compositor.inputs[1]?.windowIntents?.map((intent) => intent.type),
-    stopped.value.intents.map((intent) => intent.type),
-  );
+  assert.equal(compositor.inputs[1]?.windowIntents, undefined);
   assert.equal(host.snapshot().windows.length, 0);
+});
+
+test("delayed launch event after current stop cannot recreate a window", async () => {
+  const calls: CompositorCommand[] = [];
+  const events = new DelayedAppHostEvents();
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+    events,
+  });
+  const compositor = new CompositorDriver(recordingPort(calls));
+  const host = new AppWindowHost({
+    appHost,
+    appHostEvents: events,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+  const app = tsxApp();
+  const launched = appHost.launch(app);
+  const stopped = appHost.stop(app.id);
+
+  assert.equal(launched.ok, true);
+  assert.equal(stopped.ok, true);
+
+  const deliveredLaunch = await events.flushNext(0);
+
+  assert.equal(deliveredLaunch.ok, true);
+  assert.equal(appHost.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windows.length, 0);
+  assert.equal(hasCompositorSurface(compositor.snapshot(), appSurfaceId(app.id)), false);
+
+  const deliveredStop = await events.flushNext(0);
+
+  assert.equal(deliveredStop.ok, true);
+  assert.equal(host.snapshot().windows.length, 0);
+  assert.equal(hasCompositorSurface(compositor.snapshot(), appSurfaceId(app.id)), false);
+});
+
+test("out-of-order stop event after relaunch cannot hide the current window", async () => {
+  const events = new DelayedAppHostEvents();
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+    events,
+  });
+  const compositor = new CompositorDriver(recordingPort([]));
+  const host = new AppWindowHost({
+    appHost,
+    appHostEvents: events,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+  const app = tsxApp();
+
+  assert.equal(appHost.launch(app).ok, true);
+  assert.equal((await events.flushNext(0)).ok, true);
+  assert.equal(compositorSurface(compositor.snapshot(), appSurfaceId(app.id))?.visible, true);
+
+  assert.equal(appHost.stop(app.id).ok, true);
+  assert.equal(appHost.launch(app).ok, true);
+
+  const deliveredRelaunch = await events.flushNext(1);
+
+  assert.equal(deliveredRelaunch.ok, true);
+  assert.equal(compositorSurface(compositor.snapshot(), appSurfaceId(app.id))?.visible, true);
+
+  const deliveredStaleStop = await events.flushNext(0);
+
+  assert.equal(deliveredStaleStop.ok, true);
+  assert.deepEqual(appHost.snapshot().apps.map((launch) => launch.app.id), [
+    app.id,
+  ]);
+  assert.deepEqual(host.snapshot().windows.map((window) => window.appId), [
+    app.id,
+  ]);
+  assert.equal(compositorSurface(compositor.snapshot(), appSurfaceId(app.id))?.visible, true);
 });
 
 test("wrapper launch and subscribed launch event coalesce to one rollback on compositor failure", async () => {
@@ -722,14 +796,18 @@ test("wrapper launch and subscribed launch event coalesce to one rollback on com
   assert.equal(host.snapshot().pendingCleanup.length, 0);
 });
 
+interface FakeAppHostEventSink extends AppWindowHostAppHostEventsPort {
+  emit(event: AppWindowHostObservedEvent): void;
+}
+
 interface FakeAppHostOptions extends LayoutConstraints {
-  readonly events?: FakeAppHostEvents;
+  readonly events?: FakeAppHostEventSink;
   readonly failStopWhen?: (appId: string) => boolean;
 }
 
 class FakeAppHost implements AppWindowHostAppHostPort {
   readonly #constraints: LayoutConstraints;
-  readonly #events: FakeAppHostEvents | undefined;
+  readonly #events: FakeAppHostEventSink | undefined;
   readonly #failStopWhen: ((appId: string) => boolean) | undefined;
   readonly #launches = new Map<string, AppLaunch>();
   readonly stops: string[] = [];
@@ -853,6 +931,41 @@ class FakeAppHostEvents implements AppWindowHostAppHostEventsPort {
 }
 
 type AppWindowHostResultPlaceholder = Awaited<ReturnType<AppWindowHostEventListener>>;
+
+class DelayedAppHostEvents implements FakeAppHostEventSink {
+  readonly #listeners = new Set<AppWindowHostEventListener>();
+  readonly #events: AppWindowHostObservedEvent[] = [];
+
+  subscribe(listener: AppWindowHostEventListener): () => void {
+    this.#listeners.add(listener);
+
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  emit(event: AppWindowHostObservedEvent): void {
+    this.#events.push(event);
+  }
+
+  async flushNext(index: number): Promise<AppWindowHostResultPlaceholder> {
+    const event = this.#events[index];
+
+    if (event === undefined) {
+      assert.fail(`expected a pending AppHost event at index ${index}`);
+    }
+
+    this.#events.splice(index, 1);
+
+    const listener = [...this.#listeners][0];
+
+    if (listener === undefined) {
+      assert.fail("expected an AppHost event listener");
+    }
+
+    return listener(event);
+  }
+}
 
 class RecordingCompositorDriver implements AppWindowHostCompositorDriverPort {
   readonly inputs: CompositorReconcileInput[] = [];
@@ -1240,6 +1353,26 @@ function projectCommands(commands: readonly CompositorCommand[]): readonly Proje
         };
     }
   });
+}
+
+function hasCompositorSurface(
+  surfaces: readonly CompositorSurfaceSnapshot[],
+  surfaceId: string,
+): boolean {
+  return compositorSurface(surfaces, surfaceId) !== undefined;
+}
+
+function compositorSurface(
+  surfaces: readonly CompositorSurfaceSnapshot[],
+  surfaceId: string,
+): CompositorSurfaceSnapshot | undefined {
+  for (let index = 0; index < surfaces.length; index += 1) {
+    const surface = surfaces[index];
+
+    if (surface !== undefined && surface.id === surfaceId) return surface;
+  }
+
+  return undefined;
 }
 
 function desktopShell(): ShellComposedLayout {

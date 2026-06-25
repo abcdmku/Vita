@@ -24,7 +24,6 @@ import {
 } from "../wm/policy.ts";
 import type {
   LayoutConstraints,
-  WindowManagerIntent,
 } from "../wm/policy.ts";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -220,9 +219,7 @@ export class AppWindowHost {
 
     if (!launched.ok) return fromAppHostError(launched.error);
 
-    this.#forgetProcessedStopForLaunch(launched.value);
-
-    const reconciled = await this.#reconcileCurrent(launched.value.intents);
+    const reconciled = await this.#reconcileCurrent();
 
     if (reconciled.ok) {
       this.#rememberProcessedObservedEvent({
@@ -277,9 +274,7 @@ export class AppWindowHost {
 
     if (!stopped.ok) return fromAppHostError(stopped.error);
 
-    this.#forgetProcessedLaunchForStop(stopped.value);
-
-    const reconciled = await this.#reconcileCurrent(stopped.value.intents);
+    const reconciled = await this.#reconcileCurrent();
 
     if (!reconciled.ok) {
       this.#rememberPendingCleanup(stopped.value, reconciled.error);
@@ -321,9 +316,12 @@ export class AppWindowHost {
   ): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
     switch (event.type) {
       case "launch": {
-        const reconciled = await this.#reconcileCurrent(event.launch.intents);
+        const reconciled = await this.#reconcileCurrent();
 
         if (reconciled.ok) return reconciled;
+
+        const running = this.#appIsRunning(event.launch.app.id);
+        if (!running.ok || !running.value) return reconciled;
 
         const rolledBack = await this.#rollbackLaunch(event.launch, reconciled.error);
         if (!rolledBack.ok) return rolledBack;
@@ -334,9 +332,15 @@ export class AppWindowHost {
         };
       }
       case "stop": {
-        const reconciled = await this.#reconcileCurrent(event.stop.intents);
+        const reconciled = await this.#reconcileCurrent();
 
-        if (!reconciled.ok) this.#rememberPendingCleanup(event.stop, reconciled.error);
+        if (!reconciled.ok) {
+          const running = this.#appIsRunning(event.stop.appId);
+
+          if (!running.ok || !running.value) {
+            this.#rememberPendingCleanup(event.stop, reconciled.error);
+          }
+        }
 
         return reconciled;
       }
@@ -396,7 +400,7 @@ export class AppWindowHost {
 
     await this.#cleanupMaybeLiveWindows(stopped.value, maybeLiveWindows);
 
-    const reconciled = await this.#reconcileCurrent(stopped.value.intents);
+    const reconciled = await this.#reconcileCurrent();
     this.#rememberProcessedObservedEvent({
       stop: stopped.value,
       type: "stop",
@@ -447,17 +451,7 @@ export class AppWindowHost {
     this.#processedObservedEvents.set(observedEventKey(event), result);
   }
 
-  #forgetProcessedStopForLaunch(launch: AppLaunch): void {
-    this.#processedObservedEvents.delete(stopEventKeyForLaunch(launch));
-  }
-
-  #forgetProcessedLaunchForStop(stop: AppStop): void {
-    this.#processedObservedEvents.delete(launchEventKeyForStop(stop));
-  }
-
-  async #reconcileCurrent(
-    windowIntents: readonly WindowManagerIntent[] = Object.freeze([]),
-  ): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
+  async #reconcileCurrent(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
     let appSnapshot: AppHostSnapshot;
     let shell: ShellComposedLayout;
 
@@ -473,7 +467,7 @@ export class AppWindowHost {
     }
 
     const windowSurfaces = appWindowSurfaces(appSnapshot, this.#layoutConstraints);
-    const input = buildReconcileInput(shell, windowSurfaces, windowIntents);
+    const input = buildReconcileInput(shell, windowSurfaces);
     let reconciled: CompositorReconcileResult;
 
     try {
@@ -743,22 +737,11 @@ function appWindowSurfaces(
 function buildReconcileInput(
   shell: ShellComposedLayout,
   windows: readonly AppWindowSurface[],
-  windowIntents: readonly WindowManagerIntent[],
 ): CompositorReconcileInput {
-  const input: {
-    shell: ShellComposedLayout;
-    windows: readonly CompositorWindowPlacement[];
-    windowIntents?: readonly WindowManagerIntent[];
-  } = {
+  return Object.freeze({
     shell,
     windows: Object.freeze(windows.map((window) => window.placement)),
-  };
-
-  if (windowIntents.length > 0) {
-    input.windowIntents = freezeIntents(windowIntents);
-  }
-
-  return Object.freeze(input);
+  });
 }
 
 function launchesByWindowIdMap(launches: readonly AppLaunch[]): ReadonlyMap<string, AppLaunch> {
@@ -901,26 +884,6 @@ function launchEventKeyForLaunch(launch: AppLaunch): string {
   );
 }
 
-function launchEventKeyForStop(stop: AppStop): string {
-  return lifecycleEventKey(
-    "launch",
-    stop.appId,
-    stop.surfaceId,
-    stop.textureId,
-    stop.windowId,
-  );
-}
-
-function stopEventKeyForLaunch(launch: AppLaunch): string {
-  return lifecycleEventKey(
-    "stop",
-    launch.app.id,
-    launch.surfaceId,
-    launch.textureId,
-    launch.windowId,
-  );
-}
-
 function stopEventKeyForStop(stop: AppStop): string {
   return lifecycleEventKey(
     "stop",
@@ -986,10 +949,6 @@ function freezeLaunches(launches: readonly AppLaunch[]): readonly AppLaunch[] {
   const output = [...launches];
   output.sort((left, right) => compareStrings(left.app.id, right.app.id));
   return Object.freeze(output);
-}
-
-function freezeIntents(intents: readonly WindowManagerIntent[]): readonly WindowManagerIntent[] {
-  return Object.freeze([...intents]);
 }
 
 function compositorError(error: CompositorDriverError): AppWindowHostError {
