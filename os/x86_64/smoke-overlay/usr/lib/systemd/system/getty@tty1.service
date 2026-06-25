@@ -1,0 +1,11 @@
+# Vita SMOKE VM only - keep tty1 free for compositor KMS ownership.
+# The smoke cmdline also carries systemd.mask=getty@tty1.service; this concrete
+# instance unit prevents the package getty@.service template from starting tty1
+# if the cmdline mask is not applied by a verification runner.
+[Unit]
+Description=Vita smoke disabled tty1 getty
+ConditionPathExists=/run/vita-enable-tty1-getty
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true

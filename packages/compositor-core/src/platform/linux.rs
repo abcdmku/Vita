@@ -6,6 +6,7 @@ use std::fs::{read_dir, read_link, File, OpenOptions};
 use std::mem;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::ptr;
 use std::slice;
@@ -71,6 +72,15 @@ const DRM_MODE_CONNECTED: c_int = 1;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 const DRM_EVENT_CONTEXT_VERSION: c_int = 2;
 const POLLIN: i16 = 0x0001;
+const O_NOCTTY: c_int = 0o400;
+const KDSETMODE: usize = 0x4B3A;
+const KDGETMODE: usize = 0x4B3B;
+const KD_TEXT: c_int = 0x00;
+const KD_GRAPHICS: c_int = 0x01;
+const KDGKBMODE: usize = 0x4B44;
+const KDSKBMODE: usize = 0x4B45;
+const K_RAW: c_int = 0x00;
+const K_OFF: c_int = 0x04;
 
 type EglDisplay = *mut c_void;
 type EglConfig = *mut c_void;
@@ -98,6 +108,7 @@ extern "C" {
     fn libc_open(path: *const c_char, flags: c_int) -> c_int;
     #[link_name = "close"]
     fn libc_close(fd: c_int) -> c_int;
+    fn ioctl(fd: c_int, request: usize, ...) -> c_int;
     fn poll(fds: *mut PollFd, nfds: usize, timeout: c_int) -> c_int;
 }
 
@@ -210,6 +221,7 @@ pub struct GpuTexture {
 }
 
 pub struct PlatformGpuBackend {
+    _vt: VtState,
     drm: File,
     _render_node: File,
     libinput: Option<LibinputState>,
@@ -275,6 +287,7 @@ impl PlatformGpuBackend {
             return Err(CompositorError::InvalidDimensions { width, height });
         }
 
+        let vt = VtState::claim_active()?;
         let drm = OpenOptions::new()
             .read(true)
             .write(true)
@@ -400,6 +413,7 @@ impl PlatformGpuBackend {
 
         let gl = Gl::open(&egl)?;
         let mut backend = Self {
+            _vt: vt,
             drm,
             _render_node: render_node,
             libinput,
@@ -585,6 +599,40 @@ void main() {
             )));
         }
         Ok(())
+    }
+
+    fn read_texture_rgba(
+        &mut self,
+        texture: GlUInt,
+        width: u32,
+        height: u32,
+        label: &str,
+    ) -> Result<Vec<u8>, CompositorError> {
+        let mut bytes = vec![0_u8; (width * height * 4) as usize];
+        unsafe {
+            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.scratch_fbo);
+            (self.gl.framebuffer_texture_2d)(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                texture,
+                0,
+            );
+        }
+        self.check_framebuffer(label)?;
+        unsafe {
+            (self.gl.read_pixels)(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                bytes.as_mut_ptr().cast(),
+            );
+            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, 0);
+        }
+        Ok(bytes)
     }
 
     fn draw_placement(
@@ -789,30 +837,27 @@ impl RenderBackend for PlatformGpuBackend {
         &mut self,
         texture: &Self::Texture,
     ) -> Result<Vec<u8>, CompositorError> {
-        let mut bytes = vec![0_u8; (texture.width * texture.height * 4) as usize];
-        unsafe {
-            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.scratch_fbo);
-            (self.gl.framebuffer_texture_2d)(
-                GL_FRAMEBUFFER,
-                GL_COLOR_ATTACHMENT0,
-                GL_TEXTURE_2D,
-                texture.id,
-                0,
-            );
+        self.read_texture_rgba(texture.id, texture.width, texture.height, "readback")
+    }
+
+    fn read_output_rgba(
+        &mut self,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Vec<u8>, CompositorError> {
+        if output_width != self.output_width || output_height != self.output_height {
+            return Err(CompositorError::Backend(
+                "dynamic output resize is not implemented in this slice".to_owned(),
+            ));
         }
-        self.check_framebuffer("readback")?;
-        unsafe {
-            (self.gl.read_pixels)(
-                0,
-                0,
-                texture.width as i32,
-                texture.height as i32,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                bytes.as_mut_ptr().cast(),
-            );
-        }
-        Ok(bytes)
+
+        let bytes = self.read_texture_rgba(
+            self.output_texture,
+            self.output_width,
+            self.output_height,
+            "output-readback",
+        )?;
+        Ok(flip_rgba_rows(bytes, self.output_width, self.output_height))
     }
 
     fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
@@ -905,6 +950,96 @@ fn pixel_to_clip_y(y: i32, height: u32) -> f32 {
     1.0 - (y as f32 / height as f32) * 2.0
 }
 
+fn flip_rgba_rows(bytes: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
+    let stride = (width * 4) as usize;
+    let height = height as usize;
+    let mut flipped = vec![0_u8; bytes.len()];
+    for y in 0..height {
+        let src = (height - 1 - y) * stride;
+        let dst = y * stride;
+        flipped[dst..dst + stride].copy_from_slice(&bytes[src..src + stride]);
+    }
+    flipped
+}
+
+struct VtState {
+    tty: File,
+    original_mode: c_int,
+    original_keyboard_mode: c_int,
+}
+
+impl VtState {
+    fn claim_active() -> Result<Self, CompositorError> {
+        let tty = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(O_NOCTTY)
+            .open("/dev/tty0")
+            .map_err(|err| {
+                CompositorError::Unavailable(format!("failed to open active VT /dev/tty0: {err}"))
+            })?;
+        let fd = tty.as_raw_fd();
+        let original_mode = ioctl_get_int(fd, KDGETMODE, "KDGETMODE(active VT)")?;
+        if original_mode != KD_TEXT {
+            return Err(CompositorError::Unavailable(format!(
+                "active VT is already in non-text mode {original_mode}"
+            )));
+        }
+        let original_keyboard_mode = ioctl_get_int(fd, KDGKBMODE, "KDGKBMODE(active VT)")?;
+
+        ioctl_set_int(fd, KDSETMODE, KD_GRAPHICS, "KDSETMODE(KD_GRAPHICS)")?;
+        if let Err(off_error) = ioctl_set_int(fd, KDSKBMODE, K_OFF, "KDSKBMODE(K_OFF)") {
+            if let Err(raw_error) = ioctl_set_int(fd, KDSKBMODE, K_RAW, "KDSKBMODE(K_RAW)") {
+                let _ = ioctl_set_int(fd, KDSETMODE, KD_TEXT, "KDSETMODE(KD_TEXT)");
+                return Err(CompositorError::Unavailable(format!(
+                    "{off_error}; fallback failed: {raw_error}"
+                )));
+            }
+        }
+
+        Ok(Self {
+            tty,
+            original_mode,
+            original_keyboard_mode,
+        })
+    }
+}
+
+impl Drop for VtState {
+    fn drop(&mut self) {
+        let fd = self.tty.as_raw_fd();
+        let _ = ioctl_set_int(
+            fd,
+            KDSKBMODE,
+            self.original_keyboard_mode,
+            "KDSKBMODE(restore)",
+        );
+        let _ = ioctl_set_int(fd, KDSETMODE, self.original_mode, "KDSETMODE(restore)");
+    }
+}
+
+fn ioctl_get_int(fd: c_int, request: usize, label: &str) -> Result<c_int, CompositorError> {
+    let mut value: c_int = 0;
+    let rc = unsafe { ioctl(fd, request, &mut value) };
+    if rc != 0 {
+        return Err(last_os_unavailable(format!("{label} failed")));
+    }
+    Ok(value)
+}
+
+fn ioctl_set_int(
+    fd: c_int,
+    request: usize,
+    value: c_int,
+    label: &str,
+) -> Result<(), CompositorError> {
+    let rc = unsafe { ioctl(fd, request, value) };
+    if rc != 0 {
+        return Err(last_os_unavailable(format!("{label} failed")));
+    }
+    Ok(())
+}
+
 fn detect_drm_driver() -> String {
     match read_link("/sys/class/drm/card0/device/driver/module") {
         Ok(path) => path
@@ -949,8 +1084,12 @@ const fn fourcc_code(a: u8, b: u8, c: u8, d: u8) -> u32 {
     (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
 }
 
-fn last_os_unavailable(context: &str) -> CompositorError {
-    CompositorError::Unavailable(format!("{context}: {}", std::io::Error::last_os_error()))
+fn last_os_unavailable(context: impl AsRef<str>) -> CompositorError {
+    CompositorError::Unavailable(format!(
+        "{}: {}",
+        context.as_ref(),
+        std::io::Error::last_os_error()
+    ))
 }
 
 fn cstring(value: &str) -> Result<CString, CompositorError> {

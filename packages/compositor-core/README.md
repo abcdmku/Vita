@@ -16,6 +16,17 @@ system GPU stack (`libdrm`, `libgbm`, `libEGL`, `libGLESv2`, `libinput`) and
 opens `/dev/dri/card0`. Missing DRM, KMS master, or GPU libraries fail closed
 and emit a `status=FAILSAFE` marker.
 
+## Demo scanout
+
+```sh
+vita-compositor-core --demo --hold-seconds 30
+```
+
+The demo path composites a desktop-like wallpaper, top panel, and three window
+rectangles through the same GPU texture + KMS present path, emits the
+`VITA-COMPOSITOR` marker, then keeps the scanout visible for the requested hold
+window so the VMware smoke harness can capture a PNG.
+
 ## VMware marker
 
 On the VMware GPU target, the measured path must emit:

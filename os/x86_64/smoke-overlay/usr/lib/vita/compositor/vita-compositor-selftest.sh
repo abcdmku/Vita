@@ -6,6 +6,8 @@ MARKER=VITA-COMPOSITOR
 BIN=/usr/lib/vita/compositor/vita-compositor
 TTY=/dev/ttyS0
 TMP=
+HOLD_SECONDS=30
+SCREENSHOT=/run/vita-compositor-demo.png
 
 emit_line() {
   printf '%s\n' "$1"
@@ -42,23 +44,36 @@ if [ ! -e /dev/dri/card0 ]; then
 fi
 
 TMP=$(mktemp /run/vita-compositor-selftest.XXXXXX 2>/dev/null || mktemp /tmp/vita-compositor-selftest.XXXXXX)
+: > "$TMP"
 rc=0
-timeout 20s "$BIN" > "$TMP" 2>&1 || rc=$?
-
-seen=0
-while IFS= read -r line; do
+rm -f "$SCREENSHOT"
+timeout 45s "$BIN" --demo --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" 2>&1 | while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$TMP"
   emit_line "$line"
-  case "$line" in
-    "$MARKER":*) seen=1 ;;
-  esac
-done < "$TMP"
+done
+pipeline_status=("${PIPESTATUS[@]}")
+rc=${pipeline_status[0]}
 
-if [ "$seen" -eq 1 ]; then
+# Verification breadcrumb: report the readback screenshot size to serial so the orchestrator can
+# confirm the PNG was written and is visible in the shared /run namespace for copy-out.
+emit_line "VITA-COMPOSITOR-SHOT: path=$SCREENSHOT bytes=$(stat -c%s "$SCREENSHOT" 2>/dev/null || echo 0)"
+
+if grep -q "^$MARKER: .* status=OK " "$TMP"; then
+  if [ -s "$SCREENSHOT" ]; then
+    exit 0
+  fi
+  emit_failsafe "screenshot_missing"
+  exit 0
+fi
+
+if grep -q "^$MARKER:" "$TMP"; then
   exit 0
 fi
 
 if [ "$rc" -eq 124 ]; then
   emit_failsafe "timeout"
+elif [ ! -s "$SCREENSHOT" ]; then
+  emit_failsafe "screenshot_missing"
 else
   emit_failsafe "exit_$rc"
 fi

@@ -51,6 +51,7 @@ const NO_BOOT = has("--no-boot");
 const NO_SIGN = has("--no-sign");
 const OUT = resolve(opt("--out", join(HERE, "out")));
 const CACHE = resolve(process.env.VITA_MKOSI_CACHE ?? join(HERE, ".cache"));
+const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools"];
 
 if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MODE}`);
 
@@ -400,8 +401,8 @@ if (useNative) {
 
 if (MODE === "smoke") {
   // ── Smoke: ONE build straight to a bootable disk (overrides base Format=directory/Bootable=no), then boot.
-  // Bake a serial console into the smoke UKI so the kernel/login is visible on QEMU's `-serial mon:stdio`
-  // (-nographic). ttyS0 last = primary console (getty/login spawns there); tty0 kept for a VGA head too.
+  // Bake only the serial console into the smoke UKI so markers are visible on QEMU's `-serial mon:stdio`
+  // (-nographic), while fbcon stays off the VMware GPU scanout used by the compositor demo.
   // Login: ship an explicit serial-getty autologin drop-in via --extra-tree (reliable across mkosi versions,
   // unlike --autologin), AND set a root password (root/vita) as a fallback. Smoke/test only — full image gets
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
@@ -492,11 +493,12 @@ if (MODE === "smoke") {
     ];
     log(`   (Secure Boot: sign UKI with TEST db key ${sbKey}; enrollment is offline via virt-fw-vars)`);
   }
-  const cmdline = `console=tty0 console=ttyS0,115200 ${rootOpts} systemd.firstboot=off` +
+  const cmdline = `console=ttyS0,115200 ${rootOpts} systemd.firstboot=off systemd.mask=getty@tty1.service` +
     (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
-    ["--format", "disk", "--bootable=yes", ...incremental, ...verity, ...bootloaderPin, ...sb,
+    ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,
+     ...incremental, ...verity, ...bootloaderPin, ...sb,
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
