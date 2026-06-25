@@ -83,3 +83,25 @@ Also: on the VERIFICATION image, disable `getty@tty1` (the markers go to the SER
 the framebuffer is the compositor's). Keep `console=ttyS0` for serial markers.
 Verify: orchestrator re-images + boots on VMware + captures DURING the hold → the PNG shows the COMPOSITOR's desktop
 layout (wallpaper + panel + windows), not the console. VITA-COMPOSITOR present=kms intact.
+
+## REVISION 3 (captureScreen grabs the fbcon/SVGA layer, not KMS — use in-guest GPU READBACK — 2026-06-25)
+Diagnosis from the serial log: compositor presents at 4.8s (`present=kms status=OK surfaces=8`), but the captured PNG
+shows the text console at 10.5s — because (a) the cmdline has `console=tty0` so the kernel fbcon keeps drawing to the
+framebuffer, (b) `getty@tty1` STILL started (the rev2 mask did NOT take effect — "Started getty@tty1.service" in the
+log), and (c) `vmrun captureScreen` on vmwgfx grabs the SVGA/fbcon layer, not the compositor's DRM/KMS scanout.
+Stop fighting the VMware capture path. Implement the DESIGN-INTENDED screenshot via in-guest GPU readback:
+1. **Compositor `--screenshot <path>` (CPU readback → PNG):** after compositing the demo frame to the GL/GBM
+   framebuffer, do a `glReadPixels` readback of the rendered RGBA, and ENCODE A PNG to the given guest path (e.g.
+   `/run/vita-compositor-demo.png`). Use the pure-Rust `png` crate (add to Cargo.toml + Cargo.lock; rust-in-docker builds
+   `--locked` so it must be vendored/lockfile-resolved — NO network at image runtime). This captures EXACTLY what the
+   compositor rendered, independent of the VMware display path. Keep emitting VITA-COMPOSITOR + the hold. Flip the RGBA
+   row order as needed (GL is bottom-up). Fail-closed (FAILSAFE) if readback/encode fails; still emit the marker.
+2. **Boot self-test runs `--demo --screenshot /run/vita-compositor-demo.png`** so the PNG is written each boot.
+3. **Console hygiene (so the LIVE display/GUI also shows the compositor, not the console):** verification cmdline =
+   `console=ttyS0,115200` ONLY (DROP `console=tty0` so the kernel fbcon doesn't draw to the framebuffer — markers go to
+   serial, which the harness reads). And ACTUALLY mask `getty@tty1` — the rev2 attempt didn't work; do it robustly (e.g.
+   a `getty@tty1.service -> /dev/null` mask symlink in the smoke overlay, AND/OR `systemd.mask=getty@tty1.service` on the
+   cmdline) and assert in the OS test that no getty starts on tty1.
+Verify: orchestrator re-images, boots on VMware, copies `/run/vita-compositor-demo.png` out of the guest
+(`vmrun -gu root -gp vita CopyFileFromGuestToHost`), and the PNG shows the COMPOSITOR's desktop layout (wallpaper +
+panel + windows). 22 markers + VITA-COMPOSITOR present=kms intact.
