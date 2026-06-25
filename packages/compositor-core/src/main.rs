@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -7,17 +8,16 @@ use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
 };
 use vita_compositor_core::{
-    run_reposition_self_test_or_failsafe, Compositor, CompositorError, DamageReport, InputEvent,
-    Placement, PointerButtonState, Rect, SurfaceId, TestPattern,
+    run_reposition_self_test_or_failsafe, start_desktop_demo_or_failsafe, Compositor,
+    CompositorError, DamageReport, InputEvent, Placement, PointerButtonState, Rect, SelfTestStatus,
+    SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
 };
+
+const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let result = if args.iter().any(|arg| arg == "--serve") {
-        serve()
-    } else {
-        run_self_test()
-    };
+    let result = dispatch(args);
 
     if let Err(error) = result {
         eprintln!("vita-compositor-core: {error}");
@@ -25,11 +25,56 @@ fn main() {
     }
 }
 
+fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
+    if args.iter().any(|arg| arg == "--serve") {
+        serve()
+    } else if args.iter().any(|arg| arg == "--demo") {
+        run_demo(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
+    } else {
+        run_self_test()
+    }
+}
+
 fn run_self_test() -> Result<(), CompositorError> {
     let report =
         run_reposition_self_test_or_failsafe(open_default_gpu_backend_for_self_test(96, 64));
-    println!("{}", report.marker_line());
+    emit_marker(&report.marker_line())?;
     Ok(())
+}
+
+fn run_demo(hold_seconds: u64, screenshot_path: Option<PathBuf>) -> Result<(), CompositorError> {
+    let outcome = start_desktop_demo_or_failsafe(open_default_gpu_backend_for_self_test(
+        DESKTOP_DEMO_OUTPUT_WIDTH,
+        DESKTOP_DEMO_OUTPUT_HEIGHT,
+    ));
+
+    match outcome {
+        vita_compositor_core::DesktopDemoOutcome::Running(mut session) => {
+            if let Some(path) = screenshot_path {
+                if let Err(error) = session.write_screenshot_png(&path) {
+                    let mut report = session.report().clone();
+                    report.status = SelfTestStatus::Failsafe;
+                    report.reason = Some(format!("screenshot_failed: {error}"));
+                    emit_marker(&report.marker_line())?;
+                    return Err(error);
+                }
+            }
+            emit_marker(&session.report().marker_line())?;
+            thread::sleep(Duration::from_secs(hold_seconds));
+        }
+        vita_compositor_core::DesktopDemoOutcome::Failsafe(report) => {
+            emit_marker(&report.marker_line())?;
+        }
+    }
+    Ok(())
+}
+
+fn emit_marker(line: &str) -> Result<(), CompositorError> {
+    let mut stdout = io::stdout();
+    writeln!(stdout, "{line}").map_err(|err| CompositorError::Protocol(err.to_string()))?;
+    stdout
+        .flush()
+        .map_err(|err| CompositorError::Protocol(err.to_string()))
 }
 
 fn serve() -> Result<(), CompositorError> {
@@ -177,6 +222,42 @@ fn parse_u32(value: &str, name: &str) -> Result<u32, CompositorError> {
     value
         .parse::<u32>()
         .map_err(|_| CompositorError::Protocol(format!("invalid {name}")))
+}
+
+fn parse_hold_seconds(args: &[String]) -> Result<u64, CompositorError> {
+    let mut hold_seconds = DEFAULT_DEMO_HOLD_SECONDS;
+    let mut index = 0_usize;
+    while index < args.len() {
+        if args[index] == "--hold-seconds" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| CompositorError::Protocol("missing hold seconds".to_owned()))?;
+            hold_seconds = value
+                .parse::<u64>()
+                .map_err(|_| CompositorError::Protocol("invalid hold seconds".to_owned()))?;
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(hold_seconds)
+}
+
+fn parse_screenshot_path(args: &[String]) -> Result<Option<PathBuf>, CompositorError> {
+    let mut path = None;
+    let mut index = 0_usize;
+    while index < args.len() {
+        if args[index] == "--screenshot" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| CompositorError::Protocol("missing screenshot path".to_owned()))?;
+            path = Some(PathBuf::from(value));
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(path)
 }
 
 fn parse_i32(value: &str, name: &str) -> Result<i32, CompositorError> {

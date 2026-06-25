@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
 
 pub mod platform;
 
 pub const VITA_COMPOSITOR_MARKER: &str = "VITA-COMPOSITOR";
+pub const DESKTOP_DEMO_OUTPUT_WIDTH: u32 = 1280;
+pub const DESKTOP_DEMO_OUTPUT_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CompositorError {
@@ -354,6 +359,12 @@ pub trait RenderBackend {
         texture: &Self::Texture,
     ) -> Result<Vec<u8>, CompositorError>;
 
+    fn read_output_rgba(
+        &mut self,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Vec<u8>, CompositorError>;
+
     fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError>;
 
     fn source_repaint_count(&self) -> u64;
@@ -531,6 +542,16 @@ impl<B: RenderBackend> Compositor<B> {
             .texture
             .clone();
         self.backend.read_texture_rgba_for_test(&texture)
+    }
+
+    pub fn output_readback_rgba(&mut self) -> Result<Vec<u8>, CompositorError> {
+        self.backend
+            .read_output_rgba(self.output_width, self.output_height)
+    }
+
+    pub fn write_output_png(&mut self, path: impl AsRef<Path>) -> Result<(), CompositorError> {
+        let rgba = self.output_readback_rgba()?;
+        write_rgba_png(path, self.output_width, self.output_height, &rgba)
     }
 
     pub fn source_repaint_count(&self) -> u64 {
@@ -715,6 +736,311 @@ pub fn run_reposition_self_test<B: RenderBackend>(
     })
 }
 
+pub fn run_desktop_demo_or_failsafe<B: RenderBackend>(
+    backend: Result<B, CompositorError>,
+) -> SelfTestReport {
+    start_desktop_demo_or_failsafe(backend).into_report()
+}
+
+pub enum DesktopDemoOutcome<B: RenderBackend> {
+    Running(DesktopDemoSession<B>),
+    Failsafe(SelfTestReport),
+}
+
+impl<B: RenderBackend> DesktopDemoOutcome<B> {
+    pub fn report(&self) -> &SelfTestReport {
+        match self {
+            Self::Running(session) => session.report(),
+            Self::Failsafe(report) => report,
+        }
+    }
+
+    pub fn into_report(self) -> SelfTestReport {
+        match self {
+            Self::Running(session) => session.into_report(),
+            Self::Failsafe(report) => report,
+        }
+    }
+}
+
+pub struct DesktopDemoSession<B: RenderBackend> {
+    _compositor: Compositor<B>,
+    report: SelfTestReport,
+}
+
+impl<B: RenderBackend> DesktopDemoSession<B> {
+    pub fn report(&self) -> &SelfTestReport {
+        &self.report
+    }
+
+    pub fn write_screenshot_png(&mut self, path: impl AsRef<Path>) -> Result<(), CompositorError> {
+        self._compositor.write_output_png(path)
+    }
+
+    pub fn into_report(self) -> SelfTestReport {
+        self.report
+    }
+}
+
+pub fn start_desktop_demo_or_failsafe<B: RenderBackend>(
+    backend: Result<B, CompositorError>,
+) -> DesktopDemoOutcome<B> {
+    let backend = match backend {
+        Ok(backend) => backend,
+        Err(error) => {
+            return DesktopDemoOutcome::Failsafe(failsafe_report(
+                "unavailable",
+                failsafe_reason(&error),
+            ));
+        }
+    };
+    let gpu = backend.backend_name().to_owned();
+    let present = backend.presentation_mode();
+    let input = backend.input_availability();
+
+    match start_desktop_demo(backend) {
+        Ok(session) => DesktopDemoOutcome::Running(session),
+        Err(error) => DesktopDemoOutcome::Failsafe(failsafe_report_for_gpu(
+            gpu,
+            present,
+            input,
+            failsafe_reason(&error),
+        )),
+    }
+}
+
+pub fn run_desktop_demo<B: RenderBackend>(backend: B) -> Result<SelfTestReport, CompositorError> {
+    start_desktop_demo(backend).map(DesktopDemoSession::into_report)
+}
+
+pub fn start_desktop_demo<B: RenderBackend>(
+    backend: B,
+) -> Result<DesktopDemoSession<B>, CompositorError> {
+    let gpu = backend.backend_name().to_owned();
+    let input = backend.input_availability();
+    let mut compositor = Compositor::new(
+        backend,
+        DESKTOP_DEMO_OUTPUT_WIDTH,
+        DESKTOP_DEMO_OUTPUT_HEIGHT,
+    )?;
+    let present = compositor.presentation_mode();
+
+    for surface in desktop_demo_surfaces() {
+        compositor.register_test_surface(
+            SurfaceId::new(surface.id)?,
+            surface.width,
+            surface.height,
+            surface.pattern.clone(),
+        )?;
+    }
+
+    let initial =
+        compositor.update_placements(desktop_demo_placements(DemoPlacementPhase::Initial)?)?;
+    let initial_report = compositor.composite(&initial)?;
+    let moved_surface = SurfaceId::new("window.terminal.body")?;
+    let before = compositor.surface_readback_rgba_for_test(&moved_surface)?;
+    let before_repaint_count = compositor.source_repaint_count();
+
+    let moved =
+        compositor.update_placements(desktop_demo_placements(DemoPlacementPhase::Final)?)?;
+    let moved_report = compositor.composite(&moved)?;
+    let after = compositor.surface_readback_rgba_for_test(&moved_surface)?;
+    let after_repaint_count = compositor.source_repaint_count();
+
+    let composited_ok = initial_report.composited && moved_report.composited;
+    let reposition_no_repaint = before == after && before_repaint_count == after_repaint_count;
+    let damage_ok = moved.changed_surfaces
+        == vec![
+            SurfaceId::new("window.terminal.body")?,
+            SurfaceId::new("window.terminal.titlebar")?,
+        ]
+        && moved.rects.len() == 4
+        && moved_report.damage_rects == moved.rects.len();
+
+    if !composited_ok {
+        return Err(CompositorError::Verification(
+            "desktop demo composite did not complete".to_owned(),
+        ));
+    }
+    if !damage_ok {
+        return Err(CompositorError::Verification(
+            "desktop demo move damage did not cover old and new window rects".to_owned(),
+        ));
+    }
+    if !reposition_no_repaint {
+        return Err(CompositorError::Verification(
+            "desktop demo source content changed during reposition".to_owned(),
+        ));
+    }
+
+    let report = SelfTestReport {
+        gpu,
+        surfaces: compositor.surface_count(),
+        composited_ok,
+        reposition_no_repaint,
+        present,
+        damage_ok,
+        input,
+        status: SelfTestStatus::Ok,
+        reason: None,
+    };
+
+    Ok(DesktopDemoSession {
+        _compositor: compositor,
+        report,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DesktopDemoSurface {
+    id: &'static str,
+    width: u32,
+    height: u32,
+    pattern: TestPattern,
+    initial_x: i32,
+    initial_y: i32,
+    final_x: i32,
+    final_y: i32,
+    z_index: i32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DemoPlacementPhase {
+    Initial,
+    Final,
+}
+
+fn desktop_demo_surfaces() -> Vec<DesktopDemoSurface> {
+    vec![
+        DesktopDemoSurface {
+            id: "desktop.wallpaper",
+            width: DESKTOP_DEMO_OUTPUT_WIDTH,
+            height: DESKTOP_DEMO_OUTPUT_HEIGHT,
+            pattern: TestPattern::Checkerboard {
+                a: [24, 52, 78, 255],
+                b: [33, 77, 98, 255],
+                tile: 80,
+            },
+            initial_x: 0,
+            initial_y: 0,
+            final_x: 0,
+            final_y: 0,
+            z_index: 0,
+        },
+        DesktopDemoSurface {
+            id: "desktop.top-panel",
+            width: DESKTOP_DEMO_OUTPUT_WIDTH,
+            height: 42,
+            pattern: TestPattern::Solid {
+                rgba: [18, 24, 31, 255],
+            },
+            initial_x: 0,
+            initial_y: 0,
+            final_x: 0,
+            final_y: 0,
+            z_index: 10,
+        },
+        DesktopDemoSurface {
+            id: "window.files.body",
+            width: 420,
+            height: 280,
+            pattern: TestPattern::Solid {
+                rgba: [230, 237, 242, 255],
+            },
+            initial_x: 86,
+            initial_y: 96,
+            final_x: 86,
+            final_y: 96,
+            z_index: 20,
+        },
+        DesktopDemoSurface {
+            id: "window.files.titlebar",
+            width: 420,
+            height: 30,
+            pattern: TestPattern::Solid {
+                rgba: [56, 95, 128, 255],
+            },
+            initial_x: 86,
+            initial_y: 96,
+            final_x: 86,
+            final_y: 96,
+            z_index: 21,
+        },
+        DesktopDemoSurface {
+            id: "window.terminal.body",
+            width: 470,
+            height: 260,
+            pattern: TestPattern::Solid {
+                rgba: [31, 35, 44, 255],
+            },
+            initial_x: 650,
+            initial_y: 205,
+            final_x: 690,
+            final_y: 235,
+            z_index: 30,
+        },
+        DesktopDemoSurface {
+            id: "window.terminal.titlebar",
+            width: 470,
+            height: 30,
+            pattern: TestPattern::Solid {
+                rgba: [197, 78, 74, 255],
+            },
+            initial_x: 650,
+            initial_y: 205,
+            final_x: 690,
+            final_y: 235,
+            z_index: 31,
+        },
+        DesktopDemoSurface {
+            id: "window.notes.body",
+            width: 360,
+            height: 230,
+            pattern: TestPattern::Solid {
+                rgba: [252, 235, 179, 255],
+            },
+            initial_x: 252,
+            initial_y: 410,
+            final_x: 252,
+            final_y: 410,
+            z_index: 40,
+        },
+        DesktopDemoSurface {
+            id: "window.notes.titlebar",
+            width: 360,
+            height: 30,
+            pattern: TestPattern::Solid {
+                rgba: [92, 117, 74, 255],
+            },
+            initial_x: 252,
+            initial_y: 410,
+            final_x: 252,
+            final_y: 410,
+            z_index: 41,
+        },
+    ]
+}
+
+fn desktop_demo_placements(phase: DemoPlacementPhase) -> Result<Vec<Placement>, CompositorError> {
+    desktop_demo_surfaces()
+        .into_iter()
+        .map(|surface| {
+            let (x, y) = match phase {
+                DemoPlacementPhase::Initial => (surface.initial_x, surface.initial_y),
+                DemoPlacementPhase::Final => (surface.final_x, surface.final_y),
+            };
+            Placement::new(
+                SurfaceId::new(surface.id)?,
+                x,
+                y,
+                surface.width,
+                surface.height,
+                surface.z_index,
+            )
+        })
+        .collect()
+}
+
 fn validate_dimensions(width: u32, height: u32) -> Result<(), CompositorError> {
     if width == 0 || height == 0 {
         return Err(CompositorError::InvalidDimensions { width, height });
@@ -734,6 +1060,43 @@ fn push_unique_rect(rects: &mut Vec<Rect>, rect: Rect) {
     if !rects.contains(&rect) {
         rects.push(rect);
     }
+}
+
+fn write_rgba_png(
+    path: impl AsRef<Path>,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<(), CompositorError> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            CompositorError::Backend("screenshot dimensions overflowed usize".to_owned())
+        })?;
+    if rgba.len() != expected_len {
+        return Err(CompositorError::Backend(format!(
+            "screenshot readback returned {} bytes, expected {expected_len}",
+            rgba.len()
+        )));
+    }
+
+    let file = File::create(path.as_ref()).map_err(|err| {
+        CompositorError::Backend(format!(
+            "failed to create screenshot {}: {err}",
+            path.as_ref().display()
+        ))
+    })?;
+    let writer = BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut png_writer = encoder
+        .write_header()
+        .map_err(|err| CompositorError::Backend(format!("failed to write PNG header: {err}")))?;
+    png_writer
+        .write_image_data(rgba)
+        .map_err(|err| CompositorError::Backend(format!("failed to write PNG pixels: {err}")))
 }
 
 fn marker_token(value: &str) -> String {
@@ -769,6 +1132,9 @@ fn failsafe_reason(error: &CompositorError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::fs;
+    use std::rc::Rc;
 
     #[test]
     fn move_changes_damage_without_repainting_source_texture() {
@@ -782,6 +1148,108 @@ mod tests {
             report.marker_line(),
             "VITA-COMPOSITOR: gpu=test-gpu surfaces=2 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unverified"
         );
+    }
+
+    #[test]
+    fn desktop_demo_draws_wallpaper_panel_windows_and_preserves_marker_shape() {
+        let surfaces = desktop_demo_surfaces();
+        assert_eq!(surfaces.len(), 8);
+        assert!(surfaces.iter().any(|surface| {
+            surface.id == "desktop.wallpaper"
+                && surface.width == DESKTOP_DEMO_OUTPUT_WIDTH
+                && surface.height == DESKTOP_DEMO_OUTPUT_HEIGHT
+                && surface.z_index == 0
+        }));
+        assert!(surfaces.iter().any(|surface| {
+            surface.id == "desktop.top-panel"
+                && surface.width == DESKTOP_DEMO_OUTPUT_WIDTH
+                && surface.height == 42
+                && surface.initial_x == 0
+                && surface.initial_y == 0
+        }));
+        assert_eq!(
+            surfaces
+                .iter()
+                .filter(|surface| surface.id.starts_with("window.") && surface.id.ends_with(".body"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            surfaces
+                .iter()
+                .filter(|surface| surface.id.starts_with("window.")
+                    && surface.id.ends_with(".titlebar"))
+                .count(),
+            3
+        );
+
+        let report = run_desktop_demo(RecordingBackend::new("test-gpu"))
+            .expect("desktop demo should composite");
+
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 8);
+        assert!(report.reposition_no_repaint);
+        assert_eq!(
+            report.marker_line(),
+            "VITA-COMPOSITOR: gpu=test-gpu surfaces=8 composited=OK reposition=no-repaint present=recording damage=OK status=OK input=unverified"
+        );
+    }
+
+    #[test]
+    fn desktop_demo_session_holds_backend_until_dropped() {
+        let drop_count = Rc::new(Cell::new(0_u32));
+        let session = start_desktop_demo(RecordingBackend::with_drop_counter(
+            "test-gpu",
+            drop_count.clone(),
+        ))
+        .expect("desktop demo should composite");
+
+        assert_eq!(session.report().status, SelfTestStatus::Ok);
+        assert_eq!(drop_count.get(), 0);
+
+        drop(session);
+        assert_eq!(drop_count.get(), 1);
+    }
+
+    #[test]
+    fn desktop_demo_writes_png_screenshot_from_final_composited_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "vita-compositor-demo-{}-screenshot.png",
+            std::process::id()
+        ));
+        let mut session = start_desktop_demo(RecordingBackend::new("test-gpu"))
+            .expect("desktop demo should composite");
+
+        session
+            .write_screenshot_png(&path)
+            .expect("desktop demo should write screenshot");
+        let png = fs::read(&path).expect("screenshot should be readable");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&png[12..16], b"IHDR");
+        assert_eq!(
+            u32::from_be_bytes(png[16..20].try_into().unwrap()),
+            DESKTOP_DEMO_OUTPUT_WIDTH
+        );
+        assert_eq!(
+            u32::from_be_bytes(png[20..24].try_into().unwrap()),
+            DESKTOP_DEMO_OUTPUT_HEIGHT
+        );
+        assert!(png.windows(4).any(|window| window == b"IDAT"));
+        assert_eq!(&png[png.len() - 12 + 4..png.len() - 12 + 8], b"IEND");
+
+        let rgba = session
+            ._compositor
+            .output_readback_rgba()
+            .expect("recording backend should keep final output");
+        assert_pixel(&rgba, 10, 10, [18, 24, 31, 255]);
+        assert_pixel(&rgba, 10, 50, [24, 52, 78, 255]);
+        assert_pixel(&rgba, 100, 100, [56, 95, 128, 255]);
+        assert_pixel(&rgba, 700, 240, [197, 78, 74, 255]);
+        assert_pixel(&rgba, 700, 300, [31, 35, 44, 255]);
+        assert_pixel(&rgba, 260, 420, [92, 117, 74, 255]);
+        assert_pixel(&rgba, 260, 450, [252, 235, 179, 255]);
     }
 
     #[test]
@@ -905,12 +1373,21 @@ mod tests {
         bytes: Vec<u8>,
     }
 
+    #[derive(Debug, Clone)]
+    struct RecordingOutput {
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    }
+
     struct RecordingBackend {
         name: String,
         next_id: u64,
         repaint_count: u64,
         fail_composite: bool,
         input: InputAvailability,
+        drop_count: Option<Rc<Cell<u32>>>,
+        last_output: Option<RecordingOutput>,
     }
 
     impl RecordingBackend {
@@ -921,6 +1398,8 @@ mod tests {
                 repaint_count: 0,
                 fail_composite: false,
                 input: InputAvailability::Unverified,
+                drop_count: None,
+                last_output: None,
             }
         }
 
@@ -931,6 +1410,8 @@ mod tests {
                 repaint_count: 0,
                 fail_composite: true,
                 input: InputAvailability::Unverified,
+                drop_count: None,
+                last_output: None,
             }
         }
 
@@ -941,6 +1422,28 @@ mod tests {
                 repaint_count: 0,
                 fail_composite: false,
                 input,
+                drop_count: None,
+                last_output: None,
+            }
+        }
+
+        fn with_drop_counter(name: &str, drop_count: Rc<Cell<u32>>) -> Self {
+            Self {
+                name: name.to_owned(),
+                next_id: 1,
+                repaint_count: 0,
+                fail_composite: false,
+                input: InputAvailability::Unverified,
+                drop_count: Some(drop_count),
+                last_output: None,
+            }
+        }
+    }
+
+    impl Drop for RecordingBackend {
+        fn drop(&mut self) {
+            if let Some(drop_count) = &self.drop_count {
+                drop_count.set(drop_count.get() + 1);
             }
         }
     }
@@ -990,11 +1493,11 @@ mod tests {
 
         fn composite(
             &mut self,
-            _surfaces: &[RenderSurface<Self::Texture>],
-            _placements: &[Placement],
+            surfaces: &[RenderSurface<Self::Texture>],
+            placements: &[Placement],
             damage: &[Rect],
-            _output_width: u32,
-            _output_height: u32,
+            output_width: u32,
+            output_height: u32,
         ) -> Result<CompositeReport, CompositorError> {
             if self.fail_composite {
                 return Err(CompositorError::Unavailable(
@@ -1002,8 +1505,15 @@ mod tests {
                 ));
             }
 
+            self.last_output = Some(render_recording_output(
+                surfaces,
+                placements,
+                output_width,
+                output_height,
+            )?);
+
             Ok(CompositeReport {
-                surfaces: _placements.len(),
+                surfaces: placements.len(),
                 composited: true,
                 damage_rects: damage.len(),
             })
@@ -1016,6 +1526,23 @@ mod tests {
             Ok(texture.bytes.clone())
         }
 
+        fn read_output_rgba(
+            &mut self,
+            output_width: u32,
+            output_height: u32,
+        ) -> Result<Vec<u8>, CompositorError> {
+            let output = self
+                .last_output
+                .as_ref()
+                .ok_or_else(|| CompositorError::Backend("no recorded output frame".to_owned()))?;
+            if output.width != output_width || output.height != output_height {
+                return Err(CompositorError::Backend(
+                    "recorded output dimensions changed".to_owned(),
+                ));
+            }
+            Ok(output.bytes.clone())
+        }
+
         fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
             Ok(Vec::new())
         }
@@ -1023,5 +1550,64 @@ mod tests {
         fn source_repaint_count(&self) -> u64 {
             self.repaint_count
         }
+    }
+
+    fn render_recording_output(
+        surfaces: &[RenderSurface<RecordingTexture>],
+        placements: &[Placement],
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<RecordingOutput, CompositorError> {
+        let mut output = vec![0_u8; (output_width * output_height * 4) as usize];
+        let textures = surfaces
+            .iter()
+            .map(|surface| (surface.id.clone(), &surface.texture))
+            .collect::<BTreeMap<_, _>>();
+
+        for placement in placements {
+            let texture = textures
+                .get(&placement.surface_id)
+                .ok_or_else(|| CompositorError::UnknownSurface(placement.surface_id.clone()))?;
+            draw_recording_placement(&mut output, output_width, output_height, placement, texture);
+        }
+
+        Ok(RecordingOutput {
+            width: output_width,
+            height: output_height,
+            bytes: output,
+        })
+    }
+
+    fn draw_recording_placement(
+        output: &mut [u8],
+        output_width: u32,
+        output_height: u32,
+        placement: &Placement,
+        texture: &RecordingTexture,
+    ) {
+        let left = placement.x.max(0) as u32;
+        let top = placement.y.max(0) as u32;
+        let right = (placement.x + placement.width as i32).clamp(0, output_width as i32) as u32;
+        let bottom = (placement.y + placement.height as i32).clamp(0, output_height as i32) as u32;
+        if left >= right || top >= bottom {
+            return;
+        }
+
+        for y in top..bottom {
+            let rel_y = y as i32 - placement.y;
+            let src_y = (rel_y as u64 * texture.height as u64 / placement.height as u64) as u32;
+            for x in left..right {
+                let rel_x = x as i32 - placement.x;
+                let src_x = (rel_x as u64 * texture.width as u64 / placement.width as u64) as u32;
+                let src = ((src_y * texture.width + src_x) * 4) as usize;
+                let dst = ((y * output_width + x) * 4) as usize;
+                output[dst..dst + 4].copy_from_slice(&texture.bytes[src..src + 4]);
+            }
+        }
+    }
+
+    fn assert_pixel(rgba: &[u8], x: u32, y: u32, expected: [u8; 4]) {
+        let offset = ((y * DESKTOP_DEMO_OUTPUT_WIDTH + x) * 4) as usize;
+        assert_eq!(rgba[offset..offset + 4], expected);
     }
 }

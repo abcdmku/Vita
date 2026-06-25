@@ -83,6 +83,16 @@ impl RenderBackend for PlatformGpuBackend {
         ))
     }
 
+    fn read_output_rgba(
+        &mut self,
+        _output_width: u32,
+        _output_height: u32,
+    ) -> Result<Vec<u8>, CompositorError> {
+        Err(CompositorError::Unavailable(
+            "non-linux compositor backend cannot read back compositor output".to_owned(),
+        ))
+    }
+
     fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
         Err(CompositorError::Unavailable(
             "input_unavailable: libinput is only built on linux".to_owned(),

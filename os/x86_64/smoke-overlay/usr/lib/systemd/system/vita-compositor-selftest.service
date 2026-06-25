@@ -2,15 +2,14 @@
 # Verification-only overlay: this is not part of the production OS image.
 [Unit]
 Description=Vita compositor KMS self-test (smoke verification)
-After=systemd-modules-load.service systemd-udev-trigger.service
-Wants=systemd-udev-trigger.service
-Before=serial-getty@ttyS0.service getty.target multi-user.target
+After=systemd-modules-load.service systemd-udev-trigger.service open-vm-tools.service
+Wants=systemd-udev-trigger.service open-vm-tools.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash /usr/lib/vita/compositor/vita-compositor-selftest.sh
-TimeoutStartSec=35s
+TimeoutStartSec=60s
 StandardOutput=journal+console
 StandardError=journal+console
 NoNewPrivileges=yes
@@ -18,11 +17,12 @@ PrivateNetwork=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
 AmbientCapabilities=
 DevicePolicy=closed
 DeviceAllow=char-drm rw
 DeviceAllow=char-input r
+DeviceAllow=/dev/tty0 rw
 
 [Install]
 WantedBy=multi-user.target
