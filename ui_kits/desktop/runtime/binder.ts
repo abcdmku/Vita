@@ -26,7 +26,9 @@ export interface VitaElement {
   closest(selector: string): VitaElement | null;
   addEventListener(type: string, listener: VitaEventListener): void;
   removeEventListener?(type: string, listener: VitaEventListener): void;
+  getAttribute?(name: string): string | null;
   setAttribute(name: string, value: string): void;
+  removeAttribute?(name: string): void;
   cloneNode(deep?: boolean): VitaElement;
   appendChild(child: VitaElement): VitaElement;
   removeChild(child: VitaElement): VitaElement;
@@ -79,6 +81,7 @@ export interface VitaBindTargets {
   readonly text: readonly VitaTextTarget[];
   readonly classes: readonly VitaClassTarget[];
   readonly attrs: readonly VitaAttrTarget[];
+  readonly aria: readonly VitaAriaTarget[];
   readonly lists: readonly VitaListTarget[];
 }
 
@@ -102,6 +105,30 @@ export interface VitaAttrTarget {
   readonly attrName: string;
   readonly bindId: string;
   readonly slot: number;
+}
+
+export type VitaAriaState =
+  | "checked"
+  | "current"
+  | "disabled"
+  | "expanded"
+  | "hidden"
+  | "pressed"
+  | "selected";
+export type VitaAriaAttribute =
+  | "aria-checked"
+  | "aria-current"
+  | "aria-disabled"
+  | "aria-expanded"
+  | "aria-hidden"
+  | "aria-pressed"
+  | "aria-selected";
+
+export interface VitaAriaTarget {
+  readonly element: VitaElement;
+  readonly state: VitaAriaState;
+  readonly attrName: VitaAriaAttribute;
+  readonly bindId: string;
 }
 
 export interface VitaListTarget {
@@ -135,6 +162,15 @@ export const VITA_KEY_SELECTOR = "[data-vita-key]";
 export const VITA_BIND_TEXT_SELECTORS = Object.freeze(["[data-vita-bind-text]", "[data-vita-text]"]);
 export const VITA_BIND_CLASS_SELECTORS = Object.freeze(["[data-vita-bind-class]", "[data-vita-class]"]);
 export const VITA_BIND_LIST_SELECTORS = Object.freeze(["[data-vita-bind-list]", "[data-vita-list]"]);
+export const VITA_BIND_ARIA_STATES = Object.freeze([
+  "expanded",
+  "selected",
+  "checked",
+  "current",
+  "disabled",
+  "pressed",
+  "hidden",
+] as const);
 export const VITA_MAX_ATTR_BINDINGS = 32;
 
 const DEFAULT_ACTION_EVENTS = Object.freeze(["click"]);
@@ -313,9 +349,11 @@ function captureTargets(root: VitaElement, includeLists: boolean): VitaBindTarge
   const text = captureTextTargets(root);
   const classes = captureClassTargets(root);
   const attrs = captureAttrTargets(root);
+  const aria = captureAriaTargets(root);
   const lists = includeLists ? captureListTargets(root) : Object.freeze([]) satisfies readonly VitaListTarget[];
 
   return Object.freeze({
+    aria,
     attrs,
     classes,
     lists,
@@ -434,6 +472,52 @@ function appendAttrTarget(output: VitaAttrTarget[], element: VitaElement, slot: 
   }));
 }
 
+function captureAriaTargets(root: VitaElement): readonly VitaAriaTarget[] {
+  const output: VitaAriaTarget[] = [];
+
+  appendAriaTargetsForElement(output, root);
+
+  for (let stateIndex = 0; stateIndex < VITA_BIND_ARIA_STATES.length; stateIndex += 1) {
+    const state = VITA_BIND_ARIA_STATES[stateIndex];
+
+    if (state === undefined) continue;
+
+    const elements = querySelector(root, ariaSelector(state));
+
+    for (let elementIndex = 0; elementIndex < elements.length; elementIndex += 1) {
+      const element = elements[elementIndex];
+
+      if (element !== undefined) {
+        appendAriaTarget(output, element, state);
+      }
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function appendAriaTargetsForElement(output: VitaAriaTarget[], element: VitaElement): void {
+  for (let index = 0; index < VITA_BIND_ARIA_STATES.length; index += 1) {
+    const state = VITA_BIND_ARIA_STATES[index];
+
+    if (state !== undefined) appendAriaTarget(output, element, state);
+  }
+}
+
+function appendAriaTarget(output: VitaAriaTarget[], element: VitaElement, state: VitaAriaState): void {
+  const bindId = datasetValue(element, Object.freeze([ariaDatasetKey(state)]));
+
+  if (bindId === undefined) return;
+  if (hasAriaTarget(output, element, state)) return;
+
+  output.push(Object.freeze({
+    attrName: ariaAttribute(state),
+    bindId,
+    element,
+    state,
+  }));
+}
+
 function captureListTargets(root: VitaElement): readonly VitaListTarget[] {
   const output: VitaListTarget[] = [];
   const rootBind = datasetValue(root, Object.freeze(["vitaBindList", "vitaList"]));
@@ -467,7 +551,7 @@ function captureListTargets(root: VitaElement): readonly VitaListTarget[] {
 }
 
 function applyScalarTargets<State>(
-  targets: Pick<VitaBindTargets, "attrs" | "classes" | "text">,
+  targets: Pick<VitaBindTargets, "aria" | "attrs" | "classes" | "text">,
   snapshot: State,
   binds: VitaBindMap<State>,
 ): void {
@@ -492,6 +576,14 @@ function applyScalarTargets<State>(
 
     if (target !== undefined) {
       applyAttrTarget(target, snapshot, binds);
+    }
+  }
+
+  for (let index = 0; index < targets.aria.length; index += 1) {
+    const target = targets.aria[index];
+
+    if (target !== undefined) {
+      applyAriaTarget(target, snapshot, binds);
     }
   }
 }
@@ -558,7 +650,31 @@ function applyAttrTarget<State>(
   if (value === null) return;
 
   try {
-    target.element.setAttribute(target.attrName, value);
+    writeAttributeIfChanged(target.element, target.attrName, value);
+  } catch {
+    return;
+  }
+}
+
+function applyAriaTarget<State>(
+  target: VitaAriaTarget,
+  snapshot: State,
+  binds: VitaBindMap<State>,
+): void {
+  const resolved = resolveBind(target.bindId, snapshot, binds);
+
+  if (!resolved.ok) return;
+
+  const value = ariaValue(target.state, resolved.value);
+
+  if (value.kind === "skip") return;
+
+  try {
+    if (value.kind === "remove") {
+      removeAttributeIfPresent(target.element, target.attrName);
+    } else {
+      writeAttributeIfChanged(target.element, target.attrName, value.value);
+    }
   } catch {
     return;
   }
@@ -842,6 +958,72 @@ function attrValue(value: unknown): string | null {
   return textValue(value);
 }
 
+type NormalizedAriaValue =
+  | {
+      readonly kind: "remove";
+    }
+  | {
+      readonly kind: "skip";
+    }
+  | {
+      readonly kind: "write";
+      readonly value: string;
+    };
+
+function ariaValue(state: VitaAriaState, value: unknown): NormalizedAriaValue {
+  if (value === null || value === undefined) {
+    return Object.freeze({ kind: "remove" });
+  }
+
+  if (state === "checked") {
+    const checked = checkedAriaValue(value);
+
+    return checked === null
+      ? Object.freeze({ kind: "skip" })
+      : Object.freeze({ kind: "write", value: checked });
+  }
+
+  if (state === "current") {
+    const current = currentAriaValue(value);
+
+    return current === null
+      ? Object.freeze({ kind: "skip" })
+      : Object.freeze({ kind: "write", value: current });
+  }
+
+  const enabled = boolValue(value);
+
+  return enabled === null
+    ? Object.freeze({ kind: "skip" })
+    : Object.freeze({ kind: "write", value: enabled ? "true" : "false" });
+}
+
+function checkedAriaValue(value: unknown): string | null {
+  const booleanValue = boolValue(value);
+
+  if (booleanValue !== null) return booleanValue ? "true" : "false";
+  if (value === "mixed") return "mixed";
+
+  return null;
+}
+
+function currentAriaValue(value: unknown): string | null {
+  const booleanValue = boolValue(value);
+
+  if (booleanValue !== null) return booleanValue ? "true" : "false";
+  if (
+    value === "page" ||
+    value === "step" ||
+    value === "location" ||
+    value === "date" ||
+    value === "time"
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
 function listValue(value: unknown): readonly VitaListItem[] | null {
   if (!Array.isArray(value)) return null;
 
@@ -1063,6 +1245,16 @@ function hasAttrTarget(targets: readonly VitaAttrTarget[], element: VitaElement,
   return false;
 }
 
+function hasAriaTarget(targets: readonly VitaAriaTarget[], element: VitaElement, state: VitaAriaState): boolean {
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+
+    if (target !== undefined && target.element === element && target.state === state) return true;
+  }
+
+  return false;
+}
+
 function attrSelectors(slot: number): readonly string[] {
   return Object.freeze([
     `[data-vita-bind-attr-${slot}]`,
@@ -1079,6 +1271,127 @@ function attrDatasetKeys(slot: number): readonly string[] {
     `vitaAttr-${slot}`,
     `vitaAttr${slot}`,
   ]);
+}
+
+function ariaSelector(state: VitaAriaState): string {
+  return `[data-vita-bind-aria-${state}]`;
+}
+
+function ariaDatasetKey(state: VitaAriaState): string {
+  let output = "vitaBindAria";
+  let capitalizeNext = true;
+
+  for (let index = 0; index < state.length; index += 1) {
+    const char = state[index];
+
+    if (char === undefined) continue;
+
+    output += capitalizeNext ? char.toUpperCase() : char;
+    capitalizeNext = char === "-";
+  }
+
+  return output;
+}
+
+function ariaAttribute(state: VitaAriaState): VitaAriaAttribute {
+  switch (state) {
+    case "checked":
+      return "aria-checked";
+    case "current":
+      return "aria-current";
+    case "disabled":
+      return "aria-disabled";
+    case "expanded":
+      return "aria-expanded";
+    case "hidden":
+      return "aria-hidden";
+    case "pressed":
+      return "aria-pressed";
+    case "selected":
+      return "aria-selected";
+  }
+}
+
+type AttributeRead =
+  | {
+      readonly ok: true;
+      readonly value: string | null;
+    }
+  | {
+      readonly ok: false;
+    };
+
+function writeAttributeIfChanged(element: VitaElement, name: string, value: string): void {
+  const current = readAttribute(element, name);
+
+  if (current.ok && current.value === value) return;
+  if (!current.ok && hasAttributeReader(element)) return;
+
+  element.setAttribute(name, value);
+}
+
+function removeAttributeIfPresent(element: VitaElement, name: string): void {
+  const current = readAttribute(element, name);
+
+  if (current.ok && current.value === null) return;
+  if (!current.ok && hasAttributeReader(element)) return;
+
+  const remover = readFunction(element, "removeAttribute");
+
+  if (remover === undefined) return;
+
+  remover(name);
+}
+
+function readAttribute(element: VitaElement, name: string): AttributeRead {
+  const getter = readFunction(element, "getAttribute");
+
+  if (getter !== undefined) {
+    return readAttributeWith(getter, element, name);
+  }
+
+  const testGetter = readFunction(element, "attribute");
+
+  if (testGetter !== undefined) {
+    return readAttributeWith(testGetter, element, name);
+  }
+
+  return Object.freeze({
+    ok: false,
+  });
+}
+
+type AttributeReader = (name: string) => unknown;
+
+function readAttributeWith(getter: AttributeReader, element: VitaElement, name: string): AttributeRead {
+  try {
+    const value = getter(name);
+
+    return Object.freeze({
+      ok: true,
+      value: typeof value === "string" ? value : null,
+    });
+  } catch {
+    return Object.freeze({
+      ok: false,
+    });
+  }
+}
+
+function hasAttributeReader(element: VitaElement): boolean {
+  return readFunction(element, "getAttribute") !== undefined || readFunction(element, "attribute") !== undefined;
+}
+
+function readFunction(source: object, key: string): AttributeReader | undefined {
+  try {
+    const value = Reflect.get(source, key);
+
+    if (typeof value !== "function") return undefined;
+
+    return (name: string): unknown => Reflect.apply(value, source, [name]);
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeEventTypes(input: readonly string[] | undefined): readonly string[] {
