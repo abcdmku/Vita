@@ -1,0 +1,7 @@
+# CEF OSR spike — keep the heavy/binary artifacts out of git; reconstruct via fetch-cef.sh.
+# Vendored CEF binary distribution (~1.5 GB extracted, ~296 MB tarball) — re-fetch, don't commit.
+.vendor/
+# CMake/ninja build tree + copied CEF runtime (libcef.so, *.pak, swiftshader, locales...).
+build/
+# Captured render output.
+out/
