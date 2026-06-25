@@ -64,21 +64,40 @@ test("desktop screen HTML delegates bootstrap and leaves lucide creation to hydr
   }
 });
 
-test("bootstrap keeps every static desktop screen inert when no bridge or host is present", async () => {
-  for (let index = 0; index < SCREEN_HTML.length; index += 1) {
-    const screen = SCREEN_HTML[index];
+test("bootstrap hydrates the matching screen in degraded mode (interactive locally, host actions fail-closed) when no host bridge is present", async () => {
+  const dom = screenDom("desktop/tiling");
+  let lucideCalls = 0;
+  const lucide = Object.freeze({
+    createIcons(): void {
+      lucideCalls += 1;
+    },
+  });
 
-    if (screen === undefined) continue;
-
-    const dom = screenDom(screen.id);
+  await withGlobalData(Object.freeze([
+    Object.freeze({
+      key: "lucide",
+      value: lucide,
+    }),
+  ]), async () => {
+    // No vitaDesktopBridge -> a fail-closed degraded host. The screen STILL hydrates so the desktop
+    // is interactive for local view-model logic (e.g. tiling.cycleLayout); host-backed actions return { ok: false }.
     const runtime = await bootstrapDesktop({
       document: new StubDocument(Object.freeze([dom.root])),
     });
 
-    assert.equal(runtime.screens.length, 0, screen.id);
-    assert.equal(dom.root.totalListenerCount(), 0, screen.id);
-    assert.equal(dom.label.textContent, "static", screen.id);
-  }
+    assert.equal(runtime.screens.length, 1);
+    assert.equal(runtime.screens[0]?.ok, true);
+    assert.equal(dom.root.listenerCount("click"), 1);
+    assert.equal(dom.label.textContent, "tile");
+
+    dom.root.dispatch("click", dom.action);
+
+    assert.equal(dom.label.textContent, "columns");
+    assert.equal(lucideCalls >= 1, true);
+
+    runtime.dispose();
+    assert.equal(dom.root.listenerCount("click"), 0);
+  });
 });
 
 test("global bootstrap wires the matching screen when a bridge is present", async () => {
