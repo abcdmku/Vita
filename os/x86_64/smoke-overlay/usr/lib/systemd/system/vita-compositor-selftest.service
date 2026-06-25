@@ -14,9 +14,12 @@ StandardOutput=journal+console
 StandardError=journal+console
 NoNewPrivileges=yes
 PrivateNetwork=yes
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
+# NOTE (verification-only): PrivateTmp/ProtectHome/ProtectSystem are intentionally NOT set here.
+# Those mount-namespace protections give the service a PRIVATE /run, so the in-guest GPU-readback
+# screenshot written to /run/vita-compositor-demo.png is invisible to the global namespace and
+# cannot be copied out by vmtoolsd. This is a smoke/verification self-test (not the production OS),
+# so /run is shared; the still-meaningful restrictions (NoNewPrivileges, capability bound, device
+# allow-list, private network) remain.
 CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
 AmbientCapabilities=
 DevicePolicy=closed

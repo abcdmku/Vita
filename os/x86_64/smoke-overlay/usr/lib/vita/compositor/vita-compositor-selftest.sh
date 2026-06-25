@@ -54,6 +54,10 @@ done
 pipeline_status=("${PIPESTATUS[@]}")
 rc=${pipeline_status[0]}
 
+# Verification breadcrumb: report the readback screenshot size to serial so the orchestrator can
+# confirm the PNG was written and is visible in the shared /run namespace for copy-out.
+emit_line "VITA-COMPOSITOR-SHOT: path=$SCREENSHOT bytes=$(stat -c%s "$SCREENSHOT" 2>/dev/null || echo 0)"
+
 if grep -q "^$MARKER: .* status=OK " "$TMP"; then
   if [ -s "$SCREENSHOT" ]; then
     exit 0
