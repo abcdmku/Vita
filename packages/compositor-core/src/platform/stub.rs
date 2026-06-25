@@ -51,6 +51,29 @@ impl RenderBackend for PlatformGpuBackend {
         ))
     }
 
+    fn create_buffer_texture(
+        &mut self,
+        _width: u32,
+        _height: u32,
+        _rgba: &[u8],
+    ) -> Result<Self::Texture, CompositorError> {
+        Err(CompositorError::Unavailable(
+            "non-linux compositor backend cannot create GPU textures".to_owned(),
+        ))
+    }
+
+    fn update_texture_rgba(
+        &mut self,
+        _texture: &mut Self::Texture,
+        _width: u32,
+        _height: u32,
+        _rgba: &[u8],
+    ) -> Result<(), CompositorError> {
+        Err(CompositorError::Unavailable(
+            "non-linux compositor backend cannot update GPU textures".to_owned(),
+        ))
+    }
+
     fn export_handle(&self, _texture: &Self::Texture) -> GpuTextureHandle {
         GpuTextureHandle {
             kind: TextureHandleKind::TestOnly,
