@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import * as sdk from "../../src/desktop-sdk/index.ts";
@@ -12,6 +13,7 @@ import {
   loadUiPackage,
   validateDesktopUiPackageManifest,
 } from "../../src/desktop-sdk/index.ts";
+import { parseVitaThemeTokensCss } from "../../src/desktop-sdk/theme-tokens.ts";
 import type {
   DesktopAppLaunch,
   DesktopAppStop,
@@ -33,6 +35,7 @@ import type {
   TrayItem,
   TrayItemInput,
 } from "../../src/desktop-sdk/index.ts";
+import type { VitaThemeTokenCssSources } from "../../src/desktop-sdk/theme-tokens.ts";
 import {
   ManagedShellConfigController,
   ShellComponentRegistry,
@@ -108,6 +111,8 @@ const EXPECTED_DESKTOP_SDK_EXPORTS = Object.freeze([
   "shellSurface",
   "stackWorkspace",
   "switchWorkspace",
+  "themeTokens",
+  "themeVar",
   "tileWorkspace",
   "validateDesktopUiPackageManifest",
 ]);
@@ -124,6 +129,7 @@ test("public desktop SDK surface exposes consumer API and hides platform interna
   assert.equal(typeof sdk.TrayModel, "function");
   assert.equal(typeof sdk.loadUiPackage, "function");
   assert.equal(typeof sdk.DesktopUiPackageLoader, "function");
+  assert.equal(typeof sdk.themeVar, "function");
 
   for (const internalName of [
     "AppHost",
@@ -138,6 +144,21 @@ test("public desktop SDK surface exposes consumer API and hides platform interna
   ]) {
     assert.equal(Object.hasOwn(sdk, internalName), false, `${internalName} must not be public`);
   }
+});
+
+test("theme tokens parse the committed design token CSS into typed variants", () => {
+  const parsed = parseVitaThemeTokensCss(readTokenCssSources());
+
+  assert.deepEqual(parsed, sdk.themeTokens);
+  assert.equal(sdk.themeTokens.color["accent"], "#3178c6");
+  assert.equal(sdk.themeTokens.variants.light.color["accent"], "#3178c6");
+  assert.equal(sdk.themeTokens.variants.dark.color["accent"], "#4f9dff");
+  assert.equal(sdk.themeTokens.variants.graphite.color["surface-base"], "#0f1217");
+  assert.equal(sdk.themeTokens.variants.light.space["space-2"], "8px");
+  assert.equal(sdk.themeTokens.variants.graphite.space["radius-window"], "var(--radius-xs)");
+  assert.equal(sdk.themeTokens.variants.light.font["font-sans"], "'Geist','SF Pro Display',system-ui,-apple-system,sans-serif");
+  assert.equal(sdk.themeVar("accent"), "var(--accent)");
+  assert.equal(sdk.themeVar("--space-2"), "var(--space-2)");
 });
 
 test("manifest validation accepts compatible semver declarations and rejects incompatible packages", () => {
@@ -748,21 +769,19 @@ function trayItem(input: TrayItemInput): TrayItem {
 function theme(): DesktopTheme {
   return Object.freeze({
     id: "vita.test.theme",
-    tokens: Object.freeze({
-      colors: Object.freeze({
-        background: "#101418",
-      }),
-      radii: Object.freeze({
-        sm: 4,
-      }),
-      spacing: Object.freeze({
-        sm: 8,
-      }),
-      typography: Object.freeze({
-        body: "system-ui",
-      }),
-    }),
+    tokens: sdk.themeTokens,
     version: "1.0.0",
+  });
+}
+
+function readTokenCssSources(): VitaThemeTokenCssSources {
+  return Object.freeze({
+    colors: readFileSync(new URL("../../../../ui_kits/tokens/colors.css", import.meta.url), "utf8"),
+    elevation: readFileSync(new URL("../../../../ui_kits/tokens/elevation.css", import.meta.url), "utf8"),
+    fonts: readFileSync(new URL("../../../../ui_kits/tokens/fonts.css", import.meta.url), "utf8"),
+    motion: readFileSync(new URL("../../../../ui_kits/tokens/motion.css", import.meta.url), "utf8"),
+    spacing: readFileSync(new URL("../../../../ui_kits/tokens/spacing.css", import.meta.url), "utf8"),
+    typography: readFileSync(new URL("../../../../ui_kits/tokens/typography.css", import.meta.url), "utf8"),
   });
 }
 
