@@ -1,6 +1,14 @@
 import type {
   DesktopHost,
 } from "../../../sdk/typescript/src/desktop-sdk/index.ts";
+import activityScreen from "../screens/activity.ts";
+import filesScreen from "../screens/files.ts";
+import indexScreen from "../screens/index.ts";
+import lockScreen from "../screens/lock.ts";
+import notificationsScreen from "../screens/notifications.ts";
+import settingsScreen from "../screens/settings.ts";
+import shellScreen from "../screens/shell.ts";
+import tilingScreen from "../screens/tiling.ts";
 import {
   createSurfaceHost,
 } from "./host-bridge.ts";
@@ -46,7 +54,16 @@ export interface DesktopHydrationRuntime {
 }
 
 const SCREEN_SELECTOR = "[data-vita-screen]";
-const DEFAULT_SCREEN_MODULES = Object.freeze([]) satisfies readonly ScreenModule[];
+const DEFAULT_SCREEN_MODULES = Object.freeze([
+  indexScreen,
+  settingsScreen,
+  filesScreen,
+  shellScreen,
+  activityScreen,
+  notificationsScreen,
+  lockScreen,
+  tilingScreen,
+]) satisfies readonly ScreenModule[];
 const TRANSPORT_GLOBALS = Object.freeze([
   "vitaDesktopBridge",
   "vitaHostBridge",
@@ -58,7 +75,11 @@ export async function bootstrapDesktop(
   options: BootstrapOptions = Object.freeze({}),
 ): Promise<DesktopHydrationRuntime> {
   const modules = options.modules ?? DEFAULT_SCREEN_MODULES;
-  const host = options.host ?? createSurfaceHost(resolveTransport(options));
+  const transport = options.host === undefined ? resolveTransport(options) : undefined;
+
+  if (options.host === undefined && transport === undefined) return runtime(Object.freeze([]));
+
+  const host = options.host ?? createSurfaceHost(transport);
   const roots = selectScreenRoots(options);
   const screens: HydratedScreen[] = [];
 
@@ -91,6 +112,8 @@ export async function bootstrapDesktopFromGlobal(
   });
 }
 
+void bootstrapDesktopFromGlobal().catch(() => {});
+
 function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
   const frozenScreens = Object.freeze([...screens]);
   let disposed = false;
@@ -108,8 +131,8 @@ function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
   });
 }
 
-function resolveTransport(options: BootstrapOptions): SurfaceHostTransportLike {
-  if (options.transport !== undefined) return options.transport;
+function resolveTransport(options: BootstrapOptions): Exclude<SurfaceHostTransportLike, null | undefined> | undefined {
+  if (options.transport !== undefined && isTransportLike(options.transport)) return options.transport;
 
   const globalObject = options.global ?? defaultGlobal();
 
@@ -209,18 +232,14 @@ function isBootstrapDocument(value: unknown): value is BootstrapDocument {
   }
 }
 
-function isTransportLike(value: unknown): value is SurfaceHostTransportLike {
-  if (typeof value === "function" || value === null || value === undefined) return true;
+function isTransportLike(value: unknown): value is Exclude<SurfaceHostTransportLike, null | undefined> {
+  if (typeof value === "function") return true;
   if (!isObjectRecord(value)) return false;
 
-  try {
-    return typeof Reflect.get(value, "request") === "function";
-  } catch {
-    return false;
-  }
+  return typeof readOwnData(value, "request") === "function";
 }
 
-function readOwnData(source: BootstrapGlobal, key: string): unknown {
+function readOwnData(source: object, key: string): unknown {
   try {
     const descriptor = Object.getOwnPropertyDescriptor(source, key);
 
