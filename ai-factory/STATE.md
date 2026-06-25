@@ -617,3 +617,15 @@ the 3 unbuilt a11y ports (224C/225C/228C), and HARDENED every acceptance to exac
 the 261C re-probe correctly FAILED `Could not find command-registry.test.ts`. Lesson saved ([[vita-vacuous-acceptance-hole]]).
 REBUILD PLAN after the 5:33 PM Codex reset: re-dispatch PSD-261C..267C (R1, auto-merge after files-exist + acceptance)
 + 224C/225C (R2 SDK ports, Codex reviewer gate) + 228C (R1, deps 224C). Always audit files-EXIST before merge, not just green.
+
+## ✅ FUNCTIONAL DESKTOP OS BOOTS LIVE ON THE VMWARE GPU (2026-06-25) — ADR-0014 M0+M1+M4 DONE
+The Vita desktop OS boots in VMware with CEF rendering the LIVE flagship desktop on the REAL GPU. Full stack on main
+(0553509): the functional desktop (deno-bundled hydration runtime → ui_kits/desktop/index.html is INTERACTIVE — live ⌘K
+re-rank, hydrated screens, icons) + CEF live-render (M0 vendored CEF 149 software-OSR; M1 CEF OnPaint→compositor
+registerBufferSurface pipe; M4 cef-overlay boot service + `VITA_CEF=1` image staging + a compositor surfaceless-software
+fallback with the production KMS path untouched). PROVEN: `gpu=vmwgfx present=kms`, markers VITA-CEF sink=buffer-surface
+present=kms + VITA-COMPOSITOR composited=OK; `C:\Users\Borg\vita-vmware\cef-live.png` is a genuine in-guest GPU readback of
+the live desktop. Build: `VITA_CEF=1 node os/x86_64/build-and-boot.mjs --mode=smoke --no-boot` → ~3.7GB image (~1.5GB CEF) →
+`node tools/vmware-verify.mjs` from WINDOWS (vmrun ENOENTs from WSL). FUTURE (not M4): interactivity (input/resize→CEF,
+PSD-055), accelerated/zero-copy (M2/M3, PSD-052/053), production CEF capsule + hardening (PSD-056). Deferred: a11y announce
+port 224C (R2 review churn; built+verified, needs more edge-case tests) + 225C/228C (dep 224C). Lesson [[vita-vacuous-acceptance-hole]].
