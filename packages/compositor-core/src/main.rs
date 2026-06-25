@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -8,9 +9,10 @@ use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
 };
 use vita_compositor_core::{
-    run_reposition_self_test_or_failsafe, start_desktop_demo_or_failsafe, Compositor,
-    CompositorError, DamageReport, InputEvent, Placement, PointerButtonState, Rect, SelfTestStatus,
-    SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
+    failsafe_report, run_reposition_self_test_or_failsafe, start_desktop_demo_or_failsafe,
+    Compositor, CompositorError, DamageReport, InputAvailability, InputEvent, Placement,
+    PointerButtonState, Rect, RenderBackend, SelfTestReport, SelfTestStatus, SurfaceId,
+    TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
 };
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
@@ -26,7 +28,12 @@ fn main() {
 }
 
 fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
-    if args.iter().any(|arg| arg == "--serve") {
+    if args
+        .iter()
+        .any(|arg| arg == "--commands" || arg == "--command-stream")
+    {
+        run_command_stream(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
+    } else if args.iter().any(|arg| arg == "--serve") {
         serve()
     } else if args.iter().any(|arg| arg == "--demo") {
         run_demo(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
@@ -66,6 +73,49 @@ fn run_demo(hold_seconds: u64, screenshot_path: Option<PathBuf>) -> Result<(), C
             emit_marker(&report.marker_line())?;
         }
     }
+    Ok(())
+}
+
+fn run_command_stream(
+    hold_seconds: u64,
+    screenshot_path: Option<PathBuf>,
+) -> Result<(), CompositorError> {
+    let backend = match open_default_gpu_backend_for_self_test(
+        DESKTOP_DEMO_OUTPUT_WIDTH,
+        DESKTOP_DEMO_OUTPUT_HEIGHT,
+    ) {
+        Ok(backend) => backend,
+        Err(error) => {
+            let report = failsafe_report("unavailable", command_failsafe_reason(&error));
+            emit_marker(&report.marker_line())?;
+            return Ok(());
+        }
+    };
+    let mut session = CommandDrivenSession::new(
+        backend,
+        DESKTOP_DEMO_OUTPUT_WIDTH,
+        DESKTOP_DEMO_OUTPUT_HEIGHT,
+    )?;
+    let stdin = io::stdin();
+    let report = match session.run(stdin.lock()) {
+        Ok(report) => report,
+        Err(error) => {
+            let report = session.failsafe_report(command_failsafe_reason(&error));
+            emit_marker(&report.marker_line())?;
+            return Err(error);
+        }
+    };
+
+    if let Some(path) = screenshot_path {
+        if let Err(error) = session.write_screenshot_png(&path) {
+            let report = session.failsafe_report(format!("screenshot_failed: {error}"));
+            emit_marker(&report.marker_line())?;
+            return Err(error);
+        }
+    }
+
+    emit_marker(&report.marker_line())?;
+    thread::sleep(Duration::from_secs(hold_seconds));
     Ok(())
 }
 
@@ -188,6 +238,193 @@ fn handle_command<B: vita_compositor_core::RenderBackend>(
     }
 }
 
+struct CommandDrivenSession<B: RenderBackend> {
+    compositor: Compositor<B>,
+    placements: BTreeMap<SurfaceId, Placement>,
+    pending_damage: DamageReport,
+    gpu: String,
+    present: vita_compositor_core::PresentationMode,
+    input: InputAvailability,
+    reposition_no_repaint: bool,
+    presented: bool,
+}
+
+impl<B: RenderBackend> CommandDrivenSession<B> {
+    fn new(backend: B, output_width: u32, output_height: u32) -> Result<Self, CompositorError> {
+        let gpu = backend.backend_name().to_owned();
+        let present = backend.presentation_mode();
+        let input = backend.input_availability();
+        Ok(Self {
+            compositor: Compositor::new(backend, output_width, output_height)?,
+            gpu,
+            input,
+            pending_damage: empty_damage(),
+            placements: BTreeMap::new(),
+            present,
+            presented: false,
+            reposition_no_repaint: true,
+        })
+    }
+
+    fn run<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
+        for line in reader.lines() {
+            let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
+            if line.trim().is_empty() {
+                return Err(CompositorError::Protocol("empty command".to_owned()));
+            }
+            self.handle_line(&line)?;
+        }
+
+        if !self.presented {
+            return Err(CompositorError::Protocol(
+                "command stream ended before present".to_owned(),
+            ));
+        }
+
+        Ok(self.ok_report())
+    }
+
+    fn handle_line(&mut self, line: &str) -> Result<(), CompositorError> {
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        let command = fields
+            .first()
+            .ok_or_else(|| CompositorError::Protocol("empty command".to_owned()))?;
+
+        match *command {
+            "registerSurface" => self.register_surface(&fields),
+            "updatePlacement" => self.update_placement(&fields),
+            "removeSurface" => self.remove_surface(&fields),
+            "present" => self.present(&fields),
+            _ => Err(CompositorError::Protocol(format!(
+                "unknown command {command:?}"
+            ))),
+        }
+    }
+
+    fn register_surface(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 5, "registerSurface")?;
+        let id = SurfaceId::new(required_field(fields, 1, "surface id")?)?;
+        let width = parse_u32(required_field(fields, 2, "width")?, "width")?;
+        let height = parse_u32(required_field(fields, 3, "height")?, "height")?;
+        let color = parse_rgba(required_field(fields, 4, "rgba")?)?;
+        self.compositor.register_test_surface(
+            id,
+            width,
+            height,
+            TestPattern::Solid { rgba: color },
+        )?;
+        Ok(())
+    }
+
+    fn update_placement(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 8, "updatePlacement")?;
+        let id = SurfaceId::new(required_field(fields, 1, "surface id")?)?;
+        if !self.compositor.has_surface(&id) {
+            return Err(CompositorError::UnknownSurface(id));
+        }
+
+        let x = parse_i32(required_field(fields, 2, "x")?, "x")?;
+        let y = parse_i32(required_field(fields, 3, "y")?, "y")?;
+        let width = parse_u32(required_field(fields, 4, "width")?, "width")?;
+        let height = parse_u32(required_field(fields, 5, "height")?, "height")?;
+        let z = parse_i32(required_field(fields, 6, "z")?, "z")?;
+        let visible = parse_bool(required_field(fields, 7, "visible")?, "visible")?;
+        let before_repaint_count = self.compositor.source_repaint_count();
+
+        if visible {
+            self.placements
+                .insert(id.clone(), Placement::new(id, x, y, width, height, z)?);
+        } else {
+            self.placements.remove(&id);
+        }
+
+        let placements = self.placements.values().cloned().collect::<Vec<_>>();
+        let damage = self.compositor.update_placements(placements)?;
+        if self.compositor.source_repaint_count() != before_repaint_count {
+            self.reposition_no_repaint = false;
+        }
+        self.merge_damage(damage);
+        Ok(())
+    }
+
+    fn remove_surface(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 2, "removeSurface")?;
+        let id = SurfaceId::new(required_field(fields, 1, "surface id")?)?;
+        self.placements.remove(&id);
+        let damage = self.compositor.remove_surface(&id)?;
+        self.merge_damage(damage);
+        Ok(())
+    }
+
+    fn present(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 1, "present")?;
+        let before_repaint_count = self.compositor.source_repaint_count();
+        let report = self.compositor.composite(&self.pending_damage)?;
+        if self.compositor.source_repaint_count() != before_repaint_count {
+            self.reposition_no_repaint = false;
+        }
+        if !report.composited {
+            return Err(CompositorError::Verification(
+                "command stream composite did not complete".to_owned(),
+            ));
+        }
+        if !self.reposition_no_repaint {
+            return Err(CompositorError::Verification(
+                "command stream source content changed during placement updates".to_owned(),
+            ));
+        }
+
+        self.pending_damage = empty_damage();
+        self.presented = true;
+        Ok(())
+    }
+
+    fn merge_damage(&mut self, damage: DamageReport) {
+        for surface in damage.changed_surfaces {
+            if !self.pending_damage.changed_surfaces.contains(&surface) {
+                self.pending_damage.changed_surfaces.push(surface);
+            }
+        }
+        for rect in damage.rects {
+            if !self.pending_damage.rects.contains(&rect) {
+                self.pending_damage.rects.push(rect);
+            }
+        }
+    }
+
+    fn write_screenshot_png(&mut self, path: &PathBuf) -> Result<(), CompositorError> {
+        self.compositor.write_output_png(path)
+    }
+
+    fn ok_report(&self) -> SelfTestReport {
+        SelfTestReport {
+            composited_ok: true,
+            damage_ok: true,
+            gpu: self.gpu.clone(),
+            input: self.input,
+            present: self.present,
+            reason: None,
+            reposition_no_repaint: self.reposition_no_repaint,
+            status: SelfTestStatus::Ok,
+            surfaces: self.compositor.surface_count(),
+        }
+    }
+
+    fn failsafe_report(&self, reason: impl Into<String>) -> SelfTestReport {
+        SelfTestReport {
+            composited_ok: false,
+            damage_ok: false,
+            gpu: self.gpu.clone(),
+            input: self.input,
+            present: self.present,
+            reason: Some(reason.into()),
+            reposition_no_repaint: self.reposition_no_repaint,
+            status: SelfTestStatus::Failsafe,
+            surfaces: self.compositor.surface_count(),
+        }
+    }
+}
+
 fn stream_input_events<B: vita_compositor_core::RenderBackend>(
     compositor: &mut Compositor<B>,
     stdout: &mut impl Write,
@@ -216,6 +453,21 @@ fn required_field<'a>(
         .get(index)
         .copied()
         .ok_or_else(|| CompositorError::Protocol(format!("missing {name}")))
+}
+
+fn require_field_count(
+    fields: &[&str],
+    expected: usize,
+    command: &str,
+) -> Result<(), CompositorError> {
+    if fields.len() != expected {
+        return Err(CompositorError::Protocol(format!(
+            "{command} expects {} fields",
+            expected - 1
+        )));
+    }
+
+    Ok(())
 }
 
 fn parse_u32(value: &str, name: &str) -> Result<u32, CompositorError> {
@@ -266,8 +518,20 @@ fn parse_i32(value: &str, name: &str) -> Result<i32, CompositorError> {
         .map_err(|_| CompositorError::Protocol(format!("invalid {name}")))
 }
 
+fn parse_bool(value: &str, name: &str) -> Result<bool, CompositorError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(CompositorError::Protocol(format!("invalid {name}"))),
+    }
+}
+
 fn parse_rgba(value: &str) -> Result<[u8; 4], CompositorError> {
-    if value.len() != 8 {
+    if value.len() != 8
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         return Err(CompositorError::Protocol(
             "rgba must be eight lowercase hex digits".to_owned(),
         ));
@@ -322,5 +586,23 @@ fn format_input_event(event: &InputEvent) -> String {
         } => format!(
             "kind=pointer-motion dx-micropixels={dx_micropixels} dy-micropixels={dy_micropixels}"
         ),
+    }
+}
+
+fn empty_damage() -> DamageReport {
+    DamageReport {
+        changed_surfaces: Vec::new(),
+        rects: Vec::new(),
+    }
+}
+
+fn command_failsafe_reason(error: &CompositorError) -> String {
+    match error {
+        CompositorError::Unavailable(reason) | CompositorError::Backend(reason)
+            if reason.starts_with("input_unavailable") =>
+        {
+            "input_unavailable".to_owned()
+        }
+        _ => error.to_string(),
     }
 }

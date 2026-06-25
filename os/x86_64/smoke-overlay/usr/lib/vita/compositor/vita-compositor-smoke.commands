@@ -1,0 +1,11 @@
+registerSurface surface:desktop 1280 720 18344eff
+updatePlacement surface:desktop 0 0 1280 720 10000 true
+registerSurface texture-files 420 280 e6edf2ff
+updatePlacement texture-files 86 96 420 280 20001 true
+registerSurface texture-terminal 470 260 1f232cff
+updatePlacement texture-terminal 690 235 470 260 20002 true
+registerSurface texture-notes 360 230 fcebb3ff
+updatePlacement texture-notes 252 410 360 230 20003 true
+registerSurface surface:panel 1280 42 12181fff
+updatePlacement surface:panel 0 0 1280 42 30001 true
+present

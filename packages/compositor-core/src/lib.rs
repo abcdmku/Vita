@@ -492,6 +492,33 @@ impl<B: RenderBackend> Compositor<B> {
         })
     }
 
+    pub fn remove_surface(&mut self, id: &SurfaceId) -> Result<DamageReport, CompositorError> {
+        if self.surfaces.remove(id).is_none() {
+            return Err(CompositorError::UnknownSurface(id.clone()));
+        }
+
+        if self.focus.as_ref() == Some(id) {
+            self.focus = None;
+        }
+
+        let mut changed_surfaces = Vec::new();
+        let mut rects = Vec::new();
+        self.placements.retain(|placement| {
+            if &placement.surface_id == id {
+                changed_surfaces.push(placement.surface_id.clone());
+                push_unique_rect(&mut rects, placement.rect());
+                false
+            } else {
+                true
+            }
+        });
+
+        Ok(DamageReport {
+            changed_surfaces,
+            rects,
+        })
+    }
+
     pub fn composite(&mut self, damage: &DamageReport) -> Result<CompositeReport, CompositorError> {
         let surfaces = self
             .surfaces
@@ -560,6 +587,10 @@ impl<B: RenderBackend> Compositor<B> {
 
     pub fn surface_count(&self) -> usize {
         self.surfaces.len()
+    }
+
+    pub fn has_surface(&self, id: &SurfaceId) -> bool {
+        self.surfaces.contains_key(id)
     }
 }
 
@@ -1336,6 +1367,37 @@ mod tests {
             ])
             .unwrap_err();
         assert_eq!(duplicate_err, CompositorError::DuplicatePlacement(surface));
+    }
+
+    #[test]
+    fn remove_surface_drops_placement_focus_and_reports_old_damage() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 64, 64).unwrap();
+        let surface = SurfaceId::new("surface-a").unwrap();
+        compositor
+            .register_test_surface(
+                surface.clone(),
+                8,
+                8,
+                TestPattern::Solid {
+                    rgba: [1, 2, 3, 255],
+                },
+            )
+            .unwrap();
+        compositor
+            .update_placements(vec![Placement::new(surface.clone(), 4, 5, 8, 8, 1).unwrap()])
+            .unwrap();
+        compositor.set_focus(Some(surface.clone())).unwrap();
+
+        let damage = compositor.remove_surface(&surface).unwrap();
+
+        assert_eq!(damage.changed_surfaces, vec![surface.clone()]);
+        assert_eq!(damage.rects, vec![Rect::new(4, 5, 8, 8).unwrap()]);
+        assert_eq!(compositor.surface_count(), 0);
+        assert_eq!(compositor.focus(), None);
+        assert_eq!(
+            compositor.remove_surface(&surface).unwrap_err(),
+            CompositorError::UnknownSurface(surface)
+        );
     }
 
     #[test]

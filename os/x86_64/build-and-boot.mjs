@@ -368,6 +368,12 @@ function installAgentOverlay() {
 function installCompositorOverlay() {
   const overlayHost = join(HERE, "smoke-overlay");
   const binDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor");
+  const commandDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor-smoke.commands");
+  run("1b0 · generate driver-produced compositor smoke layout", "node", [
+    "--experimental-strip-types",
+    join(HERE, "compositor-smoke-layout.mjs"),
+    commandDest,
+  ]);
   const buildArgs = [
     "tools/build/rust-in-docker.mjs",
     "--dir",

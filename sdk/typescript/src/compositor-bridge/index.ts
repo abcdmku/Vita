@@ -1,3 +1,5 @@
+import { safeNormalize } from "../safe-normalize.ts";
+import type { PlainJsonObject } from "../safe-normalize.ts";
 import type {
   DesktopSurfacePlacement,
   DesktopSurfaceRegistrationRequest,
@@ -38,6 +40,197 @@ export interface CompositorPort {
   ) => MaybePromise<void>;
   readonly removeSurface: (id: string) => MaybePromise<void>;
   readonly present: () => MaybePromise<void>;
+}
+
+export interface NativeCompositorCommandWriter {
+  readonly write: (line: string) => MaybePromise<void>;
+}
+
+export type NativeCompositorColor =
+  | string
+  | readonly [number, number, number, number];
+
+export interface NativeCompositorSurfaceColorInput {
+  readonly id: string;
+  readonly kind: CompositorSurfaceKind;
+  readonly size: CompositorSurfaceSize;
+}
+
+export interface NativeCompositorPortOptions {
+  readonly colors?: Readonly<Record<string, NativeCompositorColor>>;
+  readonly colorForSurface?: (
+    surface: NativeCompositorSurfaceColorInput,
+  ) => NativeCompositorColor;
+}
+
+export type NativeCompositorWireCommand =
+  | {
+      readonly type: "registerSurface";
+      readonly id: string;
+      readonly width: number;
+      readonly height: number;
+      readonly rgba: string;
+    }
+  | {
+      readonly type: "updatePlacement";
+      readonly id: string;
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+      readonly z: number;
+      readonly visible: boolean;
+    }
+  | {
+      readonly type: "removeSurface";
+      readonly id: string;
+    }
+  | {
+      readonly type: "present";
+    };
+
+export class NativeCompositorPortError extends Error {
+  readonly code = "INVALID_NATIVE_COMPOSITOR_COMMAND";
+  readonly path: string;
+
+  constructor(path: string, message: string) {
+    super(message);
+    this.name = "NativeCompositorPortError";
+    this.path = path;
+  }
+}
+
+export class NativeCompositorPort implements CompositorPort {
+  readonly #write: (line: string) => MaybePromise<void>;
+  readonly #options: NativeCompositorPortOptions;
+
+  constructor(
+    writer: NativeCompositorCommandWriter,
+    options: NativeCompositorPortOptions = {},
+  ) {
+    this.#write = normalizeCommandWriter(writer);
+    this.#options = options;
+  }
+
+  registerSurface(
+    id: string,
+    kind: CompositorSurfaceKind,
+    size: CompositorSurfaceSize,
+  ): MaybePromise<void> {
+    const surfaceId = normalizeSurfaceId(id, "/registerSurface/id");
+    const surfaceKind = normalizeSurfaceKind(kind, "/registerSurface/kind");
+    const normalizedSize = normalizeSize(size, "/registerSurface/size");
+    const frozenSize = Object.freeze({
+      height: normalizedSize.height,
+      width: normalizedSize.width,
+    });
+    const rgba = resolveNativeCompositorColor(this.#options, {
+      id: surfaceId,
+      kind: surfaceKind,
+      size: frozenSize,
+    });
+
+    return this.#write(encodeNativeCompositorCommand({
+      height: frozenSize.height,
+      id: surfaceId,
+      rgba,
+      type: "registerSurface",
+      width: frozenSize.width,
+    }));
+  }
+
+  updatePlacement(
+    id: string,
+    rect: CompositorRect,
+    z: number,
+    visible: boolean,
+  ): MaybePromise<void> {
+    const surfaceId = normalizeSurfaceId(id, "/updatePlacement/id");
+    const normalizedRect = normalizeNativeRect(rect, "/updatePlacement/rect");
+    const zIndex = normalizeI32(z, "/updatePlacement/z");
+
+    if (typeof visible !== "boolean") {
+      throw new NativeCompositorPortError(
+        "/updatePlacement/visible",
+        "Compositor visibility must be a boolean.",
+      );
+    }
+
+    return this.#write(encodeNativeCompositorCommand({
+      height: normalizedRect.height,
+      id: surfaceId,
+      type: "updatePlacement",
+      visible,
+      width: normalizedRect.width,
+      x: normalizedRect.x,
+      y: normalizedRect.y,
+      z: zIndex,
+    }));
+  }
+
+  removeSurface(id: string): MaybePromise<void> {
+    return this.#write(encodeNativeCompositorCommand({
+      id: normalizeSurfaceId(id, "/removeSurface/id"),
+      type: "removeSurface",
+    }));
+  }
+
+  present(): MaybePromise<void> {
+    return this.#write(encodeNativeCompositorCommand({
+      type: "present",
+    }));
+  }
+}
+
+export function createNativeCompositorPort(
+  writer: NativeCompositorCommandWriter,
+  options: NativeCompositorPortOptions = {},
+): NativeCompositorPort {
+  return new NativeCompositorPort(writer, options);
+}
+
+export function encodeNativeCompositorCommand(
+  command: NativeCompositorWireCommand,
+): string {
+  switch (command.type) {
+    case "registerSurface":
+      return `registerSurface ${command.id} ${command.width} ${command.height} ${command.rgba}\n`;
+    case "updatePlacement":
+      return (
+        `updatePlacement ${command.id} ${command.x} ${command.y} ` +
+        `${command.width} ${command.height} ${command.z} ${command.visible ? "true" : "false"}\n`
+      );
+    case "removeSurface":
+      return `removeSurface ${command.id}\n`;
+    case "present":
+      return "present\n";
+  }
+}
+
+export function defaultNativeCompositorSurfaceColor(
+  surface: NativeCompositorSurfaceColorInput,
+): string {
+  if (surface.kind === "shell:panel") {
+    return "12181fff";
+  }
+  if (surface.kind === "shell:desktop" || surface.kind === "shell:background") {
+    return "18344eff";
+  }
+  if (surface.kind === "shell:overlay") {
+    return "384f80ff";
+  }
+  if (surface.kind === "shell" || surface.kind.startsWith("shell:")) {
+    return "253044ff";
+  }
+
+  const color = WINDOW_COLOR_PALETTE[fnv1a32(surface.id) % WINDOW_COLOR_PALETTE.length];
+  if (color === undefined) {
+    throw new NativeCompositorPortError(
+      "/registerSurface/rgba",
+      "Native compositor color palette is empty.",
+    );
+  }
+  return color;
 }
 
 export interface CompositorWindowPlacement {
@@ -152,6 +345,19 @@ const ZERO_RECT: CompositorRect = Object.freeze({
   x: 0,
   y: 0,
 });
+const U32_MAX = 0xffff_ffff;
+const I32_MIN = -0x8000_0000;
+const I32_MAX = 0x7fff_ffff;
+const SIZE_FIELDS = Object.freeze(["height", "width"]);
+const RECT_FIELDS = Object.freeze(["height", "width", "x", "y"]);
+const WINDOW_COLOR_PALETTE = Object.freeze([
+  "e6edf2ff",
+  "f5d36cff",
+  "79b8ffff",
+  "c586c0ff",
+  "92b66fff",
+  "f08c6cff",
+]);
 
 export class CompositorDriver {
   readonly #port: CompositorPort;
@@ -958,4 +1164,264 @@ function compareStrings(left: string, right: string): number {
   if (left > right) return 1;
 
   return 0;
+}
+
+function normalizeSurfaceId(value: string, path: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 128 ||
+    !/^[A-Za-z0-9._:-]+$/u.test(value)
+  ) {
+    throw new NativeCompositorPortError(
+      path,
+      "Native compositor surface id must match the Rust SurfaceId grammar.",
+    );
+  }
+
+  return value;
+}
+
+function normalizeCommandWriter(
+  writer: NativeCompositorCommandWriter,
+): (line: string) => MaybePromise<void> {
+  if (writer === null || typeof writer !== "object") {
+    throw new NativeCompositorPortError(
+      "/writer",
+      "Native compositor writer must be an injected object capability.",
+    );
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(writer, "write");
+  const candidate: unknown = descriptor?.value;
+  if (
+    descriptor === undefined ||
+    !Object.prototype.hasOwnProperty.call(descriptor, "value") ||
+    !isCommandWriterFunction(candidate)
+  ) {
+    throw new NativeCompositorPortError(
+      "/writer/write",
+      "Native compositor writer must expose a data-property write function.",
+    );
+  }
+
+  return (line: string): MaybePromise<void> => candidate.call(writer, line);
+}
+
+function isCommandWriterFunction(
+  value: unknown,
+): value is (line: string) => MaybePromise<void> {
+  return typeof value === "function";
+}
+
+function normalizeSurfaceKind(
+  value: CompositorSurfaceKind,
+  path: string,
+): CompositorSurfaceKind {
+  if (
+    typeof value !== "string" ||
+    !/^(?:shell|window)(?::[A-Za-z0-9._:-]+)?$/u.test(value)
+  ) {
+    throw new NativeCompositorPortError(
+      path,
+      "Native compositor surface kind must be shell/window scoped.",
+    );
+  }
+
+  return value;
+}
+
+function normalizeSize(value: CompositorSurfaceSize, path: string): CompositorSurfaceSize {
+  const object = normalizePlainObject(value, SIZE_FIELDS, path);
+
+  return Object.freeze({
+    height: normalizeU32(object.height, `${path}/height`),
+    width: normalizeU32(object.width, `${path}/width`),
+  });
+}
+
+function normalizeNativeRect(value: CompositorRect, path: string): CompositorRect {
+  const object = normalizePlainObject(value, RECT_FIELDS, path);
+
+  return Object.freeze({
+    height: normalizeU32(object.height, `${path}/height`),
+    width: normalizeU32(object.width, `${path}/width`),
+    x: normalizeI32(object.x, `${path}/x`),
+    y: normalizeI32(object.y, `${path}/y`),
+  });
+}
+
+function normalizePlainObject(
+  value: unknown,
+  allowedFields: readonly string[],
+  path: string,
+): PlainJsonObject {
+  const normalized = safeNormalize(value, {
+    maxDepth: 2,
+    maxNodes: 16,
+  });
+
+  if (!normalized.ok) {
+    throw new NativeCompositorPortError(path, normalized.reason);
+  }
+
+  if (!isPlainJsonObject(normalized.value)) {
+    throw new NativeCompositorPortError(path, "Expected a plain data object.");
+  }
+
+  const keys = Object.keys(normalized.value).sort(compareStrings);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key !== undefined && !hasNativeField(allowedFields, key)) {
+      throw new NativeCompositorPortError(`${path}/${pathToken(key)}`, "Unknown field.");
+    }
+  }
+
+  for (let index = 0; index < allowedFields.length; index += 1) {
+    const field = allowedFields[index];
+
+    if (field !== undefined && !Object.hasOwn(normalized.value, field)) {
+      throw new NativeCompositorPortError(`${path}/${field}`, "Required field is missing.");
+    }
+  }
+
+  return normalized.value;
+}
+
+function normalizeU32(value: unknown, path: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > U32_MAX
+  ) {
+    throw new NativeCompositorPortError(path, "Expected a positive u32 integer.");
+  }
+
+  return value;
+}
+
+function normalizeI32(value: unknown, path: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < I32_MIN ||
+    value > I32_MAX
+  ) {
+    throw new NativeCompositorPortError(path, "Expected an i32 integer.");
+  }
+
+  return value;
+}
+
+function resolveNativeCompositorColor(
+  options: NativeCompositorPortOptions,
+  surface: NativeCompositorSurfaceColorInput,
+): string {
+  const colorFromId = colorRecordLookup(options.colors, surface.id);
+  if (colorFromId !== undefined) {
+    return normalizeNativeCompositorColor(colorFromId, "/registerSurface/rgba");
+  }
+
+  const colorFromKind = colorRecordLookup(options.colors, surface.kind);
+  if (colorFromKind !== undefined) {
+    return normalizeNativeCompositorColor(colorFromKind, "/registerSurface/rgba");
+  }
+
+  const resolved = options.colorForSurface?.(surface) ?? defaultNativeCompositorSurfaceColor(surface);
+  return normalizeNativeCompositorColor(resolved, "/registerSurface/rgba");
+}
+
+function colorRecordLookup(
+  colors: Readonly<Record<string, NativeCompositorColor>> | undefined,
+  key: string,
+): NativeCompositorColor | undefined {
+  if (colors === undefined || !Object.hasOwn(colors, key)) {
+    return undefined;
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(colors, key);
+  if (
+    descriptor === undefined ||
+    !Object.prototype.hasOwnProperty.call(descriptor, "value")
+  ) {
+    throw new NativeCompositorPortError(
+      "/registerSurface/rgba",
+      "Native compositor color overrides must use data properties.",
+    );
+  }
+
+  return descriptor.value as NativeCompositorColor;
+}
+
+function normalizeNativeCompositorColor(
+  value: NativeCompositorColor,
+  path: string,
+): string {
+  if (typeof value === "string") {
+    const normalized = value.startsWith("#") ? value.slice(1) : value;
+    if (!/^[0-9a-fA-F]{8}$/u.test(normalized)) {
+      throw new NativeCompositorPortError(
+        path,
+        "Native compositor RGBA color must be eight hex digits.",
+      );
+    }
+
+    return normalized.toLowerCase();
+  }
+
+  if (Array.isArray(value) && value.length === 4) {
+    const channels: string[] = [];
+
+    for (let index = 0; index < value.length; index += 1) {
+      const channel = value[index];
+
+      if (
+        typeof channel !== "number" ||
+        !Number.isInteger(channel) ||
+        channel < 0 ||
+        channel > 255
+      ) {
+        throw new NativeCompositorPortError(
+          `${path}/${index}`,
+          "Native compositor RGBA channels must be bytes.",
+        );
+      }
+
+      channels.push(channel.toString(16).padStart(2, "0"));
+    }
+
+    return channels.join("");
+  }
+
+  throw new NativeCompositorPortError(
+    path,
+    "Native compositor color must be hex RGBA or four byte channels.",
+  );
+}
+
+function hasNativeField(fields: readonly string[], key: string): boolean {
+  for (let index = 0; index < fields.length; index += 1) {
+    if (fields[index] === key) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isPlainJsonObject(value: unknown): value is PlainJsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function fnv1a32(value: string): number {
+  let hash = 0x811c9dc5;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  return hash;
 }
