@@ -10,7 +10,7 @@ depends_on: [PSD-261C]
 target_paths:
   - ui_kits/desktop/viewmodels
   - sdk/typescript/test/ui-kits
-acceptance_command: "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/gesture-input*.test.ts"
+acceptance_command: "test -f ui_kits/desktop/viewmodels/gesture-input.ts && test -f sdk/typescript/test/ui-kits/gesture-input.test.ts && npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/gesture-input.test.ts"
 allowed_network: false
 budget_minutes: 90
 ---
@@ -37,3 +37,6 @@ Turns the static desktop into real, testable pointer-driven behavior — modifie
 
 ## Definition of done
 - `ui_kits/desktop/viewmodels/gesture-input.ts` + `sdk/typescript/test/ui-kits/gesture-input.test.ts`, deterministic, typecheck clean. R1.
+
+## REVISION 1 (prior run produced NO files — vacuous 0-test pass — 2026-06-25)
+The previous dispatch created nothing yet 'passed' because the glob `gesture-input*.test.ts` matched no files (0 tests = exit 0). You MUST create `ui_kits/desktop/viewmodels/gesture-input.ts` (the gesture-input view-model on the SDK, per the objective) AND `sdk/typescript/test/ui-kits/gesture-input.test.ts` with REAL deterministic assertions. The acceptance now guards on both files existing. Do not submit an empty branch.
