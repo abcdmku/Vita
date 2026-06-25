@@ -162,10 +162,15 @@ function activateScreen<
     binding.dispose();
   }
 
+  function render(snapshot: State): void {
+    binding.render(snapshot);
+    createLucideIcons();
+  }
+
   unsubscribe = state.subscribe((snapshot) => {
-    if (!disposed) binding.render(snapshot);
+    if (!disposed) render(snapshot);
   });
-  binding.render(state.get());
+  render(state.get());
 
   return Object.freeze({
     id,
@@ -353,6 +358,43 @@ function safeScreenId(module: Pick<ScreenModule<unknown>, "id">): string {
   }
 }
 
+function createLucideIcons(): void {
+  const globalObject = defaultGlobal();
+  const lucide = readOwnData(globalObject, "lucide");
+
+  if (!isObjectRecord(lucide)) return;
+
+  const createIcons = readOwnData(lucide, "createIcons");
+
+  if (typeof createIcons !== "function") return;
+
+  try {
+    Reflect.apply(createIcons, lucide, []);
+  } catch {
+    return;
+  }
+}
+
+function defaultGlobal(): object {
+  const value: unknown = globalThis;
+
+  return isObjectRecord(value) ? value : Object.freeze({});
+}
+
+function readOwnData(source: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+
+    if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+      return undefined;
+    }
+
+    return descriptor.value;
+  } catch {
+    return undefined;
+  }
+}
+
 function isReadonlyBindMap<State>(
   source: ReadonlyMap<string, ScreenBindResolver<State>> | Readonly<Record<string, ScreenBindResolver<State>>>,
 ): source is ReadonlyMap<string, ScreenBindResolver<State>> {
@@ -381,6 +423,10 @@ function isPromiseLike<T>(value: DesktopMaybePromise<T>): value is Promise<T> {
   } catch {
     return false;
   }
+}
+
+function isObjectRecord(value: unknown): value is object {
+  return value !== null && typeof value === "object";
 }
 
 function errorMessage(error: unknown, fallback: string): string {
