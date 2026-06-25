@@ -376,6 +376,68 @@ test("incompatible package never mounts and recovers to built-in known-good fall
   ]);
 });
 
+test("reserved Vita component ids cannot poison built-in fallback recovery", async () => {
+  const events: string[] = [];
+  const host = realShellBackedHost(events);
+  const recovered = await loadUiPackage(fallbackPoisonPackage(events), host);
+
+  assert.equal(recovered.ok, true);
+  if (!recovered.ok) {
+    assert.fail("expected built-in fallback recovery");
+  }
+  assert.equal(recovered.loaded.source, "fallback");
+  assert.equal(recovered.loaded.manifest.id, KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID);
+  assert.equal(recovered.recoveredFrom?.code, "UI_PACKAGE_MOUNT_FAILED");
+  assert.equal(host.currentShell?.().layout.configId, "vita.shell.fallback");
+  assert.equal(host.currentShell?.().layout.root.componentId, "vita.shell.fallback");
+  assert.deepEqual(events, [
+    "mount:ui.poison",
+    "poison-denied:RESERVED_COMPONENT_ID",
+    "rollback",
+    "register:vita.shell.fallback",
+    "preview:vita.shell.fallback",
+    "apply:vita.shell.fallback",
+  ]);
+});
+
+test("scoped host rejects accessor-based launchApp TOCTOU without forwarding", async () => {
+  const events: string[] = [];
+  const scoped = createDesktopHostForPackage(fakeHost(events), manifest("ui.launcher", {
+    capabilityGrants: Object.freeze([
+      Object.freeze({
+        capability: "apps.launch",
+        resourceId: "allowed.app",
+      }),
+    ]),
+  }));
+  const hostileApp: Record<string, unknown> = {
+    runtime: Object.freeze({
+      url: "https://example.invalid/app",
+    }),
+    surfaceKind: "web",
+    title: "Allowed",
+  };
+  let reads = 0;
+
+  Object.defineProperty(hostileApp, "id", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? "allowed.app" : "victim.app";
+    },
+  });
+
+  const launched = await callLaunchApp(scoped, hostileApp);
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected accessor launch request to fail closed");
+  }
+  assert.equal(launched.error.code, "INVALID_HOST_REQUEST");
+  assert.equal(reads, 0);
+  assert.deepEqual(events, []);
+});
+
 function manifest(
   id: string,
   overrides: {
@@ -397,6 +459,37 @@ function manifest(
       min: "1.0.0",
     }),
     version: "1.0.0",
+  });
+}
+
+function fallbackPoisonPackage(events: string[]): DesktopUiPackage {
+  return Object.freeze({
+    manifest: manifest("ui.poison", {
+      capabilityGrants: Object.freeze([]),
+    }),
+    mount(host: DesktopHost) {
+      events.push("mount:ui.poison");
+      const poisoned = host.registerComponent(sdk.defineShellComponent({
+        defaultPlacement: {
+          layer: "desktop",
+          order: 99,
+          zone: "center",
+        },
+        id: "vita.shell.fallback",
+        render: () => sdk.shellSurface({
+          poisoned: true,
+          title: "Poisoned Fallback",
+        }),
+        role: "desktop",
+      }));
+
+      assert.equal(poisoned.ok, false);
+      if (poisoned.ok) {
+        assert.fail("expected reserved component id to be rejected");
+      }
+      events.push(`poison-denied:${poisoned.error.code}`);
+      throw new Error("configured fallback poisoning failure");
+    },
   });
 }
 
@@ -483,6 +576,12 @@ function fallbackPackage(events: string[]): DesktopUiPackage {
       });
     },
   });
+}
+
+async function callLaunchApp(host: DesktopHost, input: unknown): Promise<DesktopHostResult<DesktopAppLaunch>> {
+  const launchApp = host.launchApp as (app: unknown) => ReturnType<DesktopHost["launchApp"]>;
+
+  return await launchApp(input);
 }
 
 function fakeHost(events: string[]): DesktopHost {
