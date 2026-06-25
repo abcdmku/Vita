@@ -399,6 +399,159 @@ test("partial thrown launch rollback leaves existing app window intact", async (
   assert.equal(host.snapshot().pendingCleanup.length, 0);
 });
 
+for (const failureCommand of ["registerSurface", "updatePlacement"] as const) {
+  test(`maybe-landed ${failureCommand} failure cleans only the failed launch surface`, async () => {
+    const calls: CompositorCommand[] = [];
+    const appHost = new FakeAppHost({
+      bounds: SCREEN,
+    });
+    const runningApp = tsxApp();
+    const failedApp = webApp();
+    const compositor = new CleanupCapableCompositorDriver(recordingPort(calls, {
+      failWhen(command) {
+        switch (command.type) {
+          case "registerSurface":
+          case "updatePlacement":
+          case "removeSurface":
+            return command.id === appSurfaceId(failedApp.id) && command.type === failureCommand;
+          case "present":
+            return false;
+        }
+      },
+    }));
+    const host = new AppWindowHost({
+      appHost,
+      compositor,
+      layoutConstraints: {
+        bounds: SCREEN,
+      },
+      shell: desktopShell(),
+    });
+
+    assert.equal((await host.launch(runningApp)).ok, true);
+    assert.equal(
+      compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+      true,
+    );
+
+    const failed = await host.launch(failedApp);
+
+    assert.equal(failed.ok, false);
+    if (failed.ok) {
+      assert.fail("expected compositor command failure");
+    }
+    assert.equal(failed.error.code, "COMPOSITOR_RECONCILE_FAILED");
+    assert.deepEqual(compositor.removedSurfaces, [
+      appSurfaceId(failedApp.id),
+    ]);
+    assert.equal(
+      compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+      true,
+    );
+    assert.equal(
+      compositor.snapshot().some((surface) => surface.id === appSurfaceId(failedApp.id)),
+      false,
+    );
+    assert.deepEqual(appHost.snapshot().apps.map((launch) => launch.app.id), [
+      runningApp.id,
+    ]);
+    assert.deepEqual(host.snapshot().windows.map((window) => window.appId), [
+      runningApp.id,
+    ]);
+    assert.equal(host.snapshot().pendingCleanup.length, 0);
+
+    const swept = await host.reconcile();
+
+    assert.equal(swept.ok, true);
+    assert.deepEqual(host.snapshot().windows.map((window) => window.appId), [
+      runningApp.id,
+    ]);
+    assert.equal(
+      compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+      true,
+    );
+  });
+}
+
+test("rollback stop failure retains the failed launch surface pending until sweep", async () => {
+  let failFailedAppStop = true;
+  const runningApp = tsxApp();
+  const failedApp = webApp();
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+    failStopWhen(appId) {
+      return failFailedAppStop && appId === failedApp.id;
+    },
+  });
+  const compositor = new ThrowingMaybeLandedCompositorDriver({
+    throwOnWindowReconcile: 2,
+  });
+  const host = new AppWindowHost({
+    appHost,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+
+  assert.equal((await host.launch(runningApp)).ok, true);
+
+  const failed = await host.launch(failedApp);
+
+  assert.equal(failed.ok, false);
+  if (failed.ok) {
+    assert.fail("expected rollback stop failure");
+  }
+  assert.equal(failed.error.code, "APP_LAUNCH_ROLLBACK_FAILED");
+  assert.deepEqual(compositor.removedSurfaces, []);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+    true,
+  );
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(failedApp.id)),
+    true,
+  );
+  assert.deepEqual(appHost.snapshot().apps.map((launch) => launch.app.id), [
+    runningApp.id,
+    failedApp.id,
+  ]);
+  assert.equal(host.snapshot().pendingCleanup[0]?.appId, failedApp.id);
+
+  const blocked = await host.launch(containerApp());
+
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) {
+    assert.fail("expected pending cleanup to block another launch");
+  }
+  assert.equal(blocked.error.code, "APP_WINDOW_CLEANUP_PENDING");
+
+  failFailedAppStop = false;
+
+  const swept = await host.reconcile();
+
+  assert.equal(swept.ok, true);
+  assert.deepEqual(compositor.removedSurfaces, [
+    appSurfaceId(failedApp.id),
+  ]);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(runningApp.id)),
+    true,
+  );
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId(failedApp.id)),
+    false,
+  );
+  assert.deepEqual(appHost.snapshot().apps.map((launch) => launch.app.id), [
+    runningApp.id,
+  ]);
+  assert.deepEqual(host.snapshot().windows.map((window) => window.appId), [
+    runningApp.id,
+  ]);
+  assert.equal(host.snapshot().pendingCleanup.length, 0);
+});
+
 test("compositor teardown failure records pending cleanup and retries idempotently", async () => {
   const calls: CompositorCommand[] = [];
   let failWindowRemove = false;
@@ -521,11 +674,13 @@ test("subscribed AppHost launch and stop events reconcile through the injected c
 
 interface FakeAppHostOptions extends LayoutConstraints {
   readonly events?: FakeAppHostEvents;
+  readonly failStopWhen?: (appId: string) => boolean;
 }
 
 class FakeAppHost implements AppWindowHostAppHostPort {
   readonly #constraints: LayoutConstraints;
   readonly #events: FakeAppHostEvents | undefined;
+  readonly #failStopWhen: ((appId: string) => boolean) | undefined;
   readonly #launches = new Map<string, AppLaunch>();
   readonly stops: string[] = [];
   #windowModel: WindowModel;
@@ -533,6 +688,7 @@ class FakeAppHost implements AppWindowHostAppHostPort {
   constructor(options: FakeAppHostOptions) {
     this.#constraints = options;
     this.#events = options.events;
+    this.#failStopWhen = options.failStopWhen;
     this.#windowModel = createWindowModel({
       activeWorkspaceId: "main",
     });
@@ -574,6 +730,10 @@ class FakeAppHost implements AppWindowHostAppHostPort {
 
     if (launch === undefined) {
       return appHostReject("APP_NOT_RUNNING", `app '${appId}' is not running.`, `/apps/${appId}`);
+    }
+
+    if (this.#failStopWhen?.(appId) === true) {
+      return appHostReject("APP_HOST_STOP_FAILED", `app '${appId}' stop failed.`, `/apps/${appId}`);
     }
 
     this.stops.push(appId);

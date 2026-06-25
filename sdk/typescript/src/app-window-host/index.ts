@@ -155,6 +155,7 @@ export class AppWindowHost {
   readonly #layoutConstraints: LayoutConstraints;
   readonly #maybeLiveWindowsByError = new WeakMap<AppWindowHostError, readonly AppWindowSurface[]>();
   readonly #pendingCleanup = new Map<string, AppWindowHostPendingCleanup>();
+  readonly #pendingRollbackStops = new Set<string>();
   readonly #untrackedPendingCleanup = new Set<string>();
   #eventQueue: Promise<void> = Promise.resolve();
   #unsubscribe: AppWindowHostUnsubscribe | undefined;
@@ -265,13 +266,13 @@ export class AppWindowHost {
   }
 
   async reconcile(): Promise<AppWindowHostResult<AppWindowHostReconcile>> {
-    const reconciled = await this.#reconcileCurrent();
-
-    if (!reconciled.ok) return reconciled;
-
     const untrackedCleanup = await this.#retryUntrackedPendingCleanup();
 
     if (!untrackedCleanup.ok) return untrackedCleanup;
+
+    const reconciled = await this.#reconcileCurrent();
+
+    if (!reconciled.ok) return reconciled;
 
     if (this.#untrackedPendingCleanup.size === 0) {
       this.#clearPendingCleanup();
@@ -307,7 +308,19 @@ export class AppWindowHost {
         `app launch window registration failed with ${cause.code}; rollback stop failed with ${stopped.error.code}: ${stopped.error.message}`,
         stopped.error.path,
       );
-      this.#rememberPendingCleanup(launch, rollbackError);
+
+      const running = this.#appIsRunning(launch.app.id);
+      let untrackedSurface = maybeLiveWindows.length > 0;
+
+      if (running.ok && !running.value) {
+        await this.#cleanupMaybeLiveWindows(launch, maybeLiveWindows);
+        untrackedSurface = this.#untrackedPendingCleanup.has(launch.app.id);
+      }
+
+      this.#rememberPendingCleanup(launch, rollbackError, {
+        retryStop: true,
+        untrackedSurface,
+      });
       return {
         error: rollbackError,
         ok: false,
@@ -438,6 +451,7 @@ export class AppWindowHost {
     lifecycle: AppLaunch | AppStop,
     reason: AppWindowHostError,
     options: {
+      readonly retryStop?: boolean;
       readonly untrackedSurface?: boolean;
     } = {},
   ): void {
@@ -446,6 +460,10 @@ export class AppWindowHost {
 
     if (options.untrackedSurface === true) {
       this.#untrackedPendingCleanup.add(cleanup.appId);
+    }
+
+    if (options.retryStop === true) {
+      this.#pendingRollbackStops.add(cleanup.appId);
     }
   }
 
@@ -458,7 +476,7 @@ export class AppWindowHost {
   }
 
   async #cleanupMaybeLiveWindows(
-    lifecycle: AppStop,
+    lifecycle: AppLaunch | AppStop,
     windows: readonly AppWindowSurface[],
   ): Promise<void> {
     const seen = new Set<string>();
@@ -506,7 +524,10 @@ export class AppWindowHost {
 
   async #retryUntrackedPendingCleanup(): Promise<AppWindowHostResult<true>> {
     const pending = freezePendingCleanup([...this.#pendingCleanup.values()])
-      .filter((cleanup) => this.#untrackedPendingCleanup.has(cleanup.appId));
+      .filter((cleanup) =>
+        this.#pendingRollbackStops.has(cleanup.appId) ||
+        this.#untrackedPendingCleanup.has(cleanup.appId)
+      );
     const first = pending[0];
 
     if (first === undefined) return accept(true);
@@ -516,25 +537,83 @@ export class AppWindowHost {
 
       if (cleanup === undefined) continue;
 
-      const removed = await this.#removeMaybeLiveSurface(cleanup.textureId);
+      const stopped = await this.#stopRunningPendingCleanupApp(cleanup);
 
-      if (!removed.ok) {
+      if (!stopped.ok) {
         this.#pendingCleanup.set(cleanup.appId, Object.freeze({
           ...cleanup,
-          reason: removed.error,
+          reason: stopped.error,
         }));
-        return removed;
+        return stopped;
       }
 
-      this.#untrackedPendingCleanup.delete(cleanup.appId);
+      const cleanupAfterStop = stopped.value;
+
+      if (this.#untrackedPendingCleanup.has(cleanupAfterStop.appId)) {
+        const removed = await this.#removeMaybeLiveSurface(cleanupAfterStop.textureId);
+
+        if (!removed.ok) {
+          this.#pendingCleanup.set(cleanupAfterStop.appId, Object.freeze({
+            ...cleanupAfterStop,
+            reason: removed.error,
+          }));
+          return removed;
+        }
+
+        this.#untrackedPendingCleanup.delete(cleanupAfterStop.appId);
+      }
+
+      this.#pendingRollbackStops.delete(cleanupAfterStop.appId);
     }
 
     return accept(true);
   }
 
+  async #stopRunningPendingCleanupApp(
+    cleanup: AppWindowHostPendingCleanup,
+  ): Promise<AppWindowHostResult<AppWindowHostPendingCleanup>> {
+    const running = this.#appIsRunning(cleanup.appId);
+
+    if (!running.ok) return running;
+
+    if (!running.value) return accept(cleanup);
+
+    const stopped = await this.#callAppHostStop(cleanup.appId);
+
+    if (!stopped.ok) return fromAppHostError(stopped.error);
+
+    const next = pendingCleanupFromLifecycle(stopped.value, cleanup.reason);
+    this.#pendingCleanup.set(next.appId, next);
+
+    return accept(next);
+  }
+
   #clearPendingCleanup(): void {
     this.#pendingCleanup.clear();
+    this.#pendingRollbackStops.clear();
     this.#untrackedPendingCleanup.clear();
+  }
+
+  #appIsRunning(appId: string): AppWindowHostResult<boolean> {
+    let snapshot: AppHostSnapshot;
+
+    try {
+      snapshot = this.#appHost.snapshot();
+    } catch {
+      return reject(
+        "APP_WINDOW_SNAPSHOT_FAILED",
+        "app window host could not read the injected app snapshot during cleanup.",
+        `/apps/${pathToken(appId)}/cleanup`,
+      );
+    }
+
+    for (let index = 0; index < snapshot.apps.length; index += 1) {
+      const launch = snapshot.apps[index];
+
+      if (launch !== undefined && launch.app.id === appId) return accept(true);
+    }
+
+    return accept(false);
   }
 }
 
