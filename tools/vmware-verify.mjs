@@ -535,10 +535,12 @@ async function deleteVm(vmrun, vmxPath) {
 async function captureScreen(vmrun, vmxPath, screenshotPath) {
   await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
   console.log(`vmrun: captureScreen ${screenshotPath}`);
+  // captureScreen is a guest op: needs VMware Tools (vmtoolsd) running + a guest login.
+  // The verification image sets a known verification-only root password (root/vita).
   await runChecked(
     "vmrun captureScreen",
     vmrun,
-    ["-T", "ws", "captureScreen", vmxPath, screenshotPath],
+    ["-T", "ws", "-gu", "root", "-gp", "vita", "captureScreen", vmxPath, screenshotPath],
     DEFAULT_SCREENSHOT_TIMEOUT_SECONDS * 1000,
   );
 }
