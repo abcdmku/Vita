@@ -368,9 +368,14 @@ export class AppHost {
     );
     const emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(appId)}/wm`);
 
+    if (!emitted.ok) {
+      this.#rememberPendingCleanup(appId, undefined, launch.surfaceId, launch.windowId, false, true);
+      this.#launches.delete(appId);
+      return emitted;
+    }
+
     this.#windowModel = nextWindowModel;
     this.#launches.delete(appId);
-    if (!emitted.ok) return emitted;
 
     return accept(Object.freeze({
       appId,
@@ -681,6 +686,18 @@ export class AppHost {
         this.#layoutConstraints,
       );
       emitted = this.#emitWindowManagerIntents(intents, `/apps/${pathToken(cleanup.appId)}/wm`);
+      if (!emitted.ok) {
+        this.#rememberPendingCleanup(
+          cleanup.appId,
+          undefined,
+          cleanup.surfaceId,
+          cleanup.windowId,
+          false,
+          true,
+        );
+        return emitted;
+      }
+
       this.#windowModel = nextWindowModel;
     }
 

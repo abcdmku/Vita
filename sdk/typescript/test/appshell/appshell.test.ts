@@ -523,6 +523,141 @@ test("failed launch records rollback surface removal failure for retry without r
   assert.equal(host.snapshot().windowModel.windows.length, 0);
 });
 
+test("stop records pending cleanup when WM close intents fail before advancing the window model", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  let failWm = false;
+  const app = tsxApp();
+  const host = new AppHost({
+    initialWindowModel: createWindowModel({
+      activeWorkspaceId: "main",
+    }),
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: conditionalThrowingWm(wmCalls, () => failWm),
+    },
+  });
+
+  const launched = host.launch(app);
+
+  assert.equal(launched.ok, true);
+  wmCalls.length = 0;
+  failWm = true;
+
+  const failedStop = host.stop(app);
+
+  assert.equal(failedStop.ok, false);
+  if (failedStop.ok) {
+    assert.fail("expected WM close intent rejection");
+  }
+  assert.equal(failedStop.error.code, "WM_INTENT_FAILED");
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.deepEqual(wmCalls.map((call) => call.type), ["setTextureVisibility"]);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 1);
+
+  const duplicateLaunch = host.launch(app);
+
+  assert.equal(duplicateLaunch.ok, false);
+  if (duplicateLaunch.ok) {
+    assert.fail("expected cleanup-pending launch rejection");
+  }
+  assert.equal(duplicateLaunch.error.code, "APP_LAUNCH_CLEANUP_PENDING");
+
+  failWm = false;
+  wmCalls.length = 0;
+
+  const retryStop = host.stop(app);
+
+  assert.equal(retryStop.ok, true);
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.deepEqual(wmCalls.map((call) => call.type), [
+    "setTextureVisibility",
+    "setFocus",
+  ]);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
+test("pending cleanup retry keeps the window model open when WM close intents fail again", () => {
+  const created: ShellSurfaceCreateRequest[] = [];
+  const removed: string[] = [];
+  const wmCalls: WindowManagerIntent[] = [];
+  const mounts: TsxRenderRequest[] = [];
+  const unmounts: TsxRenderBinding[] = [];
+  let failWm = false;
+  const app = tsxApp();
+  const host = new AppHost({
+    initialWindowModel: createWindowModel({
+      activeWorkspaceId: "main",
+    }),
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    ports: {
+      shell: fakeShell(created, removed),
+      tsx: fakeTsxPort(mounts, unmounts),
+      wm: conditionalThrowingWm(wmCalls, () => failWm),
+    },
+  });
+
+  assert.equal(host.launch(app).ok, true);
+  wmCalls.length = 0;
+  failWm = true;
+
+  const failedStop = host.stop(app);
+
+  assert.equal(failedStop.ok, false);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 1);
+  wmCalls.length = 0;
+
+  const failedRetry = host.stop(app);
+
+  assert.equal(failedRetry.ok, false);
+  if (failedRetry.ok) {
+    assert.fail("expected pending cleanup WM retry rejection");
+  }
+  assert.equal(failedRetry.error.code, "WM_INTENT_FAILED");
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.deepEqual(wmCalls.map((call) => call.type), ["setTextureVisibility"]);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 1);
+
+  const duplicateLaunch = host.launch(app);
+
+  assert.equal(duplicateLaunch.ok, false);
+  if (duplicateLaunch.ok) {
+    assert.fail("expected cleanup-pending launch rejection after failed retry");
+  }
+  assert.equal(duplicateLaunch.error.code, "APP_LAUNCH_CLEANUP_PENDING");
+
+  failWm = false;
+  wmCalls.length = 0;
+
+  const cleanupStop = host.stop(app);
+
+  assert.equal(cleanupStop.ok, true);
+  assert.deepEqual(removed, [appSurfaceId(app.id)]);
+  assert.deepEqual(unmounts.map((binding) => binding.bindingId), ["tsx:com.vita.notes.component"]);
+  assert.deepEqual(wmCalls.map((call) => call.type), [
+    "setTextureVisibility",
+    "setFocus",
+  ]);
+  assert.equal(host.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windowModel.windows.length, 0);
+});
+
 function tsxApp(): AppDescriptor {
   return Object.freeze({
     defaultWindow: {
@@ -713,6 +848,48 @@ function throwingWm(calls: WindowManagerIntent[]): WindowManagerSubstratePort {
         windowId,
       }));
       throw new Error("WM unavailable");
+    },
+  };
+}
+
+function conditionalThrowingWm(
+  calls: WindowManagerIntent[],
+  shouldThrow: () => boolean,
+): WindowManagerSubstratePort {
+  return {
+    repositionTexture(textureId, rect, windowId): void {
+      calls.push(Object.freeze({
+        rect,
+        textureId,
+        type: "repositionTexture",
+        windowId,
+      }));
+
+      if (shouldThrow()) {
+        throw new Error("WM unavailable");
+      }
+    },
+    setFocus(windowId): void {
+      calls.push(Object.freeze({
+        type: "setFocus",
+        windowId,
+      }));
+
+      if (shouldThrow()) {
+        throw new Error("WM unavailable");
+      }
+    },
+    setTextureVisibility(textureId, visible, windowId): void {
+      calls.push(Object.freeze({
+        textureId,
+        type: "setTextureVisibility",
+        visible,
+        windowId,
+      }));
+
+      if (shouldThrow()) {
+        throw new Error("WM unavailable");
+      }
     },
   };
 }
