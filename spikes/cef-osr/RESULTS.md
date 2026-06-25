@@ -1,13 +1,20 @@
-# CEF OSR spike — M0 RESULTS (software off-screen render of the flagship desktop)
+# CEF OSR spike — RESULTS (M0 software OSR + M1 CEF → compositor pipe)
 
-**Status: M0 PASS.** CEF renders the live Vita flagship desktop HTML off-screen on the
-Borg51 build host and produces a 1280x800 PNG. This is the gating proof that CEF works on
-this host; the accelerated-OSR → shared-texture → compositor path (M1+) builds on it.
+**Status: M0 PASS + M1 PASS.**
+- **M0** — CEF renders the live Vita flagship desktop HTML off-screen on the Borg51 build
+  host and produces a 1280x800 PNG (the gating proof that CEF works on this host).
+- **M1** — CEF's rendered frame flows INTO the Vita native compositor: CEF emits the
+  compositor command stream for the captured frame; the compositor ingests it, composites
+  the buffer surface through real GL, and the **compositor** does the glReadPixels readback
+  → `cef-m1.png`. The readback shows the CEF-rendered desktop produced BY the compositor.
 
-Marker emitted on success:
+Markers emitted on success:
 
 ```
-VITA-CEF: osr=software frame=1 w=1280 h=800 status=OK
+M0: VITA-CEF: osr=software frame=1 w=1280 h=800 status=OK
+M1: VITA-CEF: sink=buffer-surface present=ok status=OK
+    (compositor side: VITA-COMPOSITOR: gpu=surfaceless-llvmpipe surfaces=1 composited=OK
+     reposition=no-repaint present=recording damage=OK status=OK input=unavailable)
 ```
 
 ## What was proven
@@ -74,19 +81,88 @@ spikes/cef-osr/run.sh
 - `fetch-cef.sh` — reproducible download + sha-verify + extract of the pinned CEF distribution.
 - `run.sh` — runs the host headless and mirrors the PNG to the Windows-visible path.
 
-## Handoff to M1 (feed OnPaint frames to the native compositor)
+## M1 — how CEF feeds the compositor (the wiring)
 
-The compositor at `packages/compositor-core` already has a buffer-surface sink (PSD-011). Its
-stdin command stream (`packages/compositor-core/src/main.rs`) accepts:
+The pipe is the compositor's **stdin command stream** (`packages/compositor-core/src/main.rs`,
+`run_command_stream`), feeding the MERGED PSD-011 buffer-surface sink. The data path:
 
-- `registerBufferSurface <id> <w> <h> <rgba>` — 5 fields; `<rgba>` is the full surface as **hex**
-  (e.g. `0a141eff…`) **or base64**, in **RGBA byte order**, length must equal `w*h*4`.
-- `updateBufferSurface <id> <rgba>` — re-upload the same-sized surface (incremental frames).
-- `updatePlacement <id> col row w h z visible` — place/animate the surface.
+```
+CEF (software OSR, OnPaint BGRA 1280x800)
+  -> BGRA->RGBA  + vertical box-downscale 800->720 (DownscaleVerticalRgba in osr_host.cc)
+  -> hex-encode  -> emit the compositor command stream:
+       registerBufferSurface cef:desktop 1280 720 <hex>     (3,686,400 bytes -> 7,372,800 hex)
+       updatePlacement cef:desktop 0 0 1280 720 0 true
+       present
+  -> piped on stdin into:
+     vita-compositor --commands --hold-seconds 0 --screenshot /run/cef-m1.png
+  -> compositor: register_buffer_surface -> glTexImage2D -> composite() (real GL) -> output FBO
+  -> compositor: read_output_rgba (glReadPixels) -> PNG   <-- the COMPOSITOR produces the readback
+```
 
-M1 path: in `OnPaint`, take the BGRA buffer → swap to RGBA (the host already does this for PNG)
-→ emit `registerBufferSurface cef:desktop 1280 800 <hex>` once, then `updateBufferSurface
-cef:desktop <hex>` per subsequent paint. The id must match `SurfaceId::new` rules. Caveat:
-`MAX_COMMAND_RGBA_BYTES = 16 MiB`; a 1280x800 RGBA frame is 4 MiB (fits). For software OSR a
-per-frame full readback is fine; the accelerated/shared-texture path (no CPU readback) is M2+.
+`osr_host.cc` adds `--compositor-out=<file|->` (and `--surface-id=`): in that mode the host emits
+the stream instead of a PNG. `run-m1.sh` runs CEF in that mode and pipes the stream into the
+compositor. Surface id `cef:desktop` satisfies `SurfaceId::new`. `MAX_COMMAND_RGBA_BYTES = 16 MiB`;
+a 1280x720 RGBA frame is 3.5 MiB (fits). Resolution reconcile: CEF view is 1280x800, compositor
+output is 1280x720 — the host downscales 800->720 so the surface fills the output exactly (no clip,
+no letterbox). For software OSR a per-frame full upload is fine; the no-CPU-readback path is M2+.
+
+**RGBA orientation: NO flip needed.** CEF `OnPaint` delivers row 0 = top; the compositor's
+buffer-surface upload + readback also treat row 0 = top (`read_output_rgba` applies a single
+`flip_rgba_rows` to undo GL's bottom-up readback). The `cef-m1.png` readback renders the desktop
+**upright** (menu bar at top, dock at bottom), matching `cef-m0.png`. Confirmed visually.
+
+### The no-GPU readback enabler (compositor change)
+
+The merged compositor's only backend was KMS/GBM/EGL, which needs a real `/dev/dri/card0` + a
+connected CRTC — absent on the WSL build host (Microsoft kernel ships no DRM device and no loadable
+`vkms`). So a `--commands --screenshot` run failsafed (`gpu=unavailable … card0 … No such file`).
+The compositor's **readback is already FBO-based** (`composite()` renders into `output_fbo`;
+`read_output_rgba` does `glReadPixels` from the FBO texture) — only the *present-to-display* step
+needs scanout. M1 therefore adds a **surfaceless software fallback** to
+`packages/compositor-core/src/platform/linux.rs`:
+
+- `PlatformGpuBackend::open_surfaceless` — EGL `EGL_MESA_platform_surfaceless` display +
+  `EGL_KHR_surfaceless_context` (`eglMakeCurrent` with `EGL_NO_SURFACE`), backed by Mesa
+  **llvmpipe**. No GBM/DRM/KMS/libinput. `gpu=surfaceless-llvmpipe`, `present=recording`.
+- `open_for_self_test` (the `--commands` path) tries KMS first, falls back to surfaceless when no
+  GPU is present. The real boot path (`open`, input-required) is unchanged — still KMS-only.
+- `composite()` gates the scanout swap/page-flip behind a `scanout` flag (false for surfaceless);
+  KMS hardware fields became `Option` so the same struct serves both paths.
+- Host runtime dep: `libgles2` (Mesa `libGLESv2.so.2`) — install once: `apt-get install -y libgles2`.
+
+This exercises the **real** PSD-011 buffer-surface sink + real GL compositing + real `glReadPixels`
+readback, swapping only the GL substrate (surfaceless llvmpipe vs KMS scanout). All 23 cargo tests
+still pass; `rust-in-docker.mjs` builds clean.
+
+## Build & run (M1)
+
+```bash
+# compositor binary (smoke overlay path), if not current:
+node tools/build/rust-in-docker.mjs --dir packages/compositor-core \
+  --out os/x86_64/smoke-overlay/usr/lib/vita/compositor/vita-compositor
+# CEF host (rebuild after osr_host.cc changes):
+cd spikes/cef-osr && ninja -C build && cp build/vita_cef_osr build/Release/vita_cef_osr
+# the pipe (host without a GPU): force Mesa software
+LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe spikes/cef-osr/run-m1.sh
+# -> /run/cef-m1.png (compositor readback) mirrored to /mnt/c/Users/Borg/vita-vmware/cef-m1.png
+# -> VITA-CEF: sink=buffer-surface present=ok status=OK
+```
+
+## Handoff to M4 (CEF + compositor as a boot service, on the GPU, in VMware)
+
+M1 proves the pipe with software readback on WSL. To run it for real in the OS boot:
+1. **Service unit** — mirror `vita-compositor-selftest.service` with a `vita-cef-*.service`
+   (after `open-vm-tools` + `card0`, `DeviceAllow=char-drm rw` + input devices, `PrivateNetwork`,
+   `file://`-only). On VMware the compositor takes the **KMS** path (`/dev/dri/card0` present, 3D
+   accel `svga.present=TRUE`), so `present=kms` (the surfaceless fallback is a no-GPU dev aid only).
+2. **Process model** — for M1-on-device, run CEF as a child that writes the command stream to the
+   compositor's stdin (a pipe), exactly as `run-m1.sh` does, but long-lived: `registerBufferSurface`
+   once, then `updateBufferSurface cef:desktop <hex>` per `OnPaint` (the incremental path the
+   protocol already supports). The single hard serial bottleneck remains the one Borg51 QEMU/VMware
+   boot.
+3. **Verify** — `tools/vmware-verify.mjs` with `--guest-file /run/cef-m1.png:<host>` copies the
+   readback out; assert the desktop is present + node survives. This is the GPU floor.
+4. **Then M2/M3** — replace the per-frame CPU upload with `OnAcceleratedPaint` shared-texture (M2)
+   and zero-copy DMABUF import (M3, PSD-052/053) so the frame never leaves the GPU; M1 stays the
+   always-works fallback when vmwgfx rejects the modifier.
 ```
