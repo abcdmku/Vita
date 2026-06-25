@@ -607,3 +607,13 @@ task/<id> on shared refs → orchestrator verifies + gates + merges) — keep it
 - **Name the single owning module when a concept spans contracts** (avoid divergent re-invention).
 - **Workers isolated in `.vita-worktrees/<id>`; never `&`-background a dispatch; never run foreground
   git on main during a worktree teardown. Windows: launch `codex.cmd` via shell, prompt over stdin.**
+
+## CODEX USAGE LIMIT + EMPTY-MERGE AUDIT (2026-06-25 ~4:46 PM CDT)
+Codex hit its usage limit (resets 5:33 PM CDT) mid-way through the shortcuts/command/gesture domain → 7 slices
+(PSD-261C–267C) produced EMPTY branches that "passed" via a vacuous `*.test.ts` glob (0 tests = exit 0) and got merged.
+Caught by a files-exist AUDIT. **main is NOT broken** (empty merges add nothing; all 252 tests + ~49 real slices are
+genuine — foundation, 15 view-models, complete hydration runtime, accessibility, desktop-surface). Re-opened all 7 +
+the 3 unbuilt a11y ports (224C/225C/228C), and HARDENED every acceptance to exact test paths (no glob) — validated:
+the 261C re-probe correctly FAILED `Could not find command-registry.test.ts`. Lesson saved ([[vita-vacuous-acceptance-hole]]).
+REBUILD PLAN after the 5:33 PM Codex reset: re-dispatch PSD-261C..267C (R1, auto-merge after files-exist + acceptance)
++ 224C/225C (R2 SDK ports, Codex reviewer gate) + 228C (R1, deps 224C). Always audit files-EXIST before merge, not just green.
