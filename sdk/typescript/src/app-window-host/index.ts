@@ -371,11 +371,20 @@ export class AppWindowHost {
     try {
       reconciled = await this.#compositor.reconcile(input);
     } catch {
-      return reject(
+      const error = rejectError(
         "COMPOSITOR_RECONCILE_FAILED",
         "compositor reconcile threw before committing a window snapshot.",
         "/compositor/reconcile",
       );
+
+      if (windowSurfaces.length > 0) {
+        this.#maybeLiveWindowsByError.set(error, windowSurfaces);
+      }
+
+      return {
+        error,
+        ok: false,
+      };
     }
 
     if (!reconciled.ok) {

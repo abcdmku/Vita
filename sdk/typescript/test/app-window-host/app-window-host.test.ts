@@ -313,6 +313,39 @@ test("failed maybe-landed window registration uses injected cleanup before allow
   );
 });
 
+test("thrown maybe-landed reconcile removes the compositor window during rollback", async () => {
+  const appHost = new FakeAppHost({
+    bounds: SCREEN,
+  });
+  const compositor = new ThrowingMaybeLandedCompositorDriver();
+  const host = new AppWindowHost({
+    appHost,
+    compositor,
+    layoutConstraints: {
+      bounds: SCREEN,
+    },
+    shell: desktopShell(),
+  });
+
+  const launched = await host.launch(tsxApp());
+
+  assert.equal(launched.ok, false);
+  if (launched.ok) {
+    assert.fail("expected thrown compositor reconcile");
+  }
+  assert.equal(launched.error.code, "COMPOSITOR_RECONCILE_FAILED");
+  assert.deepEqual(compositor.removedSurfaces, [
+    appSurfaceId("com.vita.notes"),
+  ]);
+  assert.equal(
+    compositor.snapshot().some((surface) => surface.id === appSurfaceId("com.vita.notes")),
+    false,
+  );
+  assert.equal(appHost.snapshot().apps.length, 0);
+  assert.equal(host.snapshot().windows.length, 0);
+  assert.equal(host.snapshot().pendingCleanup.length, 0);
+});
+
 test("compositor teardown failure records pending cleanup and retries idempotently", async () => {
   const calls: CompositorCommand[] = [];
   let failWindowRemove = false;
@@ -595,6 +628,54 @@ class CleanupCapableCompositorDriver implements AppWindowHostCompositorDriverPor
 
   snapshot(): readonly CompositorSurfaceSnapshot[] {
     return this.#driver.snapshot();
+  }
+}
+
+class ThrowingMaybeLandedCompositorDriver implements AppWindowHostCompositorDriverPort {
+  readonly #surfaces = new Map<string, CompositorSurfaceSnapshot>();
+  readonly removedSurfaces: string[] = [];
+  #throwNextWindowReconcile = true;
+
+  reconcile(input: CompositorReconcileInput): CompositorReconcileResult {
+    const windows = input.windows ?? Object.freeze([]);
+
+    for (let index = 0; index < windows.length; index += 1) {
+      const window = windows[index];
+
+      if (window !== undefined) {
+        this.#surfaces.set(window.textureId, Object.freeze({
+          id: window.textureId,
+          kind: "window",
+          rect: window.rect,
+          size: Object.freeze({
+            height: window.rect.height,
+            width: window.rect.width,
+          }),
+          visible: window.visible,
+          z: window.zIndex,
+        }));
+      }
+    }
+
+    if (this.#throwNextWindowReconcile && windows.length > 0) {
+      this.#throwNextWindowReconcile = false;
+      throw new Error("partial compositor register");
+    }
+
+    return {
+      commands: Object.freeze([]),
+      ok: true,
+      state: this.snapshot(),
+    };
+  }
+
+  removeSurface(surfaceId: string): void {
+    this.removedSurfaces.push(surfaceId);
+    this.#surfaces.delete(surfaceId);
+  }
+
+  snapshot(): readonly CompositorSurfaceSnapshot[] {
+    return Object.freeze([...this.#surfaces.values()]);
   }
 }
 
