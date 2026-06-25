@@ -19,7 +19,6 @@ import type { SemverRange } from "../semver-range.ts";
 import type { PlainJson, PlainJsonObject } from "../safe-normalize.ts";
 import type { TsxAppDescriptor, WebAppDescriptor } from "../appshell/index.ts";
 import type { WindowId, WindowManagerIntent } from "../wm/policy.ts";
-import type { VitaThemeTokens } from "./theme-tokens.ts";
 
 export type DesktopMaybePromise<T> = T | Promise<T>;
 
@@ -83,7 +82,12 @@ export interface DesktopHostError {
   readonly path: string;
 }
 
-export type DesktopThemeTokens = VitaThemeTokens;
+export interface DesktopThemeTokens {
+  readonly colors: Readonly<Record<string, string>>;
+  readonly spacing: Readonly<Record<string, number>>;
+  readonly radii: Readonly<Record<string, number>>;
+  readonly typography: Readonly<Record<string, string | number>>;
+}
 
 export interface DesktopTheme {
   readonly id: string;

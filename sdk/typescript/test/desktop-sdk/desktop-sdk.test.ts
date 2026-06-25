@@ -769,7 +769,12 @@ function trayItem(input: TrayItemInput): TrayItem {
 function theme(): DesktopTheme {
   return Object.freeze({
     id: "vita.test.theme",
-    tokens: sdk.themeTokens,
+    tokens: Object.freeze({
+      colors: Object.freeze({ accent: "#3178c6" }),
+      spacing: Object.freeze({ sm: 8 }),
+      radii: Object.freeze({ sm: 4 }),
+      typography: Object.freeze({ body: "system-ui" }),
+    }),
     version: "1.0.0",
   });
 }
