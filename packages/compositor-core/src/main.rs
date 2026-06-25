@@ -313,6 +313,9 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             height,
             TestPattern::Solid { rgba: color },
         )?;
+        // Mutating the scene invalidates the last present: a fresh present must follow before the
+        // stream can succeed (otherwise a screenshot would show the stale pre-mutation frame).
+        self.presented = false;
         Ok(())
     }
 
@@ -344,6 +347,8 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             self.reposition_no_repaint = false;
         }
         self.merge_damage(damage);
+        // Scene changed: invalidate the last present (see register_surface).
+        self.presented = false;
         Ok(())
     }
 
@@ -353,6 +358,8 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         self.placements.remove(&id);
         let damage = self.compositor.remove_surface(&id)?;
         self.merge_damage(damage);
+        // Scene changed: invalidate the last present (see register_surface).
+        self.presented = false;
         Ok(())
     }
 
