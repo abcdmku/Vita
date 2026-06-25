@@ -23,6 +23,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -51,7 +52,19 @@ const NO_BOOT = has("--no-boot");
 const NO_SIGN = has("--no-sign");
 const OUT = resolve(opt("--out", join(HERE, "out")));
 const CACHE = resolve(process.env.VITA_MKOSI_CACHE ?? join(HERE, ".cache"));
-const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools"];
+// VITA_CEF=1 (ADR-0014 M4): bake the CEF live-render verification overlay. CEF's libcef.so
+// pulls in a large runtime shared-lib set beyond the compositor's Mesa GL stack already in the
+// base package allowlist (libgbm1/libegl1/libgles2/libdrm2/libinput10/dbus/udev). These are the
+// CEF DT_NEEDED libs not already present — resolved against Debian trixie main (t64 names where
+// the time_t transition renamed them). Verified present in the trixie Packages index.
+const CEF_RUNTIME_PACKAGES = [
+  "libx11-6", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxrandr2",
+  "libxcb1", "libxkbcommon0", "libasound2t64", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
+  "libatspi2.0-0t64", "libcairo2", "libcups2t64", "libexpat1", "libglib2.0-0t64",
+  "libnss3", "libnspr4", "libpango-1.0-0", "libstdc++6",
+].map((p) => `--package=${p}`);
+const CEF_ENABLED = process.env.VITA_CEF === "1";
+const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools", ...(CEF_ENABLED ? CEF_RUNTIME_PACKAGES : [])];
 
 if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MODE}`);
 
@@ -391,6 +404,64 @@ function installCompositorOverlay() {
   return useNative ? overlayHost : "/work/os/x86_64/smoke-overlay";
 }
 
+// ADR-0014 M4: stage the CEF runtime + osr_host + flagship desktop assets into cef-overlay so
+// mkosi's --extra-tree ships them into the image. Large (~1.5GB CEF runtime, expected). The
+// committed parts (service unit, wants symlink-file, launch script) live under cef-overlay/ in
+// git; the heavy CEF runtime + ui_kits assets are STAGED here (gitignored, like the Deno runtime).
+// Requires the vendored CEF (spikes/cef-osr/fetch-cef.sh) + a built osr_host (ninja in spikes/cef-osr).
+function installCefOverlay() {
+  const overlayHost = join(HERE, "cef-overlay");
+  const cefDst = join(overlayHost, "usr", "lib", "vita", "cef");
+  const uikitsDst = join(overlayHost, "usr", "lib", "vita", "ui_kits");
+  const serviceUnit = join(overlayHost, "usr", "lib", "systemd", "system", "vita-cef-live.service");
+  const launchSh = join(cefDst, "vita-cef-live.sh");
+  // Committed pieces must exist (these are in git, not staged).
+  if (!DRY && !existsSync(serviceUnit)) fail(`1d0 · committed CEF service unit missing: ${serviceUnit}`);
+  if (!DRY && !existsSync(launchSh)) fail(`1d0 · committed CEF launch script missing: ${launchSh}`);
+
+  // Locate the vendored CEF Release/Resources (the dir name carries the pinned version).
+  const vendorRoot = join(REPO, "spikes", "cef-osr", ".vendor");
+  const cefBin = !DRY && existsSync(vendorRoot)
+    ? readdirSync(vendorRoot).find((d) => d.startsWith("cef_binary_")) : null;
+  if (!DRY && !cefBin) {
+    fail("1d0 · vendored CEF missing under spikes/cef-osr/.vendor — run spikes/cef-osr/fetch-cef.sh");
+  }
+  const cefRelease = DRY ? "<cef>/Release" : join(vendorRoot, cefBin, "Release");
+  const cefResources = DRY ? "<cef>/Resources" : join(vendorRoot, cefBin, "Resources");
+  const osrBin = join(REPO, "spikes", "cef-osr", "build", "Release", "vita_cef_osr");
+  const osrBinAlt = join(REPO, "spikes", "cef-osr", "build", "vita_cef_osr");
+
+  if (!DRY) {
+    // Ensure a freshly built osr_host is staged into the spike Release dir (next to libcef.so),
+    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there.
+    if (!existsSync(osrBin) && existsSync(osrBinAlt)) {
+      mkdirSync(dirname(osrBin), { recursive: true });
+      copyFileSync(osrBinAlt, osrBin);
+    }
+    if (!existsSync(osrBin)) {
+      fail("1d0 · osr_host binary missing — build it: (cd spikes/cef-osr && ninja -C build)");
+    }
+    // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
+    // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
+    rmSync(cefDst, { recursive: true, force: true });
+    mkdirSync(cefDst, { recursive: true });
+    cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
+    cpSync(cefResources, cefDst, { recursive: true, dereference: true });
+    copyFileSync(osrBin, join(cefDst, "vita_cef_osr"));
+    chmodSync(join(cefDst, "vita_cef_osr"), 0o755);
+    // Re-stage the committed launch script (cpSync of Release may not have touched it; it lives
+    // in git under cef-overlay and we copied the runtime AROUND it, so it persists — assert it).
+    if (!existsSync(launchSh)) fail(`1d0 · launch script vanished during staging: ${launchSh}`);
+    chmodSync(launchSh, 0o755);
+    // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
+    // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
+    rmSync(uikitsDst, { recursive: true, force: true });
+    mkdirSync(dirname(uikitsDst), { recursive: true });
+    cpSync(join(REPO, "ui_kits"), uikitsDst, { recursive: true, dereference: true });
+  }
+  return useNative ? overlayHost : "/work/os/x86_64/cef-overlay";
+}
+
 log(`  engine=${useNative ? "host-native mkosi" : `docker ${PINNED_MKOSI_IMAGE}`}`);
 
 // ── Step 0: ensure the mkosi engine is available (docker pull only; native skips the registry) ─────────────
@@ -417,6 +488,9 @@ if (MODE === "smoke") {
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
   const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
   const smokeOverlay = installCompositorOverlay(); // build + stage the compositor self-test into smoke-overlay
+  // ADR-0014 M4: optionally stage the CEF live-render overlay (CEF runtime + osr_host + flagship
+  // assets + service). Gated by VITA_CEF=1 — the ~1.5GB CEF runtime is opt-in for the CEF GPU boot.
+  const cefOverlay = CEF_ENABLED ? installCefOverlay() : null;
   // P1-030: stage the pinned Deno runtime into ts-overlay (ts-image.mjs fetches + sha256-verifies + extracts the
   // binary to ts-overlay/usr/lib/vita/deno), then ship the on-device TS runtime + entrypoint via --extra-tree.
   const tsOverlay = useNative ? join(HERE, "ts-overlay") : "/work/os/x86_64/ts-overlay";
@@ -508,7 +582,8 @@ if (MODE === "smoke") {
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,
      ...incremental, ...verity, ...bootloaderPin, ...sb,
-     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`, ...verityTree, ...luksTree,
+     `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
+     ...(cefOverlay ? [`--extra-tree=${cefOverlay}`] : []), ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   if (luksMode) luksFormatDataPartition(disk, luksKey);
