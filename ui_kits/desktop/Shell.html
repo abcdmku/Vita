@@ -1,5 +1,5 @@
-﻿<!-- @dsCard group="Desktop OS" viewport="1280x800" subtitle="TypeScript shell â€” tabbed terminal (dark)" name="Shell" -->
-<!-- @startingPoint section="Screens" subtitle="TypeScript shell â€” tabbed terminal (dark)" viewport="1280x800" -->
+<!-- @dsCard group="Desktop OS" viewport="1280x800" subtitle="TypeScript shell — tabbed terminal (dark)" name="Shell" -->
+<!-- @startingPoint section="Screens" subtitle="TypeScript shell — tabbed terminal (dark)" viewport="1280x800" -->
 <!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css"><link rel="stylesheet" href="kit.css"><style>html,body{margin:0}</style></head><body>
 <div class="v-screen theme-dark v-wall-dark" data-vita-screen="desktop/shell"><div class="v-menubar"><div style="display:flex;align-items:center;gap:18px"><span class="v-brand">Vita<i>.ts</i></span><div class="v-menus"><span>File</span><span>Edit</span><span>View</span><span>Go</span><span>Window</span><span>Help</span></div></div>
 <div class="v-status"><span class="ico" style="width:15px;height:15px"><i data-lucide="wifi"></i></span><span class="ico" style="width:19px;height:19px"><i data-lucide="battery-full"></i></span><span class="clk">10:24</span></div></div>
@@ -10,16 +10,16 @@
 <span style="height:36px;display:flex;align-items:center;gap:8px;padding:0 13px;color:var(--text-muted)"><span class="mono" style="font-size:12px">build</span></span>
 <span style="height:36px;display:flex;align-items:center;padding:0 11px;color:var(--text-faint)" data-vita-action="shell.newTab"><span class="ico" style="width:14px;height:14px"><i data-lucide="plus"></i></span></span></div>
 <div class="v-content" style="background:var(--surface-sunken);padding:18px 20px;font-family:var(--font-mono);font-size:13px;line-height:1.95" data-vita-bind-list="shell.output">
-<div style="color:var(--syn-comment)">// Vita shell â€” a TypeScript REPL with full system access</div>
-<div><span style="color:var(--accent)">â€º</span> <span style="color:var(--syn-keyword)">import</span> { Kernel } <span style="color:var(--syn-keyword)">from</span> <span style="color:var(--syn-string)">"./kernel.ts"</span></div>
-<div><span style="color:var(--accent)">â€º</span> <span style="color:var(--syn-keyword)">const</span> k <span style="color:var(--syn-punct)">=</span> <span style="color:var(--syn-keyword)">new</span> <span style="color:var(--syn-fn)">Kernel</span>()</div>
-<div><span style="color:var(--accent)">â€º</span> <span style="color:var(--syn-keyword)">await</span> k<span style="color:var(--syn-punct)">.</span><span style="color:var(--syn-fn)">boot</span>(<span style="color:var(--syn-string)">"init.ts"</span>)</div>
-<div style="color:var(--success)">&nbsp;&nbsp;âœ“ kernel ready Â· <span style="color:var(--syn-number)">0.42s</span></div>
-<div style="color:var(--success)">&nbsp;&nbsp;âœ“ mounted vfs at <span style="color:var(--text)">/</span></div>
-<div style="color:var(--success)">&nbsp;&nbsp;âœ“ compositor online Â· <span style="color:var(--syn-number)">60fps</span></div>
-<div><span style="color:var(--accent)">â€º</span> k<span style="color:var(--syn-punct)">.</span>processes<span style="color:var(--syn-punct)">.</span><span style="color:var(--syn-fn)">where</span>(p <span style="color:var(--syn-keyword)">=&gt;</span> p<span style="color:var(--syn-punct)">.</span>cpu <span style="color:var(--syn-punct)">&gt;</span> <span style="color:var(--syn-number)">1</span>)</div>
+<div style="color:var(--syn-comment)">// Vita shell — a TypeScript REPL with full system access</div>
+<div><span style="color:var(--accent)">›</span> <span style="color:var(--syn-keyword)">import</span> { Kernel } <span style="color:var(--syn-keyword)">from</span> <span style="color:var(--syn-string)">"./kernel.ts"</span></div>
+<div><span style="color:var(--accent)">›</span> <span style="color:var(--syn-keyword)">const</span> k <span style="color:var(--syn-punct)">=</span> <span style="color:var(--syn-keyword)">new</span> <span style="color:var(--syn-fn)">Kernel</span>()</div>
+<div><span style="color:var(--accent)">›</span> <span style="color:var(--syn-keyword)">await</span> k<span style="color:var(--syn-punct)">.</span><span style="color:var(--syn-fn)">boot</span>(<span style="color:var(--syn-string)">"init.ts"</span>)</div>
+<div style="color:var(--success)">&nbsp;&nbsp;✓ kernel ready · <span style="color:var(--syn-number)">0.42s</span></div>
+<div style="color:var(--success)">&nbsp;&nbsp;✓ mounted vfs at <span style="color:var(--text)">/</span></div>
+<div style="color:var(--success)">&nbsp;&nbsp;✓ compositor online · <span style="color:var(--syn-number)">60fps</span></div>
+<div><span style="color:var(--accent)">›</span> k<span style="color:var(--syn-punct)">.</span>processes<span style="color:var(--syn-punct)">.</span><span style="color:var(--syn-fn)">where</span>(p <span style="color:var(--syn-keyword)">=&gt;</span> p<span style="color:var(--syn-punct)">.</span>cpu <span style="color:var(--syn-punct)">&gt;</span> <span style="color:var(--syn-number)">1</span>)</div>
 <div style="color:var(--text-muted)">&nbsp;&nbsp;[ { pid: <span style="color:var(--syn-number)">14</span>, name: <span style="color:var(--syn-string)">"compositor"</span>, cpu: <span style="color:var(--syn-number)">3.8</span> } ]</div>
-<div style="margin-top:4px" data-vita-key="line:prompt" data-vita-action="shell.submit" data-vita-command="k.status()"><span style="color:var(--accent)">â€º</span> <span style="display:inline-block;width:8px;height:15px;background:var(--accent);vertical-align:-2px"></span></div>
+<div style="margin-top:4px" data-vita-key="line:prompt" data-vita-action="shell.submit" data-vita-command="k.status()"><span style="color:var(--accent)">›</span> <span style="display:inline-block;width:8px;height:15px;background:var(--accent);vertical-align:-2px"></span></div>
 </div>
 <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:10px;padding:0 14px;border-top:1px solid var(--hairline);background:var(--surface-raised);font-family:var(--font-mono);font-size:10.5px;color:var(--text-muted)"><span style="color:var(--accent)" data-vita-bind-text="shell.cwd">~/vita</span><span style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;color:var(--success)"><span class="ico" style="width:12px;height:12px"><i data-lucide="git-branch"></i></span>main</span><span>TS 5.9</span><span style="color:var(--text-faint)" data-vita-bind-text="shell.exitCode">UTF-8</span></div>
 </div>
