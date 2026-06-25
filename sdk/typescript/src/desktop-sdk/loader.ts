@@ -22,6 +22,7 @@ import type { SemverRange } from "../semver-range.ts";
 import { safeNormalize } from "../safe-normalize.ts";
 import type { PlainJson, PlainJsonObject } from "../safe-normalize.ts";
 import type { FilesErrorResponse, FilesRequest, FilesResponse } from "../files-grant.ts";
+import { SDK_VERSION } from "./version.ts";
 import type {
   DesktopAppLaunch,
   DesktopAppStop,
@@ -97,7 +98,7 @@ interface SnapshotUiInstance {
 
 const SDK_VERSION_COMPATIBILITY: SemverRange = Object.freeze({
   max: "2.0.0",
-  min: "1.0.0",
+  min: SDK_VERSION,
 });
 
 const PACKAGE_FIELDS = Object.freeze(["manifest", "mount"]);
@@ -158,7 +159,7 @@ export class DesktopUiPackageLoader {
 
   constructor(host: DesktopHost, options: DesktopUiLoaderOptions = Object.freeze({})) {
     this.#host = host;
-    this.#sdkVersion = options.sdkVersion ?? "1.0.0";
+    this.#sdkVersion = options.sdkVersion ?? SDK_VERSION;
     this.#fallbackPackage = options.fallbackPackage ?? knownGoodDesktopUiPackage;
   }
 
@@ -283,7 +284,7 @@ export function loadUiPackage(
 
 export function validateDesktopUiPackageManifest(
   input: unknown,
-  currentSdkVersion = "1.0.0",
+  currentSdkVersion = SDK_VERSION,
 ): DesktopUiValidationResult<DesktopUiPackageManifest> {
   const normalized = safeNormalize(input);
 
@@ -334,7 +335,7 @@ export function validateDesktopUiPackageManifest(
 
 export function isSdkVersionCompatible(
   compatibility: unknown,
-  currentSdkVersion = "1.0.0",
+  currentSdkVersion = SDK_VERSION,
 ): boolean {
   if (typeof compatibility === "string") {
     return isSemverCompatible(compatibility, currentSdkVersion);

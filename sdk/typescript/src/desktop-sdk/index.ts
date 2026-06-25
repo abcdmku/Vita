@@ -1,4 +1,6 @@
-export const SDK_VERSION = "1.0.0";
+export {
+  SDK_VERSION,
+} from "./version.ts";
 
 export {
   defineShellComponent,
