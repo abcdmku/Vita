@@ -1,0 +1,26 @@
+<!-- @dsCard group="Components" viewport="720x300" subtitle="Badge, Tag, ProgressBar, Toast" name="Status & feedback" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>*{box-sizing:border-box}html,body{margin:0}body{font-family:var(--font-sans);color:var(--text);background:transparent;padding:18px}
+.mono{font-family:var(--font-mono)}.ico{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}.ico svg{width:100%;height:100%;display:block;stroke-width:2}
+.dark{background:var(--surface-base);border-radius:10px;padding:16px}.col{display:flex;flex-direction:column;gap:16px}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:var(--radius-pill);font-size:11.5px;font-weight:600}
+.tag{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 10px;border-radius:var(--radius-sm);background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-1);font-family:var(--font-mono);font-size:12px;color:var(--text-secondary)}
+.pb{width:150px;height:6px;border-radius:var(--radius-pill);background:var(--border-strong);overflow:hidden}.pb i{display:block;height:100%;background:var(--accent)}</style></head><body><div class="col"><div class="row">
+<span class="badge" style="background:var(--accent-subtle);color:var(--accent)"><span style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></span>running</span>
+<span class="badge" style="background:var(--success-subtle);color:var(--success)">compiled</span>
+<span class="badge" style="background:var(--warning-subtle);color:var(--warning)">2 warnings</span>
+<span class="badge" style="background:var(--danger-subtle);color:var(--danger)">failed</span>
+<span class="tag">kernel.ts <span class="ico" style="width:13px;height:13px;color:var(--text-muted)"><i data-lucide="x"></i></span></span>
+<span class="pb"><i style="width:38%"></i></span>
+</div>
+<div class="row">
+<div style="display:flex;gap:11px;width:300px;padding:13px 14px;background:var(--surface-overlay);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-3)">
+<span style="width:34px;height:34px;border-radius:var(--radius-md);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--accent)"><span class="ico" style="width:17px;height:17px"><i data-lucide="code"></i></span></span>
+<div><div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Studio</b><span class="mono" style="font-size:10.5px;color:var(--text-muted)">now</span></div><div style="font-size:13px">Build passed</div><div class="mono" style="font-size:11.5px;color:var(--text-muted)">kernel.ts compiled · 0.8s</div></div>
+</div></div>
+<div class="dark"><div class="row">
+<span class="badge" style="background:var(--accent-subtle);color:var(--accent)"><span style="width:6px;height:6px;border-radius:50%;background:var(--accent)"></span>running</span>
+<span class="badge" style="background:var(--success-subtle);color:var(--success)">compiled</span>
+<span class="tag">kernel.ts <span class="ico" style="width:13px;height:13px;color:var(--text-muted)"><i data-lucide="x"></i></span></span>
+<span class="pb"><i style="width:38%"></i></span>
+</div></div></div><script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script><script>lucide.createIcons();</script>

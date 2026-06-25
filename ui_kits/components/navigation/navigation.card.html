@@ -1,0 +1,19 @@
+<!-- @dsCard group="Components" viewport="720x300" subtitle="Tabs, ContextMenu, ListRow / tree" name="Navigation & lists" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>*{box-sizing:border-box}html,body{margin:0}body{font-family:var(--font-sans);color:var(--text);background:transparent;padding:18px}
+.mono{font-family:var(--font-mono)}.ico{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}.ico svg{width:100%;height:100%;display:block;stroke-width:2}
+.dark{background:var(--surface-base);border-radius:10px;padding:16px}.tab{position:relative;padding:10px 14px;font-size:13.5px;color:var(--text-muted)}.tab.on{color:var(--text);font-weight:600}.tab.on::after{content:'';position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--accent)}
+.row{display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:var(--radius-md)}.row.on{background:var(--accent-subtle)}
+.tok{width:28px;height:28px;border-radius:var(--radius-sm);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-secondary)}</style></head><body><div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+<div style="flex:1;min-width:300px">
+<div style="display:flex;border-bottom:1px solid var(--border);margin-bottom:8px"><span class="tab on">General</span><span class="tab">Appearance</span><span class="tab">Network</span></div>
+<div class="row on"><span class="tok" style="color:var(--accent);background:var(--accent-subtle);border-color:transparent"><span class="ico" style="width:15px;height:15px"><i data-lucide="wifi"></i></span></span><div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:var(--accent)">Network</div><div style="font-size:12px;color:var(--text-muted)">Wi-Fi · vita-lab</div></div><span class="ico" style="width:16px;height:16px;color:var(--text-muted)"><i data-lucide="chevron-right"></i></span></div>
+<div class="row"><span class="tok"><span class="ico" style="width:15px;height:15px"><i data-lucide="circle-user"></i></span></span><div style="flex:1"><div style="font-size:13.5px;font-weight:500">Accounts</div></div><span class="ico" style="width:16px;height:16px;color:var(--text-muted)"><i data-lucide="chevron-right"></i></span></div>
+<div class="row" style="padding-left:44px"><span class="tok"><span class="ico" style="width:14px;height:14px"><i data-lucide="file-code"></i></span></span><div style="flex:1"><div style="font-size:13.5px;font-weight:500">kernel.ts</div></div></div>
+</div>
+<div style="width:226px;padding:6px;background:var(--surface-overlay);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-3)">
+<div class="row" style="padding:7px 9px;gap:10px"><span style="color:var(--text-muted)"><span class="ico" style="width:16px;height:16px"><i data-lucide="terminal"></i></span></span><span style="flex:1;font-size:13.5px">Open in Shell</span><span class="mono" style="font-size:11px;color:var(--text-faint)">⌘O</span></div>
+<div class="row" style="padding:7px 9px;gap:10px"><span style="color:var(--text-muted)"><span class="ico" style="width:16px;height:16px"><i data-lucide="code"></i></span></span><span style="flex:1;font-size:13.5px">Edit in Studio</span></div>
+<div style="height:1px;background:var(--hairline);margin:5px 8px"></div>
+<div class="row" style="padding:7px 9px;gap:10px;color:var(--danger)"><span class="ico" style="width:16px;height:16px"><i data-lucide="trash-2"></i></span><span style="flex:1;font-size:13.5px">Delete</span><span class="mono" style="font-size:11px;color:var(--danger)">⌘⌫</span></div>
+</div></div><script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script><script>lucide.createIcons();</script>

@@ -1,0 +1,14 @@
+<!-- @dsCard group="Motion" viewport="720x196" subtitle="Four curves; base duration 200ms" name="Easing & duration" -->
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../styles.css">
+<style>
+*{box-sizing:border-box}html,body{margin:0}
+body{font-family:var(--font-sans);color:var(--text);background:transparent;padding:18px}
+.mono{font-family:var(--font-mono)}
+.wrap{display:flex;gap:14px;flex-wrap:wrap}
+.lbl{font-family:var(--font-mono);font-size:10px;line-height:1.45;color:var(--text-secondary)}
+.lbl b{font-weight:500}.lbl span{color:var(--text-muted)}
+@keyframes vmove{from{transform:translateX(0)}to{transform:translateX(480px)}}
+</style></head><body><div style="display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;align-items:center;gap:12px"><div class="mono" style="width:120px;font-size:10px;color:var(--text-secondary)">--ease-standard</div><div style="position:relative;flex:1;height:24px;background:var(--surface-sunken);border:1px solid var(--border);border-radius:12px;overflow:hidden"><div style="position:absolute;top:3px;left:3px;width:18px;height:16px;border-radius:5px;background:var(--accent);animation:vmove 1.8s infinite alternate var(--ease-standard)"></div></div></div><div style="display:flex;align-items:center;gap:12px"><div class="mono" style="width:120px;font-size:10px;color:var(--text-secondary)">--ease-decelerate</div><div style="position:relative;flex:1;height:24px;background:var(--surface-sunken);border:1px solid var(--border);border-radius:12px;overflow:hidden"><div style="position:absolute;top:3px;left:3px;width:18px;height:16px;border-radius:5px;background:var(--accent);animation:vmove 1.8s infinite alternate var(--ease-decelerate)"></div></div></div><div style="display:flex;align-items:center;gap:12px"><div class="mono" style="width:120px;font-size:10px;color:var(--text-secondary)">--ease-accelerate</div><div style="position:relative;flex:1;height:24px;background:var(--surface-sunken);border:1px solid var(--border);border-radius:12px;overflow:hidden"><div style="position:absolute;top:3px;left:3px;width:18px;height:16px;border-radius:5px;background:var(--accent);animation:vmove 1.8s infinite alternate var(--ease-accelerate)"></div></div></div><div style="display:flex;align-items:center;gap:12px"><div class="mono" style="width:120px;font-size:10px;color:var(--text-secondary)">--ease-spring</div><div style="position:relative;flex:1;height:24px;background:var(--surface-sunken);border:1px solid var(--border);border-radius:12px;overflow:hidden"><div style="position:absolute;top:3px;left:3px;width:18px;height:16px;border-radius:5px;background:var(--accent);animation:vmove 1.8s infinite alternate var(--ease-spring)"></div></div></div>
+</div></body></html>

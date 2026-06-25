@@ -1,0 +1,19 @@
+<!-- @dsCard group="Components" viewport="720x180" subtitle="Input, SearchField, Select · default & focus" name="Text inputs" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>*{box-sizing:border-box}html,body{margin:0}body{font-family:var(--font-sans);color:var(--text);background:transparent;padding:18px}
+.mono{font-family:var(--font-mono)}.ico{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}.ico svg{width:100%;height:100%;display:block;stroke-width:2}
+.dark{background:var(--surface-base);border-radius:10px;padding:16px}.col{display:flex;flex-direction:column;gap:16px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.field{display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 12px;min-width:200px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-control);box-shadow:var(--shadow-1);font-size:14px;color:var(--text-muted)}
+.field.focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring);color:var(--text)}</style></head><body><div class="col">
+<div class="row">
+<span class="field">Display name</span>
+<span class="field focus"><span class="mono" style="color:var(--text-muted)">~/</span>vita/src</span>
+<span class="field" style="min-width:140px;justify-content:space-between">Automatic <span class="ico" style="width:15px;height:15px;color:var(--text-muted)"><i data-lucide="chevrons-up-down"></i></span></span>
+</div>
+<div class="row">
+<span class="field focus" style="height:38px;min-width:320px;border-radius:var(--radius-md);color:var(--accent)"><span class="ico" style="width:17px;height:17px"><i data-lucide="search"></i></span><span style="color:var(--text-muted)">Search or run a command…</span><span style="margin-left:auto;font-size:11px;color:var(--text-faint);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 7px" class="mono">⌘K</span></span>
+</div>
+<div class="dark"><div class="row">
+<span class="field">Display name</span>
+<span class="field focus" style="height:38px;min-width:320px;border-radius:var(--radius-md);color:var(--accent)"><span class="ico" style="width:17px;height:17px"><i data-lucide="search"></i></span><span style="color:var(--text-muted)">Search or run a command…</span><span style="margin-left:auto;font-size:11px;color:var(--text-faint);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 7px" class="mono">⌘K</span></span>
+</div></div></div><script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script><script>lucide.createIcons();</script>

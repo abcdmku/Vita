@@ -1,0 +1,37 @@
+<!-- @dsCard group="Components" viewport="720x200" subtitle="Checkbox, Radio, Switch, Segmented, Slider" name="Selection controls" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>*{box-sizing:border-box}html,body{margin:0}body{font-family:var(--font-sans);color:var(--text);background:transparent;padding:18px;font-size:14px}
+.col{display:flex;flex-direction:column;gap:16px}.row{display:flex;gap:22px;align-items:center;flex-wrap:wrap}
+.dark{background:var(--surface-base);border-radius:10px;padding:16px}
+.cb{width:18px;height:18px;border-radius:var(--radius-xs);display:inline-flex;align-items:center;justify-content:center;box-shadow:var(--shadow-1);font-family:var(--font-mono);font-size:12px;font-weight:700}
+.cb-on{background:var(--accent);border:1px solid var(--accent);color:var(--accent-fg)}.cb-off{background:var(--surface);border:1px solid var(--border-strong)}
+.rd{width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:var(--surface);box-shadow:var(--shadow-1)}
+.lab{display:inline-flex;align-items:center;gap:9px}
+.sw{width:38px;height:22px;border-radius:var(--radius-pill);padding:2px;display:inline-flex;align-items:center}
+.sw-on{background:var(--accent);justify-content:flex-end}.sw-off{background:var(--border-strong);justify-content:flex-start}
+.knob{width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.seg{display:inline-flex;gap:2px;padding:3px;background:var(--surface-sunken);border:1px solid var(--border);border-radius:var(--radius-md)}
+.seg button{height:28px;padding:0 14px;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:var(--font-sans);font-size:13px;background:transparent;color:var(--text-muted)}
+.seg .on{background:var(--surface);color:var(--text);font-weight:600;box-shadow:var(--shadow-1)}
+.sld{position:relative;width:200px;height:6px;border-radius:var(--radius-pill);background:var(--border-strong)}
+.sld i{position:absolute;left:0;height:6px;border-radius:var(--radius-pill);background:var(--accent)}
+.sld b{position:absolute;top:-6px;width:18px;height:18px;border-radius:50%;background:#fff;border:1px solid var(--border);box-shadow:var(--shadow-2)}
+</style></head><body><div class="col"><div class="row">
+<span class="lab"><span class="cb cb-on">&#10003;</span>Watch files</span>
+<span class="lab"><span class="cb cb-off"></span>Verbose logs</span>
+<span class="lab"><span class="rd"><span style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span></span>Dark</span>
+<span class="lab"><span class="rd"></span>Light</span>
+<span class="sw sw-on"><span class="knob"></span></span>
+<span class="sw sw-off"><span class="knob"></span></span>
+<span class="seg"><button class="on">Dark</button><button>Light</button><button>Auto</button></span>
+<span class="sld"><i style="width:62%"></i><b style="left:calc(62% - 9px)"></b></span>
+</div><div class="dark"><div class="row">
+<span class="lab"><span class="cb cb-on">&#10003;</span>Watch files</span>
+<span class="lab"><span class="cb cb-off"></span>Verbose logs</span>
+<span class="lab"><span class="rd"><span style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span></span>Dark</span>
+<span class="lab"><span class="rd"></span>Light</span>
+<span class="sw sw-on"><span class="knob"></span></span>
+<span class="sw sw-off"><span class="knob"></span></span>
+<span class="seg"><button class="on">Dark</button><button>Light</button><button>Auto</button></span>
+<span class="sld"><i style="width:62%"></i><b style="left:calc(62% - 9px)"></b></span>
+</div></div></div></body></html>

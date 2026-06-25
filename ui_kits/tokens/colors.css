@@ -1,0 +1,97 @@
+:root {
+  /* ===== Brand · TypeScript blue ===== */
+  --blue-50:#eef4fb;  --blue-100:#d6e6f7; --blue-200:#aecbef; --blue-300:#7faae2;
+  --blue-400:#4f9dff; --blue-500:#3178c6; --blue-600:#2a68ac; --blue-700:#23568c;
+  --blue-800:#1d456f; --blue-900:#163350;
+
+  /* ===== Neutral · cool ink ramp ===== */
+  --ink-0:#ffffff;  --ink-25:#f9fafb; --ink-50:#eef1f6;  --ink-100:#e1e5ea;
+  --ink-150:#cdd5e0;--ink-200:#aeb8c6;--ink-300:#8a94a3; --ink-400:#6b7787;
+  --ink-500:#4b5563;--ink-600:#2f3744;--ink-700:#1f242c; --ink-800:#15191f;
+  --ink-900:#0f1217;--ink-950:#0a0d12;
+
+  /* ===== Semantic hues ===== */
+  --green-500:#1f8a5b; --green-bright:#5bbf86;
+  --amber-500:#b5772b; --amber-bright:#e0a86b;
+  --red-500:#c44a4a;   --red-bright:#f08a8a;
+
+  /* ===== LIGHT THEME (default) ===== */
+  --surface-base:#eef1f6;
+  --surface:#ffffff;
+  --surface-raised:#ffffff;
+  --surface-sunken:#f7f8fa;
+  --surface-inset:#f4f6f8;
+  --surface-translucent:rgba(255,255,255,.72);
+  --surface-overlay:rgba(255,255,255,.82);
+
+  --border:#e6e8ec;
+  --border-strong:#d4d8de;
+  --hairline:rgba(20,24,31,.08);
+
+  --text:#14171c;
+  --text-secondary:#4b5563;
+  --text-muted:#8a94a3;
+  --text-faint:#aeb6c2;
+
+  --accent:#3178c6;
+  --accent-hover:#2a68ac;
+  --accent-active:#23568c;
+  --accent-subtle:rgba(49,120,198,.10);
+  --accent-fg:#ffffff;
+
+  --success:#1f8a5b; --success-subtle:rgba(31,138,91,.12);
+  --warning:#b5772b; --warning-subtle:rgba(181,119,43,.12);
+  --danger:#c44a4a;  --danger-subtle:rgba(196,74,74,.12);
+  --info:#3178c6;
+
+  --focus-ring:rgba(49,120,198,.45);
+
+  /* ===== Syntax (light) ===== */
+  --syn-comment:#8a94a3; --syn-keyword:#8250df; --syn-string:#2f8f5b;
+  --syn-number:#b5532b;  --syn-fn:#3178c6;      --syn-ident:#1b1f24; --syn-punct:#5a6573;
+}
+
+/* ===== DARK THEME ===== */
+.theme-dark {
+  --surface-base:#0e1116;
+  --surface:#161a21;
+  --surface-raised:#1c222b;
+  --surface-sunken:#11151b;
+  --surface-inset:#1b212b;
+  --surface-translucent:rgba(16,20,27,.55);
+  --surface-overlay:rgba(28,34,43,.80);
+
+  --border:rgba(255,255,255,.07);
+  --border-strong:rgba(255,255,255,.12);
+  --hairline:rgba(255,255,255,.06);
+
+  --text:#e6e9ef;
+  --text-secondary:#aeb8c6;
+  --text-muted:#8b97a6;
+  --text-faint:#6b7787;
+
+  --accent:#4f9dff;
+  --accent-hover:#6fb0ff;
+  --accent-active:#3f8de8;
+  --accent-subtle:rgba(79,157,255,.14);
+  --accent-fg:#07101c;
+
+  --success:#5bbf86; --success-subtle:rgba(91,191,134,.16);
+  --warning:#e0a86b; --warning-subtle:rgba(224,168,107,.16);
+  --danger:#f08a8a;  --danger-subtle:rgba(240,138,138,.16);
+  --info:#4f9dff;
+
+  --focus-ring:rgba(79,157,255,.50);
+
+  --syn-comment:#5d6877; --syn-keyword:#c08bff; --syn-string:#5bbf86;
+  --syn-number:#e0a86b;  --syn-fn:#7fd99a;      --syn-ident:#cdd5e0; --syn-punct:#6b7787;
+}
+
+/* ===== TILING LAYOUT MODE (graphite + sharp) — compose with .theme-dark ===== */
+.mode-tiling {
+  --surface-base:#0f1217;
+  --surface:#13171d;
+  --surface-raised:#171c23;
+  --radius-window:var(--radius-xs);
+  --radius-tile:var(--radius-xs);
+}

@@ -1,0 +1,7 @@
+:root {
+  --dur-instant:80ms; --dur-fast:120ms; --dur-base:200ms; --dur-slow:320ms; --dur-slower:480ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+  --ease-decelerate:cubic-bezier(0,0,0,1);
+  --ease-accelerate:cubic-bezier(.3,0,1,1);
+  --ease-spring:cubic-bezier(.5,1.4,.4,1);
+}
