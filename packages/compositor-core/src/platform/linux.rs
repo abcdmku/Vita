@@ -1019,7 +1019,7 @@ impl Drop for VtState {
 }
 
 fn ioctl_get_int(fd: c_int, request: usize, label: &str) -> Result<c_int, CompositorError> {
-    let mut value = 0_c_int;
+    let mut value: c_int = 0;
     let rc = unsafe { ioctl(fd, request, &mut value) };
     if rc != 0 {
         return Err(last_os_unavailable(format!("{label} failed")));
