@@ -256,6 +256,49 @@ test("WM stream registering a newly visible window emits register and placement 
   assert.deepEqual(calls, []);
 });
 
+test("WM visible intent without a known placement fails closed before registering", async () => {
+  const calls: CompositorCommand[] = [];
+  const driver = new CompositorDriver(recordingPort(calls));
+  await mustReconcile(driver, {
+    shell: chromeLikeShell(),
+    windows: [],
+  });
+
+  const committed = driver.snapshot();
+  calls.length = 0;
+  const visibleIntent: WindowManagerIntent = Object.freeze({
+    textureId: "texture-files",
+    type: "setTextureVisibility",
+    visible: true,
+    windowId: "files",
+  });
+  const rejected = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      visibleIntent,
+    ],
+    windows: [],
+  });
+
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) {
+    assert.fail("expected missing placement rejection");
+  }
+  assert.equal(rejected.error.code, "INVALID_SURFACE");
+  assert.equal(rejected.error.path, "/surfaces/texture-files/placement/rect");
+  assert.deepEqual(calls, []);
+  assert.deepEqual(driver.snapshot(), committed);
+  assert.equal(
+    rejected.commands.some((command) =>
+      command.type === "registerSurface" &&
+      command.id === "texture-files" &&
+      command.size.width === 0 &&
+      command.size.height === 0
+    ),
+    false,
+  );
+});
+
 test("delta WM reposition intent leaves unmentioned current surfaces unchanged", async () => {
   const calls: CompositorCommand[] = [];
   const driver = new CompositorDriver(recordingPort(calls));
@@ -301,6 +344,65 @@ test("delta WM reposition intent leaves unmentioned current surfaces unchanged",
     shell: chromeLikeShell(),
     windowIntents: [
       repositionIntent,
+    ],
+  });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.commands, []);
+  assert.deepEqual(calls, []);
+});
+
+test("delta WM focus intent restacks the focused window without a full placement snapshot", async () => {
+  const calls: CompositorCommand[] = [];
+  const driver = new CompositorDriver(recordingPort(calls));
+  await mustReconcile(driver, {
+    shell: chromeLikeShell(),
+    windows: [
+      windowSurface("mail", rect(80, 72, 600, 440), 1),
+      windowSurface("chat", rect(160, 120, 500, 360), 2),
+    ],
+  });
+
+  calls.length = 0;
+  const focusIntent: WindowManagerIntent = Object.freeze({
+    type: "setFocus",
+    windowId: "mail",
+  });
+  const focused = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      focusIntent,
+    ],
+  });
+
+  assert.equal(focused.ok, true);
+  assert.deepEqual(projectCommands(focused.commands), [
+    {
+      id: "texture-chat",
+      rect: rect(160, 120, 500, 360),
+      type: "updatePlacement",
+      visible: true,
+      z: 20_001,
+    },
+    {
+      id: "texture-mail",
+      rect: rect(80, 72, 600, 440),
+      type: "updatePlacement",
+      visible: true,
+      z: 20_002,
+    },
+    {
+      type: "present",
+    },
+  ]);
+  assert.equal(calls.some((call) => call.type === "registerSurface"), false);
+  assert.equal(calls.some((call) => call.type === "removeSurface"), false);
+
+  calls.length = 0;
+  const second = await driver.reconcile({
+    shell: chromeLikeShell(),
+    windowIntents: [
+      focusIntent,
     ],
   });
 

@@ -113,6 +113,8 @@ export interface CompositorSurfaceSnapshot {
 
 interface DesiredSurfaceState extends CompositorSurfaceSnapshot {
   readonly source: "shell" | "window";
+  readonly placementKnown: boolean;
+  readonly windowId?: WindowId;
 }
 
 type DesiredResult =
@@ -313,6 +315,19 @@ function desiredSurfacesFromInput(
     if (!patchedIntent.ok) return patchedIntent;
   }
 
+  const unresolvedPlacement = firstVisibleWindowWithoutPlacement(patched);
+
+  if (unresolvedPlacement !== undefined) {
+    return {
+      error: {
+        code: "INVALID_SURFACE",
+        message: `Window surface '${unresolvedPlacement.id}' is visible but has no known compositor placement.`,
+        path: `/surfaces/${pathToken(unresolvedPlacement.id)}/placement/rect`,
+      },
+      ok: false,
+    };
+  }
+
   return {
     ok: true,
     surfaces: snapshotDesiredState(patched),
@@ -361,6 +376,7 @@ function shellDesiredSurfaces(layout: ShellComposedLayout): DesiredResult {
     output.push(Object.freeze({
       id: surface.id,
       kind: shellKind(surface),
+      placementKnown: true,
       rect: normalizedRect,
       size: sizeFromRect(normalizedRect),
       source: "shell",
@@ -397,10 +413,12 @@ function windowDesiredSurface(
     surface: Object.freeze({
       id: placement.textureId,
       kind: "window",
+      placementKnown: true,
       rect,
       size: sizeFromRect(rect),
       source: "window",
       visible: placement.visible,
+      windowId: placement.windowId,
       z: WINDOW_LAYER_BASE + normalizeZ(placement.zIndex),
     }),
   };
@@ -413,10 +431,7 @@ function applyWindowIntent(
   path: string,
 ): DesiredResult {
   if (intent.type === "setFocus") {
-    return {
-      ok: true,
-      surfaces: Object.freeze([]),
-    };
+    return applyFocusIntent(desired, intent.windowId, path);
   }
 
   const id = intent.textureId;
@@ -431,7 +446,7 @@ function applyWindowIntent(
       };
     }
 
-    const existing = desiredSurface ?? current.get(id) ?? provisionalWindowSurface(id, desired);
+    const existing = desiredSurface ?? current.get(id) ?? provisionalWindowSurface(id, intent.windowId, desired);
 
     if (existing.source !== "window") {
       return {
@@ -441,6 +456,14 @@ function applyWindowIntent(
           path: `${path}/textureId`,
         },
         ok: false,
+      };
+    }
+
+    if (!intent.visible && !existing.placementKnown && current.get(id) === undefined) {
+      desired.delete(id);
+      return {
+        ok: true,
+        surfaces: Object.freeze([]),
       };
     }
 
@@ -494,6 +517,7 @@ function applyWindowIntent(
 
     desired.set(id, Object.freeze({
       ...existing,
+      placementKnown: true,
       rect,
       size: sizeFromRect(rect),
       visible: true,
@@ -510,19 +534,126 @@ function applyWindowIntent(
   };
 }
 
+function applyFocusIntent(
+  desired: Map<string, DesiredSurfaceState>,
+  windowId: WindowId | null,
+  path: string,
+): DesiredResult {
+  if (windowId === null) {
+    return {
+      ok: true,
+      surfaces: Object.freeze([]),
+    };
+  }
+
+  const windows = windowSurfacesByZ(desired);
+  const targetIndex = windows.findIndex((surface) => surface.windowId === windowId);
+
+  if (targetIndex < 0) {
+    return {
+      error: {
+        code: "UNKNOWN_WINDOW_SURFACE",
+        message: `Focus intent references unknown window '${windowId}'.`,
+        path: `${path}/windowId`,
+      },
+      ok: false,
+    };
+  }
+
+  if (targetIndex === windows.length - 1) {
+    return {
+      ok: true,
+      surfaces: Object.freeze([]),
+    };
+  }
+
+  const target = windows[targetIndex];
+
+  if (target === undefined) {
+    return {
+      error: {
+        code: "UNKNOWN_WINDOW_SURFACE",
+        message: `Focus intent references unknown window '${windowId}'.`,
+        path: `${path}/windowId`,
+      },
+      ok: false,
+    };
+  }
+
+  const zSlots = windows.map((surface) => surface.z);
+  const restacked = [
+    ...windows.slice(0, targetIndex),
+    ...windows.slice(targetIndex + 1),
+    target,
+  ];
+
+  for (let index = 0; index < restacked.length; index += 1) {
+    const surface = restacked[index];
+    const z = zSlots[index];
+
+    if (surface !== undefined && z !== undefined && surface.z !== z) {
+      desired.set(surface.id, Object.freeze({
+        ...surface,
+        z,
+      }));
+    }
+  }
+
+  return {
+    ok: true,
+    surfaces: Object.freeze([]),
+  };
+}
+
+function windowSurfacesByZ(
+  desired: ReadonlyMap<string, DesiredSurfaceState>,
+): readonly DesiredSurfaceState[] {
+  const windows: DesiredSurfaceState[] = [];
+
+  for (const surface of desired.values()) {
+    if (surface.source === "window" && surface.visible) {
+      windows.push(surface);
+    }
+  }
+
+  windows.sort((left, right) => {
+    const z = left.z - right.z;
+    if (z !== 0) return z;
+
+    return compareStrings(left.id, right.id);
+  });
+
+  return Object.freeze(windows);
+}
+
 function provisionalWindowSurface(
   id: string,
+  windowId: WindowId,
   desired: ReadonlyMap<string, DesiredSurfaceState>,
 ): DesiredSurfaceState {
   return Object.freeze({
     id,
     kind: "window",
+    placementKnown: false,
     rect: ZERO_RECT,
     size: sizeFromRect(ZERO_RECT),
     source: "window",
     visible: true,
+    windowId,
     z: nextWindowIntentZ(desired),
   });
+}
+
+function firstVisibleWindowWithoutPlacement(
+  state: ReadonlyMap<string, DesiredSurfaceState>,
+): DesiredSurfaceState | undefined {
+  for (const surface of state.values()) {
+    if (surface.source === "window" && surface.visible && !surface.placementKnown) {
+      return surface;
+    }
+  }
+
+  return undefined;
 }
 
 function nextWindowIntentZ(desired: ReadonlyMap<string, DesiredSurfaceState>): number {
