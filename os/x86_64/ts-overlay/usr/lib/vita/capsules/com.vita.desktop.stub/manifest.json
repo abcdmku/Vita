@@ -1,0 +1,26 @@
+{
+  "id": "com.vita.desktop.stub",
+  "version": "1.0.0",
+  "integrity": "sha256-sPt3ZRLmh4AiIyy5GMMpd6DAPKE/vAP3KdOOr0kAb6w=",
+  "packageClass": "ts-service",
+  "runtime": {
+    "typescript": {
+      "entrypoint": "main.ts"
+    }
+  },
+  "resourceLimits": {
+    "cpuCores": 0.25,
+    "ramMiB": 64,
+    "storageMiB": 16,
+    "tasksMax": 32
+  },
+  "healthChecks": [
+    {
+      "name": "lifecycle",
+      "type": "lifecycle",
+      "target": "self",
+      "intervalSeconds": 5,
+      "timeoutSeconds": 2
+    }
+  ]
+}
