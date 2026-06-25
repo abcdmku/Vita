@@ -1,6 +1,6 @@
-# CEF OSR spike — RESULTS (M0 software OSR + M1 CEF → compositor pipe)
+# CEF OSR spike — RESULTS (M0 software OSR + M1 CEF → compositor pipe + M4 live-on-GPU boot)
 
-**Status: M0 PASS + M1 PASS.**
+**Status: M0 PASS + M1 PASS + M4 PASS (the live flagship desktop renders on the VMware GPU during an OS boot).**
 - **M0** — CEF renders the live Vita flagship desktop HTML off-screen on the Borg51 build
   host and produces a 1280x800 PNG (the gating proof that CEF works on this host).
 - **M1** — CEF's rendered frame flows INTO the Vita native compositor: CEF emits the
@@ -165,4 +165,75 @@ M1 proves the pipe with software readback on WSL. To run it for real in the OS b
 4. **Then M2/M3** — replace the per-frame CPU upload with `OnAcceleratedPaint` shared-texture (M2)
    and zero-copy DMABUF import (M3, PSD-052/053) so the frame never leaves the GPU; M1 stays the
    always-works fallback when vmwgfx rejects the modifier.
+
+## M4 — CEF live-render BOOTS on the VMware GPU (PASS)
+
+The handoff above is now realized end-to-end: the live flagship desktop renders on the VMware
+GPU during a real Vita OS boot, and a `glReadPixels` readback copied out of the guest proves it.
+
+**Markers from the VMware boot (3D accel, `mks.enable3d=TRUE`, vmwgfx):**
+
 ```
+VITA-COMPOSITOR: gpu=vmwgfx surfaces=5 composited=OK ... present=kms ... status=OK   (selftest, first)
+VITA-CEF: stage=start frames=6 url=file:///usr/lib/vita/ui_kits/desktop/index.html card0=present cache=/run/vita-cef-cache
+VITA-CEF: cef_diag=... emitted compositor frame (7372841 bytes, surface=cef:desktop 1280x720, incremental) -> - | stream: emitted 6 frames — closing
+VITA-CEF: readback=/run/cef-live.png bytes=3687468
+VITA-CEF: sink=buffer-surface present=kms status=OK
+VITA-COMPOSITOR: gpu=vmwgfx surfaces=1 composited=OK reposition=no-repaint present=kms damage=OK status=OK
+```
+
+`cef-live.png` (1280×720 RGBA, copied out via `--guest-file /run/cef-live.png:<host>` / vmtoolsd)
+is a genuine VMware GPU readback showing the live desktop: menu bar (Vita.ts + File/Edit/View/Go/
+Window/Help + wifi/battery + 10:24), the ⌘K command palette (Run kernel.ts highlighted, Open Files,
+Toggle Dark Mode, lucide icons), the shell window with syntax-highlighted TS, and the dock.
+
+### What M4 added (on branch `spike/cef-m4`)
+- **`osr_host.cc` `--frames=N` live-streaming mode** — register the buffer surface once, then
+  `updateBufferSurface cef:desktop <hex>` + `present` per `OnPaint`, then close stdout (EOF) so the
+  downstream `vita-compositor --commands` reads back the latest presented frame. `frames=1` is the
+  unchanged M1 one-shot. (Exercises the incremental protocol path the spec already supported.)
+- **`--ozone-platform=headless` + `root_cache_path`** — the on-device service runs CEF in a minimal
+  systemd env (no `$DISPLAY`, no `$HOME`, read-only `/usr`). Without headless Ozone, CEF defaulted to
+  X11 and aborted (`Missing X server or $DISPLAY` → platform init failed → exit in 0.3s, no frame →
+  the compositor saw EOF before any present). Headless Ozone + a writable cache (`$VITA_CEF_CACHE`)
+  fix it. **This was the decisive M4 bug.**
+- **`os/x86_64/cef-overlay/`** — `vita-cef-live.service` (oneshot, `After=open-vm-tools` + card0 +
+  `vita-compositor-selftest` to serialize the exclusive KMS master, `DeviceAllow=char-drm rw` +
+  `char-input r`, `PrivateNetwork`, NOT `PrivateTmp` so `/run/cef-live.png` is copy-out-able),
+  enabled via a committed `multi-user.target.wants` entry; `vita-cef-live.sh` (waits for card0,
+  exports HOME/XDG/TMPDIR/`VITA_CEF_CACHE` → `/run`, runs `osr_host --compositor-out=- --frames=6 |
+  vita-compositor --commands --screenshot /run/cef-live.png`, surfaces VITA-COMPOSITOR + emits
+  VITA-CEF, fails closed with a FAILSAFE marker — never hangs the boot).
+- **`build-and-boot.mjs installCefOverlay()` (gated by `VITA_CEF=1`)** — stages the vendored CEF
+  runtime (libcef.so + sibling libs + paks + 220 locales, ~1.5 GB), the built `vita_cef_osr`, and the
+  whole `ui_kits/` tree (so every relative asset path resolves) into `cef-overlay`, ships it via
+  `--extra-tree`, and adds CEF's DT_NEEDED runtime libs to the smoke package set (Debian trixie t64
+  names: `libx11-6 libxcomposite1 … libnss3 libnspr4 libglib2.0-0t64 libatk1.0-0t64 …`). The heavy
+  CEF runtime + staged `ui_kits` copy are gitignored (reproducible from `fetch-cef.sh` + `ninja`).
+
+### Build & run (M4)
+```bash
+# 1. vendored CEF present + osr_host built (M0/M1 steps), compositor binary staged.
+# 2. build the OS image with the CEF overlay (~3.7 GB raw, ~1.5 GB is the CEF runtime):
+VITA_CEF=1 node os/x86_64/build-and-boot.mjs --mode=smoke --no-boot
+# 3. copy the .raw to a Windows path, then boot in VMware FROM WINDOWS (vmrun.exe is Windows-side):
+#    cp os/x86_64/out/vita-debian-trixie-x86_64-root.raw /mnt/c/Users/Borg/vita-vmware/cef-os.raw
+node tools/vmware-verify.mjs --image C:/Users/Borg/vita-vmware/cef-os.raw \
+  --markers "VITA-CEF: sink=buffer-surface,VITA-COMPOSITOR" \
+  --guest-file /run/cef-live.png:C:/Users/Borg/vita-vmware/cef-live.png --timeout 240
+# NOTE: wait on the CEF COMPLETION marker ("VITA-CEF: sink=buffer-surface"), not the stage=start
+# line — CEF starts ~35 s in and needs ~5 s to init+render 6 frames; matching stage=start tears the
+# VM down mid-render before /run/cef-live.png exists.
+```
+
+### Remaining gaps (future milestones, not M4)
+- **M2/M3 are still pending**: CEF here is **software OSR** (the compositor does the GPU work + the
+  readback is a real GPU `glReadPixels`, but CEF's own paint is CPU). `OnAcceleratedPaint` shared-
+  texture (M2) and zero-copy DMABUF (M3, PSD-052/053) keep the frame on the GPU end-to-end.
+- **Interactivity (the ADR's own "M4")**: input/resize/damage routing into CEF is not wired — this
+  rung is a *visible* live render, not yet interactive (PSD-055).
+- **Hardening**: the boot service is the verification-only overlay (executable/world-writable unit
+  perms warn at boot; `PrivateTmp` is off for copy-out). The production CEF capsule (PSD-056) is a
+  separate SRI'd offline capsule, hardened, NOT this smoke overlay.
+- The single serial bottleneck remains the one VMware boot at a time.
+
