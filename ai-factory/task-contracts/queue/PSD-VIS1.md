@@ -51,3 +51,20 @@ Report the screenshot path.
 - Compositor `--demo`/hold mode draws a desktop-like layout on the GPU and holds the display; open-vm-tools in the
   verification image enables `vmrun captureScreen`; the orchestrator captures a PNG of the GPU-rendered layout on VMware;
   22 markers + VITA-COMPOSITOR present=kms intact. R1.
+
+## REVISION 1 (compositor draws surfaces=8 present=kms — but screenshot capture failed — 2026-06-25)
+The demo WORKS on VMware: `VITA-COMPOSITOR: gpu=vmwgfx surfaces=8 composited=OK reposition=no-repaint present=kms
+damage=OK status=OK` (wallpaper+panel+3 windows+titlebars on the GPU). But `vmrun captureScreen` fails: "Anonymous
+guest operations are not allowed ... LoginInGuest" — open-vm-tools is INSTALLED but its service isn't running, and the
+capture is treated as a guest op. Fix the screenshot path:
+1. **ENABLE + run `open-vm-tools.service` (vmtoolsd) at boot** in the verification/smoke image — add the
+   `multi-user.target.wants/open-vm-tools.service` enable symlink in the smoke overlay (or a systemd preset) so vmtoolsd
+   is running, which is what `vmrun captureScreen` needs.
+2. **Guest-login for captureScreen:** if captureScreen still needs credentials, set a VERIFICATION-ONLY root password in
+   the smoke overlay (e.g. a known fixed test password — verification image only, NOT production) and update
+   `tools/vmware-verify.mjs` to pass `-gu root -gp <pw>` to the `vmrun captureScreen` call (and only that call). Keep it
+   verification-only + documented.
+3. **Longer hold:** bump the compositor demo `--hold-seconds` to ~30 so the layout stays on screen long enough to
+   capture AND for a human to watch in the GUI.
+Verify: build (rust-in-docker) + the orchestrator re-images, boots on VMware, and `vmrun captureScreen` SUCCEEDS → a PNG
+of the GPU-rendered desktop layout. 22 markers + VITA-COMPOSITOR present=kms intact.
