@@ -46,3 +46,9 @@ duplicates, and falls back to the live-region snapshot when the port is degraded
 ## Definition of done
 - The optional `announce` port + `accessibility.announce` capability (loader-gated, allow-listed) + `announcer.ts` with
   deterministic tests in BOTH test dirs; typecheck clean. R2 (Codex reviewer gate before merge).
+
+## REVISION 1 (Codex R2 review: revise — add missing test coverage — 2026-06-25)
+The announce SDK port + announcer are correctly scoped/grant-gated + within target paths, but the tests MISS two cases — add both (handle in announcer.ts if needed), keep all existing tests/behavior:
+1. **Malformed host-result:** host `announce()` returns a malformed/non-`{ok}` result → announcer must fail-closed (no throw) and fall back to the live-region snapshot. Add a regression.
+2. **Ambiguous-event / dedup boundary:** two events mapping to the same announcement vs two distinct messages at the rate-dedup boundary → assert deterministic resolution (no double-announce, no dropping a distinct message). Add a regression.
+Verify: test -f sdk/typescript/test/ui-kits/announcer.test.ts && npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/desktop-sdk/*.test.ts sdk/typescript/test/ui-kits/announcer.test.ts
