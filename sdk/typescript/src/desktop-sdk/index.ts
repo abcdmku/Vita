@@ -7,12 +7,19 @@ export {
 } from "./theme-tokens.ts";
 
 export {
+  ManagedShellConfigController,
+  ShellComponentRegistry,
+  composeKnownGoodFallbackShell,
+  createShellComponentRegistry,
   defineShellComponent,
   defineShellConfig,
   diffShellLayouts,
   shellComponent,
   shellSurface,
 } from "../shell/index.ts";
+export {
+  createShellBackend,
+} from "./shell-backend.ts";
 export {
   applyWindowManagerEvent,
   closeWindow,
@@ -120,6 +127,8 @@ export type {
   ShellConfigDefinition,
   ShellConfigRender,
   ShellConfigRenderApi,
+  ShellComposedLayout,
+  ShellCompositionPorts,
   ShellCssDefinition,
   ShellCssRule,
   ShellElement,
@@ -311,6 +320,10 @@ export type {
   SurfaceHostRouter,
   SurfaceHostRouterErrorCode,
 } from "./surface-host-router.ts";
+export type {
+  ShellBackend,
+  ShellBackendOptions,
+} from "./shell-backend.ts";
 export type {
   VitaThemeCssVariableName,
   VitaThemeTokenGroup,
