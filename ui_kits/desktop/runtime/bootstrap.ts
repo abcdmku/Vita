@@ -22,13 +22,25 @@ import {
 import type {
   HydratedScreen,
 } from "./hydrate.ts";
+import {
+  createBinder,
+} from "./binder.ts";
 import type {
+  VitaBinder,
   VitaElement,
   VitaElementList,
 } from "./binder.ts";
 import type {
   ScreenModule,
 } from "./screen.ts";
+import {
+  createStatusbarClockViewModel,
+} from "../viewmodels/statusbar-clock.ts";
+import type {
+  StatusbarClockDisplay,
+  StatusbarClockTickResult,
+  StatusbarClockViewModel,
+} from "../viewmodels/statusbar-clock.ts";
 
 export interface BootstrapDocument {
   readonly body?: VitaElement | null;
@@ -45,6 +57,7 @@ export interface BootstrapOptions {
   readonly host?: DesktopHost;
   readonly modules?: readonly ScreenModule[];
   readonly root?: VitaElement;
+  readonly statusbarClock?: StatusbarClockBootstrapOptions;
   readonly transport?: SurfaceHostTransportLike;
 }
 
@@ -53,7 +66,20 @@ export interface DesktopHydrationRuntime {
   dispose(): void;
 }
 
+export interface StatusbarClockBootstrapOptions {
+  readonly initialNow?: Date | number;
+  readonly intervalMs?: number;
+  readonly now?: () => Date | number;
+  readonly scheduler?: StatusbarClockScheduler;
+}
+
+export interface StatusbarClockScheduler {
+  setInterval(callback: () => void, intervalMs: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
 const SCREEN_SELECTOR = "[data-vita-screen]";
+const STATUSBAR_CLOCK_INTERVAL_MS = 1000;
 const DEFAULT_SCREEN_MODULES = Object.freeze([
   indexScreen,
   settingsScreen,
@@ -70,6 +96,22 @@ const TRANSPORT_GLOBALS = Object.freeze([
   "vitaBridge",
   "__vitaDesktopBridge",
 ] as const);
+const STATUSBAR_CLOCK_BINDS = new Map<string, (snapshot: StatusbarClockDisplay) => string>([
+  ["statusbar.date", (snapshot) => snapshot.date],
+  ["statusbar.time", (snapshot) => snapshot.time],
+]);
+const DEFAULT_STATUSBAR_CLOCK_SCHEDULER = Object.freeze({
+  setInterval(callback: () => void, intervalMs: number): unknown {
+    return globalThis.setInterval(callback, intervalMs);
+  },
+  clearInterval(handle: unknown): void {
+    try {
+      Reflect.apply(globalThis.clearInterval, globalThis, [handle]);
+    } catch {
+      return;
+    }
+  },
+}) satisfies StatusbarClockScheduler;
 
 export async function bootstrapDesktop(
   options: BootstrapOptions = Object.freeze({}),
@@ -105,7 +147,7 @@ export async function bootstrapDesktop(
     }
   }
 
-  return runtime(screens);
+  return runtime(screens, createStatusbarClockRuntime(roots, options.statusbarClock));
 }
 
 export async function bootstrapDesktopFromGlobal(
@@ -119,7 +161,10 @@ export async function bootstrapDesktopFromGlobal(
 
 void bootstrapDesktopFromGlobal().catch(() => {});
 
-function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
+function runtime(
+  screens: readonly HydratedScreen[],
+  statusbarClock: Pick<DesktopHydrationRuntime, "dispose">,
+): DesktopHydrationRuntime {
   const frozenScreens = Object.freeze([...screens]);
   let disposed = false;
 
@@ -129,11 +174,150 @@ function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
       if (disposed) return;
       disposed = true;
 
+      statusbarClock.dispose();
       for (let index = 0; index < frozenScreens.length; index += 1) {
         disposeScreen(frozenScreens[index]);
       }
     },
   });
+}
+
+function createStatusbarClockRuntime(
+  roots: readonly VitaElement[],
+  options: StatusbarClockBootstrapOptions | undefined,
+): Pick<DesktopHydrationRuntime, "dispose"> {
+  const binders = createStatusbarClockBinders(roots);
+
+  if (binders.length === 0) return emptyDisposable();
+
+  const viewModel = createStatusbarClockViewModel({
+    initialNow: initialStatusbarNow(options),
+  });
+  renderStatusbarClock(binders, viewModel.snapshot());
+  const handle = startStatusbarClockInterval(binders, viewModel, options);
+  let disposed = false;
+
+  return Object.freeze({
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+
+      if (handle !== undefined) {
+        const scheduler = options?.scheduler ?? DEFAULT_STATUSBAR_CLOCK_SCHEDULER;
+
+        scheduler.clearInterval(handle);
+      }
+
+      for (let index = 0; index < binders.length; index += 1) {
+        binders[index]?.dispose();
+      }
+    },
+  });
+}
+
+function emptyDisposable(): Pick<DesktopHydrationRuntime, "dispose"> {
+  return Object.freeze({
+    dispose(): void {},
+  });
+}
+
+function createStatusbarClockBinders(
+  roots: readonly VitaElement[],
+): readonly VitaBinder<StatusbarClockDisplay>[] {
+  const output: VitaBinder<StatusbarClockDisplay>[] = [];
+
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index];
+
+    if (root === undefined) continue;
+
+    try {
+      const binder = createBinder(root, {
+        binds: STATUSBAR_CLOCK_BINDS,
+      });
+
+      if (hasStatusbarClockTarget(binder)) {
+        output.push(binder);
+      } else {
+        binder.dispose();
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function hasStatusbarClockTarget(binder: VitaBinder<StatusbarClockDisplay>): boolean {
+  for (let index = 0; index < binder.targets.text.length; index += 1) {
+    const target = binder.targets.text[index];
+    const bindId = target?.bindId;
+
+    if (bindId === "statusbar.time" || bindId === "statusbar.date") return true;
+  }
+
+  return false;
+}
+
+function renderStatusbarClock(
+  binders: readonly VitaBinder<StatusbarClockDisplay>[],
+  snapshot: StatusbarClockDisplay,
+): void {
+  for (let index = 0; index < binders.length; index += 1) {
+    binders[index]?.render(snapshot);
+  }
+}
+
+function startStatusbarClockInterval(
+  binders: readonly VitaBinder<StatusbarClockDisplay>[],
+  viewModel: StatusbarClockViewModel,
+  options: StatusbarClockBootstrapOptions | undefined,
+): unknown | undefined {
+  const scheduler = options?.scheduler ?? DEFAULT_STATUSBAR_CLOCK_SCHEDULER;
+  const intervalMs = normalizeStatusbarIntervalMs(options?.intervalMs);
+
+  try {
+    return scheduler.setInterval(() => {
+      const ticked = viewModel.tick(readStatusbarNow(options));
+
+      if (isStatusbarClockTickDisplay(ticked)) {
+        renderStatusbarClock(binders, ticked);
+      }
+    }, intervalMs);
+  } catch {
+    return undefined;
+  }
+}
+
+function isStatusbarClockTickDisplay(
+  result: StatusbarClockTickResult,
+): result is StatusbarClockDisplay {
+  return !("ok" in result);
+}
+
+function initialStatusbarNow(options: StatusbarClockBootstrapOptions | undefined): Date | number {
+  return options?.initialNow ?? readStatusbarNow(options);
+}
+
+function readStatusbarNow(options: StatusbarClockBootstrapOptions | undefined): Date | number {
+  const now = options?.now;
+
+  if (now !== undefined) {
+    try {
+      return now();
+    } catch {
+      return Number.NaN;
+    }
+  }
+
+  return Date.now();
+}
+
+function normalizeStatusbarIntervalMs(input: number | undefined): number {
+  return input !== undefined && Number.isFinite(input) && input > 0
+    ? input
+    : STATUSBAR_CLOCK_INTERVAL_MS;
 }
 
 function resolveTransport(options: BootstrapOptions): Exclude<SurfaceHostTransportLike, null | undefined> | undefined {
