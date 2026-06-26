@@ -172,18 +172,40 @@ done < "$COMP_OUT"
 if [ "$seen_ok" -eq 1 ]; then
   present=$(grep -m1 "^VITA-COMPOSITOR:" "$COMP_OUT" | sed -n 's/.*present=\([^ ]*\).*/\1/p')
   input_state=$(grep -aoE "input=[a-z]+" "$COMP_OUT" | head -1)
-  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes instant=$have_snapshot interactive=yes"
+  # HONEST marker: input=available means libinput opened the devices; the loop is WIRED. We do NOT
+  # claim interactive until the self-test below confirms CEF actually received events.
+  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes instant=$have_snapshot input-wiring=on"
 
-  # OPTIONAL input self-test: inject a scripted gesture now that the desktop is live, then report
-  # how many events CEF actually received (proof the loop works on the real GPU).
+  # LIVE-SWAP PROOF: confirm CEF keeps feeding updateBufferSurface AFTER the snapshot (i.e. the
+  # screen is the LIVE render, not the static baked frame). Sample the osr emitted-frame count
+  # twice, ~3s apart — it must be RISING.
+  f1=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+  sleep 3
+  f2=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+  if [ "$f2" -gt "$f1" ]; then
+    emit_line "$MARKER: live-swap=confirmed cef-frames ${f1}->${f2} rising (live render, not the static snapshot)"
+  else
+    emit_line "$MARKER: live-swap=UNCONFIRMED cef-frames stuck at ${f1} (may be showing the static snapshot)"
+  fi
+
+  # OPTIONAL input self-test (verification only): inject an ABSOLUTE move to a known on-screen
+  # target + a click, then report how many events CEF actually received. The self-test device is
+  # an absolute pointer like the real VMware mouse, so it exercises the exact fixed code path.
   if [ -n "$INJ_FD" ]; then
-    sleep 2
-    i=0; while [ "$i" -lt 110 ]; do echo "move 2 -3" >&6 2>/dev/null; i=$((i+1)); done
-    sleep 1; echo "click" >&6 2>/dev/null; sleep 1; echo "move 0 0" >&6 2>/dev/null; sleep 2
+    sleep 1
+    # Target the command-palette "Run kernel.ts" row (~430,150 in 1280x720) so a click visibly opens
+    # / activates it on the live desktop. Move in a few steps so the cursor visibly travels there.
+    for xy in "200 360" "300 280" "380 200" "430 150"; do echo "moveto $xy" >&6 2>/dev/null; sleep 0.2; done
+    sleep 0.5; echo "click" >&6 2>/dev/null; sleep 0.5
+    echo "moveto 430 150" >&6 2>/dev/null; sleep 1.5
     sends=$(grep -acE "input: SendMouse" "$CEF_LOG" 2>/dev/null)
     clicks=$(grep -acE "input: SendMouseClick" "$CEF_LOG" 2>/dev/null)
-    lastmove=$(grep -aE "input: SendMouseMove" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*input:/input:/')
-    emit_line "$MARKER: input-selftest SendMouse=$sends clicks=$clicks $lastmove"
+    lastmove=$(grep -aE "input: SendMouse" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*input:/input:/')
+    if [ "$sends" -gt 0 ]; then
+      emit_line "$MARKER: interactive=CONFIRMED input-selftest SendMouse=$sends clicks=$clicks $lastmove"
+    else
+      emit_line "$MARKER: interactive=FAILED input-selftest SendMouse=0 (events not reaching CEF) $lastmove"
+    fi
   fi
 else
   cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error|input:" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
