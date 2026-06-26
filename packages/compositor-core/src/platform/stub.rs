@@ -25,6 +25,11 @@ pub fn open_default_gpu_backend_for_self_test(
     ))
 }
 
+/// Non-linux platforms have no DRM/KMS connector to query a real display mode from.
+pub fn query_default_output_mode() -> Option<(u32, u32)> {
+    None
+}
+
 impl RenderBackend for PlatformGpuBackend {
     type Texture = ();
 

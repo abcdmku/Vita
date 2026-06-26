@@ -55,14 +55,24 @@ namespace {
 // Forward decl: the M4 streaming pump (OsrClient::StreamFrameTick, a method defined
 // inside the class below) emits frames via this free function, which is defined later.
 bool EmitCompositorFrame();
+// PSD-500: emit a CHEAP cursor-only present (a bare `present` line) so the compositor repositions
+// the top-most cursor surface and re-composites WITHOUT a CEF repaint or a buffer re-upload.
+bool EmitCursorPresent();
 
-// --- configuration (fixed CEF view surface) ---
-constexpr int kWidth = 1280;
-constexpr int kHeight = 800;
-// Compositor output is 1280x720 (DESKTOP_DEMO_OUTPUT_*). The M1 buffer surface is
-// downscaled to this so it fills the output exactly (no clip / no letterbox bars).
-constexpr int kCompWidth = 1280;
-constexpr int kCompHeight = 720;
+// --- configuration (CEF view surface) ---
+// PSD-500: the CEF view + compositor-output dimensions are RUNTIME-configurable so the live boot
+// can render at the REAL display resolution (e.g. 1920x1080) instead of a fixed 1280x720 that
+// lands in a corner of a larger VMware virtual display. They default to the historical values and
+// are overridden by --view-width/--view-height/--comp-width/--comp-height (set by the boot script
+// from the KMS connector mode). Named kWidth/etc. (not constexpr) so the rest of the file is
+// unchanged; they are assigned ONCE in main() before CefInitialize and read-only thereafter.
+int kWidth = 1280;
+int kHeight = 800;
+// Compositor output (DESKTOP_DEMO_OUTPUT_*). The CEF view frame is downscaled to this so it fills
+// the output exactly (no clip / no letterbox bars). kHeight may exceed kCompHeight (the dock strip);
+// the vertical box-filter maps the view rows onto the output rows.
+int kCompWidth = 1280;
+int kCompHeight = 720;
 // How long to keep pumping after main-frame load so lucide.min.js can replace the
 // <i data-lucide> placeholders with inlined SVGs and OnPaint can deliver it.
 constexpr int kSettleMs = 2500;
@@ -89,6 +99,14 @@ int g_frames = 1;
 // --frame-interval-ms (the persistent service runs a steady cadence so the live clock
 // and any hydrated content keep updating on screen).
 int g_frame_interval_ms = 350;
+// PSD-500 smooth cursor: how many CHEAP cursor-only presents to interleave per real CONTENT frame.
+// A content frame = Invalidate(CEF repaint) + downscale + updateBufferSurface (expensive). A cursor
+// present = a bare `present` line: the compositor drains input + repositions the top-most cursor
+// surface and re-composites the SAME textures (a GPU blit, no texture re-upload, no CEF repaint), so
+// source_repaint_count stays flat while the cursor tracks every move. With the default 100ms content
+// interval, 6 cursor presents/frame yields a ~16ms (~60fps) cursor cadence. Overridable via
+// --cursor-presents-per-frame.
+int g_cursor_presents_per_frame = 6;
 
 std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
@@ -267,34 +285,57 @@ class OsrClient : public CefClient,
     }
   }
 
-  // M4 streaming pump: emit the current frame to the compositor sink, then either
-  // schedule the next tick or close the browser once g_frames have been emitted.
+  // M4 streaming pump (PSD-500 smooth-cursor cadence): runs at the FAST cursor interval
+  // (content interval / cursor-presents-per-frame). Most ticks emit a CHEAP cursor-only present so
+  // the compositor repositions the top-most cursor surface at ~60fps with NO CEF repaint and NO
+  // full-desktop buffer re-upload. Every Nth tick emits a real CONTENT frame (Invalidate + downscale
+  // + updateBufferSurface) at the content interval — that is the only thing that bumps
+  // source_repaint_count, so moving the mouse alone leaves the repaint count flat.
   void StreamFrameTick() {
     CEF_REQUIRE_UI_THREAD();
-    if (browser_ && browser_->GetHost()) {
-      browser_->GetHost()->Invalidate(PET_VIEW);
+    const int presents_per_frame = g_cursor_presents_per_frame > 0 ? g_cursor_presents_per_frame : 1;
+    int cursor_interval = g_frame_interval_ms / presents_per_frame;
+    if (cursor_interval < 1) cursor_interval = 1;
+
+    // A content frame is due on the first tick and then every `presents_per_frame` ticks.
+    const bool content_due = (cursor_tick_ % presents_per_frame) == 0;
+    cursor_tick_++;
+
+    bool ok = true;
+    if (content_due) {
+      if (browser_ && browser_->GetHost()) {
+        browser_->GetHost()->Invalidate(PET_VIEW);  // ask CEF to repaint -> OnPaint -> new frame
+      }
+      ok = EmitCompositorFrame();
+      if (ok) {
+        frames_emitted_++;
+        // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the pump
+        // reschedules itself forever, so the compositor keeps presenting the live desktop.
+        if (g_frames != 0 && frames_emitted_ >= g_frames) {
+          fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
+          if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
+          return;
+        }
+      }
+    } else {
+      // CHEAP cursor present: no Invalidate, no updateBufferSurface — just move the cursor surface.
+      ok = EmitCursorPresent();
     }
-    if (!EmitCompositorFrame()) {
-      // A write failure means the downstream compositor pipe closed (it exited). In
-      // unbounded mode that is the only stop path: close the browser and let the
-      // process exit so the service can restart the whole pipe fail-closed.
-      fprintf(stderr, "[osr] stream: frame emit failed at #%d (frames=%d) — closing\n",
-              frames_emitted_ + 1, g_frames);
+
+    if (!ok) {
+      // A write failure means the downstream compositor pipe closed (it exited). In unbounded mode
+      // that is the only stop path: close the browser and let the process exit so the service can
+      // restart the whole pipe fail-closed.
+      fprintf(stderr, "[osr] stream: %s emit failed at frame #%d (frames=%d) — closing\n",
+              content_due ? "content" : "cursor", frames_emitted_ + 1, g_frames);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
     }
-    frames_emitted_++;
-    // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the
-    // pump reschedules itself forever, so the compositor keeps presenting the live desktop.
-    if (g_frames != 0 && frames_emitted_ >= g_frames) {
-      fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
-      if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
-      return;
-    }
+
     CefPostDelayedTask(
         TID_UI,
         CefCreateClosureTask(base::BindOnce(&OsrClient::StreamFrameTick, this)),
-        g_frame_interval_ms);
+        cursor_interval);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -310,7 +351,8 @@ class OsrClient : public CefClient,
  private:
   CefRefPtr<OsrRenderHandler> render_handler_;
   CefRefPtr<CefBrowser> browser_;
-  int frames_emitted_ = 0;  // M4 streaming: frames pushed to the compositor sink
+  int frames_emitted_ = 0;  // M4 streaming: CONTENT frames pushed to the compositor sink
+  long long cursor_tick_ = 0;  // PSD-500: fast-cadence tick counter (cursor presents + content)
 
   IMPLEMENT_REFCOUNTING(OsrClient);
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
@@ -664,6 +706,17 @@ bool EmitCompositorFrame() {
   return true;
 }
 
+// PSD-500 smooth cursor: emit a bare `present` so the compositor drains the latest input, moves the
+// cheap top-most cursor surface to the new pointer position, and re-composites the SAME textures.
+// No updateBufferSurface (no full-desktop re-upload) and no CEF Invalidate (no repaint), so
+// source_repaint_count stays flat while the cursor tracks every move at the cursor-present cadence.
+bool EmitCursorPresent() {
+  // Only meaningful once the desktop surface exists; before the first content frame there is nothing
+  // to present cheaply (the prelude already presented the loading screen + cursor).
+  if (!g_registered) return true;
+  return WriteToSink("present\n");
+}
+
 // --- PSD-055 input wiring -----------------------------------------------------
 // The compositor writes routed input events (one per line) to the reverse channel
 // (--input-out=<fifo>); osr_host reads them here (--input-in=<same fifo>) and injects them into
@@ -766,8 +819,15 @@ void ApplyInputLineOnUi(std::string line) {
   if (kind == "pointer-motion") {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
-    InjectMouseMove(browser, vx, vy);
-    fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
+    // PSD-500: COALESCE moves forwarded to CEF. The VISIBLE cursor is the compositor's cheap
+    // top-most cursor surface (it already tracks every move); CEF only needs a SendMouseMove when
+    // the VIEW-space position actually changes (hover/:hover state, host-bridge hit-testing). Many
+    // micro-moves map to the same view pixel (esp. after the output->view scale) — skipping the
+    // redundant ones avoids needless renderer work without losing any cursor fidelity.
+    if (vx != g_last_view_x || vy != g_last_view_y) {
+      InjectMouseMove(browser, vx, vy);
+      fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
+    }
   } else if (kind == "pointer-button") {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
@@ -898,7 +958,22 @@ int main(int argc, char* argv[]) {
     else if (a.rfind("--input-in=", 0) == 0) g_input_in = a.substr(11);  // PSD-055
     else if (a.rfind("--host-proxy-sock=", 0) == 0) g_host_proxy_sock = a.substr(18);  // PSD-500
     else if (a == "--surface-prearmed") g_surface_prearmed = true;       // instant-desktop
+    // PSD-500: real-resolution overrides. The CEF view is rendered at view-w x view-h; the
+    // compositor output (and the buffer surface streamed to it) is comp-w x comp-h. The boot
+    // script passes the REAL KMS connector mode so the desktop fills the display. view-w should
+    // equal comp-w (the vertical downscale preserves width); view-h may be >= comp-h.
+    else if (a.rfind("--view-width=", 0) == 0)  { int v = std::atoi(a.substr(13).c_str()); if (v > 0) kWidth = v; }
+    else if (a.rfind("--view-height=", 0) == 0) { int v = std::atoi(a.substr(14).c_str()); if (v > 0) kHeight = v; }
+    else if (a.rfind("--comp-width=", 0) == 0)  { int v = std::atoi(a.substr(13).c_str()); if (v > 0) kCompWidth = v; }
+    else if (a.rfind("--comp-height=", 0) == 0) { int v = std::atoi(a.substr(14).c_str()); if (v > 0) kCompHeight = v; }
+    // PSD-500: cursor-present cadence. The compositor repositions the cheap top-most cursor surface
+    // every `present`; emitting bare presents between content frames lets the cursor track at ~60fps
+    // WITHOUT a CEF repaint or a full-desktop buffer re-upload. <=1 disables cursor-only presents.
+    else if (a.rfind("--cursor-presents-per-frame=", 0) == 0) { int v = std::atoi(a.substr(28).c_str()); if (v >= 1) g_cursor_presents_per_frame = v; }
   }
+  // Keep the input-mapping last-position defaults centred on the (possibly overridden) view.
+  g_last_view_x = kWidth / 2;
+  g_last_view_y = kHeight / 2;
   // If the launch stream pre-registered cef:desktop (baked snapshot), skip the register and
   // start emitting updateBufferSurface so the swap to live is seamless on the same surface.
   if (g_surface_prearmed) g_registered = true;
