@@ -347,6 +347,48 @@ func TestCapsuleIngressConfigRejectsInvalidHostLocalGrants(t *testing.T) {
 	}
 }
 
+func TestCapsuleIngressOnlyNetworkUsesNamedNetns(t *testing.T) {
+	netns, err := capsuleNetnsForNetwork(ingressFixtureUnitName, "", ingressFixturePolicy())
+	if err != nil {
+		t.Fatalf("capsuleNetnsForNetwork returned error: %v", err)
+	}
+	if netns.Private || netns.Egress == nil || netns.Egress.Ingress == nil {
+		t.Fatalf("NetNS = %#v, want named netns with ingress config", netns)
+	}
+	if len(netns.Egress.Grants) != 0 {
+		t.Fatalf("egress grants = %#v, want none for ingress-only policy", netns.Egress.Grants)
+	}
+}
+
+func TestCapsuleIngressAbsentGrantGetsNoIngress(t *testing.T) {
+	policy := &ExecutionNetwork{
+		Ingress: []ExecutionNetworkIngressRule{},
+		Egress:  []ExecutionNetworkEgressRule{},
+	}
+	config, err := capsuleIngressConfigForUnit(ingressFixtureUnitName, policy)
+	if err != nil {
+		t.Fatalf("capsuleIngressConfigForUnit returned error: %v", err)
+	}
+	if config != nil {
+		t.Fatalf("capsuleIngressConfigForUnit = %#v, want nil for no ingress grants", config)
+	}
+	netns, err := capsuleNetnsForNetwork(ingressFixtureUnitName, "", policy)
+	if err != nil {
+		t.Fatalf("capsuleNetnsForNetwork returned error: %v", err)
+	}
+	if !netns.Private || netns.Egress != nil {
+		t.Fatalf("NetNS = %#v, want private loopback-only netns for no grants", netns)
+	}
+}
+
+func TestCapsuleIngressValidateRejectsDeniedPortInsideGrant(t *testing.T) {
+	config := mustCapsuleIngressFixtureConfig(t)
+	config.ProbeDeniedPort = config.ProbePort
+	if err := validateCapsuleIngressConfig(*config); err == nil {
+		t.Fatal("validateCapsuleIngressConfig accepted denied probe on a granted port")
+	}
+}
+
 func mustCapsuleIngressFixtureConfig(t *testing.T) *capsuleIngressConfig {
 	t.Helper()
 
