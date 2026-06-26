@@ -57,6 +57,9 @@ import type {
 // screen still hydrates headless / in a plain browser without a window host.
 export interface IndexAppWindowPort {
   open(appId: string, launch: DesktopAppLaunch): Promise<void>;
+  // Phase A2: right-click on a dock tile opens the reusable app context menu (Properties / Close)
+  // anchored at the pointer. Optional so older hosts still satisfy the port.
+  openContextMenu?(appId: string, x: number, y: number): boolean;
 }
 
 export type IndexScreenPorts =
@@ -133,12 +136,16 @@ export interface IndexScreenViewModel extends ScreenViewModel<IndexScreenState> 
   setWindows(windows: readonly DesktopMenuWindow[]): void;
   selectMenuItem(itemId: string): DesktopMenuEffect;
   dismissOverlays(): void;
+  // Phase A2: open the app context menu for a dock tile (right-click). No-op when no app-window port.
+  showDockContextMenu(appId: string, x: number, y: number): void;
 }
 
 const INDEX_SCREEN_ID = "desktop";
-const INDEX_SCREEN_EVENTS = Object.freeze(["click", "input", "keydown"] as const);
+const INDEX_SCREEN_EVENTS = Object.freeze(["click", "input", "keydown", "contextmenu"] as const);
 const PALETTE_EXECUTE_ACTION = "palette.execute";
 const DOCK_LAUNCH_ACTION = "dock.launchOrFocus";
+// Right-click on a dock tile routes here (declared on the tile as a second data-vita-event).
+const DOCK_CONTEXT_ACTION = "dock.contextmenu";
 const MENU_ITEM_SELECT_ACTION = "menu.select";
 
 // Per-menu open-flag bind ids consumed by the static menu-title spans in index.html.
@@ -200,6 +207,19 @@ export const indexScreenActions: ReadonlyMap<string, ScreenActionHandler<IndexSc
         viewModel.closeMenu();
         await viewModel.launchOrFocusDock(appId);
       }
+    }],
+    [DOCK_CONTEXT_ACTION, (viewModel, context) => {
+      const appId = dockAppIdFromContext(context);
+
+      if (appId === undefined) return;
+
+      // Suppress the native browser menu and show the desktop's own app context menu.
+      preventEventDefault(context.event);
+      viewModel.closeMenu();
+
+      const { x, y } = pointerCoordinates(context.event);
+
+      viewModel.showDockContextMenu(appId, x, y);
     }],
     ["menu.toggle", (viewModel, context) => {
       const menuId = menuIdFromContext(context);
@@ -319,6 +339,18 @@ class IndexScreenModel implements IndexScreenViewModel {
   dismissOverlays(): void {
     this.#paletteOpen = false;
     this.#menuSnapshot = this.menu.close();
+  }
+
+  showDockContextMenu(appId: string, x: number, y: number): void {
+    const port = this.#appWindow;
+
+    if (port === undefined || port.openContextMenu === undefined) return;
+
+    try {
+      port.openContextMenu(appId, x, y);
+    } catch {
+      // a context-menu failure must not break the dock.
+    }
   }
 
   async executePalette(index?: number): Promise<void> {
@@ -501,6 +533,8 @@ function dockListItems(snapshot: IndexScreenRootState): readonly VitaListItem[] 
       attrs: Object.freeze([
         attr("data-vita-action", DOCK_LAUNCH_ACTION),
         attr("data-vita-event", "click"),
+        // Right-click on the tile routes to the context-menu action (Properties / Close).
+        attr("data-vita-action-contextmenu", DOCK_CONTEXT_ACTION),
         attr("data-vita-dock-app-id", item.appId),
         attr("aria-pressed", rowSnapshot.active ? "true" : "false"),
         attr("title", item.title),
@@ -627,6 +661,33 @@ function paletteIndexFromContext(
 
 function dockAppIdFromContext(context: VitaActionContext<IndexScreenState>): string | undefined {
   return readDataset(context.target, Object.freeze(["vitaDockAppId", "vitaAppId"]));
+}
+
+// Suppress the native browser context menu so the desktop's themed app menu shows instead.
+function preventEventDefault(event: unknown): void {
+  if (!isObjectLike(event)) return;
+
+  try {
+    const fn = (event as { preventDefault?: unknown }).preventDefault;
+
+    if (typeof fn === "function") Reflect.apply(fn, event, []);
+  } catch {
+    // ignore
+  }
+}
+
+// Read viewport pointer coordinates (clientX/clientY) off a contextmenu event; default to 0.
+function pointerCoordinates(event: unknown): { x: number; y: number } {
+  const x = readEventNumber(event, "clientX");
+  const y = readEventNumber(event, "clientY");
+
+  return { x: x ?? 0, y: y ?? 0 };
+}
+
+function readEventNumber(source: unknown, key: string): number | undefined {
+  const value = readOwnOrAccessor(source, key);
+
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function menuIdFromContext(context: VitaActionContext<IndexScreenState>): string | undefined {

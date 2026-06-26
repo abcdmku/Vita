@@ -33,9 +33,32 @@ type ActivitySample = {
 
 const POLL_INTERVAL_MS = 1_500;
 
+// Config keys (Phase A2). Declaring these on the manifest is enough to get a generated settings form
+// (right-click the dock tile → Properties). The app reads them through ctx.config.
+const CONFIG_KEYS = Object.freeze({
+  refreshSeconds: "refreshSeconds",
+  showProcesses: "showProcesses",
+});
+
 export const activityApp: VitaApp = defineApp({
   manifest: Object.freeze({
     capabilities: Object.freeze(["metrics.read"] as const),
+    config: Object.freeze([
+      Object.freeze({
+        default: 1.5,
+        description: "How often the monitor re-samples /proc.",
+        key: CONFIG_KEYS.refreshSeconds,
+        label: "Refresh interval (seconds)",
+        type: "number" as const,
+      }),
+      Object.freeze({
+        default: true,
+        description: "Show the per-process table below the CPU / memory summary.",
+        key: CONFIG_KEYS.showProcesses,
+        label: "Show process table",
+        type: "boolean" as const,
+      }),
+    ]),
     icon: "📊",
     id: "vita.app.activity",
     title: "Activity",
@@ -52,6 +75,17 @@ export const activityApp: VitaApp = defineApp({
     if (metrics === undefined) {
       root.innerHTML = emptyState("The metrics backend is unavailable.");
       return () => {};
+    }
+
+    // Read config (defaults from the manifest schema; user overrides persisted via the host bridge).
+    function showProcesses(): boolean {
+      return ctx.config.get(CONFIG_KEYS.showProcesses) !== false;
+    }
+
+    function pollIntervalMs(): number {
+      const seconds = ctx.config.get(CONFIG_KEYS.refreshSeconds);
+
+      return typeof seconds === "number" && seconds > 0 ? Math.round(seconds * 1000) : POLL_INTERVAL_MS;
     }
 
     async function refresh(): Promise<void> {
@@ -71,14 +105,25 @@ export const activityApp: VitaApp = defineApp({
         return;
       }
 
-      root.innerHTML = renderSample(result.value as ActivitySample);
+      root.innerHTML = renderSample(result.value as ActivitySample, showProcesses());
+    }
+
+    function startPolling(): void {
+      if (interval !== undefined) clearInterval(interval);
+      interval = setInterval(() => void refresh(), pollIntervalMs());
     }
 
     root.innerHTML = renderLoading();
     void refresh();
-    interval = setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    startPolling();
 
     const offClose = ctx.on("close", () => cleanup());
+    // Live config: re-sample + restart the timer when the user changes settings (e.g. via Properties).
+    const offConfig = ctx.config.onChange(() => {
+      if (disposed) return;
+      void refresh();
+      startPolling();
+    });
 
     function cleanup(): void {
       if (disposed) return;
@@ -89,6 +134,7 @@ export const activityApp: VitaApp = defineApp({
         interval = undefined;
       }
 
+      offConfig();
       offClose();
     }
 
@@ -113,7 +159,7 @@ function readMetricsPort(host: DesktopHost): MetricsPortLike | undefined {
   return undefined;
 }
 
-function renderSample(sample: ActivitySample): string {
+function renderSample(sample: ActivitySample, showProcesses: boolean): string {
   const cpu = typeof sample.cpuPercent === "number" ? sample.cpuPercent : 0;
   const used = sample.memory?.usedBytes ?? 0;
   const total = sample.memory?.totalBytes ?? 0;
@@ -125,6 +171,11 @@ function renderSample(sample: ActivitySample): string {
     `<div style="font-size:22px;font-weight:600;color:var(--text)">${cpu.toFixed(1)}%</div></div>` +
     `<div style="flex:1"><div style="font-size:11px;color:var(--text-faint)">Memory</div>` +
     `<div style="font-size:22px;font-weight:600;color:var(--text)">${gib(used)} / ${gib(total)} GB</div></div></div>`;
+
+  // The process table is config-gated (Properties → "Show process table").
+  if (!showProcesses) {
+    return `${header}<div style="padding:18px 16px;color:var(--text-faint);font-size:12px">Process table hidden (enable it in Properties).</div>`;
+  }
 
   if (procs.length === 0) {
     return `${header}<div style="padding:18px 16px;color:var(--text-faint);font-size:12px">No processes reported yet (sampling…).</div>`;
