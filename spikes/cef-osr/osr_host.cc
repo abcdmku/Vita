@@ -157,6 +157,12 @@ class OsrClient : public CefClient,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browser_ = browser;
+    // PSD-500: give the windowless browser input focus, otherwise SendMouseClickEvent does not
+    // dispatch DOM click events (the renderer treats the OSR view as unfocused). With focus, a real
+    // injected mouse down+up produces a DOM click that drives the host-bridge click delegate.
+    if (browser->GetHost()) {
+      browser->GetHost()->SetFocus(true);
+    }
     // PSD-055: publish the browser so the input-reader thread can inject CEF events.
     {
       std::lock_guard<std::mutex> lock(g_browser_mu);
@@ -200,12 +206,7 @@ class OsrClient : public CefClient,
         "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
         "  }"
         "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
-        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING'));"
-        // Self-test the click delegate with a SYNTHETIC DOM click (isolates delegate wiring from
-        // whether CEF SendMouseClickEvent produces a DOM click). If the delegate fires, the Files
-        // surface appears (proving click->real-action) even before a real injected click.
-        "  if(fm){ L('VITA-HOSTTEST firing synthetic click to drive the host-bridge delegate');"
-        "    fm.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }"
+        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' — a REAL injected click now drives the host-bridge delegate');"
         "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
