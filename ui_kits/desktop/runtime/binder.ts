@@ -308,9 +308,15 @@ function dispatchAction<State>(
   }
 
   if (actionElement === null) return;
-  if (!eventMatchesActionElement(event, actionElement)) return;
 
-  const action = datasetValue(actionElement, Object.freeze(["vitaAction"]));
+  // An element may declare an EVENT-SPECIFIC action via `data-vita-action-<type>` (e.g.
+  // data-vita-action-contextmenu) so a single element can carry, say, a click action AND a
+  // contextmenu action. The override wins for its event type and bypasses the data-vita-event gate;
+  // otherwise we fall back to the default data-vita-action gated by data-vita-event.
+  const override = eventActionOverride(actionElement, event.type);
+  const action = override ?? (eventMatchesActionElement(event, actionElement)
+    ? datasetValue(actionElement, Object.freeze(["vitaAction"]))
+    : undefined);
 
   if (action === undefined) return;
 
@@ -344,6 +350,15 @@ function eventMatchesActionElement(event: VitaEventLike, element: VitaElement): 
   const declared = datasetValue(element, Object.freeze(["vitaEvent"]));
 
   return declared === undefined || declared === event.type;
+}
+
+// Read an event-specific action override: `data-vita-action-<type>` → dataset key `vitaAction<Type>`.
+function eventActionOverride(element: VitaElement, eventType: string): string | undefined {
+  if (eventType.length === 0) return undefined;
+
+  const datasetKey = `vitaAction${eventType.charAt(0).toUpperCase()}${eventType.slice(1)}`;
+
+  return datasetValue(element, Object.freeze([datasetKey]));
 }
 
 function captureTargets(root: VitaElement, includeLists: boolean): VitaBindTargets {
