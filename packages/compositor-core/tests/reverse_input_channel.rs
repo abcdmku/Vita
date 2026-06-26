@@ -20,6 +20,10 @@ fn command_session_writes_ordered_reverse_input_lines() {
     let poll_count = Arc::new(AtomicUsize::new(0));
     let backend = RecordingBackend::with_events(
         vec![
+            InputEvent::Key {
+                key_code: 29,
+                pressed: false,
+            },
             InputEvent::PointerMotion {
                 dx_micropixels: 5_000_000,
                 dy_micropixels: 6_000_000,
@@ -57,21 +61,61 @@ fn command_session_writes_ordered_reverse_input_lines() {
 
     assert_eq!(report.status, SelfTestStatus::Ok);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    // PSD-055: the reverse-channel line now carries the ROUTED event with the ABSOLUTE cursor
-    // position (output pixels) the router computed, so the CEF host can SendMouseMoveEvent at the
-    // right coordinates. dx=5_000_000 micropixels = 5 px, dy=6_000_000 = 6 px from origin (0,0).
     assert_eq!(
         output_lines(&output),
         vec![
-            "inputEvent surface=surface:cef kind=pointer-motion cursor-x=5 cursor-y=6",
-            "inputEvent surface=surface:cef kind=pointer-button cursor-x=5 cursor-y=6 button=1 state=pressed",
+            "inputEvent surface=none kind=key key-code=29 pressed=false",
+            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=5000000 dy-micropixels=6000000",
+            "inputEvent surface=surface:cef kind=pointer-button button=1 state=pressed",
             "inputEvent surface=surface:cef kind=key key-code=30 pressed=true",
-            "inputEvent surface=surface:cef kind=pointer-button cursor-x=5 cursor-y=6 button=1 state=released",
+            "inputEvent surface=surface:cef kind=pointer-button button=1 state=released",
         ]
     );
     assert_eq!(
         session.reverse_input_summary_marker().as_deref(),
-        Some("VITA-INPUT: routed=4 dropped=0 status=OK")
+        Some("VITA-INPUT: routed=5 dropped=0 status=OK")
+    );
+}
+
+#[test]
+fn command_session_writes_reverse_input_lines_on_explicit_route_tick() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let backend = RecordingBackend::with_events(
+        vec![InputEvent::PointerMotion {
+            dx_micropixels: 2_000_000,
+            dy_micropixels: 3_000_000,
+        }],
+        Arc::clone(&poll_count),
+    );
+    let mut session = CommandDrivenSession::new(backend, 64, 64).expect("session should create");
+    session.set_reverse_input_channel(ReverseInputChannel::new(
+        Box::new(SharedSink::new(Arc::clone(&output))),
+        8,
+    ));
+
+    let report = run_commands(
+        &mut session,
+        &[
+            "registerSurface surface:cef 32 24 e6edf2ff",
+            "updatePlacement surface:cef 0 0 32 24 0 true",
+            "routeInput",
+            "present",
+        ],
+    )
+    .expect("explicit routeInput tick should not disturb present");
+
+    assert_eq!(report.status, SelfTestStatus::Ok);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        output_lines(&output),
+        vec![
+            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=2000000 dy-micropixels=3000000",
+        ]
+    );
+    assert_eq!(
+        session.reverse_input_summary_marker().as_deref(),
+        Some("VITA-INPUT: routed=1 dropped=0 status=OK")
     );
 }
 
@@ -114,11 +158,10 @@ fn command_session_drops_reverse_input_when_queue_is_full_and_still_presents() {
 
     assert_eq!(report.status, SelfTestStatus::Ok);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    // First motion (dx=1_000_000 = 1 px) routes to cursor (1,0); queue capacity 1 keeps only it.
     assert_eq!(
         output_lines(&output),
         vec![
-            "inputEvent surface=surface:cef kind=pointer-motion cursor-x=1 cursor-y=0",
+            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=1000000 dy-micropixels=0",
         ]
     );
     assert_eq!(

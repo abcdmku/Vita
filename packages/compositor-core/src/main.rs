@@ -48,7 +48,7 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .iter()
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
-let continuous = args.iter().any(|arg| arg == "--continuous");
+        let continuous = args.iter().any(|arg| arg == "--continuous");
         run_command_stream(
             parse_hold_seconds(&args)?,
             parse_screenshot_path(&args)?,
@@ -150,12 +150,18 @@ fn run_command_stream(
         }) {
             Ok(report) => report,
             Err(error) => {
+                if let Some(line) = session.reverse_input_summary_marker() {
+                    emit_marker(&line)?;
+                }
                 let report = session.failsafe_report(command_failsafe_reason(&error));
                 emit_marker(&report.marker_line())?;
                 return Err(error);
             }
         };
         // Reached only on a clean upstream EOF: emit the final report and exit.
+        if let Some(line) = session.reverse_input_summary_marker() {
+            emit_marker(&line)?;
+        }
         emit_marker(&report.marker_line())?;
         return Ok(());
     }
@@ -407,6 +413,16 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         reader: R,
         mut on_first_present: impl FnMut(&str),
     ) -> Result<SelfTestReport, CompositorError> {
+        let result = self.run_continuous_inner(reader, &mut on_first_present);
+        self.finish_reverse_input();
+        result
+    }
+
+    fn run_continuous_inner<R: BufRead>(
+        &mut self,
+        reader: R,
+        on_first_present: &mut impl FnMut(&str),
+    ) -> Result<SelfTestReport, CompositorError> {
         let mut announced = false;
         for line in reader.lines() {
             let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
@@ -643,10 +659,6 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             }
         };
 
-        if !events.is_empty() {
-            eprintln!("VITA-INPUT-DIAG: drain got {} InputEvent(s)", events.len());
-        }
-
         let overflow = events.len().saturating_sub(MAX_INPUT_EVENTS_PER_TICK);
         if overflow > 0 {
             channel.drop_events(overflow);
@@ -661,13 +673,10 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
                     continue;
                 }
             };
-            // PSD-055 wiring: emit the ROUTED event carrying the absolute cursor position the
-            // router computed (clamped, accumulated from libinput deltas), so the CEF host can
-            // SendMouseMoveEvent/SendMouseClickEvent at the right absolute coordinates and the
-            // visible cursor surface tracks it. The compositor owns the cursor; track it here so
-            // the cursor surface (registered by the launch stream as cursor:pointer) follows.
+            // The compositor owns the cursor; track it here so the cursor surface (registered by
+            // the launch stream as cursor:pointer) follows in interactive mode.
             self.cursor_pos = self.compositor.cursor();
-            channel.enqueue(format_reverse_input_event(&routed));
+            channel.enqueue(format_reverse_input_event(event, &routed));
         }
 
         channel.drain_best_effort();
@@ -781,24 +790,20 @@ impl ReverseInputChannel {
         while let Some(line) = self.queue.pop_front() {
             match self.write_line(&line) {
                 ReverseInputWriteResult::Written => {
-                    eprintln!("VITA-INPUT-DIAG: channel wrote line ({} bytes)", line.len());
                     self.routed = self.routed.saturating_add(1);
                 }
                 ReverseInputWriteResult::Backpressure => {
-                    eprintln!("VITA-INPUT-DIAG: channel BACKPRESSURE (drop)");
                     self.drop_events(1 + self.queue.len());
                     self.queue.clear();
                     break;
                 }
                 ReverseInputWriteResult::Closed => {
-                    eprintln!("VITA-INPUT-DIAG: channel CLOSED (no reader)");
                     self.writer = None;
                     self.drop_events(1 + self.queue.len());
                     self.queue.clear();
                     break;
                 }
                 ReverseInputWriteResult::Failed(reason) => {
-                    eprintln!("VITA-INPUT-DIAG: channel FAILED: {reason}");
                     self.record_failsafe(reason);
                     self.writer = None;
                     self.drop_events(1 + self.queue.len());
@@ -1229,54 +1234,22 @@ fn format_input_event(event: &InputEvent) -> String {
     }
 }
 
-// PSD-055: the reverse-channel line the CEF host (osr_host) reads. It carries the ROUTED event
-// with the ABSOLUTE cursor position the router computed, so osr_host can call CEF's
-// SendMouseMoveEvent/SendMouseClickEvent at the right coordinates and SendKeyEvent to the focused
-// surface. Format (one event per line, space-separated key=value):
-//   inputEvent surface=<id|none> kind=pointer-motion cursor-x=N cursor-y=N
-//   inputEvent surface=<id|none> kind=pointer-button cursor-x=N cursor-y=N button=N state=pressed|released
-//   inputEvent surface=<id|none> kind=key key-code=N pressed=true|false
-// Dropped events still emit (surface=none) so the host/cursor can ignore them cleanly.
-fn format_reverse_input_event(routed: &RoutedInputEvent) -> String {
+// PSD-302: reverse-channel records reuse the exact InputEvent field grammar and only add the
+// routed target surface chosen by the compositor.
+fn format_reverse_input_event(event: &InputEvent, routed: &RoutedInputEvent) -> String {
+    format!(
+        "inputEvent surface={} {}",
+        routed_surface_token(routed),
+        format_input_event(event)
+    )
+}
+
+fn routed_surface_token(routed: &RoutedInputEvent) -> &str {
     match routed {
-        RoutedInputEvent::PointerMotion {
-            surface_id,
-            cursor_x,
-            cursor_y,
-            ..
-        } => format!(
-            "inputEvent surface={} kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}",
-            surface_id.as_str()
-        ),
-        RoutedInputEvent::PointerButton {
-            surface_id,
-            cursor_x,
-            cursor_y,
-            button,
-            state,
-            ..
-        } => format!(
-            "inputEvent surface={} kind=pointer-button cursor-x={cursor_x} cursor-y={cursor_y} button={button} state={}",
-            surface_id.as_str(),
-            match state {
-                PointerButtonState::Pressed => "pressed",
-                PointerButtonState::Released => "released",
-            }
-        ),
-        RoutedInputEvent::Key {
-            surface_id,
-            key_code,
-            pressed,
-        } => format!(
-            "inputEvent surface={} kind=key key-code={key_code} pressed={}",
-            surface_id.as_str(),
-            if *pressed { "true" } else { "false" }
-        ),
-        RoutedInputEvent::Dropped {
-            cursor_x, cursor_y, ..
-        } => format!(
-            "inputEvent surface=none kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}"
-        ),
+        RoutedInputEvent::PointerMotion { surface_id, .. }
+        | RoutedInputEvent::PointerButton { surface_id, .. }
+        | RoutedInputEvent::Key { surface_id, .. } => surface_id.as_str(),
+        RoutedInputEvent::Dropped { .. } => "none",
     }
 }
 
