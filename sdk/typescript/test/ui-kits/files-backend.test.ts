@@ -196,6 +196,75 @@ test("requestFile enforces bridge grants fail-closed before agentd transport", a
   assert.deepEqual(calls, []);
 });
 
+test("requestFile rejects fractional agentd sizes across response shapes", async () => {
+  const requestFile = createRequestFilePort({
+    package: packageManifest(
+      grant("files.read", FILE_GRANT),
+      grant("files.write", FILE_GRANT),
+    ),
+    transport(request) {
+      switch (request.op) {
+        case "list":
+          return {
+            entries: [entry("half.txt", "file", 1.5, MTIME)],
+          };
+        case "read":
+          return {
+            data: "AA==",
+            mtime: MTIME,
+            size: 1.5,
+          };
+        case "write":
+          return {
+            kind: "file",
+            size: 1.5,
+          };
+        case "stat":
+          return {
+            kind: "file",
+            mtime: MTIME,
+            size: 1.5,
+          };
+      }
+    },
+  });
+
+  const listed = await requestFile({
+    grant: FILE_GRANT,
+    op: "list",
+    path: "/docs",
+  });
+  assertFilesError(listed, "malformed_response");
+
+  const read = await requestFile({
+    grant: FILE_GRANT,
+    op: "read",
+    path: "/docs/half.txt",
+  });
+  assertFilesError(read, "malformed_response");
+
+  const written = await requestFile({
+    data: "AA==",
+    grant: FILE_GRANT,
+    op: "write",
+    path: "/docs/half.txt",
+  });
+  assertFilesError(written, "malformed_response");
+
+  const stat = await requestFile({
+    grant: FILE_GRANT,
+    op: "stat",
+    path: "/docs/half.txt",
+  });
+  assertFilesError(stat, "malformed_response");
+
+  assert.equal(isFilesResponse({
+    data: "AA==",
+    mtime: MTIME,
+    size: 1.5,
+  }), false);
+});
+
 class FakeAgentdFiles {
   readonly #files = new Map<string, string>([
     ["/docs/draft.txt", "aGVsbG8="],

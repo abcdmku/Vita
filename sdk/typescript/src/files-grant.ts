@@ -135,7 +135,7 @@ function isFilesEntryKind(value: unknown): value is FilesEntryKind {
 }
 
 function isFileSize(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function hasOnlyKnownFields(

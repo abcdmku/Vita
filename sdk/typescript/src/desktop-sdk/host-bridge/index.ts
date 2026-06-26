@@ -425,7 +425,7 @@ function isFilesEntryKind(value: unknown): value is FilesEntry["kind"] {
 }
 
 function isFileSize(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function snapshotDataObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
