@@ -66,10 +66,18 @@ std::string g_surface_id = "cef:desktop";
 // OnPaint, so the compositor composites a sequence and reads back the latest. The
 // service uses this so the LIVE (hydrated) desktop — after bootstrap.js runs — is what
 // the compositor presents and reads back on the real KMS scanout.
+//
+// PERSISTENT desktop (spike/cef-vm): --frames=0 means UNBOUNDED — stream frames forever,
+// never closing the browser or the compositor sink. The compositor then keeps presenting
+// every incoming frame on the KMS scanout indefinitely, so a powered-on VM shows the live
+// desktop continuously (not a few-frame flash). The pump only stops when the process is
+// signalled (the boot service is killed on shutdown).
 int g_frames = 1;
 // M4 streaming-mode interval between emitted frames (ms). Spaced so the page paints
-// new content (clock, hydration, lucide icons) between captures.
-constexpr int kFrameIntervalMs = 350;
+// new content (clock, hydration, lucide icons) between captures. Overridable via
+// --frame-interval-ms (the persistent service runs a steady cadence so the live clock
+// and any hydrated content keep updating on screen).
+int g_frame_interval_ms = 350;
 
 std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
@@ -173,7 +181,8 @@ class OsrClient : public CefClient,
     // EmitCompositorFrame in main() handles the single capture; just close.
     // Streaming (M4) compositor mode: pump frames live on the UI thread so the
     // command sink stays open and the compositor composites a sequence.
-    if (!g_compositor_out.empty() && g_frames > 1) {
+    // g_frames > 1: bounded sequence; g_frames == 0: UNBOUNDED (persistent desktop).
+    if (!g_compositor_out.empty() && (g_frames == 0 || g_frames > 1)) {
       StreamFrameTick();
       return;
     }
@@ -190,13 +199,18 @@ class OsrClient : public CefClient,
       browser_->GetHost()->Invalidate(PET_VIEW);
     }
     if (!EmitCompositorFrame()) {
-      fprintf(stderr, "[osr] stream: frame emit failed at #%d/%d — closing\n",
+      // A write failure means the downstream compositor pipe closed (it exited). In
+      // unbounded mode that is the only stop path: close the browser and let the
+      // process exit so the service can restart the whole pipe fail-closed.
+      fprintf(stderr, "[osr] stream: frame emit failed at #%d (frames=%d) — closing\n",
               frames_emitted_ + 1, g_frames);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
     }
     frames_emitted_++;
-    if (frames_emitted_ >= g_frames) {
+    // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the
+    // pump reschedules itself forever, so the compositor keeps presenting the live desktop.
+    if (g_frames != 0 && frames_emitted_ >= g_frames) {
       fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
@@ -204,7 +218,7 @@ class OsrClient : public CefClient,
     CefPostDelayedTask(
         TID_UI,
         CefCreateClosureTask(base::BindOnce(&OsrClient::StreamFrameTick, this)),
-        kFrameIntervalMs);
+        g_frame_interval_ms);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -450,15 +464,27 @@ int main(int argc, char* argv[]) {
     else if (a.rfind("--surface-id=", 0) == 0) g_surface_id = a.substr(13);
     else if (a.rfind("--frames=", 0) == 0) {
       g_frames = std::atoi(a.substr(9).c_str());
-      if (g_frames < 1) g_frames = 1;
+      // 0 = UNBOUNDED (persistent desktop). Negative is meaningless -> treat as one-shot.
+      if (g_frames < 0) g_frames = 1;
+    }
+    else if (a.rfind("--frame-interval-ms=", 0) == 0) {
+      g_frame_interval_ms = std::atoi(a.substr(20).c_str());
+      if (g_frame_interval_ms < 1) g_frame_interval_ms = 1;
     }
   }
   const bool compositor_mode = !g_compositor_out.empty();
-  const bool streaming = compositor_mode && g_frames > 1;
-  fprintf(stderr, "[osr] url=%s mode=%s frames=%d out=%s\n", g_url.c_str(),
-          compositor_mode ? (streaming ? "compositor-stream(live)" : "compositor-stream")
-                          : "png",
-          g_frames, compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
+  // Streaming (long-lived pump) covers both bounded sequences (>1) and unbounded (0).
+  const bool streaming = compositor_mode && (g_frames == 0 || g_frames > 1);
+  const std::string frames_label = g_frames == 0 ? "unbounded" : std::to_string(g_frames);
+  fprintf(stderr, "[osr] url=%s mode=%s frames=%s interval=%dms out=%s\n", g_url.c_str(),
+          compositor_mode
+              ? (streaming ? (g_frames == 0 ? "compositor-stream(persistent)"
+                                            : "compositor-stream(live)")
+                           : "compositor-stream")
+              : "png",
+          frames_label.c_str(),
+          g_frame_interval_ms,
+          compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
 
   // Open the compositor sink up front: streaming (M4) writes to it live on the UI
   // thread during the message loop; one-shot (M1) writes the single frame after it.

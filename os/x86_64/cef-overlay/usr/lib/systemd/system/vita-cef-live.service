@@ -1,10 +1,10 @@
-# Vita SMOKE/VM only - M4 of the CEF live-render arc (ADR-0014).
-# Run CEF (windowless software OSR) rendering the LIVE flagship desktop, piped into the
-# Vita native compositor on the real VMware GPU (KMS); emit VITA-CEF + VITA-COMPOSITOR
-# to serial and a GPU-readback PNG to the shared /run for copy-out by vmware-verify.
-# Verification-only overlay: not part of the production OS image.
+# Vita SMOKE/VM only - M4 of the CEF live-render arc (ADR-0014), PERSISTENT (spike/cef-vm).
+# Run CEF (windowless software OSR) rendering the LIVE flagship desktop, piped CONTINUOUSLY
+# into the Vita native compositor on the real VMware GPU (KMS). The compositor presents every
+# frame and HOLDS the desktop on screen indefinitely (not a few-frame flash). Emits VITA-CEF +
+# VITA-COMPOSITOR to serial. Verification-only overlay: not part of the production OS image.
 [Unit]
-Description=Vita CEF live-render -> compositor KMS readback (M4 verification)
+Description=Vita CEF live-render -> compositor KMS scanout (persistent live desktop)
 After=systemd-modules-load.service systemd-udev-trigger.service open-vm-tools.service
 Wants=systemd-udev-trigger.service open-vm-tools.service
 # Run after the compositor self-test so only ONE process drives /dev/dri/card0 at a time
@@ -13,18 +13,23 @@ Wants=systemd-udev-trigger.service open-vm-tools.service
 After=vita-compositor-selftest.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Long-lived: the script blocks in the foreground holding the live CEF->compositor pipe for
+# the whole life of the powered-on VM. It reaches readiness (first GPU present + markers) well
+# before it blocks, so a finite start timeout is unnecessary and would be wrong here.
+Type=simple
 ExecStart=/bin/bash /usr/lib/vita/cef/vita-cef-live.sh
-TimeoutStartSec=180s
+TimeoutStartSec=infinity
+# Fail-closed: if the live pipe dies (CEF crash, compositor exit), rebuild the desktop.
+Restart=on-failure
+RestartSec=2s
 StandardOutput=journal+console
 StandardError=journal+console
 NoNewPrivileges=yes
 PrivateNetwork=yes
 # NOTE (verification-only): PrivateTmp/ProtectHome/ProtectSystem are intentionally NOT set.
-# Those mount-namespace protections give the service a PRIVATE /run, so the GPU-readback PNG
-# written to /run/cef-live.png would be invisible to the global namespace and could not be
-# copied out by vmtoolsd. This is a smoke/verification self-test (not the production OS), so
+# Those mount-namespace protections give the service a PRIVATE /run; the CEF cache/home/logs
+# under /run/vita-cef-* must live in the SHARED namespace (and any debug copy-out via vmtoolsd
+# must be able to see them). This is a smoke/verification self-test (not the production OS), so
 # /run is shared; the still-meaningful restrictions (NoNewPrivileges, capability bound, device
 # allow-list, private network) remain. The production CEF capsule (PSD-056) is hardened separately.
 CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
