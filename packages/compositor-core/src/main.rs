@@ -638,15 +638,10 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         let events = match self.compositor.poll_input_events() {
             Ok(events) => events,
             Err(error) => {
-                eprintln!("VITA-INPUT-DIAG: poll_failed:{error}");
                 channel.record_failsafe(format!("poll_failed:{error}"));
                 return;
             }
         };
-
-        if !events.is_empty() {
-            eprintln!("VITA-INPUT-DIAG: polled {} libinput event(s)", events.len());
-        }
 
         let overflow = events.len().saturating_sub(MAX_INPUT_EVENTS_PER_TICK);
         if overflow > 0 {
