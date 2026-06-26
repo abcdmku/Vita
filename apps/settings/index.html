@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Settings</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --panel-2: #f8fafc;
+      --line: rgba(15, 23, 42, .10);
+      --text: #111827;
+      --muted: #64748b;
+      --faint: #94a3b8;
+      --accent: #3178c6;
+      --accent-soft: rgba(49, 120, 198, .10);
+      --shadow: 0 18px 45px rgba(15, 23, 42, .12);
+      --radius: 8px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101418;
+        --panel: #171d24;
+        --panel-2: #121820;
+        --line: rgba(226, 232, 240, .12);
+        --text: #eef2f7;
+        --muted: #9aa6b2;
+        --faint: #64748b;
+        --accent-soft: rgba(49, 120, 198, .18);
+        --shadow: 0 18px 45px rgba(0, 0, 0, .28);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      padding: 28px;
+    }
+
+    .settings-shell {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      width: min(900px, 100%);
+      min-height: 560px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: var(--panel-2);
+      padding: 18px 12px;
+    }
+
+    .title {
+      margin: 0 8px 18px;
+      font-size: 17px;
+      font-weight: 650;
+    }
+
+    .group {
+      margin: 16px 8px 6px;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      min-height: 34px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 13px;
+      text-align: left;
+      padding: 7px 9px;
+    }
+
+    .nav-item[aria-current="page"] {
+      background: var(--accent-soft);
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .icon {
+      display: grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 5px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .panel {
+      padding: 28px 32px;
+    }
+
+    .panel h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+      font-weight: 650;
+    }
+
+    .summary {
+      margin: 5px 0 22px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .eyebrow {
+      margin: 22px 0 8px;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      min-height: 64px;
+      padding: 14px 16px;
+    }
+
+    .row + .row {
+      border-top: 1px solid var(--line);
+    }
+
+    .row-title {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .row-copy {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      flex: none;
+      gap: 2px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-2);
+    }
+
+    .segmented button {
+      min-width: 62px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 12px;
+      padding: 6px 9px;
+    }
+
+    .segmented button[aria-pressed="true"] {
+      background: var(--panel);
+      color: var(--text);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+    }
+
+    .swatches {
+      display: inline-flex;
+      flex: none;
+      gap: 9px;
+      align-items: center;
+    }
+
+    .swatch {
+      width: 24px;
+      height: 24px;
+      border: 0;
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .14);
+    }
+
+    .swatch[aria-pressed="true"] {
+      box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 0;
+      }
+
+      .settings-shell {
+        grid-template-columns: 1fr;
+        width: 100%;
+        min-height: 100vh;
+        border: 0;
+        border-radius: 0;
+      }
+
+      .sidebar {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .title,
+      .group {
+        display: none;
+      }
+
+      .nav-item {
+        width: auto;
+        white-space: nowrap;
+      }
+
+      .panel {
+        padding: 22px;
+      }
+
+      .row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="settings-shell" data-vita-screen="apps/settings">
+    <nav class="sidebar" aria-label="Settings sections">
+      <h1 class="title">Settings</h1>
+      <div class="group">System</div>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="general">
+        <span class="icon" aria-hidden="true">G</span><span>General</span>
+      </button>
+      <button class="nav-item" type="button" aria-current="page" data-vita-action="selectSection" data-vita-value="appearance">
+        <span class="icon" aria-hidden="true">A</span><span>Appearance</span>
+      </button>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="network">
+        <span class="icon" aria-hidden="true">N</span><span>Network</span>
+      </button>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="sound">
+        <span class="icon" aria-hidden="true">S</span><span>Sound</span>
+      </button>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="display">
+        <span class="icon" aria-hidden="true">D</span><span>Display</span>
+      </button>
+      <div class="group">Account</div>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="accounts">
+        <span class="icon" aria-hidden="true">U</span><span>Accounts</span>
+      </button>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="privacy">
+        <span class="icon" aria-hidden="true">P</span><span>Privacy</span>
+      </button>
+      <div class="group">Advanced</div>
+      <button class="nav-item" type="button" data-vita-action="selectSection" data-vita-value="developer">
+        <span class="icon" aria-hidden="true">T</span><span>Developer</span>
+      </button>
+    </nav>
+    <section class="panel" aria-labelledby="settings-appearance-title">
+      <h1 id="settings-appearance-title">Appearance</h1>
+      <p class="summary">How Vita looks across windows, the dock, and first-party apps.</p>
+
+      <div class="eyebrow">Theme</div>
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="row-title">Theme</div>
+            <div class="row-copy">Choose the base surface tone.</div>
+          </div>
+          <div class="segmented" role="group" aria-label="Theme">
+            <button type="button" aria-pressed="true" data-vita-action="previewSetting" data-vita-setting-key="appearance.theme" data-vita-value="light">Light</button>
+            <button type="button" aria-pressed="false" data-vita-action="previewSetting" data-vita-setting-key="appearance.theme" data-vita-value="dark">Dark</button>
+            <button type="button" aria-pressed="false" data-vita-action="previewSetting" data-vita-setting-key="appearance.theme" data-vita-value="graphite">Auto</button>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="row-title">Accent color</div>
+            <div class="row-copy">Used for active controls and focus rings.</div>
+          </div>
+          <div class="swatches" role="group" aria-label="Accent color">
+            <button class="swatch" type="button" aria-label="Blue" aria-pressed="true" style="background:#3178c6" data-vita-action="previewSetting" data-vita-setting-key="appearance.accent" data-vita-value="blue"></button>
+            <button class="swatch" type="button" aria-label="Teal" aria-pressed="false" style="background:#14b8a6" data-vita-action="previewSetting" data-vita-setting-key="appearance.accent" data-vita-value="teal"></button>
+            <button class="swatch" type="button" aria-label="Violet" aria-pressed="false" style="background:#8b5cf6" data-vita-action="previewSetting" data-vita-setting-key="appearance.accent" data-vita-value="violet"></button>
+            <button class="swatch" type="button" aria-label="Orange" aria-pressed="false" style="background:#f97316" data-vita-action="previewSetting" data-vita-setting-key="appearance.accent" data-vita-value="orange"></button>
+            <button class="swatch" type="button" aria-label="Green" aria-pressed="false" style="background:#10b981" data-vita-action="previewSetting" data-vita-setting-key="appearance.accent" data-vita-value="green"></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="eyebrow">Layout</div>
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="row-title">Window mode</div>
+            <div class="row-copy">Choose floating windows or a tiling grid.</div>
+          </div>
+          <div class="segmented" role="group" aria-label="Window mode">
+            <button type="button" aria-pressed="true" data-vita-action="previewSetting" data-vita-setting-key="appearance.layout" data-vita-value="floating">Floating</button>
+            <button type="button" aria-pressed="false" data-vita-action="previewSetting" data-vita-setting-key="appearance.layout" data-vita-value="tiling">Tiling</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
