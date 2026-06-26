@@ -781,20 +781,24 @@ impl ReverseInputChannel {
         while let Some(line) = self.queue.pop_front() {
             match self.write_line(&line) {
                 ReverseInputWriteResult::Written => {
+                    eprintln!("VITA-INPUT-DIAG: channel wrote line ({} bytes)", line.len());
                     self.routed = self.routed.saturating_add(1);
                 }
                 ReverseInputWriteResult::Backpressure => {
+                    eprintln!("VITA-INPUT-DIAG: channel BACKPRESSURE (drop)");
                     self.drop_events(1 + self.queue.len());
                     self.queue.clear();
                     break;
                 }
                 ReverseInputWriteResult::Closed => {
+                    eprintln!("VITA-INPUT-DIAG: channel CLOSED (no reader)");
                     self.writer = None;
                     self.drop_events(1 + self.queue.len());
                     self.queue.clear();
                     break;
                 }
                 ReverseInputWriteResult::Failed(reason) => {
+                    eprintln!("VITA-INPUT-DIAG: channel FAILED: {reason}");
                     self.record_failsafe(reason);
                     self.writer = None;
                     self.drop_events(1 + self.queue.len());

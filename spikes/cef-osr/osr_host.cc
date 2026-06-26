@@ -19,6 +19,7 @@
 // shared-texture / zero-copy DMABUF path is M2+.
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <unistd.h>
@@ -608,8 +609,10 @@ void ApplyInputLineOnUi(std::string line) {
 void InputReaderThread() {
   fprintf(stderr, "[osr] input: reader thread starting, channel=%s\n", g_input_in.c_str());
   while (!g_input_stop.load()) {
-    // Blocking open of the FIFO read end: blocks until a writer (the compositor) is present.
-    int fd = open(g_input_in.c_str(), O_RDONLY);
+    // NON-BLOCKING open of the FIFO read end: a blocking O_RDONLY open deadlocks against the
+    // compositor's O_NONBLOCK write open (each waits for the other end). O_NONBLOCK read-open
+    // always succeeds immediately; we then poll/read for data.
+    int fd = open(g_input_in.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
       continue;
@@ -617,7 +620,8 @@ void InputReaderThread() {
     fprintf(stderr, "[osr] input: channel opened (fd=%d), reading events\n", fd);
     std::string buf;
     char chunk[512];
-    while (!g_input_stop.load()) {
+    bool reopen = false;
+    while (!g_input_stop.load() && !reopen) {
       ssize_t n = read(fd, chunk, sizeof(chunk));
       if (n > 0) {
         buf.append(chunk, static_cast<size_t>(n));
@@ -632,9 +636,16 @@ void InputReaderThread() {
                       CefCreateClosureTask(base::BindOnce(&ApplyInputLineOnUi, copy)));
         }
       } else if (n == 0) {
-        break;  // all writers closed -> EOF; reopen.
+        // EOF: all writers closed. With a long-lived writer (the compositor) this is rare; pause
+        // briefly and keep the same fd (do NOT busy-spin).
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
       } else {
-        break;  // error -> reopen.
+        // n < 0: EAGAIN (no data yet, O_NONBLOCK) — sleep briefly and retry; other errors -> reopen.
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        } else {
+          reopen = true;
+        }
       }
     }
     close(fd);
