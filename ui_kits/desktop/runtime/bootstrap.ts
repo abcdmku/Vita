@@ -5,6 +5,7 @@ import activityScreen from "../screens/activity.ts";
 import filesScreen from "../screens/files.ts";
 import indexScreen from "../screens/index.ts";
 import lockScreen from "../screens/lock.ts";
+import mailScreen from "../screens/mail.ts";
 import notificationsScreen from "../screens/notifications.ts";
 import settingsScreen from "../screens/settings.ts";
 import shellScreen from "../screens/shell.ts";
@@ -80,10 +81,11 @@ export interface StatusbarClockScheduler {
 
 const SCREEN_SELECTOR = "[data-vita-screen]";
 const STATUSBAR_CLOCK_INTERVAL_MS = 1000;
-const DEFAULT_SCREEN_MODULES = Object.freeze([
+export const DEFAULT_SCREEN_MODULES: readonly ScreenModule[] = Object.freeze([
   indexScreen,
   settingsScreen,
   filesScreen,
+  mailScreen,
   shellScreen,
   activityScreen,
   notificationsScreen,

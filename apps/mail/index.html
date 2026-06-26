@@ -73,8 +73,12 @@
         gap: var(--vita-mail-gap);
         min-height: 34px;
         padding: 7px 9px;
+        border: 0;
         border-radius: var(--vita-mail-radius);
+        background: transparent;
         color: var(--vita-mail-muted);
+        font: inherit;
+        text-align: left;
       }
 
       .folder[aria-current="page"] {
@@ -112,7 +116,8 @@
         font-size: 15px;
       }
 
-      .compose-button {
+      .compose-button,
+      .queue-button {
         border: 1px solid var(--vita-mail-accent);
         border-radius: var(--vita-mail-radius);
         background: var(--vita-mail-accent);
@@ -126,9 +131,15 @@
         display: grid;
         grid-template-columns: 1fr auto;
         gap: 3px 12px;
+        width: 100%;
         min-height: 88px;
         padding: 12px 14px;
+        border: 0;
         border-bottom: 1px solid var(--vita-mail-border);
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
       }
 
       .message[aria-selected="true"] {
@@ -169,6 +180,16 @@
         color: var(--vita-mail-muted);
       }
 
+      .empty-inbox {
+        display: none;
+        margin: 18px 14px;
+        color: var(--vita-mail-muted);
+      }
+
+      .empty-inbox.visible {
+        display: block;
+      }
+
       .reader {
         display: grid;
         grid-template-rows: auto 1fr auto;
@@ -194,6 +215,7 @@
         overflow: auto;
         padding: 22px 26px;
         max-width: 760px;
+        white-space: pre-wrap;
       }
 
       .composer {
@@ -220,6 +242,12 @@
         resize: vertical;
       }
 
+      .composer-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
       :focus-visible {
         outline: 2px solid var(--vita-mail-focus);
         outline-offset: 2px;
@@ -227,65 +255,50 @@
     </style>
   </head>
   <body>
-    <main class="mail-shell" data-vita-viewmodel="mail-app">
+    <main class="mail-shell" data-vita-screen="desktop/mail">
       <aside class="folders" aria-label="Mail folders">
         <h1 class="app-title">Mail</h1>
-        <ul class="folder-list" data-bind="folders">
-          <li class="folder" aria-current="page">
-            <span>Inbox</span>
-            <span class="count">2</span>
-          </li>
-          <li class="folder">
-            <span>Sent</span>
-            <span class="count">0</span>
-          </li>
-          <li class="folder">
-            <span>Outbox</span>
-            <span class="count">1</span>
-          </li>
-          <li class="folder">
-            <span>Archive</span>
-            <span class="count">0</span>
+        <ul class="folder-list" data-vita-bind-list="mail.folders">
+          <li class="folder" data-vita-key="template">
+            <span data-vita-bind-text="mail.folder.label"></span>
+            <span class="count" data-vita-bind-text="mail.folder.count"></span>
           </li>
         </ul>
       </aside>
 
       <section class="messages" aria-label="Messages">
         <div class="toolbar">
-          <h2 data-bind="activeFolderLabel">Inbox</h2>
-          <button class="compose-button" type="button" data-action="compose">Compose</button>
+          <h2 data-vita-bind-text="mail.activeFolderLabel">Mail</h2>
+          <button class="compose-button" type="button" data-vita-action="mail.composeDraft">Compose</button>
         </div>
-        <ul class="message-list" data-bind="messages">
-          <li class="message unread" aria-selected="true">
-            <span class="sender">Local System</span>
-            <time class="date" datetime="2026-06-25T09:30:00Z">09:30</time>
-            <span class="subject">Welcome to offline Mail</span>
-            <span class="preview">Your local mailbox is available without network access.</span>
-          </li>
-          <li class="message unread">
-            <span class="sender">Desk</span>
-            <time class="date" datetime="2026-06-24T18:10:00Z">Jun 24</time>
-            <span class="subject">Queued compose flow</span>
-            <span class="preview">Drafts are stored locally and move to Outbox.</span>
+        <ul class="message-list" data-vita-bind-list="mail.messages">
+          <li class="message" data-vita-key="template">
+            <span class="sender" data-vita-bind-text="mail.message.sender"></span>
+            <time class="date" data-vita-bind-attr-0="datetime:mail.message.dateTime" data-vita-bind-text="mail.message.date"></time>
+            <span class="subject" data-vita-bind-text="mail.message.subject"></span>
+            <span class="preview" data-vita-bind-text="mail.message.preview"></span>
           </li>
         </ul>
+        <p class="empty-inbox" data-vita-bind-class="visible:mail.emptyInbox" data-vita-bind-text="mail.emptyInboxText"></p>
       </section>
 
       <article class="reader" aria-label="Reading pane">
         <header class="reader-header">
-          <h1 data-bind="selectedMessage.subject">Welcome to offline Mail</h1>
-          <div class="metadata" data-bind="selectedMessage.meta">Local System to You</div>
+          <h1 data-vita-bind-text="mail.selectedMessage.subject">Select a message</h1>
+          <div class="metadata" data-vita-bind-text="mail.selectedMessage.meta"></div>
         </header>
-        <section class="body" data-bind="selectedMessage.body">
-          <p>This mail surface is static. Runtime behavior is supplied by the headless Mail view-model and the desktop binder.</p>
-          <p>Mailbox reads come from the injected local mailbox port. Compose queues to Outbox and no network send path is exposed.</p>
-        </section>
-        <form class="composer" data-bind="composeDraft">
-          <input type="text" name="to" placeholder="To">
-          <input type="text" name="subject" placeholder="Subject">
-          <textarea name="body" placeholder="Message"></textarea>
+        <section class="body" data-vita-bind-text="mail.selectedMessage.body"></section>
+        <form class="composer" data-vita-compose-form data-vita-action="mail.composeDraft" data-vita-event="input">
+          <input type="text" name="to" placeholder="To" data-vita-compose-field="to">
+          <input type="text" name="subject" placeholder="Subject" data-vita-compose-field="subject">
+          <textarea name="body" placeholder="Message" data-vita-compose-field="body"></textarea>
+          <div class="composer-actions">
+            <button class="compose-button" type="button" data-vita-action="mail.composeDraft">Save draft</button>
+            <button class="queue-button" type="button" data-vita-action="mail.queueDraft">Queue</button>
+          </div>
         </form>
       </article>
     </main>
+    <script type="module" src="runtime/bootstrap.js"></script>
   </body>
 </html>
