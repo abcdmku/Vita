@@ -2262,18 +2262,25 @@ where
         }
 
         selected_count += 1;
-        if !add_device(&path)? {
-            return Err(input_unavailable(format!(
-                "failed to add selected input device {}",
-                path.display()
-            )));
+        // PSD-055: best-effort. libinput_path_add_device returns null for event* nodes it does not
+        // handle (PC Speaker, Power Button) or cannot open; failing the WHOLE init when ANY single
+        // node can't be added wrongly disabled the mouse on the VMware guest (which exposes a
+        // keyboard + speaker + power button alongside the pointer event nodes). Skip the ones that
+        // don't add; succeed as long as at least one real input device was added.
+        if add_device(&path)? {
+            device_count += 1;
         }
-        device_count += 1;
     }
 
     if selected_count == 0 {
         return Err(input_unavailable(
             "no libinput event devices found under /dev/input",
+        ));
+    }
+
+    if device_count == 0 {
+        return Err(input_unavailable(
+            "no /dev/input event device could be added to libinput",
         ));
     }
 
@@ -2352,8 +2359,10 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn selected_input_device_add_failure_is_failsafe_error() {
-        let err = add_selected_input_devices(
+    fn selected_input_device_add_is_best_effort() {
+        // PSD-055: a single event* node that libinput won't handle (returns false) must NOT fail
+        // the whole init — the others still count. Here event0 adds, event1 does not -> count 1.
+        let count = add_selected_input_devices(
             input_paths(&[
                 "/dev/input/event0",
                 "/dev/input/mouse0",
@@ -2361,12 +2370,24 @@ mod tests {
             ]),
             |path| Ok(!path.ends_with("event1")),
         )
+        .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn all_input_devices_failing_to_add_is_failsafe_error() {
+        // If NONE of the event* nodes can be added, that IS a failure (no usable input).
+        let err = add_selected_input_devices(
+            input_paths(&["/dev/input/event0", "/dev/input/event1"]),
+            |_path| Ok(false),
+        )
         .unwrap_err();
 
         assert_eq!(
             err,
             CompositorError::Unavailable(
-                "input_unavailable: failed to add selected input device /dev/input/event1"
+                "input_unavailable: no /dev/input event device could be added to libinput"
                     .to_owned()
             )
         );
