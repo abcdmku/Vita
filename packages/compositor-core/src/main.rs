@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -678,8 +681,6 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             self.cursor_pos = self.compositor.cursor();
             channel.enqueue(format_reverse_input_event(event, &routed));
         }
-
-        channel.drain_best_effort();
     }
 
     fn finish_reverse_input(&mut self) {
@@ -735,12 +736,16 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
 }
 
 pub(crate) struct ReverseInputChannel {
-    writer: Option<Box<dyn Write>>,
-    queue: VecDeque<String>,
-    capacity: usize,
-    routed: u64,
-    dropped: u64,
+    sender: Option<mpsc::SyncSender<String>>,
+    writer: Option<thread::JoinHandle<Option<String>>>,
+    counters: Arc<ReverseInputCounters>,
     failsafe_reason: Option<String>,
+}
+
+#[derive(Default)]
+struct ReverseInputCounters {
+    routed: AtomicU64,
+    dropped: AtomicU64,
 }
 
 impl ReverseInputChannel {
@@ -755,101 +760,75 @@ impl ReverseInputChannel {
         }
     }
 
-    pub(crate) fn new(writer: Box<dyn Write>, capacity: usize) -> Self {
-        Self {
-            writer: Some(writer),
-            queue: VecDeque::with_capacity(capacity),
-            capacity,
-            routed: 0,
-            dropped: 0,
-            failsafe_reason: None,
+    pub(crate) fn new(writer: Box<dyn Write + Send>, capacity: usize) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let counters = Arc::new(ReverseInputCounters::default());
+        let writer_counters = Arc::clone(&counters);
+        let writer = thread::Builder::new()
+            .name("vita-reverse-input-writer".to_owned())
+            .spawn(move || reverse_input_writer_loop(writer, receiver, writer_counters));
+
+        match writer {
+            Ok(writer) => Self {
+                sender: Some(sender),
+                writer: Some(writer),
+                counters,
+                failsafe_reason: None,
+            },
+            Err(error) => Self {
+                sender: None,
+                writer: None,
+                counters,
+                failsafe_reason: Some(format!("writer_thread_failed:{error}")),
+            },
         }
     }
 
-    fn closed(capacity: usize) -> Self {
+    fn closed(_capacity: usize) -> Self {
         Self {
+            sender: None,
             writer: None,
-            queue: VecDeque::with_capacity(capacity),
-            capacity,
-            routed: 0,
-            dropped: 0,
+            counters: Arc::new(ReverseInputCounters::default()),
             failsafe_reason: None,
         }
     }
 
     fn enqueue(&mut self, line: String) {
-        if line.len() > MAX_INPUT_EVENT_LINE_BYTES || self.queue.len() >= self.capacity {
+        if line.len() > MAX_INPUT_EVENT_LINE_BYTES {
             self.drop_events(1);
             return;
         }
 
-        self.queue.push_back(line);
-    }
-
-    fn drain_best_effort(&mut self) {
-        while let Some(line) = self.queue.pop_front() {
-            match self.write_line(&line) {
-                ReverseInputWriteResult::Written => {
-                    self.routed = self.routed.saturating_add(1);
-                }
-                ReverseInputWriteResult::Backpressure => {
-                    self.drop_events(1 + self.queue.len());
-                    self.queue.clear();
-                    break;
-                }
-                ReverseInputWriteResult::Closed => {
-                    self.writer = None;
-                    self.drop_events(1 + self.queue.len());
-                    self.queue.clear();
-                    break;
-                }
-                ReverseInputWriteResult::Failed(reason) => {
-                    self.record_failsafe(reason);
-                    self.writer = None;
-                    self.drop_events(1 + self.queue.len());
-                    self.queue.clear();
-                    break;
-                }
-            }
-        }
-    }
-
-    fn write_line(&mut self, line: &str) -> ReverseInputWriteResult {
-        let Some(writer) = self.writer.as_mut() else {
-            return ReverseInputWriteResult::Closed;
+        let Some(sender) = self.sender.as_ref() else {
+            self.drop_events(1);
+            return;
         };
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
 
-        match writer.write(&bytes) {
-            Ok(written) if written == bytes.len() => ReverseInputWriteResult::Written,
-            Ok(_) => ReverseInputWriteResult::Failed("partial_write".to_owned()),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                ReverseInputWriteResult::Backpressure
+        match sender.try_send(line) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_line)) => self.drop_events(1),
+            Err(TrySendError::Disconnected(_line)) => {
+                self.sender = None;
+                self.drop_events(1);
             }
-            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-                ReverseInputWriteResult::Closed
-            }
-            Err(error) => ReverseInputWriteResult::Failed(format!("write_failed:{error}")),
         }
     }
 
     fn finish(&mut self) {
-        self.drain_best_effort();
-        if let Some(writer) = self.writer.as_mut() {
-            if let Err(error) = writer.flush() {
-                if error.kind() != io::ErrorKind::BrokenPipe
-                    && error.kind() != io::ErrorKind::WouldBlock
-                {
-                    self.record_failsafe(format!("flush_failed:{error}"));
-                }
+        self.sender.take();
+        if let Some(writer) = self.writer.take() {
+            match writer.join() {
+                Ok(Some(reason)) => self.record_failsafe(reason),
+                Ok(None) => {}
+                Err(_) => self.record_failsafe("writer_thread_panicked"),
             }
         }
     }
 
     fn drop_events(&mut self, count: usize) {
-        self.dropped = self.dropped.saturating_add(count as u64);
+        self.counters
+            .dropped
+            .fetch_add(count as u64, Ordering::Relaxed);
     }
 
     fn record_failsafe(&mut self, reason: impl Into<String>) {
@@ -859,16 +838,18 @@ impl ReverseInputChannel {
     }
 
     fn summary_marker(&self) -> String {
+        let routed = self.counters.routed.load(Ordering::Relaxed);
+        let dropped = self.counters.dropped.load(Ordering::Relaxed);
         match self.failsafe_reason.as_deref() {
             Some(reason) => format!(
                 "VITA-INPUT: routed={} dropped={} status=FAILSAFE reason={}",
-                self.routed,
-                self.dropped,
+                routed,
+                dropped,
                 marker_token(reason)
             ),
             None => format!(
                 "VITA-INPUT: routed={} dropped={} status=OK",
-                self.routed, self.dropped
+                routed, dropped
             ),
         }
     }
@@ -879,6 +860,85 @@ enum ReverseInputWriteResult {
     Backpressure,
     Closed,
     Failed(String),
+}
+
+fn reverse_input_writer_loop(
+    mut writer: Box<dyn Write + Send>,
+    receiver: Receiver<String>,
+    counters: Arc<ReverseInputCounters>,
+) -> Option<String> {
+    while let Ok(line) = receiver.recv() {
+        match write_reverse_input_line(&mut writer, &line) {
+            ReverseInputWriteResult::Written => {
+                counters.routed.fetch_add(1, Ordering::Relaxed);
+            }
+            ReverseInputWriteResult::Backpressure => {
+                counters.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            ReverseInputWriteResult::Closed => {
+                counters.dropped.fetch_add(1, Ordering::Relaxed);
+                count_dropped_pending(&receiver, &counters);
+                return None;
+            }
+            ReverseInputWriteResult::Failed(reason) => {
+                counters.dropped.fetch_add(1, Ordering::Relaxed);
+                count_dropped_pending(&receiver, &counters);
+                return Some(reason);
+            }
+        }
+    }
+
+    match writer.flush() {
+        Ok(()) => None,
+        Err(error)
+            if error.kind() == io::ErrorKind::BrokenPipe
+                || error.kind() == io::ErrorKind::WouldBlock =>
+        {
+            None
+        }
+        Err(error) => Some(format!("flush_failed:{error}")),
+    }
+}
+
+fn count_dropped_pending(receiver: &Receiver<String>, counters: &ReverseInputCounters) {
+    let pending = receiver.try_iter().count();
+    if pending > 0 {
+        counters
+            .dropped
+            .fetch_add(pending as u64, Ordering::Relaxed);
+    }
+}
+
+fn write_reverse_input_line(
+    writer: &mut (dyn Write + Send),
+    line: &str,
+) -> ReverseInputWriteResult {
+    let mut bytes = Vec::with_capacity(line.len() + 1);
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        match writer.write(&bytes[written..]) {
+            Ok(0) => return ReverseInputWriteResult::Failed("zero_write".to_owned()),
+            Ok(count) => {
+                written += count;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && written == 0 => {
+                return ReverseInputWriteResult::Backpressure;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                return ReverseInputWriteResult::Closed;
+            }
+            Err(error) => return ReverseInputWriteResult::Failed(format!("write_failed:{error}")),
+        }
+    }
+
+    ReverseInputWriteResult::Written
 }
 
 fn stream_input_events<B: vita_compositor_core::RenderBackend>(
@@ -1260,7 +1320,7 @@ fn empty_damage() -> DamageReport {
     }
 }
 
-fn open_input_out_writer(path: &Path) -> io::Result<Box<dyn Write>> {
+fn open_input_out_writer(path: &Path) -> io::Result<Box<dyn Write + Send>> {
     #[cfg(unix)]
     {
         open_input_out_writer_unix(path)
@@ -1278,7 +1338,7 @@ fn open_input_out_writer(path: &Path) -> io::Result<Box<dyn Write>> {
 }
 
 #[cfg(unix)]
-fn open_input_out_writer_unix(path: &Path) -> io::Result<Box<dyn Write>> {
+fn open_input_out_writer_unix(path: &Path) -> io::Result<Box<dyn Write + Send>> {
     let file_type = std::fs::metadata(path)
         .ok()
         .map(|metadata| metadata.file_type());

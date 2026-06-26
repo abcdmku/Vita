@@ -5,7 +5,9 @@ mod compositor_bin;
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use compositor_bin::{CommandDrivenSession, ReverseInputChannel};
 use vita_compositor_core::{
@@ -123,51 +125,56 @@ fn command_session_writes_reverse_input_lines_on_explicit_route_tick() {
 fn command_session_drops_reverse_input_when_queue_is_full_and_still_presents() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let poll_count = Arc::new(AtomicUsize::new(0));
-    let backend = RecordingBackend::with_events(
-        vec![
-            InputEvent::PointerMotion {
+    let composite_count = Arc::new(AtomicUsize::new(0));
+    let blocker = Arc::new(BlockingSinkState::new());
+    let backend = RecordingBackend::with_events_and_composite_count(
+        (0..64)
+            .map(|_| InputEvent::PointerMotion {
                 dx_micropixels: 1_000_000,
                 dy_micropixels: 0,
-            },
-            InputEvent::PointerMotion {
-                dx_micropixels: 1_000_000,
-                dy_micropixels: 0,
-            },
-            InputEvent::PointerMotion {
-                dx_micropixels: 1_000_000,
-                dy_micropixels: 0,
-            },
-        ],
+            })
+            .collect(),
         Arc::clone(&poll_count),
+        Arc::clone(&composite_count),
     );
     let mut session = CommandDrivenSession::new(backend, 64, 64).expect("session should create");
     session.set_reverse_input_channel(ReverseInputChannel::new(
-        Box::new(SharedSink::new(Arc::clone(&output))),
+        Box::new(BlockingSink::new(Arc::clone(&output), Arc::clone(&blocker))),
         1,
     ));
 
-    let report = run_commands(
-        &mut session,
-        &[
-            "registerSurface surface:cef 32 24 e6edf2ff",
-            "updatePlacement surface:cef 0 0 32 24 0 true",
-            "present",
-        ],
-    )
-    .expect("backpressure should not fail present");
+    let handle = thread::spawn(move || {
+        let report = run_commands(
+            &mut session,
+            &[
+                "registerSurface surface:cef 32 24 e6edf2ff",
+                "updatePlacement surface:cef 0 0 32 24 0 true",
+                "present",
+            ],
+        )
+        .expect("backpressure should not fail present");
+        (report, session)
+    });
+
+    blocker.wait_for_write_started();
+    wait_for_atomic_at_least(&composite_count, 1);
+    thread::sleep(Duration::from_millis(50));
+    blocker.release();
+    let (report, session) = handle
+        .join()
+        .expect("command session thread should not panic");
 
     assert_eq!(report.status, SelfTestStatus::Ok);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        output_lines(&output),
-        vec![
-            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=1000000 dy-micropixels=0",
-        ]
-    );
-    assert_eq!(
-        session.reverse_input_summary_marker().as_deref(),
-        Some("VITA-INPUT: routed=1 dropped=2 status=OK")
-    );
+    assert_eq!(composite_count.load(Ordering::SeqCst), 1);
+    let lines = output_lines(&output);
+    assert!(!lines.is_empty(), "at least one queued event should flush");
+    assert!(lines.iter().all(|line| line
+        == "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=1000000 dy-micropixels=0"));
+    let marker = session
+        .reverse_input_summary_marker()
+        .expect("reverse input summary should exist");
+    assert_input_summary_ok_with_drops(&marker);
 }
 
 #[test]
@@ -204,6 +211,44 @@ fn command_session_drops_reverse_input_when_sink_is_closed_and_still_presents() 
     assert_eq!(
         session.reverse_input_summary_marker().as_deref(),
         Some("VITA-INPUT: routed=0 dropped=2 status=OK")
+    );
+}
+
+#[test]
+fn command_session_preserves_reverse_input_line_across_short_writes() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let backend = RecordingBackend::with_events(
+        vec![InputEvent::PointerButton {
+            button: 1,
+            state: PointerButtonState::Pressed,
+        }],
+        Arc::clone(&poll_count),
+    );
+    let mut session = CommandDrivenSession::new(backend, 64, 64).expect("session should create");
+    session.set_reverse_input_channel(ReverseInputChannel::new(
+        Box::new(ChunkedSink::new(Arc::clone(&output), 3)),
+        8,
+    ));
+
+    let report = run_commands(
+        &mut session,
+        &[
+            "registerSurface surface:cef 32 24 e6edf2ff",
+            "updatePlacement surface:cef 0 0 32 24 0 true",
+            "present",
+        ],
+    )
+    .expect("short reverse sink writes should not corrupt the line protocol");
+
+    assert_eq!(report.status, SelfTestStatus::Ok);
+    assert_eq!(
+        output_lines(&output),
+        vec!["inputEvent surface=surface:cef kind=pointer-button button=1 state=pressed"]
+    );
+    assert_eq!(
+        session.reverse_input_summary_marker().as_deref(),
+        Some("VITA-INPUT: routed=1 dropped=0 status=OK")
     );
 }
 
@@ -258,6 +303,37 @@ fn output_lines(output: &Arc<Mutex<Vec<u8>>>) -> Vec<String> {
         .collect()
 }
 
+fn assert_input_summary_ok_with_drops(marker: &str) {
+    assert!(marker.starts_with("VITA-INPUT: routed="));
+    assert!(marker.ends_with(" status=OK"));
+    assert!(
+        summary_counter(marker, "dropped") > 0,
+        "expected dropped>0 in {marker}"
+    );
+}
+
+fn summary_counter(marker: &str, name: &str) -> u64 {
+    let prefix = format!("{name}=");
+    marker
+        .split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("missing {name}= counter in {marker}"))
+}
+
+fn wait_for_atomic_at_least(counter: &AtomicUsize, expected: usize) {
+    for _ in 0..200 {
+        if counter.load(Ordering::SeqCst) >= expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "counter did not reach {expected}; last={}",
+        counter.load(Ordering::SeqCst)
+    );
+}
+
 struct SharedSink {
     output: Arc<Mutex<Vec<u8>>>,
 }
@@ -279,6 +355,111 @@ impl Write for SharedSink {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+struct ChunkedSink {
+    output: Arc<Mutex<Vec<u8>>>,
+    max_chunk: usize,
+}
+
+impl ChunkedSink {
+    fn new(output: Arc<Mutex<Vec<u8>>>, max_chunk: usize) -> Self {
+        Self { output, max_chunk }
+    }
+}
+
+impl Write for ChunkedSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let count = self.max_chunk.min(buf.len());
+        self.output
+            .lock()
+            .expect("output lock should not be poisoned")
+            .extend_from_slice(&buf[..count]);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BlockingSink {
+    output: Arc<Mutex<Vec<u8>>>,
+    state: Arc<BlockingSinkState>,
+}
+
+impl BlockingSink {
+    fn new(output: Arc<Mutex<Vec<u8>>>, state: Arc<BlockingSinkState>) -> Self {
+        Self { output, state }
+    }
+}
+
+impl Write for BlockingSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.state.mark_write_started();
+        self.state.wait_until_released();
+        self.output
+            .lock()
+            .expect("output lock should not be poisoned")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BlockingSinkState {
+    state: Mutex<BlockingSinkFlags>,
+    changed: Condvar,
+}
+
+struct BlockingSinkFlags {
+    write_started: bool,
+    released: bool,
+}
+
+impl BlockingSinkState {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(BlockingSinkFlags {
+                write_started: false,
+                released: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn mark_write_started(&self) {
+        let mut state = self.state.lock().expect("blocking state should lock");
+        state.write_started = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_for_write_started(&self) {
+        let state = self.state.lock().expect("blocking state should lock");
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.write_started)
+            .expect("blocking state wait should not poison");
+        assert!(state.write_started, "reverse writer did not begin writing");
+    }
+
+    fn wait_until_released(&self) {
+        let state = self.state.lock().expect("blocking state should lock");
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(5), |state| !state.released)
+            .expect("blocking state wait should not poison");
+        assert!(state.released, "reverse writer was not released");
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("blocking state should lock");
+        state.released = true;
+        self.changed.notify_all();
     }
 }
 
@@ -310,10 +491,19 @@ struct RecordingBackend {
     repaint_count: u64,
     scripted_events: VecDeque<Vec<InputEvent>>,
     poll_count: Arc<AtomicUsize>,
+    composite_count: Arc<AtomicUsize>,
 }
 
 impl RecordingBackend {
     fn with_events(events: Vec<InputEvent>, poll_count: Arc<AtomicUsize>) -> Self {
+        Self::with_events_and_composite_count(events, poll_count, Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn with_events_and_composite_count(
+        events: Vec<InputEvent>,
+        poll_count: Arc<AtomicUsize>,
+        composite_count: Arc<AtomicUsize>,
+    ) -> Self {
         let mut scripted_events = VecDeque::new();
         scripted_events.push_back(events);
         Self {
@@ -321,6 +511,7 @@ impl RecordingBackend {
             repaint_count: 0,
             scripted_events,
             poll_count,
+            composite_count,
         }
     }
 }
@@ -404,6 +595,7 @@ impl RenderBackend for RecordingBackend {
         _output_width: u32,
         _output_height: u32,
     ) -> Result<CompositeReport, CompositorError> {
+        self.composite_count.fetch_add(1, Ordering::SeqCst);
         Ok(CompositeReport {
             composited: true,
             damage_rects: damage.len(),
