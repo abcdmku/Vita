@@ -96,6 +96,11 @@ export interface DesktopTheme {
   readonly tokens: DesktopThemeTokens;
 }
 
+const REPOSITION_TEXTURE_INTENT_FIELDS = Object.freeze(["rect", "textureId", "type", "windowId"]);
+const SET_FOCUS_INTENT_FIELDS = Object.freeze(["type", "windowId"]);
+const SET_TEXTURE_VISIBILITY_INTENT_FIELDS = Object.freeze(["textureId", "type", "visible", "windowId"]);
+const RECT_FIELDS = Object.freeze(["height", "width", "x", "y"]);
+
 export interface DesktopSettingsReadRequest {
   readonly key: string;
 }
@@ -232,6 +237,7 @@ function isRect(value: PlainJson | undefined): boolean {
   const rect = jsonObject(value);
 
   return rect !== undefined &&
+    hasExactFields(rect, RECT_FIELDS) &&
     isFiniteNumber(rect["x"]) &&
     isFiniteNumber(rect["y"]) &&
     isFiniteNumber(rect["width"]) &&
@@ -244,7 +250,41 @@ function isWindowManagerIntentArray(value: PlainJson | undefined): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const intent = jsonObject(value[index]);
 
-    if (intent === undefined || typeof intent["type"] !== "string") return false;
+    if (intent === undefined || !isWindowManagerIntent(intent)) return false;
+  }
+
+  return true;
+}
+
+function isWindowManagerIntent(intent: PlainJsonObject): boolean {
+  switch (intent["type"]) {
+    case "repositionTexture":
+      return hasExactFields(intent, REPOSITION_TEXTURE_INTENT_FIELDS) &&
+        typeof intent["windowId"] === "string" &&
+        typeof intent["textureId"] === "string" &&
+        isRect(intent["rect"]);
+    case "setFocus":
+      return hasExactFields(intent, SET_FOCUS_INTENT_FIELDS) &&
+        (intent["windowId"] === null || typeof intent["windowId"] === "string");
+    case "setTextureVisibility":
+      return hasExactFields(intent, SET_TEXTURE_VISIBILITY_INTENT_FIELDS) &&
+        typeof intent["windowId"] === "string" &&
+        typeof intent["textureId"] === "string" &&
+        typeof intent["visible"] === "boolean";
+  }
+
+  return false;
+}
+
+function hasExactFields(value: PlainJsonObject, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+
+  if (keys.length !== expected.length) return false;
+
+  for (let index = 0; index < expected.length; index += 1) {
+    const key = expected[index];
+
+    if (key === undefined || !Object.hasOwn(value, key)) return false;
   }
 
   return true;

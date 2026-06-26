@@ -1,9 +1,13 @@
 {
   "taskId": "PSD-348",
   "worker": "codex",
-  "status": "partial",
+  "workerSession": "codex-PSD-348-2026-06-26",
+  "status": "done",
+  "acceptanceCommand": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/apps-backend.test.ts",
+  "acceptanceResult": "pass",
   "notes": [
-    "Implementation and tests completed.",
-    "Direct tsc and node test commands passed; literal npm acceptance command is blocked by sandbox EPERM on C:\\Users\\Borg\\AppData\\Local\\nvm."
+    "Apps backend implementation and tests are present.",
+    "Revision hardens WindowManagerIntent guard to reject unknown, partial, and extra-field intent shapes.",
+    "Executed with process-local NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main so npm can run inside the sandbox without resolving the nvm symlink target."
   ]
 }

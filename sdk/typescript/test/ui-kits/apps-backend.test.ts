@@ -8,6 +8,7 @@ import {
   createDesktopAppsBackend,
   createWindowModel,
   isDesktopAppLaunch,
+  isDesktopAppStop,
   openWindow,
 } from "../../src/desktop-sdk/index.ts";
 import type {
@@ -206,6 +207,116 @@ test("apps backend fails closed when the agentd transport is absent", async () =
   assertHostFailure(await backend.launchApp(launchableApp("vita.app.no-transport")), "APP_AGENTD_UNAVAILABLE");
   assertHostFailure(await backend.stopApp("vita.app.no-transport"), "APP_AGENTD_UNAVAILABLE");
   assert.deepEqual(backend.snapshot().launched, []);
+});
+
+test("desktop app guards reject malformed window manager intents", () => {
+  const app = launchableApp("vita.app.guard");
+  const validLaunch = Object.freeze({
+    app,
+    intents: Object.freeze([
+      Object.freeze({
+        rect: Object.freeze({
+          height: 240,
+          width: 320,
+          x: 12,
+          y: 16,
+        }),
+        textureId: "texture:vita.app:guard",
+        type: "repositionTexture",
+        windowId: "window:vita.app:guard",
+      }) satisfies WindowManagerIntent,
+      Object.freeze({
+        type: "setFocus",
+        windowId: "window:vita.app:guard",
+      }) satisfies WindowManagerIntent,
+      Object.freeze({
+        textureId: "texture:vita.app:guard",
+        type: "setTextureVisibility",
+        visible: true,
+        windowId: "window:vita.app:guard",
+      }) satisfies WindowManagerIntent,
+    ]),
+    surfaceId: "surface:vita.app:guard",
+    textureId: "texture:vita.app:guard",
+    windowId: "window:vita.app:guard",
+  }) satisfies DesktopAppLaunch;
+  const validStop = Object.freeze({
+    appId: app.id,
+    intents: Object.freeze([
+      Object.freeze({
+        type: "setFocus",
+        windowId: null,
+      }) satisfies WindowManagerIntent,
+    ]),
+    surfaceId: validLaunch.surfaceId,
+    textureId: validLaunch.textureId,
+    windowId: validLaunch.windowId,
+  }) satisfies DesktopAppStop;
+
+  assert.equal(isDesktopAppLaunch(validLaunch), true);
+  assert.equal(isDesktopAppStop(validStop), true);
+  assert.equal(isDesktopAppLaunch({
+    ...validLaunch,
+    intents: Object.freeze([
+      Object.freeze({
+        type: "filesystem.delete",
+      }),
+    ]),
+  }), false);
+  assert.equal(isDesktopAppLaunch({
+    ...validLaunch,
+    intents: Object.freeze([
+      Object.freeze({
+        type: "repositionTexture",
+      }),
+    ]),
+  }), false);
+  assert.equal(isDesktopAppLaunch({
+    ...validLaunch,
+    intents: Object.freeze([
+      Object.freeze({
+        rect: Object.freeze({
+          height: 240,
+          width: 320,
+          x: 12,
+          y: 16,
+        }),
+        textureId: validLaunch.textureId,
+        type: "repositionTexture",
+        windowId: validLaunch.windowId,
+        workspaceId: "workspace-1",
+      }),
+    ]),
+  }), false);
+  assert.equal(isDesktopAppStop({
+    ...validStop,
+    intents: Object.freeze([
+      Object.freeze({
+        textureId: validStop.textureId,
+        type: "setTextureVisibility",
+        visible: true,
+        windowId: validStop.windowId,
+        workspaceId: "workspace-1",
+      }),
+    ]),
+  }), false);
+  assert.equal(isDesktopAppStop({
+    ...validStop,
+    intents: Object.freeze([
+      Object.freeze({
+        rect: Object.freeze({
+          height: 240,
+          width: 320,
+          x: 12,
+          y: 16,
+          z: 0,
+        }),
+        textureId: validStop.textureId,
+        type: "repositionTexture",
+        windowId: validStop.windowId,
+      }),
+    ]),
+  }), false);
 });
 
 interface AgentdCall {
