@@ -2160,6 +2160,7 @@ impl LibinputState {
                     break;
                 }
                 let event_type = (libinput.event_get_type)(event);
+                eprintln!("VITA-INPUT-DIAG: libinput raw event type={event_type}");
                 match event_type {
                     LIBINPUT_EVENT_KEYBOARD_KEY => {
                         let key_event = (libinput.event_get_keyboard_event)(event);
