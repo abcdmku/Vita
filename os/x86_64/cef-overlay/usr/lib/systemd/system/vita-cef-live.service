@@ -41,6 +41,8 @@ DeviceAllow=char-drm rw
 # devices need READ-WRITE here — char-input 'r' silently fails the open and disables the mouse.
 DeviceAllow=char-input rw
 DeviceAllow=/dev/tty0 rw
+# Verification-only: the gated input self-test creates a virtual pointer via /dev/uinput.
+DeviceAllow=/dev/uinput rw
 
 [Install]
 WantedBy=multi-user.target
