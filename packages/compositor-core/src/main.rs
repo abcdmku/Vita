@@ -45,10 +45,12 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .iter()
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
+let continuous = args.iter().any(|arg| arg == "--continuous");
         run_command_stream(
             parse_hold_seconds(&args)?,
             parse_screenshot_path(&args)?,
             parse_input_out_path(&args)?,
+            continuous,
         )
     } else if args.iter().any(|arg| arg == "--serve") {
         serve()
@@ -97,6 +99,7 @@ fn run_command_stream(
     hold_seconds: u64,
     screenshot_path: Option<PathBuf>,
     input_out_path: Option<PathBuf>,
+    continuous: bool,
 ) -> Result<(), CompositorError> {
     let mut reverse_input = input_out_path
         .as_deref()
@@ -125,6 +128,32 @@ fn run_command_stream(
         session.set_reverse_input_channel(channel);
     }
     let stdin = io::stdin();
+
+    // PERSISTENT desktop (spike/cef-vm): --continuous keeps the compositor presenting every
+    // frame the CEF stream delivers, indefinitely, so a powered-on VM shows the LIVE desktop
+    // rather than a few-frame flash. The stream never EOFs in normal operation; the OK marker
+    // (which carries gpu=…/present=kms — the verification gate) must therefore be emitted ONCE
+    // after the FIRST successful present, not at EOF. write_screenshot is skipped (the desktop
+    // is live on the GPU; the running VM is captured with vmrun captureScreen). On a clean EOF
+    // (the upstream pipe closed) we exit 0 fail-closed; on error we emit the failsafe marker.
+    if continuous {
+        // The closure emits the REAL VITA-COMPOSITOR OK marker (with gpu=…/present=kms — the
+        // verification gate) exactly once, right after the first frame is presented on the GPU.
+        let report = match session.run_continuous(stdin.lock(), |marker| {
+            emit_marker_best_effort(marker);
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let report = session.failsafe_report(command_failsafe_reason(&error));
+                emit_marker(&report.marker_line())?;
+                return Err(error);
+            }
+        };
+        // Reached only on a clean upstream EOF: emit the final report and exit.
+        emit_marker(&report.marker_line())?;
+        return Ok(());
+    }
+
     let report = match session.run(stdin.lock()) {
         Ok(report) => report,
         Err(error) => {
@@ -152,6 +181,14 @@ fn run_command_stream(
     emit_marker(&report.marker_line())?;
     thread::sleep(Duration::from_secs(hold_seconds));
     Ok(())
+}
+
+// Emit a marker line to stdout, ignoring any I/O error (used from the continuous-present hot
+// path where a transient stdout error must not tear the live desktop down).
+fn emit_marker_best_effort(line: &str) {
+    let mut stdout = io::stdout();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 fn emit_marker(line: &str) -> Result<(), CompositorError> {
@@ -330,6 +367,38 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
                 return Err(CompositorError::Protocol("empty command".to_owned()));
             }
             self.handle_line(&line)?;
+        }
+
+        if !self.presented {
+            return Err(CompositorError::Protocol(
+                "command stream ended before present".to_owned(),
+            ));
+        }
+
+        Ok(self.ok_report())
+    }
+
+    // PERSISTENT desktop (spike/cef-vm): like `run`, but the OK report marker is emitted (via
+    // `on_first_present`) the FIRST time a frame is presented, and the loop then keeps reading +
+    // presenting every subsequent frame indefinitely. It returns the ok_report only on a CLEAN
+    // EOF (the upstream CEF pipe closed). This is what keeps the live desktop on the KMS scanout
+    // for the whole life of the powered-on VM instead of a few-frame flash.
+    fn run_continuous<R: BufRead>(
+        &mut self,
+        reader: R,
+        mut on_first_present: impl FnMut(&str),
+    ) -> Result<SelfTestReport, CompositorError> {
+        let mut announced = false;
+        for line in reader.lines() {
+            let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
+            if line.trim().is_empty() {
+                return Err(CompositorError::Protocol("empty command".to_owned()));
+            }
+            self.handle_line(&line)?;
+            if !announced && self.presented {
+                announced = true;
+                on_first_present(&self.ok_report().marker_line());
+            }
         }
 
         if !self.presented {
