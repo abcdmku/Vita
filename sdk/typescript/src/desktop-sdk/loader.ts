@@ -52,6 +52,9 @@ import type {
   DesktopUiPackage,
   DesktopUiPackageManifest,
   DesktopLauncherIntent,
+  OwnerAuthAgentdTransport,
+  OwnerAuthRequest,
+  OwnerAuthSession,
 } from "./ui-package.ts";
 
 export const KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID = "vita.desktop-ui.known-good";
@@ -144,6 +147,15 @@ const SETTINGS_READ_FIELDS = Object.freeze(["key"]);
 const SETTINGS_WRITE_FIELDS = Object.freeze(["key", "value"]);
 const LAUNCHER_INTENT_REQUIRED_FIELDS = Object.freeze(["type"]);
 const LAUNCHER_INTENT_OPTIONAL_FIELDS = Object.freeze(["appId", "query"]);
+const OWNER_AUTH_REQUEST_FIELDS = Object.freeze(["assertion", "user"]);
+const OWNER_AUTH_ASSERTION_FIELDS = Object.freeze(["action", "authenticatorData", "clientDataJSON", "credentialId", "signature"]);
+const OWNER_AUTH_USER_FIELDS = Object.freeze(["displayName", "id", "initials"]);
+const OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS = Object.freeze(["ok"]);
+const OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS = Object.freeze(["error", "value"]);
+const OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
+const OWNER_AUTH_AGENTD_ERROR_OPTIONAL_FIELDS = Object.freeze(["status"]);
+const OWNER_AUTH_VERDICT_SUCCESS_FIELDS = Object.freeze(["action", "verified"]);
+const OWNER_AUTH_VERDICT_DENY_FIELDS = Object.freeze(["reason", "verified"]);
 const CAPABILITY_DENIED_CODE = "CAP_DENIED";
 
 export const knownGoodDesktopUiPackage: DesktopUiPackage = Object.freeze({
@@ -427,9 +439,11 @@ export function createDesktopHostForPackage(
   manifest: DesktopUiPackageManifest,
   options: {
     readonly builtIn?: boolean;
+    readonly ownerAuthAgentd?: OwnerAuthAgentdTransport;
   } = Object.freeze({}),
 ): DesktopHost {
   const canRegisterReservedComponents = options.builtIn === true;
+  const ownerAuthAgentd = options.ownerAuthAgentd;
   const packageManifest = snapshotDesktopCapabilityManifest(manifest);
   const scoped: {
     package: DesktopUiPackageManifest;
@@ -447,6 +461,7 @@ export function createDesktopHostForPackage(
     previewSetting?: (request: DesktopSettingsWriteRequest) => DesktopMaybePromise<DesktopHostResult<DesktopSettingsPreview>>;
     applySetting?: (request: DesktopSettingsWriteRequest) => DesktopMaybePromise<DesktopHostResult<DesktopSettingsApply>>;
     emitLauncherIntent?: (intent: DesktopLauncherIntent) => DesktopMaybePromise<DesktopHostResult<true>>;
+    authenticateOwner?: (request: OwnerAuthRequest) => DesktopMaybePromise<DesktopHostResult<OwnerAuthSession>>;
     readTheme: () => DesktopTheme;
   } = {
     applyShell(definition) {
@@ -595,8 +610,65 @@ export function createDesktopHostForPackage(
       return host.emitLauncherIntent?.(snapshot.value) ?? hostReject("LAUNCHER_PORT_UNAVAILABLE", "launcher port is unavailable.", "/launcher");
     };
   }
+  if (ownerAuthAgentd !== undefined || host.authenticateOwner !== undefined) {
+    scoped.authenticateOwner = async (request) => {
+      const snapshot = normalizeOwnerAuthRequest(request, "/authenticateOwner");
+
+      if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
+      if (!hasDesktopCapabilityGrant(packageManifest, "owner.auth")) {
+        return hostReject(
+          "MISSING_CAPABILITY",
+          "package cannot authenticate the local owner.",
+          "/capabilityGrants/owner.auth",
+        );
+      }
+
+      if (ownerAuthAgentd !== undefined) {
+        return await authenticateOwnerWithAgentd(ownerAuthAgentd, snapshot.value);
+      }
+
+      return await (host.authenticateOwner?.(snapshot.value) ?? hostReject(
+        "OWNER_AUTH_PORT_UNAVAILABLE",
+        "owner authentication port is unavailable.",
+        "/authenticateOwner",
+      ));
+    };
+  }
 
   return Object.freeze(scoped);
+}
+
+async function authenticateOwnerWithAgentd(
+  agentd: OwnerAuthAgentdTransport,
+  request: OwnerAuthRequest,
+): Promise<DesktopHostResult<OwnerAuthSession>> {
+  let rawResult: unknown;
+
+  try {
+    rawResult = await agentd.call("webauthn.get", ownerAuthAgentdRequest(request));
+  } catch {
+    return hostReject("OWNER_AUTH_AGENTD_FAILED", "owner authentication transport failed closed.", "/authenticateOwner");
+  }
+
+  const agentdResult = normalizeOwnerAuthAgentdResult(rawResult);
+
+  if (!agentdResult.ok) return hostRejectFromValidation(agentdResult.error);
+
+  const verdict = normalizeOwnerAuthVerdict(agentdResult.value, request.user);
+
+  return verdict.ok ? acceptHost(verdict.value) : hostRejectFromValidation(verdict.error);
+}
+
+function ownerAuthAgentdRequest(request: OwnerAuthRequest): PlainJsonObject {
+  return Object.freeze({
+    assertion: Object.freeze({
+      action: request.assertion.action,
+      authenticatorData: request.assertion.authenticatorData,
+      clientDataJSON: request.assertion.clientDataJSON,
+      credentialId: request.assertion.credentialId,
+      signature: request.assertion.signature,
+    }),
+  });
 }
 
 function snapshotDesktopCapabilityManifest(manifest: DesktopUiPackageManifest): DesktopUiPackageManifest {
@@ -1161,6 +1233,168 @@ function normalizeLauncherIntent(input: unknown, path: string): DesktopUiValidat
   if (query.value !== undefined) output.query = query.value;
 
   return accept(Object.freeze(output));
+}
+
+function normalizeOwnerAuthRequest(input: unknown, path: string): DesktopUiValidationResult<OwnerAuthRequest> {
+  const object = normalizeHostRequestObject(input, OWNER_AUTH_REQUEST_FIELDS, Object.freeze([]), path);
+
+  if (!object.ok) return object;
+
+  const assertion = normalizeOwnerAuthAssertion(field(object.value, "assertion"), `${path}/assertion`);
+  const user = normalizeOwnerAuthUser(field(object.value, "user"), `${path}/user`);
+
+  if (!assertion.ok) return assertion;
+  if (!user.ok) return user;
+
+  return accept(Object.freeze({
+    assertion: assertion.value,
+    user: user.value,
+  }));
+}
+
+function normalizeOwnerAuthAssertion(
+  input: PlainJson | undefined,
+  path: string,
+): DesktopUiValidationResult<OwnerAuthRequest["assertion"]> {
+  if (!isPlainObject(input)) {
+    return reject("INVALID_HOST_REQUEST", "owner auth assertion must be an object.", path);
+  }
+
+  const fields = expectFields(input, OWNER_AUTH_ASSERTION_FIELDS, Object.freeze([]), path);
+
+  if (!fields.ok) return fields;
+
+  const credentialId = normalizePlainString(field(input, "credentialId"), `${path}/credentialId`, true);
+  const authenticatorData = normalizePlainString(field(input, "authenticatorData"), `${path}/authenticatorData`, true);
+  const clientDataJSON = normalizePlainString(field(input, "clientDataJSON"), `${path}/clientDataJSON`, true);
+  const signature = normalizePlainString(field(input, "signature"), `${path}/signature`, true);
+  const action = normalizePlainString(field(input, "action"), `${path}/action`, true);
+
+  if (!credentialId.ok) return credentialId;
+  if (!authenticatorData.ok) return authenticatorData;
+  if (!clientDataJSON.ok) return clientDataJSON;
+  if (!signature.ok) return signature;
+  if (!action.ok) return action;
+
+  return accept(Object.freeze({
+    action: action.value,
+    authenticatorData: authenticatorData.value,
+    clientDataJSON: clientDataJSON.value,
+    credentialId: credentialId.value,
+    signature: signature.value,
+  }));
+}
+
+function normalizeOwnerAuthUser(
+  input: PlainJson | undefined,
+  path: string,
+): DesktopUiValidationResult<OwnerAuthRequest["user"]> {
+  if (!isPlainObject(input)) {
+    return reject("INVALID_HOST_REQUEST", "owner auth user must be an object.", path);
+  }
+
+  const fields = expectFields(input, OWNER_AUTH_USER_FIELDS, Object.freeze([]), path);
+
+  if (!fields.ok) return fields;
+
+  const id = normalizePlainString(field(input, "id"), `${path}/id`, true);
+  const displayName = normalizePlainString(field(input, "displayName"), `${path}/displayName`, true);
+  const initials = normalizePlainString(field(input, "initials"), `${path}/initials`, true);
+
+  if (!id.ok) return id;
+  if (!displayName.ok) return displayName;
+  if (!initials.ok) return initials;
+
+  return accept(Object.freeze({
+    displayName: displayName.value,
+    id: id.value,
+    initials: initials.value,
+  }));
+}
+
+function normalizeOwnerAuthAgentdResult(input: unknown): DesktopUiValidationResult<PlainJsonObject> {
+  const object = normalizePlainObjectInput(input, "/authenticateOwner/agentd");
+
+  if (!object.ok) {
+    return reject("MALFORMED_OWNER_AUTH_RESPONSE", object.error.message, "/authenticateOwner/agentd");
+  }
+
+  const fields = expectFields(
+    object.value,
+    OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS,
+    OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS,
+    "/authenticateOwner/agentd",
+  );
+
+  if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
+
+  const ok = field(object.value, "ok");
+
+  if (ok === true) {
+    const value = field(object.value, "value");
+
+    if (!isPlainObject(value) || Object.hasOwn(object.value, "error")) {
+      return reject("MALFORMED_OWNER_AUTH_RESPONSE", "agentd success result is malformed.", "/authenticateOwner/agentd/value");
+    }
+
+    return accept(value);
+  }
+  if (ok === false) {
+    const errorValue = field(object.value, "error");
+    const errorObject = isPlainObject(errorValue) ? errorValue : undefined;
+
+    if (errorObject !== undefined) {
+      const errorFields = expectFields(
+        errorObject,
+        OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS,
+        OWNER_AUTH_AGENTD_ERROR_OPTIONAL_FIELDS,
+        "/authenticateOwner/agentd/error",
+      );
+
+      if (!errorFields.ok) {
+        return reject("MALFORMED_OWNER_AUTH_RESPONSE", errorFields.error.message, errorFields.error.path);
+      }
+    }
+
+    return reject("OWNER_AUTH_AGENTD_FAILED", "agentd rejected owner authentication.", "/authenticateOwner/agentd");
+  }
+
+  return reject("MALFORMED_OWNER_AUTH_RESPONSE", "agentd result is malformed.", "/authenticateOwner/agentd/ok");
+}
+
+function normalizeOwnerAuthVerdict(
+  input: PlainJsonObject,
+  user: OwnerAuthRequest["user"],
+): DesktopUiValidationResult<OwnerAuthSession> {
+  const verified = field(input, "verified");
+
+  if (verified === true) {
+    const fields = expectFields(input, OWNER_AUTH_VERDICT_SUCCESS_FIELDS, Object.freeze([]), "/authenticateOwner/agentd/value");
+
+    if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
+
+    const action = normalizePlainString(field(input, "action"), "/authenticateOwner/agentd/value/action", true);
+
+    if (!action.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", action.error.message, action.error.path);
+
+    return accept(Object.freeze({
+      sessionId: `owner:${user.id}:${action.value}`,
+      user,
+    }));
+  }
+  if (verified === false) {
+    const fields = expectFields(input, OWNER_AUTH_VERDICT_DENY_FIELDS, Object.freeze([]), "/authenticateOwner/agentd/value");
+
+    if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
+
+    const reason = normalizePlainString(field(input, "reason"), "/authenticateOwner/agentd/value/reason", true);
+
+    if (!reason.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", reason.error.message, reason.error.path);
+
+    return reject("AUTHENTICATION_REJECTED", "owner passkey assertion was denied.", "/authenticateOwner");
+  }
+
+  return reject("MALFORMED_OWNER_AUTH_RESPONSE", "owner passkey verdict is malformed.", "/authenticateOwner/agentd/value/verified");
 }
 
 function normalizeHostRequestObject(
@@ -1954,6 +2188,7 @@ function isDesktopCapability(value: PlainJson | undefined): value is DesktopCapa
     value === "files.read" ||
     value === "files.write" ||
     value === "launcher.launch" ||
+    value === "owner.auth" ||
     value === "settings.read" ||
     value === "settings.write" ||
     value === "shell.notifications.post" ||
@@ -2014,6 +2249,13 @@ function reject<T>(code: string, message: string, path: string): DesktopUiValida
 
 function hostRejectFromValidation<T>(error: DesktopUiValidationError): DesktopHostResult<T> {
   return hostReject(error.code, error.message, error.path);
+}
+
+function acceptHost<T>(value: T): DesktopHostResult<T> {
+  return {
+    ok: true,
+    value,
+  };
 }
 
 function hostReject<T>(code: string, message: string, path: string): DesktopHostResult<T> {
