@@ -166,7 +166,7 @@ export const indexScreenActions: ReadonlyMap<string, ScreenActionHandler<IndexSc
       viewModel.setPaletteQuery(queryFromContext(context));
     }],
     ["palette.nav", (viewModel, context) => {
-      const key = readOwnString(context.event, "key");
+      const key = readEventKey(context.event);
 
       if (key === "Escape") {
         viewModel.closePalette();
@@ -180,7 +180,7 @@ export const indexScreenActions: ReadonlyMap<string, ScreenActionHandler<IndexSc
       viewModel.movePaletteSelection(navDeltaFromContext(context));
     }],
     ["shell.key", (viewModel, context) => {
-      const key = readOwnString(context.event, "key");
+      const key = readEventKey(context.event);
 
       if (isPaletteToggleChord(context.event)) {
         viewModel.togglePalette();
@@ -601,7 +601,7 @@ function navDeltaFromContext(context: VitaActionContext<IndexScreenState>): numb
 
   if (delta !== undefined) return delta;
 
-  const key = readOwnString(context.event, "key");
+  const key = readEventKey(context.event);
 
   if (key === "ArrowUp") return -1;
   if (key === "ArrowDown") return 1;
@@ -639,27 +639,54 @@ function menuItemIdFromContext(context: VitaActionContext<IndexScreenState>): st
 
 // Cmd/Ctrl-K toggles the command palette (the global shell shortcut).
 function isPaletteToggleChord(event: VitaActionContext<IndexScreenState>["event"]): boolean {
-  const key = readOwnString(event, "key");
+  const key = readEventKey(event);
 
   if (key !== "k" && key !== "K") return false;
 
-  return readOwnBoolean(event, "metaKey") || readOwnBoolean(event, "ctrlKey");
+  return readEventBoolean(event, "metaKey") || readEventBoolean(event, "ctrlKey");
 }
 
-function readOwnBoolean(source: unknown, key: string): boolean {
-  if (!isObjectLike(source)) return false;
+// A keyboard event's `key`/`ctrlKey`/`metaKey` are OWN data props on the binder's plain test events
+// but INHERITED accessors on a real DOM KeyboardEvent. Resolve both so the chord works live AND in
+// tests (mirrors bootstrap.ts's own-or-getter reader; still no prototype WALK beyond the getter).
+function readEventKey(event: unknown): string | undefined {
+  return readObjectString(event, "key") ?? readObjectString(event, "code");
+}
+
+function readObjectString(source: unknown, key: string): string | undefined {
+  const value = readOwnOrAccessor(source, key);
+
+  return typeof value === "string" ? value : undefined;
+}
+
+function readEventBoolean(source: unknown, key: string): boolean {
+  return readOwnOrAccessor(source, key) === true;
+}
+
+function readOwnOrAccessor(source: unknown, key: string): unknown {
+  if (!isObjectLike(source)) return undefined;
 
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    let current: object | null = source;
 
-    if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
-      return false;
+    for (let depth = 0; depth < 4 && current !== null; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+
+      if (descriptor !== undefined) {
+        if (Object.prototype.hasOwnProperty.call(descriptor, "value")) return descriptor.value;
+
+        const getter = descriptor.get;
+
+        return typeof getter === "function" ? Reflect.apply(getter, source, []) : undefined;
+      }
+
+      current = Object.getPrototypeOf(current) as object | null;
     }
-
-    return descriptor.value === true;
   } catch {
-    return false;
+    return undefined;
   }
+
+  return undefined;
 }
 
 function rootSnapshotFromContext(context: VitaActionContext<IndexScreenState>): IndexScreenRootState | undefined {
