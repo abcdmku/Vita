@@ -450,8 +450,10 @@ function installCefOverlay() {
     const launchBody = readFileSync(launchSh);
     const snapshotPath = join(cefDst, "flagship-firstframe.commands");
     const cursorPath = join(cefDst, "cursor.commands");
+    const injectorPath = join(cefDst, "uinput-inject.ts");
     const snapshotBody = existsSync(snapshotPath) ? readFileSync(snapshotPath) : null;
     const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
+    const injectorBody = existsSync(injectorPath) ? readFileSync(injectorPath) : null;
     rmSync(cefDst, { recursive: true, force: true });
     mkdirSync(cefDst, { recursive: true });
     cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
@@ -466,6 +468,7 @@ function installCefOverlay() {
     // optional too. Both are committed so they are normally present.
     if (snapshotBody) writeFileSync(snapshotPath, snapshotBody);
     if (cursorBody) writeFileSync(cursorPath, cursorBody);
+    if (injectorBody) writeFileSync(injectorPath, injectorBody);  // PSD-055 verification injector
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
     // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
     rmSync(uikitsDst, { recursive: true, force: true });
@@ -603,6 +606,9 @@ if (MODE === "smoke") {
   }
   const cmdline = `console=ttyS0,115200 ${rootOpts} systemd.firstboot=off systemd.mask=getty@tty1.service` +
     (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
+    // PSD-055 verification: bake the input self-test token so the CEF launch script injects a
+    // scripted gesture at boot (uinput -> libinput -> route -> CEF) on the real GPU. Off by default.
+    (process.env.VITA_INPUT_SELFTEST === "1" ? " vita.input_selftest=1" : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,

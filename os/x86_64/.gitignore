@@ -28,4 +28,5 @@ cef-overlay/usr/lib/vita/cef/*
 # seconds of boot (installCefOverlay preserves them across the runtime re-stage).
 !cef-overlay/usr/lib/vita/cef/flagship-firstframe.commands
 !cef-overlay/usr/lib/vita/cef/cursor.commands
+!cef-overlay/usr/lib/vita/cef/uinput-inject.ts
 cef-overlay/usr/lib/vita/ui_kits/

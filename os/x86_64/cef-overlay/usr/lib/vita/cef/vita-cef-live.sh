@@ -109,6 +109,25 @@ COMP_OUT=/run/vita-cef-comp.out
 cd "$CEF_DIR" || { emit_failsafe "cef_dir_cd"; exit 0; }
 set -o pipefail
 
+# --- OPTIONAL input self-test (verification only; VITA_CEF_INPUT_SELFTEST=1) ------------------
+# Creates a virtual uinput pointer BEFORE the compositor starts (so libinput enumerates it on the
+# real vmwgfx/KMS at boot — no GPU-master race), then injects a scripted motion+click AFTER the
+# first present. Proves the full PSD-055 loop (libinput -> route -> reverse FIFO -> CEF SendEvent +
+# visible cursor) end-to-end on the real GPU. OFF by default; not part of normal boot.
+INJ_FD=""
+# Gate: env var OR the kernel cmdline token vita.input_selftest=1 (set in the verification vmx).
+selftest=0
+[ "${VITA_CEF_INPUT_SELFTEST:-0}" = "1" ] && selftest=1
+grep -qw "vita.input_selftest=1" /proc/cmdline 2>/dev/null && selftest=1
+if [ "$selftest" = "1" ] && [ -x /usr/lib/vita/deno ] && [ -e "$CEF_DIR/uinput-inject.ts" ]; then
+  rm -f /run/vita-inj.cmd; mkfifo /run/vita-inj.cmd 2>/dev/null || true
+  setsid bash -c "/usr/lib/vita/deno run -A $CEF_DIR/uinput-inject.ts create < /run/vita-inj.cmd > /run/vita-inj.log 2>&1" &
+  exec 6<>/run/vita-inj.cmd
+  INJ_FD=6
+  sleep 2
+  emit_line "$MARKER: input-selftest uinput_ready=$(grep -c READY /run/vita-inj.log 2>/dev/null)"
+fi
+
 # The compositor side: --input-out opens the FIFO for WRITE (routed input -> osr_host).
 # The producer side: emit the prelude FIRST (instant desktop), then exec osr_host live-streaming
 # the flagship and reading the input FIFO (--input-in). exec replaces the subshell so the pipe
@@ -143,7 +162,20 @@ done < "$COMP_OUT"
 
 if [ "$seen_ok" -eq 1 ]; then
   present=$(grep -m1 "^VITA-COMPOSITOR:" "$COMP_OUT" | sed -n 's/.*present=\([^ ]*\).*/\1/p')
-  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} status=OK persistent=yes instant=$have_snapshot interactive=yes"
+  input_state=$(grep -aoE "input=[a-z]+" "$COMP_OUT" | head -1)
+  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes instant=$have_snapshot interactive=yes"
+
+  # OPTIONAL input self-test: inject a scripted gesture now that the desktop is live, then report
+  # how many events CEF actually received (proof the loop works on the real GPU).
+  if [ -n "$INJ_FD" ]; then
+    sleep 2
+    i=0; while [ "$i" -lt 110 ]; do echo "move 2 -3" >&6 2>/dev/null; i=$((i+1)); done
+    sleep 1; echo "click" >&6 2>/dev/null; sleep 1; echo "move 0 0" >&6 2>/dev/null; sleep 2
+    sends=$(grep -acE "input: SendMouse" "$CEF_LOG" 2>/dev/null)
+    clicks=$(grep -acE "input: SendMouseClick" "$CEF_LOG" 2>/dev/null)
+    lastmove=$(grep -aE "input: SendMouseMove" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*input:/input:/')
+    emit_line "$MARKER: input-selftest SendMouse=$sends clicks=$clicks $lastmove"
+  fi
 else
   cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error|input:" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
   emit_line "$MARKER: cef_diag=${cef_tail:-none}"
