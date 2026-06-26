@@ -1,0 +1,22 @@
+{
+  "id": "PSD-504",
+  "session": "codex-PSD-504",
+  "command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/files-app-surface.test.ts",
+  "status": "pass",
+  "environmentNote": "PowerShell rejected && and direct npm invocation hit the sandbox nvm junction lstat permission issue, so the acceptance string was executed through cmd /c with NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main. The underlying typecheck and test target were unchanged.",
+  "output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "TAP version 13",
+    "ok 1 - Files app HTML removes the baked seed rows and keeps a keyed binder template",
+    "ok 2 - Files app emitted bootstrap bundle exists for the HTML-loaded runtime",
+    "ok 3 - Files app bootstrap hydrates entries and path from the injected host bridge files port",
+    "ok 4 - Files app bootstrap fails closed honestly when grant or port injection is missing",
+    "ok 5 - Files app bootstrap fails closed when transport exists without an injected grant package",
+    "ok 6 - Files app select and open actions update state through the injected files port",
+    "1..6",
+    "# tests 6",
+    "# pass 6",
+    "# fail 0"
+  ]
+}
