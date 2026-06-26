@@ -8,15 +8,16 @@
     "> tsc --noEmit -p tsconfig.json",
     "TAP version 13",
     "ok 1 - mail markup removes the baked fake inbox and declares the hydrated screen",
-    "ok 2 - mail screen is registered in the default desktop modules",
-    "ok 3 - mail screen renders caller-injected mailbox data and reloads from the port",
-    "ok 4 - mail empty-inbox state is visible for an injected empty folder",
-    "ok 5 - mail screen fails closed honestly when no mailbox port is injected",
-    "ok 6 - mail queue action reads compose form values and queues the entered draft",
-    "1..6",
-    "# tests 6",
+    "ok 2 - mail markup references an existing desktop runtime script",
+    "ok 3 - mail screen is registered in the default desktop modules",
+    "ok 4 - mail screen renders caller-injected mailbox data and reloads from the port",
+    "ok 5 - mail empty-inbox state is visible for an injected empty folder",
+    "ok 6 - mail screen fails closed honestly when no mailbox port is injected",
+    "ok 7 - mail queue action reads compose form values and queues the entered draft",
+    "1..7",
+    "# tests 7",
     "# suites 0",
-    "# pass 6",
+    "# pass 7",
     "# fail 0",
     "# cancelled 0",
     "# skipped 0",
@@ -24,6 +25,6 @@
   ],
   "extraChecks": [
     "tsc --noEmit -p tsconfig.json: pass",
-    "node --experimental-strip-types --test sdk/typescript/test/ui-kits/mail-screen.test.ts: pass (6 tests)"
+    "node --experimental-strip-types --test sdk/typescript/test/ui-kits/mail-screen.test.ts: pass (7 tests)"
   ]
 }

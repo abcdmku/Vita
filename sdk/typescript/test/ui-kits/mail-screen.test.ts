@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+} from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -37,7 +40,7 @@ import type {
 } from "../../src/desktop-sdk/index.ts";
 
 test("mail markup removes the baked fake inbox and declares the hydrated screen", () => {
-  const html = readFileSync(new URL("../../../../apps/mail/index.html", import.meta.url), "utf8");
+  const html = readMailHtml();
 
   assert.equal(html.includes('data-vita-screen="desktop/mail"'), true);
   assert.equal(html.includes("Welcome to offline Mail"), false);
@@ -52,7 +55,14 @@ test("mail markup removes the baked fake inbox and declares the hydrated screen"
   assert.equal(html.includes('<span class="count">0</span>'), false);
   assert.equal(html.includes('data-vita-bind-list="mail.folders"'), true);
   assert.equal(html.includes('data-vita-bind-list="mail.messages"'), true);
-  assert.equal(html.includes('<script type="module" src="runtime/bootstrap.js"></script>'), true);
+});
+
+test("mail markup references an existing desktop runtime script", () => {
+  const html = readMailHtml();
+  const scriptSrc = runtimeScriptSource(html);
+
+  assert.equal(scriptSrc, "../../ui_kits/desktop/runtime/bootstrap.js");
+  assert.equal(existsSync(new URL(scriptSrc, mailHtmlUrl())), true);
 });
 
 test("mail screen is registered in the default desktop modules", () => {
@@ -279,6 +289,23 @@ function mailDom(): MailDom {
     subject: composeSubject,
     to,
   });
+}
+
+function readMailHtml(): string {
+  return readFileSync(mailHtmlUrl(), "utf8");
+}
+
+function mailHtmlUrl(): URL {
+  return new URL("../../../../apps/mail/index.html", import.meta.url);
+}
+
+function runtimeScriptSource(html: string): string {
+  const match = /<script\s+type="module"\s+src="([^"]+)"\s*><\/script>/u.exec(html);
+  const src = match?.[1];
+
+  if (src === undefined) assert.fail("missing module runtime script");
+
+  return src;
 }
 
 function mutableMailbox(
