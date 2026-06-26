@@ -784,15 +784,22 @@ void ApplyInputLineOnUi(std::string line) {
     if (!down && (button == 272 || button == 1)) {
       CefRefPtr<CefFrame> mf = browser->GetMainFrame();
       if (mf) {
-        char js[512];
+        char js[1024];
         snprintf(js, sizeof(js),
                  "(function(){var x=%d,y=%d;var L=globalThis.__vitaLog||function(){};"
-                 "var el=document.elementFromPoint(x,y);"
-                 "L('VITA-POINTERCLICK at ('+x+','+y+') dpr='+window.devicePixelRatio+' el='+(el?el.tagName+'.'+(el.className||''):'NULL'));"
-                 "if(!el)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
-                 "el.dispatchEvent(new MouseEvent('mousedown',o));"
-                 "el.dispatchEvent(new MouseEvent('mouseup',o));"
-                 "el.dispatchEvent(new MouseEvent('click',o));}());",
+                 "var stack=document.elementsFromPoint(x,y);"
+                 "var el=stack[0]||null;"
+                 // A full-screen scrim/overlay can sit above the real target (e.g. the command-palette
+                 // backdrop). Click the TOPMOST interactive element at this point (the first that is a
+                 // dock tile, palette item, or has a vita action) rather than the inert scrim.
+                 "var pick=null;for(var i=0;i<stack.length;i++){var e=stack[i];"
+                 "  if(e.closest&&(e.closest('[data-vita-dock-app-id]')||e.closest('[data-vita-action]'))){pick=e;break;}}"
+                 "var tgt=pick||el;"
+                 "L('VITA-POINTERCLICK at ('+x+','+y+') top='+(el?el.tagName+'.'+(el.className||''):'NULL')+' pick='+(pick?pick.tagName+'.'+(pick.className||''):'none'));"
+                 "if(!tgt)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
+                 "tgt.dispatchEvent(new MouseEvent('mousedown',o));"
+                 "tgt.dispatchEvent(new MouseEvent('mouseup',o));"
+                 "tgt.dispatchEvent(new MouseEvent('click',o));}());",
                  vx, vy);
         mf->ExecuteJavaScript(js, "vita://pointer-click", 0);
       }
