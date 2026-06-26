@@ -120,12 +120,21 @@ selftest=0
 [ "${VITA_CEF_INPUT_SELFTEST:-0}" = "1" ] && selftest=1
 grep -qw "vita.input_selftest=1" /proc/cmdline 2>/dev/null && selftest=1
 if [ "$selftest" = "1" ] && [ -x /usr/lib/vita/deno ] && [ -e "$CEF_DIR/uinput-inject.ts" ]; then
+  before=$(ls /dev/input/event* 2>/dev/null | wc -l)
   rm -f /run/vita-inj.cmd; mkfifo /run/vita-inj.cmd 2>/dev/null || true
   setsid bash -c "/usr/lib/vita/deno run -A $CEF_DIR/uinput-inject.ts create < /run/vita-inj.cmd > /run/vita-inj.log 2>&1" &
   exec 6<>/run/vita-inj.cmd
   INJ_FD=6
-  sleep 2
-  emit_line "$MARKER: input-selftest uinput_ready=$(grep -c READY /run/vita-inj.log 2>/dev/null)"
+  # CRITICAL: the compositor enumerates /dev/input/event* ONCE at startup (path-based, not udev-
+  # monitored). The uinput device MUST exist BEFORE the compositor starts or its events are never
+  # seen. Wait (bounded) for the new event node to appear before continuing to launch the pipe.
+  st=0
+  while [ "$st" -lt 100 ]; do
+    now=$(ls /dev/input/event* 2>/dev/null | wc -l)
+    [ "$now" -gt "$before" ] && break
+    sleep 0.1; st=$((st+1))
+  done
+  emit_line "$MARKER: input-selftest uinput_ready=$(grep -c READY /run/vita-inj.log 2>/dev/null) nodes=${before}->$(ls /dev/input/event* 2>/dev/null | wc -l)"
 fi
 
 # The compositor side: --input-out opens the FIFO for WRITE (routed input -> osr_host).
