@@ -1063,32 +1063,33 @@ fn parse_buffer_payload(value: &str, expected_len: usize) -> Result<Vec<u8>, Com
         ));
     }
 
-    let hex = if value.len() % 2 == 0 && value.bytes().all(is_hex_digit) {
-        Some(decode_hex_payload(value)?)
-    } else {
-        None
-    };
+    // PSD-FPS: single-pass LUT hex decode that also validates (returns None on any
+    // non-hex byte / odd length). This replaces the previous two full scans of the
+    // ~22 MB payload (`bytes().all(is_hex_digit)` then a branchy per-nibble decode) and
+    // the trailing clone of the decoded buffer — the hot path for every content frame.
+    // Behaviour is preserved: a valid-hex payload of the expected length returns here;
+    // a valid-hex payload of the wrong length still falls through to the base64 attempt
+    // below (and the error reports the hex-decoded length, as before).
+    let hex = decode_hex_payload_checked(value);
+    let hex_len = hex.as_ref().map(Vec::len);
 
-    if let Some(bytes) = &hex {
+    if let Some(bytes) = hex {
         if bytes.len() == expected_len {
-            return Ok(bytes.clone());
+            return Ok(bytes);
         }
     }
 
     match decode_base64_payload(value) {
         Ok(bytes) if bytes.len() == expected_len => Ok(bytes),
-        Ok(bytes) => {
-            let actual = hex.as_ref().map_or(bytes.len(), Vec::len);
-            Err(CompositorError::InvalidBufferLength {
-                expected: expected_len,
-                actual,
-            })
-        }
+        Ok(bytes) => Err(CompositorError::InvalidBufferLength {
+            expected: expected_len,
+            actual: hex_len.unwrap_or(bytes.len()),
+        }),
         Err(base64_error) => {
-            if let Some(bytes) = hex {
+            if let Some(actual) = hex_len {
                 return Err(CompositorError::InvalidBufferLength {
                     expected: expected_len,
-                    actual: bytes.len(),
+                    actual,
                 });
             }
             Err(base64_error)
@@ -1096,14 +1097,47 @@ fn parse_buffer_payload(value: &str, expected_len: usize) -> Result<Vec<u8>, Com
     }
 }
 
-fn decode_hex_payload(value: &str) -> Result<Vec<u8>, CompositorError> {
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for chunk in value.as_bytes().chunks_exact(2) {
-        let high = hex_value(chunk[0])?;
-        let low = hex_value(chunk[1])?;
+// PSD-FPS: 256-entry hex lookup table — ASCII byte -> nibble value, or 0xFF for any
+// non-hex byte. Lets the per-frame decode validate + decode in a single branch-light
+// pass over the ~22 MB payload (was: a full `is_hex_digit` scan followed by a branchy
+// `hex_value` decode + a clone).
+const HEX_LUT: [u8; 256] = {
+    let mut t = [0xFFu8; 256];
+    let mut c = b'0';
+    while c <= b'9' {
+        t[c as usize] = c - b'0';
+        c += 1;
+    }
+    let mut c = b'a';
+    while c <= b'f' {
+        t[c as usize] = c - b'a' + 10;
+        c += 1;
+    }
+    let mut c = b'A';
+    while c <= b'F' {
+        t[c as usize] = c - b'A' + 10;
+        c += 1;
+    }
+    t
+};
+
+// Single-pass LUT hex decode. Returns None if the input has odd length or contains any
+// non-hex byte (so the caller falls through to base64), matching the old guard exactly.
+fn decode_hex_payload_checked(value: &str) -> Option<Vec<u8>> {
+    let s = value.as_bytes();
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(s.len() / 2);
+    for chunk in s.chunks_exact(2) {
+        let high = HEX_LUT[chunk[0] as usize];
+        let low = HEX_LUT[chunk[1] as usize];
+        if high == 0xFF || low == 0xFF {
+            return None;
+        }
         bytes.push((high << 4) | low);
     }
-    Ok(bytes)
+    Some(bytes)
 }
 
 fn decode_base64_payload(value: &str) -> Result<Vec<u8>, CompositorError> {
@@ -1190,19 +1224,6 @@ fn decode_base64_block(block: &[u8; 4], out: &mut Vec<u8>) -> Result<bool, Compo
             out.push((third << 6) | fourth);
             Ok(false)
         }
-    }
-}
-
-fn is_hex_digit(byte: u8) -> bool {
-    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'A'..=b'F')
-}
-
-fn hex_value(byte: u8) -> Result<u8, CompositorError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(CompositorError::Protocol("invalid rgba hex".to_owned())),
     }
 }
 

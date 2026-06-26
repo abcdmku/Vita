@@ -1,5 +1,52 @@
 # CEF OSR spike — RESULTS (M0 software OSR + M1 CEF → compositor pipe + M4 live-on-GPU boot)
 
+## PSD-FPS — render-pipeline framerate fix (branch fix/perf-fps)
+
+**Symptom:** the live desktop ran at ~5 fps in VMware.
+
+**Bottleneck (measured, not assumed):** the CEF→compositor handoff serializes the **entire**
+frame as **hex text** through a pipe every content frame. At the live 1920x1440 mode each frame is
+11 MB RGBA → emitted as a **22 MB hex string** and decoded back. The producer path
+(`CurrentFrameHex`) ran three full-frame allocating scans — `BgraToRgba`, `DownscaleVerticalRgba`
+(a no-op identity because the live boot sets CEF view height == compositor output height, yet it
+still cost ~20 ms/frame), then `HexEncode` — and the compositor decoded with a double scan
+(`is_hex_digit` validate pass + a branchy per-nibble decode) plus a clone. On top of that the boot
+script capped content frames at `INTERVAL_MS=100` (a hard **10 fps** ceiling). The guest GL is real
+hardware (`gpu=vmwgfx present=kms`), so the bottleneck is CPU serialization + the cap, **not** the GPU.
+
+A faithful microbenchmark of the verbatim functions at 1920x1440: per content frame
+**63.8 ms** (bgra2rgba 5 + downscale 20 + hex-encode 18 + hex-decode 20) → ~15.7 fps CPU ceiling.
+
+**Fix (3 changes, all on the CEF→compositor text path; nothing in ui_kits/desktop):**
+- `spikes/cef-osr/osr_host.cc` — `FrameBgraToRgbaHexFused` + `CurrentFrameHex`: when view height ==
+  output height (the live case) collapse BGRA→RGBA→downscale→hex into ONE fused pass with a 16-bit
+  hex LUT and no intermediate buffers; the slow rescale path is kept only for view≠output.
+- `packages/compositor-core/src/main.rs` — `decode_hex_payload_checked` + `HEX_LUT`: single-pass
+  256-entry-LUT hex decode that validates inline (replaces the validate-then-decode double scan and
+  a clone). Fail-closed length/charset behaviour preserved (all 41 compositor tests pass, 0 warnings).
+- `os/x86_64/cef-overlay/usr/lib/vita/cef/vita-cef-live.sh` — content cadence `INTERVAL_MS` 100→33
+  (~30 fps content; the CPU can now sustain it). Cursor-only presents still interleave.
+
+**Measured before/after (real built binaries, 1920x1440):**
+- Microbenchmark (verbatim functions, CPU serialization only): **63.8 ms → 11.8 ms per frame =
+  5.4x** (15.7 → 84.5 fps CPU ceiling).
+- Producer end-to-end (real `vita_cef_osr` vs the live desktop, cap bypassed, 60 frames, repeated):
+  **~11.7 → ~23.6 content-frames/sec = 2.0x** (CEF's own per-frame DOM repaint is now the producer's
+  largest remaining share — the fix can't touch that).
+- Full pipe (real `vita_cef_osr | vita-compositor`, surfaceless llvmpipe, prelude, 1920x1440):
+  **8.3 → 13.3 frames/sec = 1.6x**, `composited=OK status=OK`. NB this number is held down by
+  software llvmpipe upload/composite (unchanged by the fix); on the real **vmwgfx hardware** GL path
+  the upload is far cheaper so the CPU-serialization win lands proportionally larger, and removing the
+  100 ms cap (now 33 ms) lifts the hard ceiling from 10 fps to ~30 fps content.
+
+**Still capped (not addressed here):** (1) the frame is still hex **text** (22 MB/frame) — the real
+ceiling fix is zero-copy DMABUF import (PSD-020/052/053, large, deferred); base64 was measured and
+is a **net loss** because the compositor's scalar base64 decoder is slower than LUT-hex. (2) The
+compositor still does a **full** `glTexImage2D` re-upload per frame (no `glTexSubImage2D`/dirty-rect
+sub-upload) — CEF's `dirtyRects` are ignored in `OnPaint`; a follow-up could upload only changed
+regions. (3) CEF paints on CPU (software OSR); `OnAcceleratedPaint` (M2) keeps it on the GPU.
+
+
 **Status: M0 PASS + M1 PASS + M4 PASS (the live flagship desktop renders on the VMware GPU during an OS boot).**
 - **M0** — CEF renders the live Vita flagship desktop HTML off-screen on the Borg51 build
   host and produces a 1280x800 PNG (the gating proof that CEF works on this host).

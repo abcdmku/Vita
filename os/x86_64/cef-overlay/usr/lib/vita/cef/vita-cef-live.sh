@@ -43,7 +43,13 @@ CURSOR=$CEF_DIR/cursor.commands
 # 0 = UNBOUNDED. A tight interval keeps the cursor + live content responsive (compositor drains
 # input + repositions the cursor every present, which is driven by this cadence).
 FRAMES=${VITA_CEF_FRAMES:-0}
-INTERVAL_MS=${VITA_CEF_INTERVAL_MS:-100}
+# PSD-FPS: content-frame cadence. Was 100ms (a hard 10fps cap on the live render). The
+# producer's per-frame serialization cost dropped ~5.4x (fused BGRA->RGBA-hex + no
+# redundant downscale; LUT hex decode on the compositor side), so the CPU can now sustain
+# a much tighter cadence. 33ms ~= 30fps content while leaving headroom for the pipe write
+# (~22MB hex/frame) and the compositor's full-surface GL upload. Override with
+# VITA_CEF_INTERVAL_MS. (cursor-only presents still interleave at INTERVAL_MS/presents.)
+INTERVAL_MS=${VITA_CEF_INTERVAL_MS:-33}
 
 emit_line() {
   printf '%s\n' "$1"
