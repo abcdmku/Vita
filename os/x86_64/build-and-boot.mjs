@@ -412,6 +412,54 @@ function installCompositorOverlay() {
 // committed parts (service unit, wants symlink-file, launch script) live under cef-overlay/ in
 // git; the heavy CEF runtime + ui_kits assets are STAGED here (gitignored, like the Deno runtime).
 // Requires the vendored CEF (spikes/cef-osr/fetch-cef.sh) + a built osr_host (ninja in spikes/cef-osr).
+// ADR-0014 M4: RECOMPILE osr_host from spikes/cef-osr/osr_host.cc so a clean build from main always
+// ships a binary that matches the CURRENT source. The previous staging only *copied* whatever binary
+// happened to be in spikes/cef-osr/build/ — so a stale cached osr_host (from an older source) was
+// silently baked into the image: it built clean and reported live-swap=CONFIRMED, but the live
+// desktop never swapped + input failed, because the binary predated the working osr_host source.
+// (Ref memory vita-cef-vm-stale-osr.) The canonical build (RESULTS.md) is:
+//   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build
+// SET_CEF_TARGET_OUT_DIR() places the linked binary at build/Release/vita_cef_osr. ninja is
+// incremental: a no-op when osr_host.cc is unchanged, a recompile when it changed. Set
+// VITA_CEF_SKIP_BUILD=1 ONLY when the toolchain is absent AND a known-good binary is pre-staged.
+function compileOsrHost() {
+  const spikeDir = join(REPO, "spikes", "cef-osr");
+  const buildDir = join(spikeDir, "build");
+  const osrBin = join(buildDir, "Release", "vita_cef_osr");
+  if (DRY) {
+    log("\n── 1d-pre · (re)compile osr_host from source (cmake -G Ninja + ninja -C build)");
+    log(`   $ cmake -S ${spikeDir} -B ${buildDir} -G Ninja -DCMAKE_BUILD_TYPE=Release`);
+    log(`   $ ninja -C ${buildDir}`);
+    return;
+  }
+  if (process.env.VITA_CEF_SKIP_BUILD === "1") {
+    log("\n── 1d-pre · osr_host recompile SKIPPED (VITA_CEF_SKIP_BUILD=1) — staging the pre-built binary as-is");
+    if (!existsSync(osrBin)) {
+      fail(`VITA_CEF_SKIP_BUILD=1 but no pre-built osr_host at ${osrBin} — unset it to compile from source, ` +
+           "or build it: (cd spikes/cef-osr && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build)");
+    }
+    return;
+  }
+  // Toolchain presence — fail with the exact remediation rather than silently shipping a stale binary.
+  for (const tool of ["cmake", "ninja"]) {
+    if (spawnSync(tool, ["--version"], { stdio: "ignore" }).error) {
+      fail(`1d-pre · osr_host recompile needs '${tool}' on PATH (RESULTS.md: cmake + ninja-build). ` +
+           `Install it, or set VITA_CEF_SKIP_BUILD=1 to stage a pre-built ${osrBin} as-is.`);
+    }
+  }
+  // Configure once (build.ninja absent or stale CMakeCache); ninja then drives incremental recompiles.
+  if (!existsSync(join(buildDir, "build.ninja"))) {
+    run("1d-pre · configure osr_host (cmake -G Ninja, Release)", "cmake",
+        ["-S", spikeDir, "-B", buildDir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]);
+  }
+  run("1d-pre · compile osr_host (ninja -C build) — recompiles when osr_host.cc changed", "ninja", ["-C", buildDir]);
+  if (!existsSync(osrBin)) {
+    fail(`1d-pre · ninja did not produce ${osrBin} — check the cmake/ninja output above ` +
+         "(SET_CEF_TARGET_OUT_DIR places the binary under build/Release/).");
+  }
+  log(`   recompiled osr_host → ${osrBin}`);
+}
+
 function installCefOverlay() {
   const overlayHost = join(HERE, "cef-overlay");
   const cefDst = join(overlayHost, "usr", "lib", "vita", "cef");
@@ -421,6 +469,10 @@ function installCefOverlay() {
   // Committed pieces must exist (these are in git, not staged).
   if (!DRY && !existsSync(serviceUnit)) fail(`1d0 · committed CEF service unit missing: ${serviceUnit}`);
   if (!DRY && !existsSync(launchSh)) fail(`1d0 · committed CEF launch script missing: ${launchSh}`);
+
+  // RECOMPILE osr_host from source FIRST so the binary we stage matches the current osr_host.cc —
+  // never a stale cached one (vita-cef-vm-stale-osr). Produces build/Release/vita_cef_osr.
+  compileOsrHost();
 
   // Locate the vendored CEF Release/Resources (the dir name carries the pinned version).
   const vendorRoot = join(REPO, "spikes", "cef-osr", ".vendor");
@@ -435,11 +487,11 @@ function installCefOverlay() {
   const osrBinAlt = join(REPO, "spikes", "cef-osr", "build", "vita_cef_osr");
 
   if (!DRY) {
-    // Ensure a freshly built osr_host is staged into the spike Release dir (next to libcef.so),
-    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there. Prefer the
-    // FRESHER of build/vita_cef_osr (ninja output) vs build/Release/vita_cef_osr — using a stale
-    // Release copy silently shipped an old osr_host (this caused the input/render osr changes to be
-    // ignored across rebuilds).
+    // osrBin (build/Release/vita_cef_osr) is the FRESH compileOsrHost() output (or the pre-staged
+    // binary under VITA_CEF_SKIP_BUILD=1). Belt-and-suspenders for the SKIP path: if only the raw
+    // ninja output build/vita_cef_osr exists and it is newer, prefer it (rpath includes '.', so
+    // libcef.so still resolves once it sits next to the runtime). The recompile path makes osrBin
+    // authoritative, so this no longer silently ships a stale binary.
     if (existsSync(osrBinAlt)) {
       const altNewer = !existsSync(osrBin) ||
         statSync(osrBinAlt).mtimeMs > statSync(osrBin).mtimeMs;
@@ -449,7 +501,8 @@ function installCefOverlay() {
       }
     }
     if (!existsSync(osrBin)) {
-      fail("1d0 · osr_host binary missing — build it: (cd spikes/cef-osr && ninja -C build)");
+      fail("1d0 · osr_host binary missing after compile — build it: " +
+           "(cd spikes/cef-osr && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build)");
     }
     // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
     // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
