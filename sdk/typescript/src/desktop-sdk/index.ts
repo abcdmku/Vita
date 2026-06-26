@@ -91,6 +91,11 @@ export {
   loadUiPackage,
   validateDesktopUiPackageManifest,
 } from "./loader.ts";
+export {
+  createInMemorySurfaceBackend,
+  createSurfaceHostRouter,
+  routeSurfaceHostRequest,
+} from "./surface-host-router.ts";
 
 export type {
   EvaluatedShellConfig,
@@ -270,6 +275,11 @@ export type {
   DesktopUiValidationError,
   DesktopUiValidationResult,
 } from "./loader.ts";
+export type {
+  SurfaceHostBackend,
+  SurfaceHostRouter,
+  SurfaceHostRouterErrorCode,
+} from "./surface-host-router.ts";
 export type {
   VitaThemeCssVariableName,
   VitaThemeTokenGroup,
