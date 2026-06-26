@@ -763,3 +763,16 @@ function pathToken(value: string): string {
 
   return token;
 }
+
+export {
+  createAppHost,
+} from "./app-host.ts";
+export type {
+  AppHost,
+  AppHostActionResult,
+  AppHostAppStatus,
+  AppHostError,
+  AppHostPorts,
+  AppHostState,
+  DesktopRegistryApp,
+} from "./app-host.ts";
