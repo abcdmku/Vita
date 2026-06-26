@@ -2179,6 +2179,7 @@ impl LibinputState {
                     }
                     drained_any = true;
                     let event_type = (libinput.event_get_type)(event);
+                    eprintln!("VITA-INPUT-DIAG: libinput event type={event_type}");
                     Self::translate_event(libinput, event, event_type, &mut events);
                     (libinput.event_destroy)(event);
                 }

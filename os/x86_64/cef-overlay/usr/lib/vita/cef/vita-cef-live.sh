@@ -177,15 +177,21 @@ if [ "$seen_ok" -eq 1 ]; then
   emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes instant=$have_snapshot input-wiring=on"
 
   # LIVE-SWAP PROOF: confirm CEF keeps feeding updateBufferSurface AFTER the snapshot (i.e. the
-  # screen is the LIVE render, not the static baked frame). Sample the osr emitted-frame count
-  # twice, ~3s apart — it must be RISING.
-  f1=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+  # screen is the LIVE render, not the static baked frame). CEF cold-starts after the instant
+  # snapshot, so wait for its first live frame, then confirm the count keeps RISING.
+  f1=0
+  w=0
+  while [ "$w" -lt 30 ]; do
+    f1=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+    [ "$f1" -gt 0 ] && break
+    sleep 1; w=$((w+1))
+  done
   sleep 3
   f2=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
-  if [ "$f2" -gt "$f1" ]; then
-    emit_line "$MARKER: live-swap=confirmed cef-frames ${f1}->${f2} rising (live render, not the static snapshot)"
+  if [ "$f2" -gt "$f1" ] && [ "$f1" -gt 0 ]; then
+    emit_line "$MARKER: live-swap=CONFIRMED cef-frames ${f1}->${f2} rising (LIVE render, not the static snapshot)"
   else
-    emit_line "$MARKER: live-swap=UNCONFIRMED cef-frames stuck at ${f1} (may be showing the static snapshot)"
+    emit_line "$MARKER: live-swap=UNCONFIRMED cef-frames ${f1}->${f2} (may be the static snapshot)"
   fi
 
   # OPTIONAL input self-test (verification only): inject an ABSOLUTE move to a known on-screen
