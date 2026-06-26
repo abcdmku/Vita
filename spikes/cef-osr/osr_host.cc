@@ -181,6 +181,26 @@ class OsrClient : public CefClient,
         "try{ if(window.lucide&&lucide.createIcons){lucide.createIcons();} }"
         "catch(e){ console.error('lucide',e); }",
         frame->GetURL(), 0);
+
+    // PSD-500 host-bridge self-test: prove the renderer's window.vitaDesktopBridge actually reaches
+    // the host proxy + real backends. Call requestFile(list) AND launchApp through the SAME transport
+    // the desktop uses, and console.error the results (CEF routes console to stderr -> CEF_LOG). This
+    // is the renderer-side proof that a host action does a REAL thing end-to-end.
+    frame->ExecuteJavaScript(
+        "try{"
+        "  var b = globalThis.vitaDesktopBridge;"
+        "  if(!b){ console.error('VITA-HOSTTEST: bridge MISSING'); }"
+        "  else {"
+        "    var ls = b.request({method:'requestFile',args:[{op:'list',grant:'g',path:'/'}]});"
+        "    console.error('VITA-HOSTTEST requestFile.list -> ' + JSON.stringify(ls));"
+        "    var rd = b.request({method:'requestFile',args:[{op:'read',grant:'g',path:'/proof.txt'}]});"
+        "    console.error('VITA-HOSTTEST requestFile.read(proof.txt) -> ' + JSON.stringify(rd));"
+        "    var la = b.request({method:'launchApp',args:[{id:'vita.app.file-manager'}]});"
+        "    console.error('VITA-HOSTTEST launchApp(file-manager) -> ' + JSON.stringify(la));"
+        "  }"
+        "}catch(e){ console.error('VITA-HOSTTEST error ' + String(e)); }",
+        "vita://host-bridge-selftest", 0);
+
     if (browser_ && browser_->GetHost()) {
       browser_->GetHost()->Invalidate(PET_VIEW);
     }

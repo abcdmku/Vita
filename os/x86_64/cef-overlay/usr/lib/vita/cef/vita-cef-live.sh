@@ -124,6 +124,11 @@ DENO=/usr/lib/vita/deno
 HOST_PROXY=$CEF_DIR/vita-host-proxy.ts
 if [ -x "$DENO" ] && [ -e "$HOST_PROXY" ]; then
   mkdir -p /var/lib/vita/files 2>/dev/null || true
+  # Seed a REAL file so the host-bridge self-test (and a Files click) shows real content. This is a
+  # genuine on-disk file the proxy reads via the real filesystem — not a mock.
+  [ -e /var/lib/vita/files/proof.txt ] || \
+    printf 'VITA-REAL-FILE-PROOF: this file is on /var/lib/vita/files and was read live via the host bridge\n' \
+      > /var/lib/vita/files/proof.txt 2>/dev/null || true
   rm -f "$HOST_PROXY_SOCK" 2>/dev/null || true
   setsid env VITA_HOST_PROXY_SOCK="$HOST_PROXY_SOCK" VITA_FILES_ROOT=/var/lib/vita/files \
     VITA_HOST_PROXY_LOG=/run/vita-host-proxy.log \
