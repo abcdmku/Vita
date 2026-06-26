@@ -217,6 +217,15 @@ pub enum InputEvent {
         dx_micropixels: i64,
         dy_micropixels: i64,
     },
+    // PSD-055: ABSOLUTE pointer motion. VMware's primary pointer (VirtualPS/2 VMware VMMouse,
+    // EV_ABS) is an absolute device, so libinput delivers POINTER_MOTION_ABSOLUTE — the cursor
+    // is SET to (x,y) in output pixels (micropixels), not accumulated from deltas. Handling only
+    // relative PointerMotion silently dropped every absolute event (the "nothing after
+    // DEVICE_ADDED" symptom).
+    PointerMotionAbsolute {
+        x_micropixels: i64,
+        y_micropixels: i64,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -286,6 +295,32 @@ impl InputRouter {
                         cursor_y,
                         dx_micropixels: *dx_micropixels,
                         dy_micropixels: *dy_micropixels,
+                    },
+                    None => self.dropped(RoutedInputDropReason::NoSurfaceAtCursor),
+                }
+            }
+            InputEvent::PointerMotionAbsolute {
+                x_micropixels,
+                y_micropixels,
+            } => {
+                // SET the absolute cursor (do not accumulate). VMware's EV_ABS pointer reports the
+                // position directly; the routed deltas are 0 (position, not motion).
+                self.cursor_x_micropixels = *x_micropixels as i128;
+                self.cursor_y_micropixels = *y_micropixels as i128;
+                self.clamp_cursor(output_width, output_height);
+
+                let (cursor_x, cursor_y) = self.cursor();
+                match topmost_placement_at(placements, cursor_x, cursor_y).and_then(|placement| {
+                    placement_local_coordinates(placement, cursor_x, cursor_y)
+                }) {
+                    Some((surface_id, local_x, local_y)) => RoutedInputEvent::PointerMotion {
+                        surface_id,
+                        local_x,
+                        local_y,
+                        cursor_x,
+                        cursor_y,
+                        dx_micropixels: 0,
+                        dy_micropixels: 0,
                     },
                     None => self.dropped(RoutedInputDropReason::NoSurfaceAtCursor),
                 }

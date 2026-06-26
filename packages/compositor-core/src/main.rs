@@ -1212,6 +1212,12 @@ fn format_input_event(event: &InputEvent) -> String {
         } => format!(
             "kind=pointer-motion dx-micropixels={dx_micropixels} dy-micropixels={dy_micropixels}"
         ),
+        InputEvent::PointerMotionAbsolute {
+            x_micropixels,
+            y_micropixels,
+        } => format!(
+            "kind=pointer-motion-absolute x-micropixels={x_micropixels} y-micropixels={y_micropixels}"
+        ),
     }
 }
 

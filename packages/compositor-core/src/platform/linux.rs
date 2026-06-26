@@ -66,7 +66,12 @@ const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
 
 const LIBINPUT_EVENT_KEYBOARD_KEY: u32 = 300;
 const LIBINPUT_EVENT_POINTER_MOTION: u32 = 400;
+const LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: u32 = 401;
 const LIBINPUT_EVENT_POINTER_BUTTON: u32 = 402;
+// Compositor output dimensions: libinput transforms absolute-pointer coordinates into this pixel
+// space (the VMware EV_ABS device reports 0..max which libinput maps to 0..OUTPUT_*).
+const OUTPUT_WIDTH: u32 = 1280;
+const OUTPUT_HEIGHT: u32 = 720;
 const LIBINPUT_BUTTON_STATE_PRESSED: u32 = 1;
 const LIBINPUT_KEY_STATE_PRESSED: u32 = 1;
 
@@ -2234,6 +2239,29 @@ impl LibinputState {
                             }
                         }
                     }
+                    // PSD-055: ABSOLUTE pointer motion (VMware's EV_ABS VMMouse). libinput gives the
+                    // position transformed into our output pixel space; SET the cursor there. This
+                    // is the event the VMware pointer actually emits — handling only relative motion
+                    // above dropped it, which is why the cursor never moved.
+                    LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
+                        let pointer_event = (libinput.event_get_pointer_event)(event);
+                        if !pointer_event.is_null() {
+                            let x = (libinput.pointer_get_absolute_x_transformed)(
+                                pointer_event,
+                                OUTPUT_WIDTH,
+                            );
+                            let y = (libinput.pointer_get_absolute_y_transformed)(
+                                pointer_event,
+                                OUTPUT_HEIGHT,
+                            );
+                            if x.is_finite() && y.is_finite() {
+                                events.push(InputEvent::PointerMotionAbsolute {
+                                    x_micropixels: (x * 1_000_000.0) as i64,
+                                    y_micropixels: (y * 1_000_000.0) as i64,
+                                });
+                            }
+                        }
+                    }
                     _ => {}
                 }
         }
@@ -2357,6 +2385,8 @@ struct Libinput {
     pointer_get_button_state: unsafe extern "C" fn(*mut c_void) -> u32,
     pointer_get_dx: unsafe extern "C" fn(*mut c_void) -> f64,
     pointer_get_dy: unsafe extern "C" fn(*mut c_void) -> f64,
+    pointer_get_absolute_x_transformed: unsafe extern "C" fn(*mut c_void, u32) -> f64,
+    pointer_get_absolute_y_transformed: unsafe extern "C" fn(*mut c_void, u32) -> f64,
     unref: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
 }
 
@@ -2379,6 +2409,10 @@ impl Libinput {
             pointer_get_button_state: lib.symbol("libinput_event_pointer_get_button_state")?,
             pointer_get_dx: lib.symbol("libinput_event_pointer_get_dx")?,
             pointer_get_dy: lib.symbol("libinput_event_pointer_get_dy")?,
+            pointer_get_absolute_x_transformed: lib
+                .symbol("libinput_event_pointer_get_absolute_x_transformed")?,
+            pointer_get_absolute_y_transformed: lib
+                .symbol("libinput_event_pointer_get_absolute_y_transformed")?,
             unref: lib.symbol("libinput_unref")?,
             _lib: lib,
         })
