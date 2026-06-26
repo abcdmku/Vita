@@ -1,0 +1,22 @@
+{
+  "id": "PSD-344",
+  "command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/files-backend.test.ts",
+  "status": "pass",
+  "environmentNote": "Executed via cmd /c with NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main because the sandbox cannot lstat the nvm junction used by the npm shim.",
+  "output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "TAP version 13",
+    "ok 1 - requestFile maps list/read/write/stat through the agentd files responder",
+    "ok 2 - requestFile returns FilesErrorResponse for oversize and agentd denials",
+    "ok 3 - requestFile enforces bridge grants fail-closed before agentd transport",
+    "1..3",
+    "# tests 3",
+    "# suites 0",
+    "# pass 3",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0"
+  ]
+}
