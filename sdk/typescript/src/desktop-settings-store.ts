@@ -1,3 +1,5 @@
+import { types as nodeTypes } from "node:util";
+
 import {
   hasDesktopCapabilityGrant,
 } from "./desktop-sdk/index.ts";
@@ -371,7 +373,7 @@ function snapshotObject(
   path: string,
 ): NormalizeResult<ReadonlyMap<string, unknown>> {
   try {
-    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    if (input === null || typeof input !== "object" || nodeTypes.isProxy(input) || Array.isArray(input)) {
       return reject(error("INVALID_SETTINGS_REQUEST", "request must be a plain object.", path));
     }
 
@@ -439,6 +441,9 @@ function snapshotJsonValue(
   if (typeof input !== "object") {
     return reject(error("INVALID_SETTINGS_VALUE", "settings value must be JSON.", path));
   }
+  if (nodeTypes.isProxy(input)) {
+    return reject(error("INVALID_SETTINGS_VALUE", "settings value must not be a Proxy.", path));
+  }
 
   try {
     if (seen.has(input)) {
@@ -494,6 +499,10 @@ function snapshotJsonArray(
   seen: WeakSet<object>,
 ): NormalizeResult<readonly StoreJson[]> {
   try {
+    if (nodeTypes.isProxy(input)) {
+      return reject(error("INVALID_SETTINGS_VALUE", "settings array must not be a Proxy.", path));
+    }
+
     if (Object.getPrototypeOf(input) !== Array.prototype) {
       return reject(error("INVALID_SETTINGS_VALUE", "settings array must be plain JSON.", path));
     }

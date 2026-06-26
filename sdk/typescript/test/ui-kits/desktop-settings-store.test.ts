@@ -232,6 +232,30 @@ test("settings requests reject accessors without throwing", async () => {
   assert.equal(reads, 0);
 });
 
+test("settings entry points reject Proxy objects and arrays without executing traps", async () => {
+  const fixture = fixtureForGrants(grants("settings.read", "settings.write"));
+  const objectProxy = spoofedPlainObjectProxy();
+
+  const readObject = await fixture.store.readSetting(objectProxy.value as unknown as DesktopSettingsReadRequest);
+  const previewObject = await fixture.store.previewSetting(objectProxy.value as unknown as DesktopSettingsWriteRequest);
+  const applyObject = await fixture.store.applySetting(objectProxy.value as unknown as DesktopSettingsWriteRequest);
+
+  assertHostError(readObject, "INVALID_SETTINGS_REQUEST");
+  assertHostError(previewObject, "INVALID_SETTINGS_REQUEST");
+  assertHostError(applyObject, "INVALID_SETTINGS_REQUEST");
+  assert.equal(objectProxy.trapCount(), 0);
+
+  const arrayProxy = spoofedArrayProxy();
+  const readArray = await fixture.store.readSetting(arrayProxy.value as unknown as DesktopSettingsReadRequest);
+  const previewArray = await fixture.store.previewSetting(writeRequestWithUnknownValue(arrayProxy.value));
+  const applyArray = await fixture.store.applySetting(writeRequestWithUnknownValue(arrayProxy.value));
+
+  assertHostError(readArray, "INVALID_SETTINGS_REQUEST");
+  assertHostError(previewArray, "INVALID_SETTINGS_VALUE");
+  assertHostError(applyArray, "INVALID_SETTINGS_VALUE");
+  assert.equal(arrayProxy.trapCount(), 0);
+});
+
 interface StoreFixture {
   readonly fs: MemoryAtomicSettingsFs;
   readonly store: ReturnType<typeof createDesktopSettingsStore>;
@@ -327,6 +351,85 @@ function grantPort(capabilityGrants: readonly DesktopCapabilityGrant[]) {
 
 function grants(...capabilities: readonly ("settings.read" | "settings.write")[]): readonly DesktopCapabilityGrant[] {
   return Object.freeze(capabilities.map((capability) => Object.freeze({ capability })));
+}
+
+function spoofedPlainObjectProxy(): { readonly value: object; trapCount(): number } {
+  let traps = 0;
+  const proxy = new Proxy(Object.create(null) as object, {
+    getOwnPropertyDescriptor(_target, key) {
+      traps += 1;
+      if (key === "key") {
+        return {
+          configurable: true,
+          enumerable: true,
+          value: SETTINGS_APPEARANCE_KEYS.theme,
+          writable: true,
+        };
+      }
+      if (key === "value") {
+        return {
+          configurable: true,
+          enumerable: true,
+          value: "dark",
+          writable: true,
+        };
+      }
+
+      return undefined;
+    },
+    getPrototypeOf() {
+      traps += 1;
+
+      return Object.prototype;
+    },
+    ownKeys() {
+      traps += 1;
+
+      return ["key", "value"];
+    },
+  });
+
+  return Object.freeze({
+    trapCount() {
+      return traps;
+    },
+    value: proxy,
+  });
+}
+
+function spoofedArrayProxy(): { readonly value: readonly unknown[]; trapCount(): number } {
+  let traps = 0;
+  const proxy = new Proxy(["dark"], {
+    getOwnPropertyDescriptor(target, key) {
+      traps += 1;
+
+      return Object.getOwnPropertyDescriptor(target, key);
+    },
+    getPrototypeOf() {
+      traps += 1;
+
+      return Array.prototype;
+    },
+    ownKeys(target) {
+      traps += 1;
+
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  return Object.freeze({
+    trapCount() {
+      return traps;
+    },
+    value: proxy,
+  });
+}
+
+function writeRequestWithUnknownValue(value: unknown): DesktopSettingsWriteRequest {
+  return Object.freeze({
+    key: SETTINGS_APPEARANCE_KEYS.theme,
+    value,
+  }) as unknown as DesktopSettingsWriteRequest;
 }
 
 function manifest(capabilityGrants: readonly DesktopCapabilityGrant[]): DesktopUiPackageManifest {
