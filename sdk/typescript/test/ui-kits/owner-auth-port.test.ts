@@ -22,6 +22,9 @@ import {
   createLockViewModel,
 } from "../../../../ui_kits/desktop/viewmodels/Lock.ts";
 
+// The node's single, trusted owner identity. On a real node this is supplied by the
+// host from agentd's owner-credential record / node owner config — never from the
+// transport request and never from the agentd verify verdict.
 const OWNER_USER = Object.freeze({
   displayName: "Vita Owner",
   id: "vita-owner",
@@ -42,12 +45,21 @@ const OWNER_ASSERTION = Object.freeze({
   signature: "signature-base64url",
 }) satisfies OwnerAuthAssertion;
 
-test("authenticateOwner accepts an ok webauthn.get verdict and the Lock adapter yields a session", async () => {
+// VerifyResponse shapes MIRROR the real Go owner verifier
+// (agent/capabilities/owner/owner.go, VerifyResponse at lines 242-248):
+//   type VerifyResponse struct {
+//     Verified bool   `json:"verified"`
+//     Action   string `json:"action,omitempty"`
+//     Reason   string `json:"reason,omitempty"`
+//   }
+// There is NO `user` field. On success agentd echoes the asserted action; on a deny it
+// may carry a reason. The identity is the node's known owner, not anything in this reply.
+
+test("a real verified VerifyResponse (no user field) yields a session bound to the trusted owner", async () => {
   const agentd = agentdStub({
     ok: true,
     value: Object.freeze({
       action: "unlock",
-      user: OWNER_USER,
       verified: true,
     }),
   });
@@ -55,7 +67,8 @@ test("authenticateOwner accepts an ok webauthn.get verdict and the Lock adapter 
   const authenticated = await callAuthenticateOwner(scoped, ownerAuthRequest());
 
   assert.equal(authenticated.ok, true);
-  if (!authenticated.ok) assert.fail("expected owner auth to succeed");
+  if (!authenticated.ok) assert.fail("expected owner auth to succeed against the real VerifyResponse shape");
+  // Identity comes from the trusted host source, NOT from the verdict.
   assert.deepEqual(authenticated.value.user, OWNER_USER);
   assert.equal(authenticated.value.sessionId, "owner:vita-owner:unlock");
   assert.deepEqual(agentd.calls, [
@@ -80,7 +93,73 @@ test("authenticateOwner accepts an ok webauthn.get verdict and the Lock adapter 
   assert.equal(agentd.calls.length, 2);
 });
 
-test("authenticateOwner rejects a deny webauthn.get verdict without leaking a session", async () => {
+test("a verified VerifyResponse without an action still yields a session bound to the trusted owner", async () => {
+  // `action` is omitempty in VerifyResponse; a verified reply with only `verified:true`
+  // is well-formed and must authenticate (it must NOT be treated as MALFORMED).
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      verified: true,
+    }),
+  });
+  const scoped = scopedHost(["owner.auth"], agentd);
+  const authenticated = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(authenticated.ok, true);
+  if (!authenticated.ok) assert.fail("expected a minimal verified reply to authenticate");
+  assert.deepEqual(authenticated.value.user, OWNER_USER);
+  assert.equal(authenticated.value.sessionId, "owner:vita-owner");
+});
+
+test("a forged `user` in the verify verdict is ignored — session identity is the trusted owner", async () => {
+  // A malicious/compromised transport tries to smuggle a forged identity in the reply.
+  // The verdict carries no identity in the real protocol, so any extra `user` field
+  // makes the reply MALFORMED (strict field set) — it must NOT mint a forged session.
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      user: FORGED_USER,
+      verified: true,
+    }),
+  });
+  const scoped = scopedHost(["owner.auth"], agentd);
+  const rejected = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) assert.fail("expected an extra user field in the verdict to fail closed, not forge a session");
+  assert.equal(rejected.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
+});
+
+test("the session identity is the host-trusted owner even when the assertion names a different action", async () => {
+  // The trusted identity never derives from caller- or transport-supplied data: prove
+  // a different configured owner flows through verbatim regardless of the assertion.
+  const altOwner = Object.freeze({
+    displayName: "Alt Owner",
+    id: "alt-owner",
+    initials: "AO",
+  }) satisfies OwnerAuthUser;
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "approve-transaction",
+      verified: true,
+    }),
+  });
+  const scoped = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: altOwner,
+  });
+  const authenticated = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(authenticated.ok, true);
+  if (!authenticated.ok) assert.fail("expected owner auth to succeed");
+  assert.deepEqual(authenticated.value.user, altOwner);
+  assert.notEqual(authenticated.value.user.id, FORGED_USER.id);
+  assert.equal(authenticated.value.sessionId, "owner:alt-owner:approve-transaction");
+});
+
+test("a verified:false VerifyResponse fails closed without leaking a session", async () => {
   const agentd = agentdStub({
     ok: true,
     value: Object.freeze({
@@ -98,17 +177,46 @@ test("authenticateOwner rejects a deny webauthn.get verdict without leaking a se
   assert.equal(agentd.calls.length, 1);
 });
 
-test("authenticateOwner fails closed for non-plain or missing-field agentd replies", async () => {
-  const missingField = await callAuthenticateOwner(scopedHost(["owner.auth"], agentdStub({
+test("a verified:false VerifyResponse with no reason still fails closed", async () => {
+  // `reason` is omitempty; a bare deny verdict must still reject, never authenticate.
+  const agentd = agentdStub({
     ok: true,
     value: Object.freeze({
-      verified: true,
+      verified: false,
+    }),
+  });
+  const scoped = scopedHost(["owner.auth"], agentd);
+  const rejected = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) assert.fail("expected a bare deny verdict to fail closed");
+  assert.equal(rejected.error.code, "AUTHENTICATION_REJECTED");
+});
+
+test("authenticateOwner fails closed for non-plain or malformed agentd replies", async () => {
+  // A reply missing `verified` is malformed against the real VerifyResponse shape.
+  const missingVerified = await callAuthenticateOwner(scopedHost(["owner.auth"], agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
     }),
   })), ownerAuthRequest());
 
-  assert.equal(missingField.ok, false);
-  if (missingField.ok) assert.fail("expected missing action to fail closed");
-  assert.equal(missingField.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
+  assert.equal(missingVerified.ok, false);
+  if (missingVerified.ok) assert.fail("expected a reply missing `verified` to fail closed");
+  assert.equal(missingVerified.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
+
+  // A non-boolean `verified` is malformed.
+  const nonBoolVerified = await callAuthenticateOwner(scopedHost(["owner.auth"], agentdStub({
+    ok: true,
+    value: Object.freeze({
+      verified: "true",
+    }),
+  })), ownerAuthRequest());
+
+  assert.equal(nonBoolVerified.ok, false);
+  if (nonBoolVerified.ok) assert.fail("expected a non-boolean verified to fail closed");
+  assert.equal(nonBoolVerified.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
 
   const nonPlain = await callAuthenticateOwner(scopedHost(["owner.auth"], agentdStub({
     ok: true,
@@ -120,12 +228,26 @@ test("authenticateOwner fails closed for non-plain or missing-field agentd repli
   assert.equal(nonPlain.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
 });
 
+test("authenticateOwner fails closed when the verdict echoes a non-string action", async () => {
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: 42,
+      verified: true,
+    }),
+  });
+  const rejected = await callAuthenticateOwner(scopedHost(["owner.auth"], agentd), ownerAuthRequest());
+
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) assert.fail("expected a non-string action to fail closed");
+  assert.equal(rejected.error.code, "MALFORMED_OWNER_AUTH_RESPONSE");
+});
+
 test("authenticateOwner missing owner.auth grant fails closed before invoking agentd", async () => {
   const agentd = agentdStub({
     ok: true,
     value: Object.freeze({
       action: "unlock",
-      user: OWNER_USER,
       verified: true,
     }),
   });
@@ -135,6 +257,27 @@ test("authenticateOwner missing owner.auth grant fails closed before invoking ag
   assert.equal(denied.ok, false);
   if (denied.ok) assert.fail("expected missing owner.auth grant to fail closed");
   assert.equal(denied.error.code, "MISSING_CAPABILITY");
+  assert.equal(agentd.calls.length, 0);
+});
+
+test("authenticateOwner fails closed when no trusted owner identity is configured", async () => {
+  // Without a host-supplied owner identity there is no trusted source for the session,
+  // so the node must refuse to authenticate rather than invent one.
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      verified: true,
+    }),
+  });
+  const scoped = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+  });
+  const denied = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(denied.ok, false);
+  if (denied.ok) assert.fail("expected missing owner identity to fail closed");
+  assert.equal(denied.error.code, "OWNER_AUTH_PORT_UNAVAILABLE");
   assert.equal(agentd.calls.length, 0);
 });
 
@@ -179,7 +322,6 @@ test("authenticateOwner rejects a request-side forged user before invoking agent
     ok: true,
     value: Object.freeze({
       action: "unlock",
-      user: OWNER_USER,
       verified: true,
     }),
   });
@@ -256,6 +398,7 @@ function scopedHost(
 ): DesktopHost {
   return createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", capabilities), {
     ownerAuthAgentd,
+    ownerIdentity: OWNER_USER,
   });
 }
 
