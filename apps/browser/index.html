@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Browser</title>
+    <style>
+      :root {
+        --browser-bg: var(--vita-color-surface, #f7f8fa);
+        --browser-panel: var(--vita-color-panel, #ffffff);
+        --browser-line: var(--vita-color-border, #d7dbe2);
+        --browser-text: var(--vita-color-text, #16191f);
+        --browser-muted: var(--vita-color-muted, #667085);
+        --browser-accent: var(--vita-color-accent, #1f6feb);
+        --browser-radius: var(--vita-radius-control, 8px);
+        --browser-gap: var(--vita-space-2, 8px);
+        --browser-toolbar-height: 52px;
+        color-scheme: light dark;
+        font-family: var(--vita-font-ui, system-ui, sans-serif);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: var(--browser-bg);
+        color: var(--browser-text);
+      }
+
+      .browser-shell {
+        display: grid;
+        grid-template-rows: var(--browser-toolbar-height) 1fr;
+        min-height: 100vh;
+      }
+
+      .browser-toolbar {
+        display: grid;
+        grid-template-columns: auto auto auto 1fr auto;
+        gap: var(--browser-gap);
+        align-items: center;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--browser-line);
+        background: var(--browser-panel);
+      }
+
+      .browser-button {
+        min-width: 36px;
+        height: 36px;
+        border: 1px solid var(--browser-line);
+        border-radius: var(--browser-radius);
+        background: var(--browser-panel);
+        color: var(--browser-text);
+        font: inherit;
+      }
+
+      .browser-button[data-vita-primary] {
+        border-color: var(--browser-accent);
+        color: var(--browser-accent);
+      }
+
+      .browser-address {
+        width: 100%;
+        height: 36px;
+        min-width: 120px;
+        border: 1px solid var(--browser-line);
+        border-radius: var(--browser-radius);
+        padding: 0 12px;
+        background: var(--browser-bg);
+        color: var(--browser-text);
+        font: inherit;
+      }
+
+      .browser-viewport {
+        display: grid;
+        align-content: start;
+        gap: 10px;
+        padding: 24px;
+        overflow: auto;
+      }
+
+      .browser-page-title {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 650;
+        line-height: 1.2;
+      }
+
+      .browser-page-content {
+        max-width: 72ch;
+        margin: 0;
+        color: var(--browser-muted);
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="browser-shell" data-vita-screen="vita.app.browser">
+      <form class="browser-toolbar" data-vita-action="navigate">
+        <button class="browser-button" type="button" data-vita-action="back" aria-label="Back">Back</button>
+        <button class="browser-button" type="button" data-vita-action="forward" aria-label="Forward">Forward</button>
+        <button class="browser-button" type="button" data-vita-action="reload" aria-label="Reload">Reload</button>
+        <input class="browser-address" name="url" value="vita://browser/start" aria-label="Address">
+        <button class="browser-button" type="submit" data-vita-primary>Go</button>
+      </form>
+      <section class="browser-viewport" aria-live="polite">
+        <h1 class="browser-page-title" data-vita-bind-text="pageTitle">Browser</h1>
+        <p class="browser-page-content" data-vita-bind-text="pageContent"></p>
+      </section>
+    </main>
+  </body>
+</html>
