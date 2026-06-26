@@ -54,5 +54,5 @@
 
 /* centered command palette */
 .v-palette{position:absolute;left:50%;top:140px;transform:translateX(-50%);width:520px;background:var(--surface-overlay);backdrop-filter:var(--blur-thick);-webkit-backdrop-filter:var(--blur-thick);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-popover);overflow:hidden;z-index:50}
-.v-scrim{position:absolute;inset:0;background:rgba(10,13,18,.12);z-index:45}
+.v-scrim{position:absolute;inset:0;background:rgba(10,13,18,.12);z-index:45;pointer-events:none}
 .theme-dark .v-scrim{background:rgba(5,7,10,.34)}
