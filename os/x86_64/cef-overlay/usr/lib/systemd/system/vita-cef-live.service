@@ -37,7 +37,9 @@ CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
 AmbientCapabilities=
 DevicePolicy=closed
 DeviceAllow=char-drm rw
-DeviceAllow=char-input r
+# PSD-055: libinput opens /dev/input/event* O_RDWR (grab/LED/feature writes), so the input
+# devices need READ-WRITE here — char-input 'r' silently fails the open and disables the mouse.
+DeviceAllow=char-input rw
 DeviceAllow=/dev/tty0 rw
 
 [Install]
