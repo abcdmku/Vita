@@ -66,7 +66,12 @@ const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
 
 const LIBINPUT_EVENT_KEYBOARD_KEY: u32 = 300;
 const LIBINPUT_EVENT_POINTER_MOTION: u32 = 400;
+const LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: u32 = 401;
 const LIBINPUT_EVENT_POINTER_BUTTON: u32 = 402;
+// Compositor output dimensions: libinput transforms absolute-pointer coordinates into this pixel
+// space (the VMware EV_ABS device reports 0..max which libinput maps to 0..OUTPUT_*).
+const OUTPUT_WIDTH: u32 = 1280;
+const OUTPUT_HEIGHT: u32 = 720;
 const LIBINPUT_BUTTON_STATE_PRESSED: u32 = 1;
 const LIBINPUT_KEY_STATE_PRESSED: u32 = 1;
 
@@ -838,13 +843,42 @@ void main() {
         texture: GlUInt,
         placement: &Placement,
     ) -> Result<(), CompositorError> {
+        self.draw_placement_inner(texture, placement, false)
+    }
+
+    // KMS-scanout blit of the composited output texture. The composited frame lives in
+    // `output_fbo` with the SAME orientation the readback consumes: read_output_rgba does
+    // glReadPixels (which returns rows bottom-up) THEN flip_rgba_rows, yielding an UPRIGHT
+    // PNG (cef-live.png). The scanout, however, re-draws that texture straight into the GBM
+    // default framebuffer and KMS scans it out top-left-origin, which lands one vertical flip
+    // away from the upright readback — so the live screen showed the desktop UPSIDE-DOWN.
+    // Fix: blit the output texture with its V texcoords inverted for the scanout draw ONLY.
+    // This touches neither the compositing of surfaces into output_fbo nor the readback path,
+    // so cef-live.png stays upright and present=kms markers are unchanged.
+    fn draw_placement_scanout_flipped(
+        &self,
+        texture: GlUInt,
+        placement: &Placement,
+    ) -> Result<(), CompositorError> {
+        self.draw_placement_inner(texture, placement, true)
+    }
+
+    fn draw_placement_inner(
+        &self,
+        texture: GlUInt,
+        placement: &Placement,
+        flip_v: bool,
+    ) -> Result<(), CompositorError> {
         let left = pixel_to_clip_x(placement.x, self.output_width);
         let right = pixel_to_clip_x(placement.x + placement.width as i32, self.output_width);
         let top = pixel_to_clip_y(placement.y, self.output_height);
         let bottom = pixel_to_clip_y(placement.y + placement.height as i32, self.output_height);
+        // Texcoord rows: v_top maps to the top clip edge, v_bot to the bottom. flip_v swaps
+        // them so the sampled texture is vertically mirrored (used for the KMS-scanout blit).
+        let (v_top, v_bot) = if flip_v { (1.0_f32, 0.0_f32) } else { (0.0_f32, 1.0_f32) };
         let vertices: [f32; 24] = [
-            left, top, 0.0, 0.0, right, top, 1.0, 0.0, left, bottom, 0.0, 1.0, right, top, 1.0,
-            0.0, right, bottom, 1.0, 1.0, left, bottom, 0.0, 1.0,
+            left, top, 0.0, v_top, right, top, 1.0, v_top, left, bottom, 0.0, v_bot, right, top,
+            1.0, v_top, right, bottom, 1.0, v_bot, left, bottom, 0.0, v_bot,
         ];
         let stride = (4 * mem::size_of::<f32>()) as i32;
 
@@ -1016,7 +1050,9 @@ impl RenderBackend for PlatformGpuBackend {
                 self.output_height,
                 0,
             )?;
-            self.draw_placement(self.output_texture, &output_placement)?;
+            // V-flipped blit so the live KMS scanout matches the upright readback (cef-live.png)
+            // instead of rendering the desktop upside-down. See draw_placement_scanout_flipped.
+            self.draw_placement_scanout_flipped(self.output_texture, &output_placement)?;
             if unsafe { (self.egl.swap_buffers)(self.egl_display, self.egl_surface) } == 0 {
                 return Err(CompositorError::Unavailable(
                     "eglSwapBuffers(GBM scanout) failed".to_owned(),
@@ -2120,15 +2156,50 @@ impl LibinputState {
 
         let mut events = Vec::new();
         unsafe {
-            if (libinput.dispatch)(self.context) < 0 {
-                return Err(input_unavailable("libinput_dispatch failed"));
-            }
+            // PSD-055: canonical libinput read loop. libinput multiplexes all device fds onto a
+            // single epoll fd (libinput_get_fd). We must poll THAT fd and call libinput_dispatch
+            // whenever it is readable, then drain libinput_get_event. Calling dispatch alone (the
+            // previous behaviour) reliably delivered the initial DEVICE_ADDED events but NOT the
+            // subsequent pointer/key events on the VMware guest — poll(get_fd) before dispatch is
+            // what actually pumps the per-device reads. Poll with a 0ms timeout (non-blocking) and
+            // dispatch in a loop so a burst of events injected between presents is fully drained.
+            let lfd = (libinput.get_fd)(self.context);
             loop {
-                let event = (libinput.get_event)(self.context);
-                if event.is_null() {
+                let mut pfd = PollFd { fd: lfd, events: POLLIN, revents: 0 };
+                let prc = poll(&mut pfd, 1, 0);
+                let readable = prc > 0 && (pfd.revents & POLLIN) != 0;
+                if (libinput.dispatch)(self.context) < 0 {
+                    return Err(input_unavailable("libinput_dispatch failed"));
+                }
+                let mut drained_any = false;
+                loop {
+                    let event = (libinput.get_event)(self.context);
+                    if event.is_null() {
+                        break;
+                    }
+                    drained_any = true;
+                    let event_type = (libinput.event_get_type)(event);
+                    eprintln!("VITA-INPUT-DIAG: libinput event type={event_type}");
+                    Self::translate_event(libinput, event, event_type, &mut events);
+                    (libinput.event_destroy)(event);
+                }
+                // Stop once the epoll fd has no more pending data AND we drained nothing this pass.
+                if !readable && !drained_any {
                     break;
                 }
-                let event_type = (libinput.event_get_type)(event);
+            }
+        }
+        Ok(events)
+    }
+
+    // Translate one libinput event into our InputEvent (factored out of the poll loop).
+    fn translate_event(
+        libinput: &Libinput,
+        event: *mut c_void,
+        event_type: u32,
+        events: &mut Vec<InputEvent>,
+    ) {
+        unsafe {
                 match event_type {
                     LIBINPUT_EVENT_KEYBOARD_KEY => {
                         let key_event = (libinput.event_get_keyboard_event)(event);
@@ -2169,13 +2240,33 @@ impl LibinputState {
                             }
                         }
                     }
+                    // PSD-055: ABSOLUTE pointer motion (VMware's EV_ABS VMMouse). libinput gives the
+                    // position transformed into our output pixel space; SET the cursor there. This
+                    // is the event the VMware pointer actually emits — handling only relative motion
+                    // above dropped it, which is why the cursor never moved.
+                    LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
+                        let pointer_event = (libinput.event_get_pointer_event)(event);
+                        if !pointer_event.is_null() {
+                            let x = (libinput.pointer_get_absolute_x_transformed)(
+                                pointer_event,
+                                OUTPUT_WIDTH,
+                            );
+                            let y = (libinput.pointer_get_absolute_y_transformed)(
+                                pointer_event,
+                                OUTPUT_HEIGHT,
+                            );
+                            eprintln!("VITA-INPUT-DIAG: abs-motion x={x} y={y}");
+                            if x.is_finite() && y.is_finite() {
+                                events.push(InputEvent::PointerMotionAbsolute {
+                                    x_micropixels: (x * 1_000_000.0) as i64,
+                                    y_micropixels: (y * 1_000_000.0) as i64,
+                                });
+                            }
+                        }
+                    }
                     _ => {}
                 }
-                (libinput.event_destroy)(event);
-            }
         }
-
-        Ok(events)
     }
 }
 
@@ -2206,9 +2297,9 @@ fn add_default_input_devices(
     });
 
     add_selected_input_devices(paths, |path| {
-        let path = CString::new(path.as_os_str().as_bytes())
+        let cpath = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| input_unavailable("input device path contained an interior NUL byte"))?;
-        let device = unsafe { (libinput.path_add_device)(context, path.as_ptr()) };
+        let device = unsafe { (libinput.path_add_device)(context, cpath.as_ptr()) };
         Ok(!device.is_null())
     })
 }
@@ -2231,18 +2322,25 @@ where
         }
 
         selected_count += 1;
-        if !add_device(&path)? {
-            return Err(input_unavailable(format!(
-                "failed to add selected input device {}",
-                path.display()
-            )));
+        // PSD-055: best-effort. libinput_path_add_device returns null for event* nodes it does not
+        // handle (PC Speaker, Power Button) or cannot open; failing the WHOLE init when ANY single
+        // node can't be added wrongly disabled the mouse on the VMware guest (which exposes a
+        // keyboard + speaker + power button alongside the pointer event nodes). Skip the ones that
+        // don't add; succeed as long as at least one real input device was added.
+        if add_device(&path)? {
+            device_count += 1;
         }
-        device_count += 1;
     }
 
     if selected_count == 0 {
         return Err(input_unavailable(
             "no libinput event devices found under /dev/input",
+        ));
+    }
+
+    if device_count == 0 {
+        return Err(input_unavailable(
+            "no /dev/input event device could be added to libinput",
         ));
     }
 
@@ -2276,6 +2374,7 @@ struct Libinput {
     _lib: DynamicLibrary,
     path_create_context: unsafe extern "C" fn(*const LibinputInterface, *mut c_void) -> *mut c_void,
     path_add_device: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+    get_fd: unsafe extern "C" fn(*mut c_void) -> c_int,
     dispatch: unsafe extern "C" fn(*mut c_void) -> c_int,
     get_event: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     event_get_type: unsafe extern "C" fn(*mut c_void) -> u32,
@@ -2288,6 +2387,8 @@ struct Libinput {
     pointer_get_button_state: unsafe extern "C" fn(*mut c_void) -> u32,
     pointer_get_dx: unsafe extern "C" fn(*mut c_void) -> f64,
     pointer_get_dy: unsafe extern "C" fn(*mut c_void) -> f64,
+    pointer_get_absolute_x_transformed: unsafe extern "C" fn(*mut c_void, u32) -> f64,
+    pointer_get_absolute_y_transformed: unsafe extern "C" fn(*mut c_void, u32) -> f64,
     unref: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
 }
 
@@ -2297,6 +2398,7 @@ impl Libinput {
         Ok(Self {
             path_create_context: lib.symbol("libinput_path_create_context")?,
             path_add_device: lib.symbol("libinput_path_add_device")?,
+            get_fd: lib.symbol("libinput_get_fd")?,
             dispatch: lib.symbol("libinput_dispatch")?,
             get_event: lib.symbol("libinput_get_event")?,
             event_get_type: lib.symbol("libinput_event_get_type")?,
@@ -2309,6 +2411,10 @@ impl Libinput {
             pointer_get_button_state: lib.symbol("libinput_event_pointer_get_button_state")?,
             pointer_get_dx: lib.symbol("libinput_event_pointer_get_dx")?,
             pointer_get_dy: lib.symbol("libinput_event_pointer_get_dy")?,
+            pointer_get_absolute_x_transformed: lib
+                .symbol("libinput_event_pointer_get_absolute_x_transformed")?,
+            pointer_get_absolute_y_transformed: lib
+                .symbol("libinput_event_pointer_get_absolute_y_transformed")?,
             unref: lib.symbol("libinput_unref")?,
             _lib: lib,
         })
@@ -2321,8 +2427,10 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn selected_input_device_add_failure_is_failsafe_error() {
-        let err = add_selected_input_devices(
+    fn selected_input_device_add_is_best_effort() {
+        // PSD-055: a single event* node that libinput won't handle (returns false) must NOT fail
+        // the whole init — the others still count. Here event0 adds, event1 does not -> count 1.
+        let count = add_selected_input_devices(
             input_paths(&[
                 "/dev/input/event0",
                 "/dev/input/mouse0",
@@ -2330,12 +2438,24 @@ mod tests {
             ]),
             |path| Ok(!path.ends_with("event1")),
         )
+        .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn all_input_devices_failing_to_add_is_failsafe_error() {
+        // If NONE of the event* nodes can be added, that IS a failure (no usable input).
+        let err = add_selected_input_devices(
+            input_paths(&["/dev/input/event0", "/dev/input/event1"]),
+            |_path| Ok(false),
+        )
         .unwrap_err();
 
         assert_eq!(
             err,
             CompositorError::Unavailable(
-                "input_unavailable: failed to add selected input device /dev/input/event1"
+                "input_unavailable: no /dev/input event device could be added to libinput"
                     .to_owned()
             )
         );

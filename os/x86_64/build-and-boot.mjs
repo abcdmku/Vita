@@ -30,6 +30,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -435,18 +436,34 @@ function installCefOverlay() {
 
   if (!DRY) {
     // Ensure a freshly built osr_host is staged into the spike Release dir (next to libcef.so),
-    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there.
-    if (!existsSync(osrBin) && existsSync(osrBinAlt)) {
-      mkdirSync(dirname(osrBin), { recursive: true });
-      copyFileSync(osrBinAlt, osrBin);
+    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there. Prefer the
+    // FRESHER of build/vita_cef_osr (ninja output) vs build/Release/vita_cef_osr — using a stale
+    // Release copy silently shipped an old osr_host (this caused the input/render osr changes to be
+    // ignored across rebuilds).
+    if (existsSync(osrBinAlt)) {
+      const altNewer = !existsSync(osrBin) ||
+        statSync(osrBinAlt).mtimeMs > statSync(osrBin).mtimeMs;
+      if (altNewer) {
+        mkdirSync(dirname(osrBin), { recursive: true });
+        copyFileSync(osrBinAlt, osrBin);
+      }
     }
     if (!existsSync(osrBin)) {
       fail("1d0 · osr_host binary missing — build it: (cd spikes/cef-osr && ninja -C build)");
     }
     // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
     // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
-    // Preserve the COMMITTED launch script across the clean (it lives in this dir, under git).
+    // Preserve the COMMITTED launch script + the baked instant-desktop assets (first-frame snapshot
+    // + cursor command streams) across the clean — they live in this dir under git (cef-vm-input).
     const launchBody = readFileSync(launchSh);
+    const loadingPath = join(cefDst, "loading.commands");
+    const cursorPath = join(cefDst, "cursor.commands");
+    const injectorPath = join(cefDst, "uinput-inject.ts");
+    const hostProxyPath = join(cefDst, "vita-host-proxy.ts");
+    const loadingBody = existsSync(loadingPath) ? readFileSync(loadingPath) : null;
+    const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
+    const injectorBody = existsSync(injectorPath) ? readFileSync(injectorPath) : null;
+    const hostProxyBody = existsSync(hostProxyPath) ? readFileSync(hostProxyPath) : null;
     rmSync(cefDst, { recursive: true, force: true });
     mkdirSync(cefDst, { recursive: true });
     cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
@@ -456,6 +473,13 @@ function installCefOverlay() {
     // Restore the committed launch script into the freshly-staged runtime dir.
     writeFileSync(launchSh, launchBody);
     chmodSync(launchSh, 0o755);
+    // Restore the honest loading screen + cursor + verification injector (if present). NO baked
+    // flagship snapshot — the boot shows the honest loading screen, then the LIVE CEF render. The
+    // cursor + loading are committed so they are normally present.
+    if (loadingBody) writeFileSync(loadingPath, loadingBody);
+    if (cursorBody) writeFileSync(cursorPath, cursorBody);
+    if (injectorBody) writeFileSync(injectorPath, injectorBody);  // PSD-055 verification injector
+    if (hostProxyBody) writeFileSync(hostProxyPath, hostProxyBody);  // PSD-500 host proxy (Deno)
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
     // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
     rmSync(uikitsDst, { recursive: true, force: true });
@@ -593,6 +617,13 @@ if (MODE === "smoke") {
   }
   const cmdline = `console=ttyS0,115200 ${rootOpts} systemd.firstboot=off systemd.mask=getty@tty1.service` +
     (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
+    // PSD-055 verification: bake the input self-test token so the CEF launch script injects a
+    // scripted gesture at boot (uinput -> libinput -> route -> CEF) on the real GPU. Off by default.
+    (process.env.VITA_INPUT_SELFTEST === "1" ? " vita.input_selftest=1" : "") +
+    // PSD-501: bake the verification scenario so the CEF self-test clicks real dock tiles and proves
+    // a real action (settings-toggle persists a setting; settings-read shows it survived a reboot;
+    // activity shows real /proc stats). Off by default; the boot script defaults to no-op without it.
+    (process.env.VITA_VERIFY ? ` vita.verify=${process.env.VITA_VERIFY}` : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,

@@ -19,12 +19,22 @@
 // shared-texture / zero-copy DMABUF path is M2+.
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "include/base/cef_callback.h"
 #include "include/cef_app.h"
@@ -33,6 +43,7 @@
 #include "include/cef_command_line.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_task.h"
+#include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
 
@@ -66,14 +77,35 @@ std::string g_surface_id = "cef:desktop";
 // OnPaint, so the compositor composites a sequence and reads back the latest. The
 // service uses this so the LIVE (hydrated) desktop — after bootstrap.js runs — is what
 // the compositor presents and reads back on the real KMS scanout.
+//
+// PERSISTENT desktop (spike/cef-vm): --frames=0 means UNBOUNDED — stream frames forever,
+// never closing the browser or the compositor sink. The compositor then keeps presenting
+// every incoming frame on the KMS scanout indefinitely, so a powered-on VM shows the live
+// desktop continuously (not a few-frame flash). The pump only stops when the process is
+// signalled (the boot service is killed on shutdown).
 int g_frames = 1;
 // M4 streaming-mode interval between emitted frames (ms). Spaced so the page paints
-// new content (clock, hydration, lucide icons) between captures.
-constexpr int kFrameIntervalMs = 350;
+// new content (clock, hydration, lucide icons) between captures. Overridable via
+// --frame-interval-ms (the persistent service runs a steady cadence so the live clock
+// and any hydrated content keep updating on screen).
+int g_frame_interval_ms = 350;
 
 std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
 int g_paint_count = 0;
+
+// PSD-055 input: the reverse-channel the compositor writes routed input events to (a FIFO/path).
+// osr_host reads it on a background thread and injects the events into CEF on the UI thread.
+std::string g_input_in;   // --input-in=<path>; empty = no input wiring.
+// The live browser, published for the input thread. Guarded because the input thread reads it
+// while the UI thread sets/clears it (OnAfterCreated / OnBeforeClose).
+std::mutex g_browser_mu;
+CefRefPtr<CefBrowser> g_input_browser;
+std::atomic<bool> g_input_stop{false};
+// The compositor view is kWidth x kHeight (1280x800); the compositor OUTPUT (and the cursor
+// coordinates it reports) is kCompWidth x kCompHeight (1280x720). Pointer coords from the reverse
+// channel are in OUTPUT space; map them back into the CEF VIEW's vertical space before SendEvent.
+// (Forward decls of the compositor output constants live just below.)
 
 // RenderHandler: CEF calls OnPaint with the dirty BGRA buffer for the whole view.
 class OsrRenderHandler : public CefRenderHandler {
@@ -112,7 +144,8 @@ class OsrRenderHandler : public CefRenderHandler {
 // Client: owns the render handler + load tracking; quits the loop after settle.
 class OsrClient : public CefClient,
                   public CefLifeSpanHandler,
-                  public CefLoadHandler {
+                  public CefLoadHandler,
+                  public CefDisplayHandler {
  public:
   OsrClient() : render_handler_(new OsrRenderHandler()) {}
 
@@ -121,10 +154,34 @@ class OsrClient : public CefClient,
   }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+
+  // Route page console.* to stderr so the desktop bundle's diagnostics (hydration, errors) are
+  // visible in CEF_LOG. CEF normally drops these in headless OSR.
+  bool OnConsoleMessage(CefRefPtr<CefBrowser> /*browser*/,
+                        cef_log_severity_t /*level*/,
+                        const CefString& message,
+                        const CefString& source,
+                        int line) override {
+    fprintf(stderr, "[osr] CONSOLE %s @ %s:%d\n",
+            message.ToString().c_str(), source.ToString().c_str(), line);
+    return false;
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browser_ = browser;
+    // PSD-500: give the windowless browser input focus, otherwise SendMouseClickEvent does not
+    // dispatch DOM click events (the renderer treats the OSR view as unfocused). With focus, a real
+    // injected mouse down+up produces a DOM click that drives the host-bridge click delegate.
+    if (browser->GetHost()) {
+      browser->GetHost()->SetFocus(true);
+    }
+    // PSD-055: publish the browser so the input-reader thread can inject CEF events.
+    {
+      std::lock_guard<std::mutex> lock(g_browser_mu);
+      g_input_browser = browser;
+    }
   }
 
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
@@ -144,6 +201,33 @@ class OsrClient : public CefClient,
         "try{ if(window.lucide&&lucide.createIcons){lucide.createIcons();} }"
         "catch(e){ console.error('lucide',e); }",
         frame->GetURL(), 0);
+
+    // PSD-500 host-bridge self-test: prove the renderer's window.vitaDesktopBridge actually reaches
+    // the host proxy + real backends. Call requestFile(list) AND launchApp through the SAME transport
+    // the desktop uses, and console.error the results (CEF routes console to stderr -> CEF_LOG). This
+    // is the renderer-side proof that a host action does a REAL thing end-to-end.
+    frame->ExecuteJavaScript(
+        "setTimeout(function(){ try{"
+        "  var L = globalThis.__vitaLog || function(){};"
+        "  var b = globalThis.vitaDesktopBridge;"
+        "  L('VITA-HOSTTEST bridge=' + (b?'present':'MISSING'));"
+        "  if(b){"
+        "    var ls = b.request({method:'requestFile',args:[{op:'list',grant:'g',path:'/'}]});"
+        "    L('VITA-HOSTTEST requestFile.list -> ' + JSON.stringify(ls));"
+        "    var rd = b.request({method:'requestFile',args:[{op:'read',grant:'g',path:'/proof.txt'}]});"
+        "    L('VITA-HOSTTEST requestFile.read(proof.txt) -> ' + JSON.stringify(rd));"
+        "    var la = b.request({method:'launchApp',args:[{id:'vita.app.file-manager'}]});"
+        "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
+        "  }"
+        "  var tiles = document.querySelectorAll('[data-vita-dock-app-id]');"
+        "  L('VITA-DOCK tiles=' + tiles.length);"
+        "  for(var i=0;i<tiles.length;i++){ var r=tiles[i].getBoundingClientRect();"
+        "    L('VITA-DOCK tile ' + tiles[i].getAttribute('data-vita-dock-app-id') + ' cx=' + Math.round(r.left+r.width/2) + ' cy=' + Math.round(r.top+r.height/2)); }"
+        "  var win=document.getElementById('vita-app-window');"
+        "  L('VITA-NATIVE app-window=' + (win?'present':'absent'));"
+        "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
+        "vita://host-bridge-selftest", 0);
+
     if (browser_ && browser_->GetHost()) {
       browser_->GetHost()->Invalidate(PET_VIEW);
     }
@@ -173,7 +257,8 @@ class OsrClient : public CefClient,
     // EmitCompositorFrame in main() handles the single capture; just close.
     // Streaming (M4) compositor mode: pump frames live on the UI thread so the
     // command sink stays open and the compositor composites a sequence.
-    if (!g_compositor_out.empty() && g_frames > 1) {
+    // g_frames > 1: bounded sequence; g_frames == 0: UNBOUNDED (persistent desktop).
+    if (!g_compositor_out.empty() && (g_frames == 0 || g_frames > 1)) {
       StreamFrameTick();
       return;
     }
@@ -190,13 +275,18 @@ class OsrClient : public CefClient,
       browser_->GetHost()->Invalidate(PET_VIEW);
     }
     if (!EmitCompositorFrame()) {
-      fprintf(stderr, "[osr] stream: frame emit failed at #%d/%d — closing\n",
+      // A write failure means the downstream compositor pipe closed (it exited). In
+      // unbounded mode that is the only stop path: close the browser and let the
+      // process exit so the service can restart the whole pipe fail-closed.
+      fprintf(stderr, "[osr] stream: frame emit failed at #%d (frames=%d) — closing\n",
               frames_emitted_ + 1, g_frames);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
     }
     frames_emitted_++;
-    if (frames_emitted_ >= g_frames) {
+    // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the
+    // pump reschedules itself forever, so the compositor keeps presenting the live desktop.
+    if (g_frames != 0 && frames_emitted_ >= g_frames) {
       fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
@@ -204,12 +294,16 @@ class OsrClient : public CefClient,
     CefPostDelayedTask(
         TID_UI,
         CefCreateClosureTask(base::BindOnce(&OsrClient::StreamFrameTick, this)),
-        kFrameIntervalMs);
+        g_frame_interval_ms);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browser_ = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(g_browser_mu);
+      g_input_browser = nullptr;
+    }
     CefQuitMessageLoop();
   }
 
@@ -222,13 +316,131 @@ class OsrClient : public CefClient,
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
 };
 
-// App: configures command-line switches before CEF init.
-class OsrApp : public CefApp, public CefBrowserProcessHandler {
+// PSD-500 host bridge: the renderer-side endpoint. window.vitaDesktopBridge.request(req) forwards
+// each SurfaceHostRequest as JSON to the on-device Deno host-proxy over a unix socket and returns
+// the response JSON. Single-process CEF runs the renderer in the browser process, so this V8 native
+// function can do a blocking unix-socket round-trip and return synchronously.
+std::string g_host_proxy_sock = "/run/vita-host-proxy.sock";
+
+// One blocking request/response round-trip to the host proxy. Returns the response JSON, or a
+// fail-closed host-error JSON if the proxy is unreachable (the desktop's guards consume it).
+static std::string HostProxyRoundTrip(const std::string& request_json) {
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_SOCKET\",\"message\":\"socket() failed\",\"path\":\"/host-bridge\"}}";
+  }
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, g_host_proxy_sock.c_str(), sizeof(addr.sun_path) - 1);
+  if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+    close(fd);
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_UNAVAILABLE\",\"message\":\"host proxy not reachable\",\"path\":\"/host-bridge\"}}";
+  }
+  std::string out = request_json;
+  out.push_back('\n');
+  size_t off = 0;
+  while (off < out.size()) {
+    ssize_t w = write(fd, out.data() + off, out.size() - off);
+    if (w <= 0) break;
+    off += static_cast<size_t>(w);
+  }
+  std::string resp;
+  char chunk[4096];
+  while (true) {
+    ssize_t n = read(fd, chunk, sizeof(chunk));
+    if (n > 0) {
+      resp.append(chunk, static_cast<size_t>(n));
+      if (resp.find('\n') != std::string::npos) break;
+    } else {
+      break;  // EOF or error
+    }
+  }
+  close(fd);
+  size_t nl = resp.find('\n');
+  if (nl != std::string::npos) resp.erase(nl);
+  if (resp.empty()) {
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_EMPTY\",\"message\":\"empty host response\",\"path\":\"/host-bridge\"}}";
+  }
+  return resp;
+}
+
+// V8 native function: __vitaHostProxyCall(requestJsonString) -> responseJsonString.
+class HostBridgeV8Handler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name,
+               CefRefPtr<CefV8Value> /*object*/,
+               const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval,
+               CefString& /*exception*/) override {
+    if (name == "__vitaLog") {
+      std::string s = (arguments.size() >= 1 && arguments[0]->IsString())
+                          ? arguments[0]->GetStringValue().ToString()
+                          : std::string();
+      fprintf(stderr, "[osr] %s\n", s.c_str());
+      retval = CefV8Value::CreateBool(true);
+      return true;
+    }
+    if (name != "__vitaHostProxyCall") return false;
+    std::string req = (arguments.size() >= 1 && arguments[0]->IsString())
+                          ? arguments[0]->GetStringValue().ToString()
+                          : std::string("{}");
+    std::string resp = HostProxyRoundTrip(req);
+    retval = CefV8Value::CreateString(resp);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(HostBridgeV8Handler);
+};
+
+// App: configures command-line switches before CEF init, AND (render side) installs the host bridge.
+class OsrApp : public CefApp,
+               public CefBrowserProcessHandler,
+               public CefRenderProcessHandler {
  public:
   OsrApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
     return this;
+  }
+
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
+    return this;
+  }
+
+  // Install window.vitaDesktopBridge BEFORE the desktop bootstrap runs (OnContextCreated fires when
+  // the page's JS context is created, before page scripts execute). The native string round-trip is
+  // wrapped in JS so the transport speaks the JSON-only SurfaceHostRequest contract host-bridge.ts
+  // expects: request(req) -> JSON.parse(__vitaHostProxyCall(JSON.stringify(req))).
+  void OnContextCreated(CefRefPtr<CefBrowser> /*browser*/,
+                        CefRefPtr<CefFrame> /*frame*/,
+                        CefRefPtr<CefV8Context> context) override {
+    CefRefPtr<CefV8Value> global = context->GetGlobal();
+    CefRefPtr<CefV8Handler> handler(new HostBridgeV8Handler());
+    CefRefPtr<CefV8Value> fn =
+        CefV8Value::CreateFunction("__vitaHostProxyCall", handler);
+    global->SetValue("__vitaHostProxyCall", fn, V8_PROPERTY_ATTRIBUTE_NONE);
+    CefRefPtr<CefV8Value> logfn = CefV8Value::CreateFunction("__vitaLog", handler);
+    global->SetValue("__vitaLog", logfn, V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // JS shim: expose the transport under the names bootstrap.ts looks for (TRANSPORT_GLOBALS).
+    const char* shim =
+        "(function(){"
+        "  var call = globalThis.__vitaHostProxyCall;"
+        "  var bridge = { request: function(req){"
+        "    try { return JSON.parse(call(JSON.stringify(req))); }"
+        "    catch (e) { return { ok:false, error:{ code:'HOST_BRIDGE_PARSE', message:String(e), path:'/host-bridge' } }; }"
+        "  }};"
+        "  globalThis.vitaDesktopBridge = bridge;"
+        // PSD-501: NO C++ click delegate. The desktop's own binder hydration (ADR-0013) wires
+        // dock/action clicks; a real injected pointer click is synthesized into a DOM click in
+        // ApplyInputLineOnUi, the binder fires dock.launchOrFocus -> host.launchApp, and the
+        // desktop's app-window host opens a real surface populated via this SAME bridge.
+        "}());";
+    context->GetFrame()->ExecuteJavaScript(shim, "vita://host-bridge", 0);
+    fprintf(stderr, "[osr] host-bridge: window.vitaDesktopBridge installed (proxy sock=%s)\n",
+            g_host_proxy_sock.c_str());
   }
 
   void OnBeforeCommandLineProcessing(
@@ -242,11 +454,23 @@ class OsrApp : public CefApp, public CefBrowserProcessHandler {
     command_line->AppendSwitchWithValue("use-gl", "disabled");
     command_line->AppendSwitchWithValue("use-angle", "swiftshader");
     command_line->AppendSwitch("hide-scrollbars");
+    // PSD-500: single-process so the renderer (V8 host bridge) runs IN the browser process. This
+    // lets the window.vitaDesktopBridge native function do a blocking unix-socket round-trip to the
+    // host proxy and return synchronously to JS — no cross-process IPC plumbing. OSR already runs
+    // software-only here, so single-process is safe.
+    command_line->AppendSwitch("single-process");
     // Headless Ozone: windowless OSR must NOT require an X server / $DISPLAY. Without this CEF's
     // Ozone defaults to X11 and aborts ("Missing X server or $DISPLAY" -> platform init failed)
     // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
     // VMware-boot 0.3s early-exit. ANGLE swiftshader keeps GL software so no GPU process is needed.
     command_line->AppendSwitchWithValue("ozone-platform", "headless");
+    // KEYSTONE (PSD-501): the desktop loads from file:// and bootstrap.js is an ES module. Chromium
+    // blocks ES-module fetch from a file:// origin ("null") under CORS, so the bundle never executes
+    // and the NATIVE binder never hydrates (this is why the prior build needed a C++ click delegate).
+    // Allow file access from files + relax web security so the module loads and the desktop hydrates
+    // its own DOM click/action handlers (ADR-0013). Local trusted boot asset only; no network origin.
+    command_line->AppendSwitch("allow-file-access-from-files");
+    command_line->AppendSwitch("disable-web-security");
   }
 
   void OnContextInitialized() override {
@@ -352,6 +576,10 @@ void WritePng() {
 // --commands` (reading the pipe) composites them as they arrive.
 std::FILE* g_sink = nullptr;  // open stream sink (stdout or fopen'd file)
 bool g_registered = false;    // M4: registerBufferSurface emitted yet?
+// Instant-desktop (spike): when the launch stream PRE-REGISTERS cef:desktop with a baked
+// first-frame snapshot, set this so CEF's first emit is updateBufferSurface (not a duplicate
+// register), seamlessly swapping the snapshot for the live render on the same surface.
+bool g_surface_prearmed = false;
 
 bool OpenSink() {
   if (g_compositor_out == "-") {
@@ -411,9 +639,14 @@ bool EmitCompositorFrame() {
     stream += "registerBufferSurface " + g_surface_id + " " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
               " " + hex + "\n";
+    // z=10: the live desktop sits ABOVE the honest loading screen (z=0). The cursor is higher
+    // still (z=1000).
     stream += "updatePlacement " + g_surface_id + " 0 0 " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
-              " 0 true\n";
+              " 10 true\n";
+    // The live desktop has arrived: remove the honest loading screen so ONLY the live render (and
+    // cursor) remain. removeSurface is a no-op if vita:loading was never registered.
+    stream += "removeSurface vita:loading\n";
     g_registered = true;
   } else {
     stream += "updateBufferSurface " + g_surface_id + " " + hex + "\n";
@@ -431,9 +664,214 @@ bool EmitCompositorFrame() {
   return true;
 }
 
+// --- PSD-055 input wiring -----------------------------------------------------
+// The compositor writes routed input events (one per line) to the reverse channel
+// (--input-out=<fifo>); osr_host reads them here (--input-in=<same fifo>) and injects them into
+// CEF. Line grammar (space-separated key=value), produced by format_reverse_input_event:
+//   inputEvent surface=<id|none> kind=pointer-motion cursor-x=N cursor-y=N
+//   inputEvent surface=<id|none> kind=pointer-button cursor-x=N cursor-y=N button=N state=pressed|released
+//   inputEvent surface=<id|none> kind=key key-code=N pressed=true|false
+// cursor-x/y are in compositor OUTPUT space (kCompWidth x kCompHeight). The CEF view is
+// kWidth x kHeight, so X passes through (same width) and Y is scaled output->view.
+
+std::map<std::string, std::string> ParseKv(const std::string& line) {
+  std::map<std::string, std::string> kv;
+  std::istringstream iss(line);
+  std::string tok;
+  while (iss >> tok) {
+    auto eq = tok.find('=');
+    if (eq != std::string::npos) kv[tok.substr(0, eq)] = tok.substr(eq + 1);
+  }
+  return kv;
+}
+
+int ViewX(int cursor_x) {
+  if (cursor_x < 0) return 0;
+  if (cursor_x >= kCompWidth) return kWidth - 1;
+  return cursor_x;  // same width (1280)
+}
+int ViewY(int cursor_y) {
+  // Scale compositor-output row -> CEF view row (kCompHeight -> kHeight).
+  long long y = (static_cast<long long>(cursor_y) * kHeight) / kCompHeight;
+  if (y < 0) y = 0;
+  if (y >= kHeight) y = kHeight - 1;
+  return static_cast<int>(y);
+}
+
+// Track the last pointer position so button events carry a coherent coordinate even if a click
+// line omits motion. Only touched on the UI thread (inside the posted tasks).
+int g_last_view_x = kWidth / 2;
+int g_last_view_y = kHeight / 2;
+
+// Map an X11/libinput keycode to a rough Windows VK + character for CEF. The compositor forwards
+// libinput EV_KEY codes (Linux input-event-codes.h). We only need a usable subset to PROVE keys
+// reach the flagship; unmapped keys still fire as a key event with the raw code.
+void InjectKey(CefRefPtr<CefBrowser> browser, int key_code, bool pressed) {
+  if (!browser || !browser->GetHost()) return;
+  CefKeyEvent ev;
+  ev.type = pressed ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
+  ev.native_key_code = key_code;
+  ev.windows_key_code = key_code;
+  ev.modifiers = 0;
+  browser->GetHost()->SendKeyEvent(ev);
+  // For a printable down, also send a CHAR so input fields receive text (best-effort).
+  if (pressed) {
+    CefKeyEvent ch = ev;
+    ch.type = KEYEVENT_CHAR;
+    browser->GetHost()->SendKeyEvent(ch);
+  }
+}
+
+void InjectMouseMove(CefRefPtr<CefBrowser> browser, int vx, int vy) {
+  if (!browser || !browser->GetHost()) return;
+  g_last_view_x = vx;
+  g_last_view_y = vy;
+  CefMouseEvent ev;
+  ev.x = vx;
+  ev.y = vy;
+  ev.modifiers = 0;
+  browser->GetHost()->SendMouseMoveEvent(ev, /*mouseLeave=*/false);
+}
+
+void InjectMouseButton(CefRefPtr<CefBrowser> browser, int vx, int vy, int button,
+                       bool down) {
+  if (!browser || !browser->GetHost()) return;
+  g_last_view_x = vx;
+  g_last_view_y = vy;
+  CefMouseEvent ev;
+  ev.x = vx;
+  ev.y = vy;
+  ev.modifiers = 0;
+  cef_mouse_button_type_t bt = MBT_LEFT;
+  if (button == 2 || button == 272 + 1) bt = MBT_MIDDLE;  // best-effort middle
+  if (button == 3) bt = MBT_RIGHT;
+  // libinput button codes: 272=BTN_LEFT, 273=BTN_RIGHT, 274=BTN_MIDDLE; also accept 1/2/3.
+  if (button == 272) bt = MBT_LEFT;
+  if (button == 273) bt = MBT_RIGHT;
+  if (button == 274) bt = MBT_MIDDLE;
+  browser->GetHost()->SendMouseClickEvent(ev, bt, /*mouseUp=*/!down,
+                                          /*clickCount=*/1);
+}
+
+// Apply one parsed reverse-channel line. MUST run on the CEF UI thread.
+void ApplyInputLineOnUi(std::string line) {
+  CefRefPtr<CefBrowser> browser;
+  {
+    std::lock_guard<std::mutex> lock(g_browser_mu);
+    browser = g_input_browser;
+  }
+  if (!browser) return;
+  auto kv = ParseKv(line);
+  const std::string& kind = kv["kind"];
+  if (kind == "pointer-motion") {
+    int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
+    int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
+    InjectMouseMove(browser, vx, vy);
+    fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
+  } else if (kind == "pointer-button") {
+    int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
+    int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
+    int button = std::atoi(kv["button"].c_str());
+    bool down = kv["state"] == "pressed";
+    // Move first so the press lands at the right spot, then the button.
+    InjectMouseMove(browser, vx, vy);
+    InjectMouseButton(browser, vx, vy, button, down);
+    fprintf(stderr, "[osr] input: SendMouseClick view=(%d,%d) button=%d %s\n", vx, vy,
+            button, down ? "down" : "up");
+    // PSD-500: in headless single-process OSR, SendMouseClickEvent reliably drives mousedown/mouseup
+    // but does NOT always synthesize a DOM 'click'. On the button RELEASE, dispatch a real DOM click
+    // at the cursor's view position (elementFromPoint -> full mousedown/mouseup/click sequence) so a
+    // real injected pointer click reaches DOM handlers (the host-bridge delegate + any hydrated
+    // handlers) — the same path a synthetic click takes, now driven by the REAL pointer.
+    if (!down && (button == 272 || button == 1)) {
+      CefRefPtr<CefFrame> mf = browser->GetMainFrame();
+      if (mf) {
+        char js[1024];
+        snprintf(js, sizeof(js),
+                 "(function(){var x=%d,y=%d;var L=globalThis.__vitaLog||function(){};"
+                 "var stack=document.elementsFromPoint(x,y);"
+                 "var el=stack[0]||null;"
+                 // A full-screen scrim/overlay can sit above the real target (e.g. the command-palette
+                 // backdrop). Click the TOPMOST interactive element at this point (the first that is a
+                 // dock tile, palette item, or has a vita action) rather than the inert scrim.
+                 "var pick=null;for(var i=0;i<stack.length;i++){var e=stack[i];"
+                 "  if(e.closest&&(e.closest('[data-vita-dock-app-id]')||e.closest('[data-vita-action]')||e.closest('[data-vita-setting-key]')||e.closest('#vita-app-window'))){pick=e;break;}}"
+                 "var tgt=pick||el;"
+                 "L('VITA-POINTERCLICK at ('+x+','+y+') top='+(el?el.tagName+'.'+(el.className||''):'NULL')+' pick='+(pick?pick.tagName+'.'+(pick.className||''):'none'));"
+                 "if(!tgt)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
+                 "tgt.dispatchEvent(new MouseEvent('mousedown',o));"
+                 "tgt.dispatchEvent(new MouseEvent('mouseup',o));"
+                 "tgt.dispatchEvent(new MouseEvent('click',o));}());",
+                 vx, vy);
+        mf->ExecuteJavaScript(js, "vita://pointer-click", 0);
+      }
+    }
+  } else if (kind == "key") {
+    int code = std::atoi(kv["key-code"].c_str());
+    bool pressed = kv["pressed"] == "true";
+    InjectKey(browser, code, pressed);
+    fprintf(stderr, "[osr] input: SendKey code=%d %s\n", code, pressed ? "down" : "up");
+  }
+}
+
+// Background thread: read the reverse-input channel line-by-line and post each onto the UI thread.
+// Uses POSIX open()+read() (not std::ifstream): on a FIFO, libstdc++ ifstream can buffer such that
+// getline never returns for line-oriented streaming — raw read() with manual line assembly is the
+// reliable way to stream lines from a FIFO as the compositor writes them.
+void InputReaderThread() {
+  fprintf(stderr, "[osr] input: reader thread starting, channel=%s\n", g_input_in.c_str());
+  while (!g_input_stop.load()) {
+    // NON-BLOCKING open of the FIFO read end: a blocking O_RDONLY open deadlocks against the
+    // compositor's O_NONBLOCK write open (each waits for the other end). O_NONBLOCK read-open
+    // always succeeds immediately; we then poll/read for data.
+    int fd = open(g_input_in.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      continue;
+    }
+    fprintf(stderr, "[osr] input: channel opened (fd=%d), reading events\n", fd);
+    std::string buf;
+    char chunk[512];
+    bool reopen = false;
+    while (!g_input_stop.load() && !reopen) {
+      ssize_t n = read(fd, chunk, sizeof(chunk));
+      if (n > 0) {
+        buf.append(chunk, static_cast<size_t>(n));
+        size_t nl;
+        while ((nl = buf.find('\n')) != std::string::npos) {
+          std::string line = buf.substr(0, nl);
+          buf.erase(0, nl + 1);
+          if (line.empty()) continue;
+          if (line.rfind("inputEvent", 0) != 0) continue;  // ignore non-event lines
+          std::string copy = line;
+          CefPostTask(TID_UI,
+                      CefCreateClosureTask(base::BindOnce(&ApplyInputLineOnUi, copy)));
+        }
+      } else if (n == 0) {
+        // EOF: all writers closed. With a long-lived writer (the compositor) this is rare; pause
+        // briefly and keep the same fd (do NOT busy-spin).
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      } else {
+        // n < 0: EAGAIN (no data yet, O_NONBLOCK) — sleep briefly and retry; other errors -> reopen.
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        } else {
+          reopen = true;
+        }
+      }
+    }
+    close(fd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  fprintf(stderr, "[osr] input: reader thread exiting\n");
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // Unbuffered stderr: the input diagnostics (SendMouse/channel) go to a redirected log file and
+  // were block-buffered, so the boot-time self-test read 0 events even when CEF received them.
+  setvbuf(stderr, nullptr, _IONBF, 0);
   CefMainArgs main_args(argc, argv);
   CefRefPtr<OsrApp> app(new OsrApp());
 
@@ -450,15 +888,33 @@ int main(int argc, char* argv[]) {
     else if (a.rfind("--surface-id=", 0) == 0) g_surface_id = a.substr(13);
     else if (a.rfind("--frames=", 0) == 0) {
       g_frames = std::atoi(a.substr(9).c_str());
-      if (g_frames < 1) g_frames = 1;
+      // 0 = UNBOUNDED (persistent desktop). Negative is meaningless -> treat as one-shot.
+      if (g_frames < 0) g_frames = 1;
     }
+    else if (a.rfind("--frame-interval-ms=", 0) == 0) {
+      g_frame_interval_ms = std::atoi(a.substr(20).c_str());
+      if (g_frame_interval_ms < 1) g_frame_interval_ms = 1;
+    }
+    else if (a.rfind("--input-in=", 0) == 0) g_input_in = a.substr(11);  // PSD-055
+    else if (a.rfind("--host-proxy-sock=", 0) == 0) g_host_proxy_sock = a.substr(18);  // PSD-500
+    else if (a == "--surface-prearmed") g_surface_prearmed = true;       // instant-desktop
   }
+  // If the launch stream pre-registered cef:desktop (baked snapshot), skip the register and
+  // start emitting updateBufferSurface so the swap to live is seamless on the same surface.
+  if (g_surface_prearmed) g_registered = true;
   const bool compositor_mode = !g_compositor_out.empty();
-  const bool streaming = compositor_mode && g_frames > 1;
-  fprintf(stderr, "[osr] url=%s mode=%s frames=%d out=%s\n", g_url.c_str(),
-          compositor_mode ? (streaming ? "compositor-stream(live)" : "compositor-stream")
-                          : "png",
-          g_frames, compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
+  // Streaming (long-lived pump) covers both bounded sequences (>1) and unbounded (0).
+  const bool streaming = compositor_mode && (g_frames == 0 || g_frames > 1);
+  const std::string frames_label = g_frames == 0 ? "unbounded" : std::to_string(g_frames);
+  fprintf(stderr, "[osr] url=%s mode=%s frames=%s interval=%dms out=%s\n", g_url.c_str(),
+          compositor_mode
+              ? (streaming ? (g_frames == 0 ? "compositor-stream(persistent)"
+                                            : "compositor-stream(live)")
+                           : "compositor-stream")
+              : "png",
+          frames_label.c_str(),
+          g_frame_interval_ms,
+          compositor_mode ? g_compositor_out.c_str() : g_out_png.c_str());
 
   // Open the compositor sink up front: streaming (M4) writes to it live on the UI
   // thread during the message loop; one-shot (M1) writes the single frame after it.
@@ -488,7 +944,20 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // PSD-055: start the input-reader thread if a reverse channel was given. It posts CEF events
+  // onto the UI thread for the life of the message loop.
+  std::thread input_thread;
+  if (!g_input_in.empty()) {
+    input_thread = std::thread(&InputReaderThread);
+  }
+
   CefRunMessageLoop();
+
+  // Stop the input thread before shutdown.
+  if (input_thread.joinable()) {
+    g_input_stop.store(true);
+    input_thread.detach();  // it may be blocked on a FIFO read; detach so we don't hang shutdown.
+  }
 
   bool ok = false;
   if (compositor_mode) {

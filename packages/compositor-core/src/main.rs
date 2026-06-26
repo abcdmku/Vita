@@ -1,9 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
 use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
@@ -11,12 +17,21 @@ use vita_compositor_core::platform::{
 use vita_compositor_core::{
     failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
     start_desktop_demo_or_failsafe, Compositor, CompositorError, DamageReport, InputAvailability,
-    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, SelfTestReport, SelfTestStatus,
-    SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
+    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, RoutedInputEvent,
+    SelfTestReport, SelfTestStatus, SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT,
+    DESKTOP_DEMO_OUTPUT_WIDTH,
 };
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
 const MAX_COMMAND_RGBA_BYTES: usize = 16 * 1024 * 1024;
+// PSD-055: the visible software-cursor surface id the launch stream registers; the session keeps
+// its placement tracking the router's absolute pointer position.
+const CURSOR_SURFACE_ID: &str = "cursor:pointer";
+const INPUT_EVENT_QUEUE_CAPACITY: usize = 256;
+const MAX_INPUT_EVENTS_PER_TICK: usize = 256;
+const MAX_INPUT_EVENT_LINE_BYTES: usize = 512;
+#[cfg(target_os = "linux")]
+const LINUX_O_NONBLOCK: i32 = 0o4000;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -33,7 +48,13 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .iter()
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
-        run_command_stream(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
+let continuous = args.iter().any(|arg| arg == "--continuous");
+        run_command_stream(
+            parse_hold_seconds(&args)?,
+            parse_screenshot_path(&args)?,
+            parse_input_out_path(&args)?,
+            continuous,
+        )
     } else if args.iter().any(|arg| arg == "--serve") {
         serve()
     } else if args.iter().any(|arg| arg == "--demo") {
@@ -80,13 +101,22 @@ fn run_demo(hold_seconds: u64, screenshot_path: Option<PathBuf>) -> Result<(), C
 fn run_command_stream(
     hold_seconds: u64,
     screenshot_path: Option<PathBuf>,
+    input_out_path: Option<PathBuf>,
+    continuous: bool,
 ) -> Result<(), CompositorError> {
+    let mut reverse_input = input_out_path
+        .as_deref()
+        .map(ReverseInputChannel::open_path);
     let backend = match open_default_gpu_backend_for_self_test(
         DESKTOP_DEMO_OUTPUT_WIDTH,
         DESKTOP_DEMO_OUTPUT_HEIGHT,
     ) {
         Ok(backend) => backend,
         Err(error) => {
+            if let Some(channel) = reverse_input.as_mut() {
+                channel.finish();
+                emit_marker(&channel.summary_marker())?;
+            }
             let report = failsafe_report("unavailable", command_failsafe_reason(&error));
             emit_marker(&report.marker_line())?;
             return Ok(());
@@ -97,15 +127,54 @@ fn run_command_stream(
         DESKTOP_DEMO_OUTPUT_WIDTH,
         DESKTOP_DEMO_OUTPUT_HEIGHT,
     )?;
+    if let Some(channel) = reverse_input.take() {
+        session.set_reverse_input_channel(channel);
+    }
     let stdin = io::stdin();
+
+    // PERSISTENT desktop (spike/cef-vm): --continuous keeps the compositor presenting every
+    // frame the CEF stream delivers, indefinitely, so a powered-on VM shows the LIVE desktop
+    // rather than a few-frame flash. The stream never EOFs in normal operation; the OK marker
+    // (which carries gpu=…/present=kms — the verification gate) must therefore be emitted ONCE
+    // after the FIRST successful present, not at EOF. write_screenshot is skipped (the desktop
+    // is live on the GPU; the running VM is captured with vmrun captureScreen). On a clean EOF
+    // (the upstream pipe closed) we exit 0 fail-closed; on error we emit the failsafe marker.
+    if continuous {
+        // PSD-055: continuous = the interactive live desktop. Drain libinput + move the cursor
+        // surface every present, and relax the static no-repaint verification invariant.
+        session.set_interactive(true);
+        // The closure emits the REAL VITA-COMPOSITOR OK marker (with gpu=…/present=kms — the
+        // verification gate) exactly once, right after the first frame is presented on the GPU.
+        let report = match session.run_continuous(stdin.lock(), |marker| {
+            emit_marker_best_effort(marker);
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                let report = session.failsafe_report(command_failsafe_reason(&error));
+                emit_marker(&report.marker_line())?;
+                return Err(error);
+            }
+        };
+        // Reached only on a clean upstream EOF: emit the final report and exit.
+        emit_marker(&report.marker_line())?;
+        return Ok(());
+    }
+
     let report = match session.run(stdin.lock()) {
         Ok(report) => report,
         Err(error) => {
+            if let Some(line) = session.reverse_input_summary_marker() {
+                emit_marker(&line)?;
+            }
             let report = session.failsafe_report(command_failsafe_reason(&error));
             emit_marker(&report.marker_line())?;
             return Err(error);
         }
     };
+
+    if let Some(line) = session.reverse_input_summary_marker() {
+        emit_marker(&line)?;
+    }
 
     if let Some(path) = screenshot_path {
         if let Err(error) = session.write_screenshot_png(&path) {
@@ -118,6 +187,14 @@ fn run_command_stream(
     emit_marker(&report.marker_line())?;
     thread::sleep(Duration::from_secs(hold_seconds));
     Ok(())
+}
+
+// Emit a marker line to stdout, ignoring any I/O error (used from the continuous-present hot
+// path where a transient stdout error must not tear the live desktop down).
+fn emit_marker_best_effort(line: &str) {
+    let mut stdout = io::stdout();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 fn emit_marker(line: &str) -> Result<(), CompositorError> {
@@ -239,7 +316,7 @@ fn handle_command<B: vita_compositor_core::RenderBackend>(
     }
 }
 
-struct CommandDrivenSession<B: RenderBackend> {
+pub(crate) struct CommandDrivenSession<B: RenderBackend> {
     compositor: Compositor<B>,
     placements: BTreeMap<SurfaceId, Placement>,
     pending_damage: DamageReport,
@@ -248,10 +325,21 @@ struct CommandDrivenSession<B: RenderBackend> {
     input: InputAvailability,
     reposition_no_repaint: bool,
     presented: bool,
+    reverse_input: Option<ReverseInputChannel>,
+    // PSD-055: interactive (continuous) mode relaxes the strict "no repaint during placement
+    // updates" verification invariant — moving the cursor surface IS a legitimate placement
+    // change every tick — and tracks the absolute cursor so the cursor surface follows it.
+    interactive: bool,
+    cursor_pos: (u32, u32),
+    cursor_surface: Option<SurfaceId>,
 }
 
 impl<B: RenderBackend> CommandDrivenSession<B> {
-    fn new(backend: B, output_width: u32, output_height: u32) -> Result<Self, CompositorError> {
+    pub(crate) fn new(
+        backend: B,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self, CompositorError> {
         let gpu = backend.backend_name().to_owned();
         let present = backend.presentation_mode();
         let input = backend.input_availability();
@@ -264,16 +352,72 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             present,
             presented: false,
             reposition_no_repaint: true,
+            reverse_input: None,
+            interactive: false,
+            cursor_pos: (0, 0),
+            cursor_surface: None,
         })
     }
 
-    fn run<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
+    pub(crate) fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
+    }
+
+    pub(crate) fn set_reverse_input_channel(&mut self, channel: ReverseInputChannel) {
+        self.reverse_input = Some(channel);
+    }
+
+    pub(crate) fn reverse_input_summary_marker(&self) -> Option<String> {
+        self.reverse_input
+            .as_ref()
+            .map(ReverseInputChannel::summary_marker)
+    }
+
+    pub(crate) fn run<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
+        let result = self.run_inner(reader);
+        self.finish_reverse_input();
+        result
+    }
+
+    fn run_inner<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
         for line in reader.lines() {
             let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
             if line.trim().is_empty() {
                 return Err(CompositorError::Protocol("empty command".to_owned()));
             }
             self.handle_line(&line)?;
+        }
+
+        if !self.presented {
+            return Err(CompositorError::Protocol(
+                "command stream ended before present".to_owned(),
+            ));
+        }
+
+        Ok(self.ok_report())
+    }
+
+    // PERSISTENT desktop (spike/cef-vm): like `run`, but the OK report marker is emitted (via
+    // `on_first_present`) the FIRST time a frame is presented, and the loop then keeps reading +
+    // presenting every subsequent frame indefinitely. It returns the ok_report only on a CLEAN
+    // EOF (the upstream CEF pipe closed). This is what keeps the live desktop on the KMS scanout
+    // for the whole life of the powered-on VM instead of a few-frame flash.
+    fn run_continuous<R: BufRead>(
+        &mut self,
+        reader: R,
+        mut on_first_present: impl FnMut(&str),
+    ) -> Result<SelfTestReport, CompositorError> {
+        let mut announced = false;
+        for line in reader.lines() {
+            let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
+            if line.trim().is_empty() {
+                return Err(CompositorError::Protocol("empty command".to_owned()));
+            }
+            self.handle_line(&line)?;
+            if !announced && self.presented {
+                announced = true;
+                on_first_present(&self.ok_report().marker_line());
+            }
         }
 
         if !self.presented {
@@ -298,6 +442,7 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             "updatePlacement" => self.update_placement(&fields),
             "removeSurface" => self.remove_surface(&fields),
             "present" => self.present(&fields),
+            "routeInput" => self.route_input(&fields),
             _ => Err(CompositorError::Protocol(format!(
                 "unknown command {command:?}"
             ))),
@@ -369,6 +514,17 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         let visible = parse_bool(required_field(fields, 7, "visible")?, "visible")?;
         let before_repaint_count = self.compositor.source_repaint_count();
 
+        // PSD-055: recognise the visible-cursor surface so present() can keep it tracking the
+        // router's absolute pointer position. Seed cursor_pos from its initial placement.
+        if id.as_str() == CURSOR_SURFACE_ID {
+            if visible {
+                self.cursor_surface = Some(id.clone());
+                self.cursor_pos = (x.max(0) as u32, y.max(0) as u32);
+            } else {
+                self.cursor_surface = None;
+            }
+        }
+
         if visible {
             self.placements
                 .insert(id.clone(), Placement::new(id, x, y, width, height, z)?);
@@ -400,6 +556,12 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
 
     fn present(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
         require_field_count(fields, 1, "present")?;
+        // Interactive desktop: pull the latest input + move the cursor surface BEFORE compositing
+        // so the visible cursor is up to date in the frame we are about to scan out.
+        if self.interactive {
+            self.drain_reverse_input();
+            self.reposition_cursor_surface()?;
+        }
         let before_repaint_count = self.compositor.source_repaint_count();
         let report = self.compositor.composite(&self.pending_damage)?;
         if self.compositor.source_repaint_count() != before_repaint_count {
@@ -410,15 +572,111 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
                 "command stream composite did not complete".to_owned(),
             ));
         }
-        if !self.reposition_no_repaint {
+        // The no-repaint invariant is a verification guard for the static self-test/one-shot path.
+        // In interactive mode the cursor surface moves every tick (a legitimate repaint), so the
+        // invariant does not apply — skip it. The one-shot/self-test path keeps enforcing it.
+        if !self.interactive && !self.reposition_no_repaint {
             return Err(CompositorError::Verification(
                 "command stream source content changed during placement updates".to_owned(),
             ));
         }
 
         self.pending_damage = empty_damage();
+        if !self.interactive {
+            // Non-interactive path drains input after present (PSD-302 default cadence).
+            self.drain_reverse_input();
+        }
         self.presented = true;
         Ok(())
+    }
+
+    // PSD-055 visible cursor: keep the top-most cursor surface placed at the router's absolute
+    // cursor position. The cursor surface is registered by the launch command stream as
+    // `cursor:pointer` with a high z-index; here we only update its placement to follow the mouse.
+    fn reposition_cursor_surface(&mut self) -> Result<(), CompositorError> {
+        let Some(id) = self.cursor_surface.clone() else {
+            return Ok(());
+        };
+        let Some(existing) = self.placements.get(&id).cloned() else {
+            return Ok(());
+        };
+        let (cx, cy) = self.cursor_pos;
+        if existing.x == cx as i32 && existing.y == cy as i32 {
+            return Ok(()); // unchanged — avoid a needless placement update
+        }
+        let updated = Placement::new(
+            id.clone(),
+            cx as i32,
+            cy as i32,
+            existing.width,
+            existing.height,
+            existing.z_index,
+        )?;
+        self.placements.insert(id, updated);
+        let placements = self.placements.values().cloned().collect::<Vec<_>>();
+        let damage = self.compositor.update_placements(placements)?;
+        self.merge_damage(damage);
+        Ok(())
+    }
+
+    fn route_input(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 1, "routeInput")?;
+        self.drain_reverse_input();
+        Ok(())
+    }
+
+    fn drain_reverse_input(&mut self) {
+        let Some(mut channel) = self.reverse_input.take() else {
+            return;
+        };
+
+        self.drain_reverse_input_into(&mut channel);
+        self.reverse_input = Some(channel);
+    }
+
+    fn drain_reverse_input_into(&mut self, channel: &mut ReverseInputChannel) {
+        let events = match self.compositor.poll_input_events() {
+            Ok(events) => events,
+            Err(error) => {
+                channel.record_failsafe(format!("poll_failed:{error}"));
+                return;
+            }
+        };
+
+        if !events.is_empty() {
+            eprintln!("VITA-INPUT-DIAG: drain got {} InputEvent(s)", events.len());
+        }
+
+        let overflow = events.len().saturating_sub(MAX_INPUT_EVENTS_PER_TICK);
+        if overflow > 0 {
+            channel.drop_events(overflow);
+        }
+
+        for event in events.iter().take(MAX_INPUT_EVENTS_PER_TICK) {
+            let routed = match self.compositor.route_input_event(event) {
+                Ok(routed) => routed,
+                Err(error) => {
+                    channel.record_failsafe(format!("route_failed:{error}"));
+                    channel.drop_events(1);
+                    continue;
+                }
+            };
+            // PSD-055 wiring: emit the ROUTED event carrying the absolute cursor position the
+            // router computed (clamped, accumulated from libinput deltas), so the CEF host can
+            // SendMouseMoveEvent/SendMouseClickEvent at the right absolute coordinates and the
+            // visible cursor surface tracks it. The compositor owns the cursor; track it here so
+            // the cursor surface (registered by the launch stream as cursor:pointer) follows.
+            self.cursor_pos = self.compositor.cursor();
+            channel.enqueue(format_reverse_input_event(&routed));
+        }
+
+        channel.drain_best_effort();
+    }
+
+    fn finish_reverse_input(&mut self) {
+        if let Some(channel) = &mut self.reverse_input {
+            channel.finish();
+        }
     }
 
     fn merge_damage(&mut self, damage: DamageReport) {
@@ -465,6 +723,157 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             surfaces: self.compositor.surface_count(),
         }
     }
+}
+
+pub(crate) struct ReverseInputChannel {
+    writer: Option<Box<dyn Write>>,
+    queue: VecDeque<String>,
+    capacity: usize,
+    routed: u64,
+    dropped: u64,
+    failsafe_reason: Option<String>,
+}
+
+impl ReverseInputChannel {
+    fn open_path(path: &Path) -> Self {
+        match open_input_out_writer(path) {
+            Ok(writer) => Self::new(writer, INPUT_EVENT_QUEUE_CAPACITY),
+            Err(error) => {
+                let mut channel = Self::closed(INPUT_EVENT_QUEUE_CAPACITY);
+                channel.record_failsafe(format!("open_failed:{error}"));
+                channel
+            }
+        }
+    }
+
+    pub(crate) fn new(writer: Box<dyn Write>, capacity: usize) -> Self {
+        Self {
+            writer: Some(writer),
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+            routed: 0,
+            dropped: 0,
+            failsafe_reason: None,
+        }
+    }
+
+    fn closed(capacity: usize) -> Self {
+        Self {
+            writer: None,
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+            routed: 0,
+            dropped: 0,
+            failsafe_reason: None,
+        }
+    }
+
+    fn enqueue(&mut self, line: String) {
+        if line.len() > MAX_INPUT_EVENT_LINE_BYTES || self.queue.len() >= self.capacity {
+            self.drop_events(1);
+            return;
+        }
+
+        self.queue.push_back(line);
+    }
+
+    fn drain_best_effort(&mut self) {
+        while let Some(line) = self.queue.pop_front() {
+            match self.write_line(&line) {
+                ReverseInputWriteResult::Written => {
+                    eprintln!("VITA-INPUT-DIAG: channel wrote line ({} bytes)", line.len());
+                    self.routed = self.routed.saturating_add(1);
+                }
+                ReverseInputWriteResult::Backpressure => {
+                    eprintln!("VITA-INPUT-DIAG: channel BACKPRESSURE (drop)");
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+                ReverseInputWriteResult::Closed => {
+                    eprintln!("VITA-INPUT-DIAG: channel CLOSED (no reader)");
+                    self.writer = None;
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+                ReverseInputWriteResult::Failed(reason) => {
+                    eprintln!("VITA-INPUT-DIAG: channel FAILED: {reason}");
+                    self.record_failsafe(reason);
+                    self.writer = None;
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn write_line(&mut self, line: &str) -> ReverseInputWriteResult {
+        let Some(writer) = self.writer.as_mut() else {
+            return ReverseInputWriteResult::Closed;
+        };
+        let mut bytes = Vec::with_capacity(line.len() + 1);
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+
+        match writer.write(&bytes) {
+            Ok(written) if written == bytes.len() => ReverseInputWriteResult::Written,
+            Ok(_) => ReverseInputWriteResult::Failed("partial_write".to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                ReverseInputWriteResult::Backpressure
+            }
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                ReverseInputWriteResult::Closed
+            }
+            Err(error) => ReverseInputWriteResult::Failed(format!("write_failed:{error}")),
+        }
+    }
+
+    fn finish(&mut self) {
+        self.drain_best_effort();
+        if let Some(writer) = self.writer.as_mut() {
+            if let Err(error) = writer.flush() {
+                if error.kind() != io::ErrorKind::BrokenPipe
+                    && error.kind() != io::ErrorKind::WouldBlock
+                {
+                    self.record_failsafe(format!("flush_failed:{error}"));
+                }
+            }
+        }
+    }
+
+    fn drop_events(&mut self, count: usize) {
+        self.dropped = self.dropped.saturating_add(count as u64);
+    }
+
+    fn record_failsafe(&mut self, reason: impl Into<String>) {
+        if self.failsafe_reason.is_none() {
+            self.failsafe_reason = Some(reason.into());
+        }
+    }
+
+    fn summary_marker(&self) -> String {
+        match self.failsafe_reason.as_deref() {
+            Some(reason) => format!(
+                "VITA-INPUT: routed={} dropped={} status=FAILSAFE reason={}",
+                self.routed,
+                self.dropped,
+                marker_token(reason)
+            ),
+            None => format!(
+                "VITA-INPUT: routed={} dropped={} status=OK",
+                self.routed, self.dropped
+            ),
+        }
+    }
+}
+
+enum ReverseInputWriteResult {
+    Written,
+    Backpressure,
+    Closed,
+    Failed(String),
 }
 
 fn stream_input_events<B: vita_compositor_core::RenderBackend>(
@@ -551,6 +960,27 @@ fn parse_screenshot_path(args: &[String]) -> Result<Option<PathBuf>, CompositorE
             index += 1;
         }
     }
+    Ok(path)
+}
+
+fn parse_input_out_path(args: &[String]) -> Result<Option<PathBuf>, CompositorError> {
+    let mut path = None;
+
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("--input-out=") {
+            if value.is_empty() {
+                return Err(CompositorError::Protocol(
+                    "missing input-out path".to_owned(),
+                ));
+            }
+            path = Some(PathBuf::from(value));
+        } else if arg == "--input-out" {
+            return Err(CompositorError::Protocol(
+                "input-out must use --input-out=<path>".to_owned(),
+            ));
+        }
+    }
+
     Ok(path)
 }
 
@@ -790,6 +1220,63 @@ fn format_input_event(event: &InputEvent) -> String {
         } => format!(
             "kind=pointer-motion dx-micropixels={dx_micropixels} dy-micropixels={dy_micropixels}"
         ),
+        InputEvent::PointerMotionAbsolute {
+            x_micropixels,
+            y_micropixels,
+        } => format!(
+            "kind=pointer-motion-absolute x-micropixels={x_micropixels} y-micropixels={y_micropixels}"
+        ),
+    }
+}
+
+// PSD-055: the reverse-channel line the CEF host (osr_host) reads. It carries the ROUTED event
+// with the ABSOLUTE cursor position the router computed, so osr_host can call CEF's
+// SendMouseMoveEvent/SendMouseClickEvent at the right coordinates and SendKeyEvent to the focused
+// surface. Format (one event per line, space-separated key=value):
+//   inputEvent surface=<id|none> kind=pointer-motion cursor-x=N cursor-y=N
+//   inputEvent surface=<id|none> kind=pointer-button cursor-x=N cursor-y=N button=N state=pressed|released
+//   inputEvent surface=<id|none> kind=key key-code=N pressed=true|false
+// Dropped events still emit (surface=none) so the host/cursor can ignore them cleanly.
+fn format_reverse_input_event(routed: &RoutedInputEvent) -> String {
+    match routed {
+        RoutedInputEvent::PointerMotion {
+            surface_id,
+            cursor_x,
+            cursor_y,
+            ..
+        } => format!(
+            "inputEvent surface={} kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}",
+            surface_id.as_str()
+        ),
+        RoutedInputEvent::PointerButton {
+            surface_id,
+            cursor_x,
+            cursor_y,
+            button,
+            state,
+            ..
+        } => format!(
+            "inputEvent surface={} kind=pointer-button cursor-x={cursor_x} cursor-y={cursor_y} button={button} state={}",
+            surface_id.as_str(),
+            match state {
+                PointerButtonState::Pressed => "pressed",
+                PointerButtonState::Released => "released",
+            }
+        ),
+        RoutedInputEvent::Key {
+            surface_id,
+            key_code,
+            pressed,
+        } => format!(
+            "inputEvent surface={} kind=key key-code={key_code} pressed={}",
+            surface_id.as_str(),
+            if *pressed { "true" } else { "false" }
+        ),
+        RoutedInputEvent::Dropped {
+            cursor_x, cursor_y, ..
+        } => format!(
+            "inputEvent surface=none kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}"
+        ),
     }
 }
 
@@ -797,6 +1284,74 @@ fn empty_damage() -> DamageReport {
     DamageReport {
         changed_surfaces: Vec::new(),
         rects: Vec::new(),
+    }
+}
+
+fn open_input_out_writer(path: &Path) -> io::Result<Box<dyn Write>> {
+    #[cfg(unix)]
+    {
+        open_input_out_writer_unix(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(Box::new(file))
+    }
+}
+
+#[cfg(unix)]
+fn open_input_out_writer_unix(path: &Path) -> io::Result<Box<dyn Write>> {
+    let file_type = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.file_type());
+
+    if file_type
+        .as_ref()
+        .is_some_and(|file_type| file_type.is_socket())
+    {
+        let stream = UnixStream::connect(path)?;
+        stream.set_nonblocking(true)?;
+        return Ok(Box::new(stream));
+    }
+
+    let is_fifo = file_type
+        .as_ref()
+        .is_some_and(|file_type| file_type.is_fifo());
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if !is_fifo {
+        options.create(true).truncate(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        options.custom_flags(LINUX_O_NONBLOCK);
+    }
+
+    let file = options.open(path)?;
+    Ok(Box::new(file))
+}
+
+fn marker_token(value: &str) -> String {
+    let token = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if token.is_empty() {
+        "unknown".to_owned()
+    } else {
+        token
     }
 }
 

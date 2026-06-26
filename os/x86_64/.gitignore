@@ -23,4 +23,10 @@ ts-overlay/usr/lib/vita/deno
 # the negations below re-include them after the broad cef/ + ui_kits/ ignores.
 cef-overlay/usr/lib/vita/cef/*
 !cef-overlay/usr/lib/vita/cef/vita-cef-live.sh
+# Honest loading screen + visible cursor + verification injector, as compositor command streams.
+# NO baked flagship snapshot — the boot shows an honest loading state, then the LIVE CEF render.
+!cef-overlay/usr/lib/vita/cef/loading.commands
+!cef-overlay/usr/lib/vita/cef/cursor.commands
+!cef-overlay/usr/lib/vita/cef/uinput-inject.ts
+!cef-overlay/usr/lib/vita/cef/vita-host-proxy.ts
 cef-overlay/usr/lib/vita/ui_kits/
