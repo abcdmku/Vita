@@ -107,34 +107,36 @@ fn stacking_multi_surface_zorder_raise_remove_latest_snapshot_and_marker() {
     let stale_middle_pixels = solid_rgba(6, 6, [120, 120, 120, 255]);
     let latest_middle_pixels = solid_rgba(6, 6, [240, 240, 0, 255]);
     let latest_top_pixels = solid_rgba(6, 6, [180, 0, 220, 255]);
-    let stale_damage = latest
-        .update_buffer_surface(&middle, &stale_middle_pixels)
-        .expect("stale middle pixels should still be a valid update");
-    let low_z_damage = latest
-        .set_z(&middle, -5)
-        .expect("non-monotonic z update should apply");
     let latest_damage = latest
-        .update_buffer_surface(&middle, &latest_middle_pixels)
+        .update_buffer_surface_snapshot(&middle, 10, &latest_middle_pixels)
         .expect("latest middle pixels should apply");
-    let raise_latest_damage = latest
-        .raise_surface(&middle)
-        .expect("latest z raise should apply");
+    let z_latest_damage = latest
+        .set_z_snapshot(&middle, 11, 20)
+        .expect("latest z update should apply");
     let top_damage = latest
-        .update_buffer_surface(&top, &latest_top_pixels)
+        .update_buffer_surface_snapshot(&top, 10, &latest_top_pixels)
         .expect("latest top pixels should apply");
+    let repaint_count_after_latest = latest.source_repaint_count();
+    let stale_damage = latest
+        .update_buffer_surface_snapshot(&middle, 9, &stale_middle_pixels)
+        .expect("older middle pixels should be reconciled away");
+    let stale_z_damage = latest
+        .set_z_snapshot(&middle, 9, -5)
+        .expect("older z update should be reconciled away");
 
-    assert_eq!(stale_damage.rects, vec![middle_rect]);
-    assert_eq!(low_z_damage.rects, vec![middle_rect]);
     assert_eq!(latest_damage.rects, vec![middle_rect]);
-    assert_eq!(raise_latest_damage.rects, vec![middle_rect]);
+    assert_eq!(z_latest_damage.rects, vec![middle_rect]);
     assert_eq!(top_damage.rects, vec![top_rect]);
+    assert_eq!(stale_damage.rects, Vec::<Rect>::new());
+    assert_eq!(stale_z_damage.rects, Vec::<Rect>::new());
+    assert_eq!(latest.source_repaint_count(), repaint_count_after_latest);
 
     let merged = merge_damage([
-        stale_damage,
-        low_z_damage,
         latest_damage,
-        raise_latest_damage,
         top_damage,
+        z_latest_damage,
+        stale_damage,
+        stale_z_damage,
     ]);
     let report = latest
         .composite(&merged)

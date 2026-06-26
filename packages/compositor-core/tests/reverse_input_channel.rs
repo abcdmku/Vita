@@ -117,7 +117,9 @@ fn command_session_drops_reverse_input_when_queue_is_full_and_still_presents() {
     // First motion (dx=1_000_000 = 1 px) routes to cursor (1,0); queue capacity 1 keeps only it.
     assert_eq!(
         output_lines(&output),
-        vec!["inputEvent surface=surface:cef kind=pointer-motion cursor-x=1 cursor-y=0",]
+        vec![
+            "inputEvent surface=surface:cef kind=pointer-motion cursor-x=1 cursor-y=0",
+        ]
     );
     assert_eq!(
         session.reverse_input_summary_marker().as_deref(),

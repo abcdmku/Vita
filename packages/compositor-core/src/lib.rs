@@ -617,6 +617,8 @@ struct SurfaceState<T> {
     width: u32,
     height: u32,
     texture: T,
+    buffer_revision: u64,
+    placement_revision: u64,
 }
 
 pub struct Compositor<B: RenderBackend> {
@@ -627,6 +629,7 @@ pub struct Compositor<B: RenderBackend> {
     placements: Vec<Placement>,
     focus: Option<SurfaceId>,
     input_router: InputRouter,
+    revision_clock: u64,
 }
 
 impl<B: RenderBackend> Compositor<B> {
@@ -640,7 +643,18 @@ impl<B: RenderBackend> Compositor<B> {
             placements: Vec::new(),
             focus: None,
             input_router: InputRouter::new(),
+            revision_clock: 0,
         })
+    }
+
+    fn next_snapshot_revision(&self) -> Result<u64, CompositorError> {
+        self.revision_clock.checked_add(1).ok_or_else(|| {
+            CompositorError::Protocol("compositor snapshot revision overflow".to_owned())
+        })
+    }
+
+    fn note_snapshot_revision(&mut self, revision: u64) {
+        self.revision_clock = self.revision_clock.max(revision);
     }
 
     pub fn backend_name(&self) -> &str {
@@ -672,6 +686,8 @@ impl<B: RenderBackend> Compositor<B> {
                 width,
                 height,
                 texture,
+                buffer_revision: 0,
+                placement_revision: 0,
             },
         );
 
@@ -702,6 +718,8 @@ impl<B: RenderBackend> Compositor<B> {
                 width,
                 height,
                 texture,
+                buffer_revision: 0,
+                placement_revision: 0,
             },
         );
 
@@ -716,17 +734,32 @@ impl<B: RenderBackend> Compositor<B> {
         id: &SurfaceId,
         rgba: &[u8],
     ) -> Result<DamageReport, CompositorError> {
+        let revision = self.next_snapshot_revision()?;
+        self.update_buffer_surface_snapshot(id, revision, rgba)
+    }
+
+    pub fn update_buffer_surface_snapshot(
+        &mut self,
+        id: &SurfaceId,
+        snapshot_revision: u64,
+        rgba: &[u8],
+    ) -> Result<DamageReport, CompositorError> {
         let surface = self
             .surfaces
             .get_mut(id)
             .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
         validate_rgba_buffer(surface.width, surface.height, rgba)?;
+        if snapshot_revision <= surface.buffer_revision {
+            return Ok(empty_damage_report());
+        }
         self.backend.update_texture_rgba(
             &mut surface.texture,
             surface.width,
             surface.height,
             rgba,
         )?;
+        surface.buffer_revision = snapshot_revision;
+        self.note_snapshot_revision(snapshot_revision);
 
         let mut rects = Vec::new();
         for placement in &self.placements {
@@ -759,6 +792,7 @@ impl<B: RenderBackend> Compositor<B> {
             }
         }
 
+        let snapshot_revision = self.next_snapshot_revision()?;
         sort_placements(&mut placements);
 
         let old_by_id = placement_map(&self.placements);
@@ -785,6 +819,13 @@ impl<B: RenderBackend> Compositor<B> {
         }
 
         self.placements = placements;
+        for id in &changed_surfaces {
+            if let Some(surface) = self.surfaces.get_mut(id) {
+                surface.placement_revision = snapshot_revision;
+            }
+        }
+        self.note_snapshot_revision(snapshot_revision);
+
         Ok(DamageReport {
             changed_surfaces,
             rects,
@@ -792,10 +833,24 @@ impl<B: RenderBackend> Compositor<B> {
     }
 
     pub fn set_z(&mut self, id: &SurfaceId, z_index: i32) -> Result<DamageReport, CompositorError> {
-        if !self.surfaces.contains_key(id) {
-            return Err(CompositorError::UnknownSurface(id.clone()));
-        }
+        let revision = self.next_snapshot_revision()?;
+        self.set_z_snapshot(id, revision, z_index)
+    }
 
+    pub fn set_z_snapshot(
+        &mut self,
+        id: &SurfaceId,
+        snapshot_revision: u64,
+        z_index: i32,
+    ) -> Result<DamageReport, CompositorError> {
+        let placement_revision = self
+            .surfaces
+            .get(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?
+            .placement_revision;
+        if snapshot_revision <= placement_revision {
+            return Ok(empty_damage_report());
+        }
         let Some(index) = self
             .placements
             .iter()
@@ -805,12 +860,20 @@ impl<B: RenderBackend> Compositor<B> {
         };
 
         if self.placements[index].z_index == z_index {
+            if let Some(surface) = self.surfaces.get_mut(id) {
+                surface.placement_revision = snapshot_revision;
+            }
+            self.note_snapshot_revision(snapshot_revision);
             return Ok(empty_damage_report());
         }
 
         let rect = self.placements[index].rect();
         self.placements[index].z_index = z_index;
         sort_placements(&mut self.placements);
+        if let Some(surface) = self.surfaces.get_mut(id) {
+            surface.placement_revision = snapshot_revision;
+        }
+        self.note_snapshot_revision(snapshot_revision);
 
         Ok(DamageReport {
             changed_surfaces: vec![id.clone()],

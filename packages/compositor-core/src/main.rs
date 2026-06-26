@@ -48,7 +48,7 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .iter()
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
-        let continuous = args.iter().any(|arg| arg == "--continuous");
+let continuous = args.iter().any(|arg| arg == "--continuous");
         run_command_stream(
             parse_hold_seconds(&args)?,
             parse_screenshot_path(&args)?,
