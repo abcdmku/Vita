@@ -1,0 +1,15 @@
+{
+  "taskId": "PSD-348",
+  "worker": "codex",
+  "workerSession": "codex-PSD-348-2026-06-26-revision-concurrency",
+  "status": "done",
+  "acceptanceCommand": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/apps-backend.test.ts",
+  "acceptanceResult": "pass",
+  "notes": [
+    "Apps backend implementation and tests are present.",
+    "Revision hardens WindowManagerIntent guard to reject unknown, partial, and extra-field intent shapes.",
+    "Revision collapses concurrent same-app launchApp/stopApp calls to one in-flight privileged agentd operation.",
+    "Execute-failure coverage now uses a thrown fake capsule.execute responder.",
+    "Executed through cmd /d /c with process-local NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main so npm can run inside the sandbox without resolving the nvm symlink target."
+  ]
+}
