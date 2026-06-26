@@ -28,6 +28,12 @@ import type {
   TrayItemInput,
   WindowManagerIntent,
 } from "../../../sdk/typescript/src/desktop-sdk/index.ts";
+import type {
+  LockAuthenticateRequest,
+  LockAuthPort,
+  LockAuthSession,
+  LockUser,
+} from "../viewmodels/Lock.ts";
 
 export type HostBridgeJson =
   | null
@@ -58,13 +64,17 @@ export type SurfaceHostMethod =
   | "emitLauncherIntent"
   | "readTheme";
 
+export type SurfaceHostAuthMethod = "authenticateOwner";
+export type SurfaceHostBridgeMethod = SurfaceHostMethod | SurfaceHostAuthMethod;
+
 export interface SurfaceHostRequest {
-  readonly method: SurfaceHostMethod;
+  readonly method: SurfaceHostBridgeMethod;
   readonly args: readonly HostBridgeJson[];
 }
 
 export interface SurfaceHostTransport {
   readonly package?: DesktopUiPackageManifest;
+  readonly methods?: readonly SurfaceHostBridgeMethod[];
   request(request: SurfaceHostRequest): DesktopMaybePromise<unknown>;
 }
 
@@ -200,6 +210,7 @@ export function createSurfaceHost(
     applySetting?: NonNullable<DesktopHost["applySetting"]>;
     emitLauncherIntent?: NonNullable<DesktopHost["emitLauncherIntent"]>;
     readTheme(): DesktopTheme;
+    lockAuth?: LockAuthPort;
   } = {
     applyShell(definition) {
       return forwardShellApply(request, "applyShell", [definition]);
@@ -264,6 +275,12 @@ export function createSurfaceHost(
       [intent],
       isTrue,
     );
+
+    if (transportAdvertisesMethod(transport, "authenticateOwner")) {
+      host.lockAuth = Object.freeze({
+        authenticate: async (authRequest: LockAuthenticateRequest) => await forwardLockAuth(request, authRequest),
+      });
+    }
   }
 
   return Object.freeze(host);
@@ -283,6 +300,36 @@ function resolveTransport(transport: SurfaceHostTransportLike): RequestTransport
     return (request) => descriptor.value.call(transport, request) as DesktopMaybePromise<unknown>;
   } catch {
     return undefined;
+  }
+}
+
+function transportAdvertisesMethod(
+  transport: SurfaceHostTransportLike,
+  method: SurfaceHostAuthMethod,
+): boolean {
+  if (transport === null || transport === undefined) return false;
+  if (typeof transport !== "object" && typeof transport !== "function") return false;
+
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(transport, "methods");
+
+    if (descriptor === undefined || !isDataDescriptor(descriptor) || !Array.isArray(descriptor.value)) {
+      return false;
+    }
+    if (Object.getPrototypeOf(descriptor.value) !== Array.prototype) return false;
+
+    let found = false;
+
+    for (let index = 0; index < descriptor.value.length; index += 1) {
+      const item = descriptor.value[index];
+
+      if (typeof item !== "string") return false;
+      if (item === method) found = true;
+    }
+
+    return found;
+  } catch {
+    return false;
   }
 }
 
@@ -322,6 +369,19 @@ async function forwardHostResult<T>(
   if (!response.ok) return hostReject(response.error);
 
   const result = normalizeHostResult(response.value, valueGuard, method);
+
+  return result.ok ? result.value : hostReject(result.error);
+}
+
+async function forwardLockAuth(
+  request: RequestTransport,
+  authRequest: LockAuthenticateRequest,
+): Promise<unknown> {
+  const response = await forwardAsync(request, "authenticateOwner", [authRequest]);
+
+  if (!response.ok) return hostReject(response.error);
+
+  const result = normalizeHostResult(response.value, isLockAuthSession, "authenticateOwner");
 
   return result.ok ? result.value : hostReject(result.error);
 }
@@ -425,7 +485,7 @@ function forwardCurrentShell(request: RequestTransport): ShellManagedSnapshot {
 
 async function forwardAsync(
   request: RequestTransport | undefined,
-  method: SurfaceHostMethod,
+  method: SurfaceHostBridgeMethod,
   args: readonly unknown[],
 ): Promise<JsonNormalizeResult> {
   const outbound = buildRequest(method, args);
@@ -469,7 +529,7 @@ function forwardSync(
   return snapshotJson(rawResponse, `/${method}/response`);
 }
 
-function buildRequest(method: SurfaceHostMethod, args: readonly unknown[]): JsonNormalizeResult & {
+function buildRequest(method: SurfaceHostBridgeMethod, args: readonly unknown[]): JsonNormalizeResult & {
   readonly value?: SurfaceHostRequest;
 } {
   const normalizedArgs: HostBridgeJson[] = [];
@@ -621,7 +681,7 @@ function snapshotJsonArray(
 function normalizeHostResult<T>(
   input: HostBridgeJson,
   valueGuard: (value: unknown) => value is T,
-  method: SurfaceHostMethod,
+  method: SurfaceHostBridgeMethod,
 ): {
   readonly ok: true;
   readonly value: DesktopHostResult<T>;
@@ -818,6 +878,32 @@ function isDesktopSettingsApply(value: unknown): value is DesktopSettingsApply {
   return apply !== undefined &&
     typeof apply["revision"] === "string" &&
     jsonObject(apply["applied"]) !== undefined;
+}
+
+function isLockAuthSession(value: unknown): value is LockAuthSession {
+  const session = jsonObject(value);
+
+  if (session === undefined || !isLockUser(session["user"])) return false;
+
+  const sessionId = session["sessionId"];
+  const authenticatedAtMs = session["authenticatedAtMs"];
+
+  return (
+    (sessionId === undefined || (typeof sessionId === "string" && sessionId.length > 0)) &&
+    (authenticatedAtMs === undefined || isFiniteNumber(authenticatedAtMs))
+  );
+}
+
+function isLockUser(value: unknown): value is LockUser {
+  const user = jsonObject(value);
+
+  return user !== undefined &&
+    typeof user["id"] === "string" &&
+    user["id"].length > 0 &&
+    typeof user["displayName"] === "string" &&
+    user["displayName"].length > 0 &&
+    typeof user["initials"] === "string" &&
+    user["initials"].length > 0;
 }
 
 function isFilesResponse(value: unknown): value is FilesResponse | FilesErrorResponse {
