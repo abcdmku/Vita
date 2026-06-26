@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -46,6 +46,19 @@ test("Files app HTML removes the baked seed rows and keeps a keyed binder templa
   assert.equal(listBody.includes('data-vita-key="entry:template"'), true);
   assert.equal(listBody.includes('data-vita-bind-text="files.entry.name"'), true);
   assert.equal(html.includes('<script type="module" src="runtime/bootstrap.js"></script>'), true);
+});
+
+test("Files app emitted bootstrap bundle exists for the HTML-loaded runtime", () => {
+  const bundleUrl = new URL("../../../../apps/files/runtime/bootstrap.js", import.meta.url);
+  const stat = statSync(bundleUrl);
+  const code = readFileSync(bundleUrl, "utf8");
+
+  assert.ok(stat.size > 5_000);
+  assert.match(code, /bootstrapFilesApp/u);
+  assert.match(code, /requestFile/u);
+  assert.doesNotMatch(code, /\bfrom\s*["']/u);
+  assert.doesNotMatch(code, /\bimport\s*["']/u);
+  assert.doesNotMatch(code, /bootstrap\.ts["']/u);
 });
 
 test("Files app bootstrap hydrates entries and path from the injected host bridge files port", async () => {
@@ -142,6 +155,34 @@ test("Files app bootstrap fails closed honestly when grant or port injection is 
   assert.equal(portlessDom.root.getAttribute("data-vita-error-code"), "MissingFilesPort");
   assert.match(portlessDom.notice.textContent ?? "", /MissingFilesPort/u);
   assert.deepEqual(entryRows(portlessDom.list), []);
+});
+
+test("Files app bootstrap fails closed when transport exists without an injected grant package", async () => {
+  const calls: FilesRequest[] = [];
+  const dom = filesDom();
+  const runtime = expectActive(await bootstrapFilesApp({
+    initialPath: "/transport",
+    root: dom.root,
+    transport: Object.freeze({
+      request(request: SurfaceHostRequest) {
+        assert.equal(request.method, "requestFile");
+
+        const fileRequest = expectFilesRequest(request.args[0]);
+
+        calls.push(fileRequest);
+        return listResponse(Object.freeze([
+          entry("should-not-render.txt", "file", 128, "2026-06-25T13:00:00Z"),
+        ]));
+      },
+    }),
+  }));
+
+  assert.deepEqual(calls, []);
+  assert.equal(runtime.snapshot().error?.code, "MissingFilesGrant");
+  assert.equal(dom.root.getAttribute("data-vita-status"), "forbidden");
+  assert.equal(dom.root.getAttribute("data-vita-error-code"), "MissingFilesGrant");
+  assert.match(dom.notice.textContent ?? "", /MissingFilesGrant/u);
+  assert.deepEqual(entryRows(dom.list), []);
 });
 
 test("Files app select and open actions update state through the injected files port", async () => {

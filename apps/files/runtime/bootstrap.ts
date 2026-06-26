@@ -1,11 +1,7 @@
-import {
-  filesAppManifest,
-} from "../manifest.ts";
 import type {
   DesktopCapability,
   DesktopHost,
   DesktopMaybePromise,
-  DesktopUiPackageManifest,
   FilesErrorResponse,
   FilesRequest,
   FilesResponse,
@@ -101,7 +97,6 @@ interface FilesEntryRowSnapshot {
 
 const APP_ID = "vita.app.files";
 const APP_SELECTOR = "[data-vita-app]";
-const GRANT_FALLBACK = "desktop";
 const TRANSPORT_GLOBALS = Object.freeze([
   "vitaDesktopBridge",
   "vitaHostBridge",
@@ -139,7 +134,7 @@ export async function bootstrapFilesApp(
 
   try {
     const transport = resolveTransport(options);
-    const host = options.host ?? createSurfaceHost(transport, hostOptionsForTransport(transport));
+    const host = options.host ?? createSurfaceHost(transport);
     const ports = selectFilesAppPorts(host);
     const viewModelInput: {
       files?: FilesCapabilityPort;
@@ -202,7 +197,7 @@ export async function bootstrapFilesAppFromGlobal(): Promise<FilesAppBootstrapRu
 
 export function selectFilesAppPorts(host: DesktopHost): FilesAppPorts {
   const files = filesPortFromHost(host);
-  const grant = firstCapabilityResource(host, FILES_CAPABILITIES, GRANT_FALLBACK);
+  const grant = firstCapabilityResource(host, FILES_CAPABILITIES);
   const output: {
     files?: FilesCapabilityPort;
     grant?: string;
@@ -295,7 +290,6 @@ function isHostRequestFile(value: unknown): value is (request: FilesRequest) => 
 function firstCapabilityResource(
   host: DesktopHost,
   capabilities: readonly DesktopCapability[],
-  fallback: string,
 ): string | undefined {
   try {
     const grants = host.package.capabilityGrants;
@@ -309,7 +303,9 @@ function firstCapabilityResource(
         const grant = grants[grantIndex];
 
         if (grant !== undefined && grant.capability === capability) {
-          return grant.resourceId ?? fallback;
+          const resourceId = grant.resourceId;
+
+          if (typeof resourceId === "string" && resourceId.length > 0) return resourceId;
         }
       }
     }
@@ -512,26 +508,6 @@ function resolveTransport(
   }
 
   return undefined;
-}
-
-function hostOptionsForTransport(
-  transport: Exclude<SurfaceHostTransportLike, null | undefined> | undefined,
-): {
-  readonly package?: DesktopUiPackageManifest;
-} {
-  if (transportHasPackage(transport)) return Object.freeze({});
-
-  return Object.freeze({
-    package: filesAppManifest,
-  });
-}
-
-function transportHasPackage(
-  transport: Exclude<SurfaceHostTransportLike, null | undefined> | undefined,
-): boolean {
-  if (transport === undefined || typeof transport !== "object") return false;
-
-  return readOwnData(transport, "package") !== undefined;
 }
 
 function documentFromGlobal(globalObject: FilesAppBootstrapGlobal): FilesAppBootstrapDocument | undefined {
