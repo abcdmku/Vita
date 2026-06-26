@@ -786,7 +786,9 @@ void ApplyInputLineOnUi(std::string line) {
       if (mf) {
         char js[512];
         snprintf(js, sizeof(js),
-                 "(function(){var x=%d,y=%d;var el=document.elementFromPoint(x,y);"
+                 "(function(){var x=%d,y=%d;var L=globalThis.__vitaLog||function(){};"
+                 "var el=document.elementFromPoint(x,y);"
+                 "L('VITA-POINTERCLICK at ('+x+','+y+') dpr='+window.devicePixelRatio+' el='+(el?el.tagName+'.'+(el.className||''):'NULL'));"
                  "if(!el)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
                  "el.dispatchEvent(new MouseEvent('mousedown',o));"
                  "el.dispatchEvent(new MouseEvent('mouseup',o));"
