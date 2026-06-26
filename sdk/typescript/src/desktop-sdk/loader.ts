@@ -144,6 +144,7 @@ const SETTINGS_READ_FIELDS = Object.freeze(["key"]);
 const SETTINGS_WRITE_FIELDS = Object.freeze(["key", "value"]);
 const LAUNCHER_INTENT_REQUIRED_FIELDS = Object.freeze(["type"]);
 const LAUNCHER_INTENT_OPTIONAL_FIELDS = Object.freeze(["appId", "query"]);
+const CAPABILITY_DENIED_CODE = "CAP_DENIED";
 
 export const knownGoodDesktopUiPackage: DesktopUiPackage = Object.freeze({
   manifest: Object.freeze({
@@ -429,6 +430,7 @@ export function createDesktopHostForPackage(
   } = Object.freeze({}),
 ): DesktopHost {
   const canRegisterReservedComponents = options.builtIn === true;
+  const packageManifest = snapshotDesktopCapabilityManifest(manifest);
   const scoped: {
     package: DesktopUiPackageManifest;
     registerComponent: (definition: ShellComponentDefinition) => ShellResult<RegisteredShellComponent>;
@@ -458,24 +460,20 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeDesktopLaunchableApp(app, "/launchApp/app");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "apps.launch", snapshot.value.id)) {
-        return hostReject("MISSING_CAPABILITY", "package cannot launch this app.", "/capabilityGrants/apps.launch");
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "launchApp", snapshot.value.id);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.launchApp(snapshot.value);
     },
-    package: manifest,
+    package: packageManifest,
     postNotification(input) {
       const snapshot = normalizeNotificationPostInput(input, "/postNotification");
 
       if (!snapshot.ok) return shellRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "shell.notifications.post", snapshot.value.id)) {
-        return shellReject(
-          "MISSING_CAPABILITY",
-          "package cannot post this notification.",
-          "/capabilityGrants/shell.notifications.post",
-        );
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "postNotification", snapshot.value.id);
+
+      if (!grant.ok) return shellRejectFromValidation(grant.error);
 
       return host.postNotification(snapshot.value);
     },
@@ -507,13 +505,9 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeTrayItemInput(input, "/registerTrayItem");
 
       if (!snapshot.ok) return shellRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "shell.tray.register", snapshot.value.id)) {
-        return shellReject(
-          "MISSING_CAPABILITY",
-          "package cannot register this tray item.",
-          "/capabilityGrants/shell.tray.register",
-        );
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "registerTrayItem", snapshot.value.id);
+
+      if (!grant.ok) return shellRejectFromValidation(grant.error);
 
       return host.registerTrayItem(snapshot.value);
     },
@@ -524,9 +518,9 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeStringInput(appId, "/stopApp/appId");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "apps.stop", snapshot.value)) {
-        return hostReject("MISSING_CAPABILITY", "package cannot stop this app.", "/capabilityGrants/apps.stop");
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "stopApp", snapshot.value);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.stopApp(snapshot.value);
     },
@@ -541,16 +535,9 @@ export function createDesktopHostForPackage(
 
       if (!snapshot.ok) return filesRejectFromValidation(snapshot.error);
 
-      const capability = fileCapabilityForRequest(snapshot.value);
+      const grant = requireDesktopCapabilityGrant(packageManifest, "requestFile", snapshot.value.grant, snapshot.value);
 
-      if (capability === null || !hasDesktopCapabilityGrant(manifest, capability, snapshot.value.grant)) {
-        return Object.freeze({
-          error: Object.freeze({
-            code: "MISSING_CAPABILITY",
-            message: "package cannot use this file grant.",
-          }),
-        });
-      }
+      if (!grant.ok) return filesRejectCapabilityDenied(grant.error);
 
       return host.requestFile?.(snapshot.value) ?? Object.freeze({
         error: Object.freeze({
@@ -565,9 +552,9 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeSettingsReadRequest(request, "/readSetting");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "settings.read", snapshot.value.key)) {
-        return hostReject("MISSING_CAPABILITY", "package cannot read this setting.", "/capabilityGrants/settings.read");
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "readSetting", snapshot.value.key);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.readSetting?.(snapshot.value) ?? hostReject("SETTINGS_PORT_UNAVAILABLE", "settings port is unavailable.", "/settings");
     };
@@ -577,9 +564,9 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeSettingsWriteRequest(request, "/previewSetting");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "settings.write", snapshot.value.key)) {
-        return hostReject("MISSING_CAPABILITY", "package cannot preview this setting.", "/capabilityGrants/settings.write");
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "previewSetting", snapshot.value.key);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.previewSetting?.(snapshot.value) ?? hostReject("SETTINGS_PORT_UNAVAILABLE", "settings port is unavailable.", "/settings");
     };
@@ -589,9 +576,9 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeSettingsWriteRequest(request, "/applySetting");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "settings.write", snapshot.value.key)) {
-        return hostReject("MISSING_CAPABILITY", "package cannot apply this setting.", "/capabilityGrants/settings.write");
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "applySetting", snapshot.value.key);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.applySetting?.(snapshot.value) ?? hostReject("SETTINGS_PORT_UNAVAILABLE", "settings port is unavailable.", "/settings");
     };
@@ -601,19 +588,123 @@ export function createDesktopHostForPackage(
       const snapshot = normalizeLauncherIntent(intent, "/emitLauncherIntent");
 
       if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
-      if (!hasDesktopCapabilityGrant(manifest, "launcher.launch", snapshot.value.appId)) {
-        return hostReject(
-          "MISSING_CAPABILITY",
-          "package cannot emit this launcher intent.",
-          "/capabilityGrants/launcher.launch",
-        );
-      }
+      const grant = requireDesktopCapabilityGrant(packageManifest, "emitLauncherIntent", snapshot.value.appId);
+
+      if (!grant.ok) return hostRejectFromValidation(grant.error);
 
       return host.emitLauncherIntent?.(snapshot.value) ?? hostReject("LAUNCHER_PORT_UNAVAILABLE", "launcher port is unavailable.", "/launcher");
     };
   }
 
   return Object.freeze(scoped);
+}
+
+function snapshotDesktopCapabilityManifest(manifest: DesktopUiPackageManifest): DesktopUiPackageManifest {
+  return Object.freeze({
+    capabilityGrants: snapshotDesktopCapabilityGrants(manifest.capabilityGrants),
+    entry: manifest.entry,
+    id: manifest.id,
+    sdkVersion: manifest.sdkVersion,
+    version: manifest.version,
+  });
+}
+
+function snapshotDesktopCapabilityGrants(
+  capabilityGrants: readonly DesktopCapabilityGrant[],
+): readonly DesktopCapabilityGrant[] {
+  const snapshot: DesktopCapabilityGrant[] = [];
+
+  for (let index = 0; index < capabilityGrants.length; index += 1) {
+    const grant = capabilityGrants[index];
+
+    if (grant === undefined) continue;
+
+    const normalized: {
+      capability: DesktopCapability;
+      resourceId?: string;
+    } = {
+      capability: grant.capability,
+    };
+
+    if (grant.resourceId !== undefined) normalized.resourceId = grant.resourceId;
+    snapshot.push(Object.freeze(normalized));
+  }
+
+  return Object.freeze(snapshot);
+}
+
+function requireDesktopCapabilityGrant(
+  manifest: DesktopUiPackageManifest,
+  method: string,
+  resourceId?: string,
+  fileRequest?: FilesRequest,
+): DesktopUiValidationResult<DesktopCapability> {
+  const capability = desktopCapabilityForRoute(method, fileRequest);
+
+  if (capability === null || !hasDesktopCapabilityGrant(manifest, capability, resourceId)) {
+    return reject(
+      CAPABILITY_DENIED_CODE,
+      capabilityDeniedMessage(method),
+      capabilityDeniedPath(capability),
+    );
+  }
+
+  return accept(capability);
+}
+
+function desktopCapabilityForRoute(method: string, fileRequest?: FilesRequest): DesktopCapability | null {
+  switch (method) {
+    case "launchApp":
+      return "apps.launch";
+    case "stopApp":
+      return "apps.stop";
+    case "requestFile":
+      return fileRequest === undefined ? null : fileCapabilityForRequest(fileRequest);
+    case "readSetting":
+      return "settings.read";
+    case "previewSetting":
+    case "applySetting":
+      return "settings.write";
+    case "emitLauncherIntent":
+      return "launcher.launch";
+    case "postNotification":
+      return "shell.notifications.post";
+    case "registerTrayItem":
+      return "shell.tray.register";
+    default:
+      return null;
+  }
+}
+
+function capabilityDeniedMessage(method: string): string {
+  switch (method) {
+    case "launchApp":
+      return "package cannot launch this app.";
+    case "stopApp":
+      return "package cannot stop this app.";
+    case "requestFile":
+      return "package cannot use this file grant.";
+    case "readSetting":
+      return "package cannot read this setting.";
+    case "previewSetting":
+      return "package cannot preview this setting.";
+    case "applySetting":
+      return "package cannot apply this setting.";
+    case "emitLauncherIntent":
+      return "package cannot emit this launcher intent.";
+    case "postNotification":
+      return "package cannot post this notification.";
+    case "registerTrayItem":
+      return "package cannot register this tray item.";
+    default:
+      return "package cannot use this host route.";
+  }
+}
+
+function capabilityDeniedPath(capability: DesktopCapability | null): string {
+  if (capability === null) return "/capabilityGrants";
+
+  return `/capabilityGrants/${capability}`;
 }
 
 function snapshotDesktopUiPackage(input: unknown, currentSdkVersion: string): DesktopUiValidationResult<SnapshotUiPackage> {
@@ -1985,6 +2076,15 @@ function filesRejectFromValidation(error: DesktopUiValidationError): FilesErrorR
   return Object.freeze({
     error: Object.freeze({
       code: error.code,
+      message: error.message,
+    }),
+  });
+}
+
+function filesRejectCapabilityDenied(error: DesktopUiValidationError): FilesErrorResponse {
+  return Object.freeze({
+    error: Object.freeze({
+      code: CAPABILITY_DENIED_CODE,
       message: error.message,
     }),
   });
