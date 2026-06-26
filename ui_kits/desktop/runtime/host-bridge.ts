@@ -28,6 +28,29 @@ import type {
   TrayItemInput,
   WindowManagerIntent,
 } from "../../../sdk/typescript/src/desktop-sdk/index.ts";
+import {
+  A11Y_CONTRASTS,
+  A11Y_NUMERIC_PREFS,
+  A11Y_PREFS_SETTING_KEYS,
+} from "../viewmodels/a11y-prefs.ts";
+import {
+  INPUT_ACCESSIBILITY_SETTING_KEY,
+} from "../viewmodels/input-accessibility.ts";
+import {
+  DEFAULT_KEYMAP_PROFILES,
+  KEYBOARD_SETTINGS_KEYS,
+} from "../viewmodels/keyboard-settings.ts";
+import {
+  SETTINGS_ACCENT_OPTIONS,
+  SETTINGS_APPEARANCE_KEYS,
+  SETTINGS_LAYOUTS,
+  SETTINGS_SECTIONS,
+  SETTINGS_THEMES,
+} from "../viewmodels/Settings.ts";
+import {
+  WALLPAPER_FIT_MODES,
+  WALLPAPER_SETTING_KEYS,
+} from "../viewmodels/wallpaper.ts";
 import type {
   LockAuthenticateRequest,
   LockAuthPort,
@@ -116,6 +139,40 @@ type JsonNormalizeResult =
     };
 
 const MAX_JSON_DEPTH = 80;
+
+const DESKTOP_SETTING_KEYS = Object.freeze([
+  SETTINGS_APPEARANCE_KEYS.accent,
+  SETTINGS_APPEARANCE_KEYS.activeSection,
+  SETTINGS_APPEARANCE_KEYS.layout,
+  SETTINGS_APPEARANCE_KEYS.theme,
+  A11Y_PREFS_SETTING_KEYS.contrast,
+  A11Y_PREFS_SETTING_KEYS.cursorSize,
+  A11Y_PREFS_SETTING_KEYS.focusRingThickness,
+  A11Y_PREFS_SETTING_KEYS.reduceMotion,
+  A11Y_PREFS_SETTING_KEYS.reduceTransparency,
+  A11Y_PREFS_SETTING_KEYS.textScale,
+  A11Y_PREFS_SETTING_KEYS.uiZoom,
+  INPUT_ACCESSIBILITY_SETTING_KEY,
+  WALLPAPER_SETTING_KEYS.fit,
+  WALLPAPER_SETTING_KEYS.slideshowIntervalMs,
+  WALLPAPER_SETTING_KEYS.slideshowSources,
+  WALLPAPER_SETTING_KEYS.solidColor,
+  WALLPAPER_SETTING_KEYS.sourceRef,
+  WALLPAPER_SETTING_KEYS.workspaceOverrides,
+  KEYBOARD_SETTINGS_KEYS.overrides,
+  KEYBOARD_SETTINGS_KEYS.profile,
+] as const);
+
+const INPUT_ACCESSIBILITY_POLICY_FIELDS = Object.freeze(["bounceKeys", "keyRepeat", "slowKeys", "stickyKeys"] as const);
+const INPUT_ACCESSIBILITY_KEY_REPEAT_FIELDS = Object.freeze(["enabled", "repeatDelayMs", "repeatRateMs"] as const);
+const INPUT_ACCESSIBILITY_STICKY_KEYS_FIELDS = Object.freeze(["enabled", "lockOnDoublePress"] as const);
+const INPUT_ACCESSIBILITY_SLOW_KEYS_FIELDS = Object.freeze(["enabled", "holdThresholdMs"] as const);
+const INPUT_ACCESSIBILITY_BOUNCE_KEYS_FIELDS = Object.freeze(["debounceWindowMs", "enabled"] as const);
+const WALLPAPER_WORKSPACE_OVERRIDE_FIELDS = Object.freeze(["fit", "sourceRef", "workspaceId"] as const);
+const KEYBOARD_OVERRIDE_FIELDS = Object.freeze(["chord", "commandId"] as const);
+const READ_SETTING_REQUEST_FIELDS = Object.freeze(["key"] as const);
+
+type DesktopSettingKey = typeof DESKTOP_SETTING_KEYS[number];
 
 const DEFAULT_PACKAGE_GRANTS = Object.freeze([
   Object.freeze({ capability: "apps.launch" }),
@@ -251,11 +308,9 @@ export function createSurfaceHost(
       isFilesResponse,
       filesReject,
     );
-    host.readSetting = async (readRequest) => await forwardHostResult(
+    host.readSetting = async (readRequest) => await forwardReadSetting(
       request,
-      "readSetting",
-      [readRequest],
-      isJson,
+      readRequest,
     );
     host.previewSetting = async (writeRequest) => await forwardHostResult(
       request,
@@ -369,6 +424,44 @@ async function forwardHostResult<T>(
   if (!response.ok) return hostReject(response.error);
 
   const result = normalizeHostResult(response.value, valueGuard, method);
+
+  return result.ok ? result.value : hostReject(result.error);
+}
+
+async function forwardReadSetting(
+  request: RequestTransport | undefined,
+  readRequest: unknown,
+): Promise<DesktopHostResult<HostBridgeJson>> {
+  const outbound = buildRequest("readSetting", [readRequest]);
+
+  if (!outbound.ok) return hostReject(outbound.error);
+
+  const key = readSettingKeyFromRequest(outbound.value);
+
+  if (key === undefined) {
+    return hostReject(bridgeError("HOST_BRIDGE_MALFORMED_REQUEST", "readSetting request key must be a non-empty string.", "/readSetting/args/0/key"));
+  }
+  if (request === undefined) {
+    return hostReject(bridgeError("HOST_BRIDGE_UNAVAILABLE", "host bridge transport is unavailable.", "/readSetting"));
+  }
+
+  let rawResponse: unknown;
+
+  try {
+    rawResponse = await request(outbound.value);
+  } catch {
+    return hostReject(bridgeError("HOST_BRIDGE_FAILED", "host bridge transport failed closed.", "/readSetting"));
+  }
+
+  const response = snapshotJson(rawResponse, "/readSetting/response");
+
+  if (!response.ok) return hostReject(response.error);
+
+  const result = normalizeHostResult(
+    response.value,
+    (value): value is HostBridgeJson => isDesktopSettingValue(key, value),
+    "readSetting",
+  );
 
   return result.ok ? result.value : hostReject(result.error);
 }
@@ -864,6 +957,234 @@ function isWindowManagerIntentArray(value: unknown): value is readonly WindowMan
   return true;
 }
 
+function readSettingKeyFromRequest(request: SurfaceHostRequest): string | undefined {
+  const readRequest = jsonObject(request.args[0]);
+
+  if (readRequest === undefined || !hasOnlyJsonKeys(readRequest, READ_SETTING_REQUEST_FIELDS)) return undefined;
+
+  const key = readRequest["key"];
+
+  return typeof key === "string" && key.length > 0 ? key : undefined;
+}
+
+function isDesktopSettingValue(key: string, value: unknown): value is HostBridgeJson {
+  if (!isDesktopSettingKey(key)) return false;
+
+  switch (key) {
+    case SETTINGS_APPEARANCE_KEYS.theme:
+      return isStringEnum(value, SETTINGS_THEMES);
+    case SETTINGS_APPEARANCE_KEYS.accent:
+      return isSettingsAccent(value);
+    case SETTINGS_APPEARANCE_KEYS.layout:
+      return isStringEnum(value, SETTINGS_LAYOUTS);
+    case SETTINGS_APPEARANCE_KEYS.activeSection:
+      return isSettingsSection(value);
+    case A11Y_PREFS_SETTING_KEYS.contrast:
+      return isStringEnum(value, A11Y_CONTRASTS);
+    case A11Y_PREFS_SETTING_KEYS.reduceMotion:
+    case A11Y_PREFS_SETTING_KEYS.reduceTransparency:
+      return typeof value === "boolean";
+    case A11Y_PREFS_SETTING_KEYS.cursorSize:
+      return isNumberInRange(value, A11Y_NUMERIC_PREFS.cursorSize.min, A11Y_NUMERIC_PREFS.cursorSize.max);
+    case A11Y_PREFS_SETTING_KEYS.focusRingThickness:
+      return isNumberInRange(
+        value,
+        A11Y_NUMERIC_PREFS.focusRingThickness.min,
+        A11Y_NUMERIC_PREFS.focusRingThickness.max,
+      );
+    case A11Y_PREFS_SETTING_KEYS.textScale:
+      return isNumberInRange(value, A11Y_NUMERIC_PREFS.textScale.min, A11Y_NUMERIC_PREFS.textScale.max);
+    case A11Y_PREFS_SETTING_KEYS.uiZoom:
+      return isNumberInRange(value, A11Y_NUMERIC_PREFS.uiZoom.min, A11Y_NUMERIC_PREFS.uiZoom.max);
+    case INPUT_ACCESSIBILITY_SETTING_KEY:
+      return isInputAccessibilityPolicy(value);
+    case WALLPAPER_SETTING_KEYS.fit:
+      return isStringEnum(value, WALLPAPER_FIT_MODES);
+    case WALLPAPER_SETTING_KEYS.sourceRef:
+      return isSupportedString(value, false);
+    case WALLPAPER_SETTING_KEYS.solidColor:
+      return isSupportedString(value, true);
+    case WALLPAPER_SETTING_KEYS.slideshowIntervalMs:
+      return isSafeIntegerAtLeast(value, 1);
+    case WALLPAPER_SETTING_KEYS.slideshowSources:
+      return isEncodedStringArray(value);
+    case WALLPAPER_SETTING_KEYS.workspaceOverrides:
+      return isEncodedWorkspaceOverrides(value);
+    case KEYBOARD_SETTINGS_KEYS.overrides:
+      return isEncodedKeyboardOverrides(value);
+    case KEYBOARD_SETTINGS_KEYS.profile:
+      return isKeyboardProfile(value);
+    default:
+      return false;
+  }
+}
+
+function isDesktopSettingKey(value: string): value is DesktopSettingKey {
+  return containsString(DESKTOP_SETTING_KEYS, value);
+}
+
+function isSettingsAccent(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+
+  for (let index = 0; index < SETTINGS_ACCENT_OPTIONS.length; index += 1) {
+    if (SETTINGS_ACCENT_OPTIONS[index]?.id === value) return true;
+  }
+
+  return false;
+}
+
+function isSettingsSection(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+
+  for (let index = 0; index < SETTINGS_SECTIONS.length; index += 1) {
+    if (SETTINGS_SECTIONS[index]?.id === value) return true;
+  }
+
+  return false;
+}
+
+function isKeyboardProfile(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+
+  for (let index = 0; index < DEFAULT_KEYMAP_PROFILES.length; index += 1) {
+    if (DEFAULT_KEYMAP_PROFILES[index]?.id === value) return true;
+  }
+
+  return false;
+}
+
+function isInputAccessibilityPolicy(value: unknown): boolean {
+  const policy = jsonObject(value);
+
+  if (policy === undefined || !hasOnlyJsonKeys(policy, INPUT_ACCESSIBILITY_POLICY_FIELDS)) return false;
+
+  return (
+    isInputKeyRepeatPolicy(policy["keyRepeat"]) &&
+    isInputStickyKeysPolicy(policy["stickyKeys"]) &&
+    isInputSlowKeysPolicy(policy["slowKeys"]) &&
+    isInputBounceKeysPolicy(policy["bounceKeys"])
+  );
+}
+
+function isInputKeyRepeatPolicy(value: unknown): boolean {
+  const policy = jsonObject(value);
+
+  return policy !== undefined &&
+    hasOnlyJsonKeys(policy, INPUT_ACCESSIBILITY_KEY_REPEAT_FIELDS) &&
+    typeof policy["enabled"] === "boolean" &&
+    isSafeIntegerAtLeast(policy["repeatDelayMs"], 0) &&
+    isSafeIntegerAtLeast(policy["repeatRateMs"], 1);
+}
+
+function isInputStickyKeysPolicy(value: unknown): boolean {
+  const policy = jsonObject(value);
+
+  return policy !== undefined &&
+    hasOnlyJsonKeys(policy, INPUT_ACCESSIBILITY_STICKY_KEYS_FIELDS) &&
+    typeof policy["enabled"] === "boolean" &&
+    typeof policy["lockOnDoublePress"] === "boolean";
+}
+
+function isInputSlowKeysPolicy(value: unknown): boolean {
+  const policy = jsonObject(value);
+
+  return policy !== undefined &&
+    hasOnlyJsonKeys(policy, INPUT_ACCESSIBILITY_SLOW_KEYS_FIELDS) &&
+    typeof policy["enabled"] === "boolean" &&
+    isSafeIntegerAtLeast(policy["holdThresholdMs"], 0);
+}
+
+function isInputBounceKeysPolicy(value: unknown): boolean {
+  const policy = jsonObject(value);
+
+  return policy !== undefined &&
+    hasOnlyJsonKeys(policy, INPUT_ACCESSIBILITY_BOUNCE_KEYS_FIELDS) &&
+    isSafeIntegerAtLeast(policy["debounceWindowMs"], 0) &&
+    typeof policy["enabled"] === "boolean";
+}
+
+function isEncodedStringArray(value: unknown): boolean {
+  const parsed = parseEncodedArray(value);
+
+  if (parsed === undefined) return false;
+
+  for (let index = 0; index < parsed.length; index += 1) {
+    const item = parsed[index];
+
+    if (typeof item !== "string" || item.length === 0) return false;
+  }
+
+  return true;
+}
+
+function isEncodedWorkspaceOverrides(value: unknown): boolean {
+  const parsed = parseEncodedArray(value);
+
+  if (parsed === undefined) return false;
+
+  for (let index = 0; index < parsed.length; index += 1) {
+    const item = jsonObject(parsed[index]);
+
+    if (item === undefined || !hasOnlyJsonKeys(item, WALLPAPER_WORKSPACE_OVERRIDE_FIELDS)) return false;
+    if (!isSupportedString(item["workspaceId"], true)) return false;
+    if (!isSupportedString(item["sourceRef"], true)) return false;
+    if (!isStringEnum(item["fit"], WALLPAPER_FIT_MODES)) return false;
+  }
+
+  return true;
+}
+
+function isEncodedKeyboardOverrides(value: unknown): boolean {
+  const parsed = parseEncodedArray(value);
+
+  if (parsed === undefined) return false;
+
+  for (let index = 0; index < parsed.length; index += 1) {
+    const item = jsonObject(parsed[index]);
+
+    if (item === undefined || !hasOnlyJsonKeys(item, KEYBOARD_OVERRIDE_FIELDS)) return false;
+    if (!isSupportedString(item["chord"], true)) return false;
+    if (!isSupportedString(item["commandId"], true)) return false;
+  }
+
+  return true;
+}
+
+function parseEncodedArray(value: unknown): readonly HostBridgeJson[] | undefined {
+  if (typeof value !== "string") return undefined;
+  if (value.trim().length === 0) return Object.freeze([]);
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+
+  const normalized = snapshotJson(parsed, "/readSetting/value");
+
+  if (!normalized.ok || !Array.isArray(normalized.value)) return undefined;
+
+  return normalized.value;
+}
+
+function isStringEnum<T extends string>(value: unknown, options: readonly T[]): value is T {
+  return typeof value === "string" && containsString(options, value);
+}
+
+function isSupportedString(value: unknown, nonEmpty: boolean): value is string {
+  return typeof value === "string" && (!nonEmpty || value.length > 0);
+}
+
+function isNumberInRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteNumber(value) && value >= min && value <= max;
+}
+
+function isSafeIntegerAtLeast(value: unknown, min: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min;
+}
+
 function isDesktopSettingsPreview(value: unknown): value is DesktopSettingsPreview {
   const preview = jsonObject(value);
 
@@ -1247,10 +1568,6 @@ function isTrue(value: unknown): value is true {
   return value === true;
 }
 
-function isJson(value: unknown): value is HostBridgeJson {
-  return value !== undefined;
-}
-
 function jsonObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
   if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
 
@@ -1259,6 +1576,28 @@ function jsonObject(value: unknown): Readonly<Record<string, unknown>> | undefin
 
 function hasJsonField(value: Readonly<Record<string, unknown>>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function hasOnlyJsonKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+
+  if (keys.length !== expected.length) return false;
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+
+    if (key === undefined || !containsString(expected, key)) return false;
+  }
+
+  return true;
+}
+
+function containsString<T extends string>(values: readonly T[], value: string): value is T {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === value) return true;
+  }
+
+  return false;
 }
 
 function optionalString(value: unknown): boolean {
