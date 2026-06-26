@@ -138,6 +138,8 @@ class StatefulDesktopAppsBackend implements DesktopAppsBackend {
   readonly #launched = new Map<string, RunningApp>();
   readonly #layoutConstraints: LayoutConstraints;
   readonly #package: DesktopUiPackageManifest;
+  readonly #pendingLaunches = new Map<string, Promise<DesktopHostResult<DesktopAppLaunch>>>();
+  readonly #pendingStops = new Map<string, Promise<DesktopHostResult<DesktopAppStop>>>();
   #windowModel: WindowModel;
 
   constructor(options: DesktopAppsBackendOptions) {
@@ -177,6 +179,10 @@ class StatefulDesktopAppsBackend implements DesktopAppsBackend {
       );
     }
 
+    const pendingLaunch = this.#pendingLaunches.get(appSnapshot.id);
+
+    if (pendingLaunch !== undefined) return pendingLaunch;
+
     if (this.#launched.has(appSnapshot.id)) {
       return hostReject(
         "APP_ALREADY_RUNNING",
@@ -185,9 +191,34 @@ class StatefulDesktopAppsBackend implements DesktopAppsBackend {
       );
     }
 
+    const agentd = this.#agentd;
     const capsule = this.#capsules[appSnapshot.surfaceKind];
+    const launch = this.#startLaunch(appSnapshot, capsule, agentd);
+
+    this.#pendingLaunches.set(appSnapshot.id, launch);
+    void launch.then(
+      () => {
+        if (this.#pendingLaunches.get(appSnapshot.id) === launch) {
+          this.#pendingLaunches.delete(appSnapshot.id);
+        }
+      },
+      () => {
+        if (this.#pendingLaunches.get(appSnapshot.id) === launch) {
+          this.#pendingLaunches.delete(appSnapshot.id);
+        }
+      },
+    );
+
+    return launch;
+  }
+
+  async #startLaunch(
+    appSnapshot: DesktopLaunchableApp,
+    capsule: DesktopAppCapsuleDescriptor,
+    agentd: AgentdHostClient,
+  ): Promise<DesktopHostResult<DesktopAppLaunch>> {
     const started = await callAgentd(
-      this.#agentd,
+      agentd,
       CAPSULE_EXECUTE_CAPABILITY,
       capsuleExecuteRequest(capsule),
       "APP_CAPSULE_EXECUTE_FAILED",
@@ -246,6 +277,10 @@ class StatefulDesktopAppsBackend implements DesktopAppsBackend {
       );
     }
 
+    const pendingStop = this.#pendingStops.get(appId);
+
+    if (pendingStop !== undefined) return pendingStop;
+
     const running = this.#launched.get(appId);
 
     if (running === undefined) {
@@ -255,8 +290,33 @@ class StatefulDesktopAppsBackend implements DesktopAppsBackend {
       }));
     }
 
+    const agentd = this.#agentd;
+    const stop = this.#startStop(appId, running, agentd);
+
+    this.#pendingStops.set(appId, stop);
+    void stop.then(
+      () => {
+        if (this.#pendingStops.get(appId) === stop) {
+          this.#pendingStops.delete(appId);
+        }
+      },
+      () => {
+        if (this.#pendingStops.get(appId) === stop) {
+          this.#pendingStops.delete(appId);
+        }
+      },
+    );
+
+    return stop;
+  }
+
+  async #startStop(
+    appId: string,
+    running: RunningApp,
+    agentd: AgentdHostClient,
+  ): Promise<DesktopHostResult<DesktopAppStop>> {
     const stopped = await callAgentd(
-      this.#agentd,
+      agentd,
       CAPSULE_LIFECYCLE_CAPABILITY,
       capsuleStopRequest(running.capsule),
       "APP_CAPSULE_STOP_FAILED",

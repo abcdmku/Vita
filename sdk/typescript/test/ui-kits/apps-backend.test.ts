@@ -114,9 +114,106 @@ test("apps backend launches and stops capsules with window surface allocation", 
   assert.equal(emissions.stops.length, 1);
 });
 
-test("apps backend leaves no dangling surface when capsule execute rejects", async () => {
+test("apps backend collapses concurrent same-app launches to one capsule execute", async () => {
+  const executeGate = createDeferred<AgentdHostResult>();
   const emissions = createEmissionLog();
-  const agentd = createFakeAgentd(() => agentdError("capsule_execute_rejected", "execute rejected"));
+  const agentd = createFakeAgentd((capability) => {
+    if (capability === "capsule.execute") return executeGate.promise;
+
+    return agentdError("unexpected_capability", "unexpected capability");
+  });
+  const backend = createDesktopAppsBackend({
+    agentd: agentd.client,
+    emitLaunch: emissions.emitLaunch,
+    emitStop: emissions.emitStop,
+    package: manifest(Object.freeze([
+      grant("apps.launch"),
+      grant("apps.stop"),
+    ])),
+  });
+  const app = launchableApp("vita.app.concurrent-launch");
+
+  const first = backend.launchApp(app);
+  const second = backend.launchApp(app);
+
+  assert.equal(agentd.calls.length, 1);
+  assert.equal(agentd.calls[0]?.capability, "capsule.execute");
+  assert.deepEqual(emissions.launches, []);
+
+  executeGate.resolve(agentdOk());
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  const firstLaunch = assertHostSuccess(firstResult);
+  const secondLaunch = assertHostSuccess(secondResult);
+
+  assert.strictEqual(firstLaunch, secondLaunch);
+  assert.equal(isDesktopAppLaunch(firstLaunch), true);
+  assert.deepEqual(emissions.launches, [firstLaunch]);
+  assert.equal(backend.snapshot().launched.length, 1);
+  assert.equal(agentd.calls.length, 1);
+});
+
+test("apps backend collapses concurrent same-app stops to one capsule teardown", async () => {
+  const lifecycleGate = createDeferred<AgentdHostResult>();
+  const layoutConstraints = testLayoutConstraints();
+  const emissions = createEmissionLog();
+  const agentd = createFakeAgentd((capability) => {
+    if (capability === "capsule.execute") return agentdOk();
+    if (capability === "capsule.lifecycle") return lifecycleGate.promise;
+
+    return agentdError("unexpected_capability", "unexpected capability");
+  });
+  const backend = createDesktopAppsBackend({
+    agentd: agentd.client,
+    emitLaunch: emissions.emitLaunch,
+    emitStop: emissions.emitStop,
+    layoutConstraints,
+    package: manifest(Object.freeze([
+      grant("apps.launch"),
+      grant("apps.stop"),
+    ])),
+  });
+  const app = launchableApp("vita.app.concurrent-stop");
+  const launch = assertHostSuccess(await backend.launchApp(app));
+
+  const first = backend.stopApp(app.id);
+  const second = backend.stopApp(app.id);
+
+  assert.equal(agentd.calls.length, 2);
+  assert.equal(agentd.calls[1]?.capability, "capsule.lifecycle");
+  assert.deepEqual(emissions.stops, []);
+
+  lifecycleGate.resolve(agentdOk());
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  const firstStop = assertHostSuccess(firstResult);
+  const secondStop = assertHostSuccess(secondResult);
+
+  assert.strictEqual(firstStop, secondStop);
+  assert.deepEqual(firstStop, {
+    appId: app.id,
+    intents: expectedStopIntents(launch, app, layoutConstraints),
+    surfaceId: launch.surfaceId,
+    textureId: launch.textureId,
+    windowId: launch.windowId,
+  });
+  assert.deepEqual(emissions.stops, [firstStop]);
+  assert.equal(backend.snapshot().launched.length, 0);
+  assert.equal(agentd.calls.length, 2);
+
+  const thirdStop = assertHostSuccess(await backend.stopApp(app.id));
+
+  assert.deepEqual(thirdStop, {
+    appId: app.id,
+    intents: [],
+  });
+  assert.equal(agentd.calls.length, 2);
+  assert.equal(emissions.stops.length, 1);
+});
+
+test("apps backend leaves no dangling surface when capsule execute throws", async () => {
+  const emissions = createEmissionLog();
+  const agentd = createFakeAgentd(() => {
+    throw new Error("execute rejected");
+  });
   const backend = createDesktopAppsBackend({
     agentd: agentd.client,
     emitLaunch: emissions.emitLaunch,
@@ -329,6 +426,11 @@ interface FakeAgentd {
   readonly client: AgentdHostClient;
 }
 
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+
 interface EmissionLog {
   readonly launches: readonly DesktopAppLaunch[];
   readonly stops: readonly DesktopAppStop[];
@@ -354,6 +456,18 @@ function createFakeAgentd(
   return Object.freeze({
     calls,
     client,
+  });
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolvePromise: (value: T) => void = () => {};
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  return Object.freeze({
+    promise,
+    resolve: resolvePromise,
   });
 }
 
