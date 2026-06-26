@@ -213,6 +213,49 @@ Type=ext4
 Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs
 `;
 
+const BTRFS_VAR_MOUNT_UNIT = `# Vita LUKS /var mount (btrfs data filesystem). This generated unit is used
+# only by VITA_LUKS=1 VITA_BTRFS=1 verity builds. It mounts only the decrypted
+# mapper, never /dev/disk/by-label/vita-data, so wrong/no key cannot fall open.
+[Unit]
+Description=Vita persistent data partition (/var)
+DefaultDependencies=no
+Requires=vita-data-luks.service
+BindsTo=vita-data-luks.service
+After=vita-data-luks.service
+Before=local-fs.target umount.target
+Conflicts=umount.target
+ConditionPathExists=/usr/lib/vita/luks/enabled
+ConditionPathExists=/usr/lib/vita/luks/btrfs-enabled
+
+[Mount]
+What=/dev/mapper/vita-data
+Where=/var
+Type=btrfs
+Options=nofail,x-systemd.device-timeout=5s
+`;
+
+const BTRFS_MARKER_SERVICE_UNIT = `# Emits the measured VITA-BTRFS boot marker only when the build selected
+# btrfs for the decrypted data mapper.
+[Unit]
+Description=Vita btrfs data-volume measured marker
+After=var.mount vita-data-luks.service
+Wants=var.mount
+ConditionPathExists=/usr/lib/vita/luks/enabled
+ConditionPathExists=/usr/lib/vita/luks/btrfs-enabled
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/lib/vita/luks/vita-btrfs-marker.sh
+StandardOutput=journal+console
+StandardError=journal+console
+`;
+
+const BTRFS_MARKER_TARGET_DROP_IN = `# Pull the btrfs marker probe into btrfs-selected LUKS boots. The
+# service itself is condition-gated by /usr/lib/vita/luks/btrfs-enabled.
+[Unit]
+Wants=vita-btrfs-marker.service
+`;
+
 function prepareVerityRepartDirectory({ luksMode }) {
   if (luksMode) {
     return REPART_VERITY_DIR;
@@ -234,10 +277,33 @@ function prepareVerityRepartDirectory({ luksMode }) {
   return plainDir;
 }
 
-function prepareVerityOverlay({ luksMode }) {
+function prepareVerityOverlay({ luksMode, btrfsMode }) {
   const overlay = join(HERE, "verity-overlay");
   if (luksMode) {
-    return overlay;
+    if (!btrfsMode) {
+      log("   (/var data filesystem: ext4; unit Type=ext4 Options=nofail,x-systemd.device-timeout=5s,x-systemd.growfs)");
+      return overlay;
+    }
+
+    const btrfsOverlay = join(OUT, "verity-overlay-btrfs");
+    log("   (/var data filesystem: btrfs; unit Type=btrfs Options=nofail,x-systemd.device-timeout=5s)");
+    if (DRY) return btrfsOverlay;
+    rmSync(btrfsOverlay, { recursive: true, force: true });
+    cpSync(overlay, btrfsOverlay, { recursive: true, preserveTimestamps: true });
+    const systemdDir = join(btrfsOverlay, "usr", "lib", "systemd", "system");
+    writeFileSync(join(systemdDir, "var.mount"), BTRFS_VAR_MOUNT_UNIT, { mode: 0o644 });
+    writeFileSync(join(systemdDir, "vita-btrfs-marker.service"), BTRFS_MARKER_SERVICE_UNIT, { mode: 0o644 });
+    writeFileSync(
+      join(systemdDir, "multi-user.target.d", "11-vita-btrfs-marker.conf"),
+      BTRFS_MARKER_TARGET_DROP_IN,
+      { mode: 0o644 },
+    );
+    chmodSync(join(btrfsOverlay, "usr", "lib", "vita", "luks", "vita-btrfs-marker.sh"), 0o755);
+    return btrfsOverlay;
+  }
+
+  if (btrfsMode) {
+    fail("VITA_BTRFS=1 requires VITA_LUKS=1: btrfs is only supported on the decrypted LUKS data mapper.");
   }
 
   // Keep VITA_LUKS=0 verity image contents identical to P1-029: no unlock unit,
@@ -255,7 +321,7 @@ function prepareVerityOverlay({ luksMode }) {
   return plainOverlay;
 }
 
-function stageLuksTestKeyOverlay(keyPath) {
+function stageLuksTestKeyOverlay(keyPath, { btrfsMode }) {
   const overlay = join(OUT, "luks-overlay");
   if (DRY) return overlay;
   if (!existsSync(keyPath)) {
@@ -272,6 +338,13 @@ function stageLuksTestKeyOverlay(keyPath) {
   copyFileSync(keyPath, stagedKey);
   chmodSync(stagedKey, 0o400);
   writeFileSync(join(luksDir, "enabled"), "VITA_LUKS=1 build-only TEST unlock enabled\n", { mode: 0o444 });
+  if (btrfsMode) {
+    writeFileSync(
+      join(luksDir, "btrfs-enabled"),
+      "VITA_BTRFS=1 build-only btrfs data filesystem selected\n",
+      { mode: 0o444 },
+    );
+  }
   writeFileSync(join(luksDir, "README.DO-NOT-SHIP.txt"),
     "DO-NOT-SHIP: build-only Vita LUKS TEST key overlay. Real TPM/recovery secrets are owner-held.\n",
     { mode: 0o444 });
@@ -320,14 +393,18 @@ function cleanupLuksPostprocess(loopDevice, mapperName) {
   }
 }
 
-function luksFormatDataPartition(disk, keyPath) {
-  log("\n── LUKS · format vita-data as LUKS2 and create inner ext4 label");
+function luksFormatDataPartition(disk, keyPath, dataFilesystem) {
+  log(`\n── LUKS · format vita-data as LUKS2 and create inner ${dataFilesystem} label`);
   log("   (cryptsetup LUKS2 defaults are used for cipher/KDF; no production key material is generated)");
   if (DRY) {
     log(`   $ losetup --find --show --partscan ${disk}`);
     log("   $ cryptsetup luksFormat --type luks2 --batch-mode --key-file <TEST key> <vita-data partition>");
     log("   $ cryptsetup luksOpen --key-file <TEST key> <vita-data partition> <build mapper>");
-    log("   $ mkfs.ext4 -F -L vita-data /dev/mapper/<build mapper>");
+    if (dataFilesystem === "btrfs") {
+      log("   $ mkfs.btrfs -f -L vita-data /dev/mapper/<build mapper>");
+    } else {
+      log("   $ mkfs.ext4 -F -L vita-data /dev/mapper/<build mapper>");
+    }
     return;
   }
 
@@ -342,10 +419,15 @@ function luksFormatDataPartition(disk, keyPath) {
     runLuksPostprocess("LUKS · wipe plaintext outer filesystem signatures", "wipefs", ["--all", "--force", dataPartition]);
     runLuksPostprocess("LUKS · luksFormat vita-data outer container", "cryptsetup",
       ["luksFormat", "--type", "luks2", "--batch-mode", "--key-file", keyPath, dataPartition]);
-    runLuksPostprocess("LUKS · open vita-data mapper for inner ext4 formatting", "cryptsetup",
+    runLuksPostprocess(`LUKS · open vita-data mapper for inner ${dataFilesystem} formatting`, "cryptsetup",
       ["luksOpen", "--key-file", keyPath, dataPartition, mapperName]);
-    runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
-      ["-F", "-L", "vita-data", `/dev/mapper/${mapperName}`]);
+    if (dataFilesystem === "btrfs") {
+      runLuksPostprocess("LUKS · mkfs inner btrfs filesystem label", "mkfs.btrfs",
+        ["-f", "-L", "vita-data", `/dev/mapper/${mapperName}`]);
+    } else {
+      runLuksPostprocess("LUKS · mkfs inner ext4 filesystem label", "mkfs.ext4",
+        ["-F", "-L", "vita-data", `/dev/mapper/${mapperName}`]);
+    }
   } catch (e) {
     postprocessError = e;
   } finally {
@@ -560,6 +642,10 @@ if (MODE === "smoke") {
   if (luksMode && !verityMode) {
     fail("VITA_LUKS=1 requires VITA_VERITY=1: the encrypted data partition is only present in repart-verity.");
   }
+  const btrfsMode = process.env.VITA_BTRFS === "1";
+  if (btrfsMode && !luksMode) {
+    fail("VITA_BTRFS=1 requires VITA_LUKS=1: btrfs is only supported on the decrypted LUKS data mapper.");
+  }
   if (luksMode && !DRY && !useNative) {
     fail("VITA_LUKS=1 requires the native mkosi engine — LUKS post-processing uses host loop devices.");
   }
@@ -572,10 +658,12 @@ if (MODE === "smoke") {
   // var.mount + its local-fs drop-in live in a VERITY-ONLY overlay: on a plain (non-verity) image the vita-data
   // device never exists, and a present-but-failed var.mount cascades through RequiresMountsFor=/var/... to cancel
   // vita-agentd (StateDirectory=vita-agent) — breaking the agentd socket. So ship those units ONLY when VITA_VERITY=1.
-  const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode }) : "";
+  const verityOverlay = verityMode ? prepareVerityOverlay({ luksMode, btrfsMode }) : "";
   const verityTree = verityMode ? [`--extra-tree=${verityOverlay}`] : [];
   const luksKey = resolve(process.env.VITA_LUKS_TEST_KEY_PATH ?? join(HERE, ".luks", "data.key"));
-  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey)}`] : [];
+  const luksTree = luksMode ? [`--extra-tree=${stageLuksTestKeyOverlay(luksKey, { btrfsMode })}`] : [];
+  const dataFilesystemPackages = btrfsMode ? ["--package=btrfs-progs"] : [];
+  const dataFilesystem = btrfsMode ? "btrfs" : "ext4";
   const rootOpts = verityMode ? "ro" : "rw";
   // VITA_SECURE_BOOT=1: sign the mkosi-built smoke UKI with our TEST db key (--bootloader=uki so the
   // UKI itself — kernel inside .linux — is the signed boot artifact, installed as /EFI/BOOT/BOOTX64.EFI).
@@ -627,12 +715,13 @@ if (MODE === "smoke") {
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,
+     ...dataFilesystemPackages,
      ...incremental, ...verity, ...bootloaderPin, ...sb,
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
      ...(cefOverlay ? [`--extra-tree=${cefOverlay}`] : []), ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
-  if (luksMode) luksFormatDataPartition(disk, luksKey);
+  if (luksMode) luksFormatDataPartition(disk, luksKey, dataFilesystem);
   log(`   disk → ${disk}`);
   if (!NO_BOOT) bootQemu(disk, { secureBoot, sbCert });
   log("\n✓ smoke build complete." + (NO_BOOT ? "" : " (booted above)"));
