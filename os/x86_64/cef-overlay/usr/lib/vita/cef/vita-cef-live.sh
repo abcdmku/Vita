@@ -146,12 +146,16 @@ fi
 # the flagship and reading the input FIFO (--input-in). exec replaces the subshell so the pipe
 # stays a single long-lived producer.
 (
+  # Close the inherited FIFO-holder fd 3 so osr_host does NOT inherit it — osr_host must be the
+  # SOLE reader of the input FIFO (via --input-in); inheriting the script's read-write holder gave
+  # the process a second FIFO fd that interfered with its reader so routed events never reached CEF.
+  exec 3>&-
   cat "$PRELUDE"
   LD_LIBRARY_PATH="$CEF_DIR" exec "$OSR" --url="$URL" --compositor-out=- \
     --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO"
 ) 2>"$CEF_LOG" \
-  | LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
-    "$COMPOSITOR" --commands --continuous --input-out="$INPUT_FIFO" > "$COMP_OUT" 2>&1 &
+  | { exec 3>&-; LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
+      "$COMPOSITOR" --commands --continuous --input-out="$INPUT_FIFO" > "$COMP_OUT" 2>&1; } &
 PIPE_PGID=$!
 
 # Wait (bounded) for the compositor's FIRST OK marker. With the baked snapshot this is the INSTANT

@@ -613,6 +613,7 @@ void InputReaderThread() {
     std::string line;
     while (!g_input_stop.load() && std::getline(in, line)) {
       if (line.empty()) continue;
+      fprintf(stderr, "[osr] input: read line: %s\n", line.c_str());  // DIAG
       if (line.rfind("inputEvent", 0) != 0) continue;  // ignore non-event lines
       std::string copy = line;
       CefPostTask(TID_UI,
