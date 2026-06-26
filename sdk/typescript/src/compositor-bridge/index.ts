@@ -233,6 +233,23 @@ export function defaultNativeCompositorSurfaceColor(
   return color;
 }
 
+/**
+ * Real per-window pixel content for a compositor window surface.
+ *
+ * When a {@link CompositorWindowPlacement} carries `content`, the window is
+ * backed by an actual RGBA framebuffer (sourced from the app/CEF `OnPaint`
+ * output) rather than a flat palette color. `rgbaHex` is the framebuffer's
+ * pixels encoded as lowercase hex (`width * height * 4` bytes → `* 8` hex
+ * chars), row-major, 8-bit RGBA. Drivers that understand buffer surfaces emit a
+ * `registerBufferSurface`/`updateBufferSurface` command carrying these bytes
+ * instead of a solid `registerSurface` fill.
+ */
+export interface CompositorBufferSurfaceContent {
+  readonly width: number;
+  readonly height: number;
+  readonly rgbaHex: string;
+}
+
 export interface CompositorWindowPlacement {
   readonly windowId: WindowId;
   readonly textureId: TextureId;
@@ -241,6 +258,14 @@ export interface CompositorWindowPlacement {
   readonly focused: boolean;
   readonly visible: boolean;
   readonly zIndex: number;
+  /**
+   * Optional real pixel content for this window. When present, the buffer
+   * surface flows through the bridge so a buffer-surface-aware port can emit the
+   * window's actual rendered pixels. Absent ⇒ the window has no content source
+   * yet; ports keep their existing (flat-color) behavior — this is additive and
+   * does NOT reject contentless windows.
+   */
+  readonly content?: CompositorBufferSurfaceContent;
 }
 
 export interface CompositorReconcileInput {
@@ -440,8 +465,9 @@ export class CompositorDriver {
 export function compositorWindowPlacement(
   placement: WindowPlacement,
   visible: boolean = placement.visible,
+  content?: CompositorBufferSurfaceContent,
 ): CompositorWindowPlacement {
-  return Object.freeze({
+  const base = {
     focused: placement.focused,
     rect: placement.rect,
     textureId: placement.textureId,
@@ -449,6 +475,19 @@ export function compositorWindowPlacement(
     windowId: placement.windowId,
     workspaceId: placement.workspaceId,
     zIndex: placement.zIndex,
+  };
+
+  if (content === undefined) {
+    return Object.freeze(base);
+  }
+
+  return Object.freeze({
+    ...base,
+    content: Object.freeze({
+      height: content.height,
+      rgbaHex: content.rgbaHex,
+      width: content.width,
+    }),
   });
 }
 

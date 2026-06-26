@@ -9,6 +9,7 @@ import {
   encodeNativeCompositorCommand,
 } from "./index.ts";
 import type {
+  CompositorBufferSurfaceContent,
   CompositorPort,
   CompositorRect,
   CompositorSurfaceKind,
@@ -82,8 +83,12 @@ export class SmokeCompositorLayoutError extends Error {
 export async function buildSmokeCompositorCommandStream(
   options: SmokeCompositorCommandStreamOptions,
 ): Promise<string> {
-  const windows = smokeWindowPlacements();
-  const buffers = resolveSmokeBufferSurfaces(options.bufferSurfaceSource, windows);
+  // The buffer-surface source is plumbed straight into CompositorWindowPlacement
+  // construction: each window carries its real RGBA pixels on placement.content,
+  // so the buffer content flows through the production data model (not a
+  // side-channel). The port then emits registerBufferSurface from that content.
+  const windows = smokeWindowPlacements(options.bufferSurfaceSource);
+  const buffers = bufferSurfacesFromPlacements(windows);
   const lines: string[] = [];
   const driver = new CompositorDriver(new SmokeBufferCompositorPort(lines, buffers));
   const result = await driver.reconcile({
@@ -145,9 +150,13 @@ export function smokeShellLayout(): ShellComposedLayout {
   });
 }
 
-export function smokeWindowPlacements(): readonly CompositorWindowPlacement[] {
+export function smokeWindowPlacements(
+  source?: SmokeBufferSurfaceSource,
+): readonly CompositorWindowPlacement[] {
+  const readBufferSurface = normalizeBufferSurfaceSource(source);
+
   return Object.freeze(SMOKE_WINDOWS.map((window) =>
-    smokeWindow(window.id, window.rect, window.zIndex)
+    smokeWindow(window.id, window.rect, window.zIndex, readBufferSurface)
   ));
 }
 
@@ -231,11 +240,32 @@ class SmokeBufferCompositorPort implements CompositorPort {
   }
 }
 
-function resolveSmokeBufferSurfaces(
-  source: SmokeBufferSurfaceSource | undefined,
+function resolveSmokeBufferContent(
+  readBufferSurface: BufferSurfaceReader,
+  request: SmokeBufferSurfaceRequest,
+): CompositorBufferSurfaceContent {
+  const path = `/bufferSurfaces/${pathToken(request.textureId)}`;
+  const value = readBufferSurface(request);
+
+  if (value === undefined) {
+    throw new SmokeCompositorLayoutError(
+      path,
+      `Missing injected buffer surface for '${request.textureId}'.`,
+    );
+  }
+
+  const resolved = normalizeBufferSurface(value, request, path);
+
+  return Object.freeze({
+    height: resolved.height,
+    rgbaHex: resolved.rgbaHex,
+    width: resolved.width,
+  });
+}
+
+function bufferSurfacesFromPlacements(
   windows: readonly CompositorWindowPlacement[],
 ): ReadonlyMap<string, ResolvedSmokeBufferSurface> {
-  const readBufferSurface = normalizeBufferSurfaceSource(source);
   const output = new Map<string, ResolvedSmokeBufferSurface>();
 
   for (let index = 0; index < windows.length; index += 1) {
@@ -245,23 +275,21 @@ function resolveSmokeBufferSurfaces(
       continue;
     }
 
-    const request = Object.freeze({
-      height: window.rect.height,
-      textureId: window.textureId,
-      width: window.rect.width,
-      windowId: window.windowId,
-    });
-    const path = `/bufferSurfaces/${pathToken(window.textureId)}`;
-    const value = readBufferSurface(request);
+    const content = window.content;
 
-    if (value === undefined) {
+    if (content === undefined) {
       throw new SmokeCompositorLayoutError(
-        path,
+        `/bufferSurfaces/${pathToken(window.textureId)}`,
         `Missing injected buffer surface for '${window.textureId}'.`,
       );
     }
 
-    output.set(window.textureId, normalizeBufferSurface(value, request, path));
+    output.set(window.textureId, Object.freeze({
+      height: content.height,
+      id: window.textureId,
+      rgbaHex: content.rgbaHex,
+      width: content.width,
+    }));
   }
 
   return output;
@@ -374,18 +402,27 @@ function smokeWindow(
   id: string,
   windowRect: Rect,
   zIndex: number,
+  readBufferSurface: BufferSurfaceReader,
 ): CompositorWindowPlacement {
+  const textureId = `texture-${id}`;
   const placement: WindowPlacement = Object.freeze({
     focused: id === "terminal",
     rect: windowRect,
-    textureId: `texture-${id}`,
+    textureId,
     visible: true,
     windowId: id,
     workspaceId: "main",
     zIndex,
   });
+  const request = Object.freeze({
+    height: windowRect.height,
+    textureId,
+    width: windowRect.width,
+    windowId: id,
+  });
+  const content = resolveSmokeBufferContent(readBufferSurface, request);
 
-  return compositorWindowPlacement(placement);
+  return compositorWindowPlacement(placement, placement.visible, content);
 }
 
 function patternedRgbaHex(request: SmokeBufferSurfaceRequest): string {
