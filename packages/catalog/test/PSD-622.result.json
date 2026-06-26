@@ -1,0 +1,15 @@
+{
+  "id": "PSD-622",
+  "acceptance_command": "npm run typecheck && node --experimental-strip-types --test packages/catalog/test/catalog-publish.test.ts",
+  "status": "pass",
+  "ran_via": "cmd /c with NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main for this sandbox's symlinked Node install",
+  "key_output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "1..4",
+    "# tests 4",
+    "# pass 4",
+    "# fail 0",
+    "# duration_ms 223.0514"
+  ]
+}
