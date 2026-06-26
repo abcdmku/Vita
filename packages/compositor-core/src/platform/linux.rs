@@ -522,7 +522,12 @@ impl PlatformGpuBackend {
         let config = choose_config_pbuffer(&egl, egl_display)?;
         let context_attribs = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
         let egl_context = unsafe {
-            (egl.create_context)(egl_display, config, ptr::null_mut(), context_attribs.as_ptr())
+            (egl.create_context)(
+                egl_display,
+                config,
+                ptr::null_mut(),
+                context_attribs.as_ptr(),
+            )
         };
         if egl_context.is_null() {
             unsafe {
@@ -534,9 +539,8 @@ impl PlatformGpuBackend {
         }
 
         // Make current with no draw/read surface (requires EGL_KHR_surfaceless_context).
-        if unsafe {
-            (egl.make_current)(egl_display, ptr::null_mut(), ptr::null_mut(), egl_context)
-        } == 0
+        if unsafe { (egl.make_current)(egl_display, ptr::null_mut(), ptr::null_mut(), egl_context) }
+            == 0
         {
             unsafe {
                 (egl.destroy_context)(egl_display, egl_context);
@@ -875,7 +879,11 @@ void main() {
         let bottom = pixel_to_clip_y(placement.y + placement.height as i32, self.output_height);
         // Texcoord rows: v_top maps to the top clip edge, v_bot to the bottom. flip_v swaps
         // them so the sampled texture is vertically mirrored (used for the KMS-scanout blit).
-        let (v_top, v_bot) = if flip_v { (1.0_f32, 0.0_f32) } else { (0.0_f32, 1.0_f32) };
+        let (v_top, v_bot) = if flip_v {
+            (1.0_f32, 0.0_f32)
+        } else {
+            (0.0_f32, 1.0_f32)
+        };
         let vertices: [f32; 24] = [
             left, top, 0.0, v_top, right, top, 1.0, v_top, left, bottom, 0.0, v_bot, right, top,
             1.0, v_top, right, bottom, 1.0, v_bot, left, bottom, 0.0, v_bot,
@@ -2165,7 +2173,11 @@ impl LibinputState {
             // dispatch in a loop so a burst of events injected between presents is fully drained.
             let lfd = (libinput.get_fd)(self.context);
             loop {
-                let mut pfd = PollFd { fd: lfd, events: POLLIN, revents: 0 };
+                let mut pfd = PollFd {
+                    fd: lfd,
+                    events: POLLIN,
+                    revents: 0,
+                };
                 let prc = poll(&mut pfd, 1, 0);
                 let readable = prc > 0 && (pfd.revents & POLLIN) != 0;
                 if (libinput.dispatch)(self.context) < 0 {
@@ -2200,72 +2212,72 @@ impl LibinputState {
         events: &mut Vec<InputEvent>,
     ) {
         unsafe {
-                match event_type {
-                    LIBINPUT_EVENT_KEYBOARD_KEY => {
-                        let key_event = (libinput.event_get_keyboard_event)(event);
-                        if !key_event.is_null() {
-                            events.push(InputEvent::Key {
-                                key_code: (libinput.keyboard_get_key)(key_event),
-                                pressed: (libinput.keyboard_get_key_state)(key_event)
-                                    == LIBINPUT_KEY_STATE_PRESSED,
-                            });
-                        }
+            match event_type {
+                LIBINPUT_EVENT_KEYBOARD_KEY => {
+                    let key_event = (libinput.event_get_keyboard_event)(event);
+                    if !key_event.is_null() {
+                        events.push(InputEvent::Key {
+                            key_code: (libinput.keyboard_get_key)(key_event),
+                            pressed: (libinput.keyboard_get_key_state)(key_event)
+                                == LIBINPUT_KEY_STATE_PRESSED,
+                        });
                     }
-                    LIBINPUT_EVENT_POINTER_BUTTON => {
-                        let pointer_event = (libinput.event_get_pointer_event)(event);
-                        if !pointer_event.is_null() {
-                            let state = if (libinput.pointer_get_button_state)(pointer_event)
-                                == LIBINPUT_BUTTON_STATE_PRESSED
-                            {
-                                PointerButtonState::Pressed
-                            } else {
-                                PointerButtonState::Released
-                            };
-                            events.push(InputEvent::PointerButton {
-                                button: (libinput.pointer_get_button)(pointer_event),
-                                state,
-                            });
-                        }
-                    }
-                    LIBINPUT_EVENT_POINTER_MOTION => {
-                        let pointer_event = (libinput.event_get_pointer_event)(event);
-                        if !pointer_event.is_null() {
-                            let dx = (libinput.pointer_get_dx)(pointer_event);
-                            let dy = (libinput.pointer_get_dy)(pointer_event);
-                            if dx.is_finite() && dy.is_finite() {
-                                events.push(InputEvent::PointerMotion {
-                                    dx_micropixels: (dx * 1_000_000.0) as i64,
-                                    dy_micropixels: (dy * 1_000_000.0) as i64,
-                                });
-                            }
-                        }
-                    }
-                    // PSD-055: ABSOLUTE pointer motion (VMware's EV_ABS VMMouse). libinput gives the
-                    // position transformed into our output pixel space; SET the cursor there. This
-                    // is the event the VMware pointer actually emits — handling only relative motion
-                    // above dropped it, which is why the cursor never moved.
-                    LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
-                        let pointer_event = (libinput.event_get_pointer_event)(event);
-                        if !pointer_event.is_null() {
-                            let x = (libinput.pointer_get_absolute_x_transformed)(
-                                pointer_event,
-                                OUTPUT_WIDTH,
-                            );
-                            let y = (libinput.pointer_get_absolute_y_transformed)(
-                                pointer_event,
-                                OUTPUT_HEIGHT,
-                            );
-                            eprintln!("VITA-INPUT-DIAG: abs-motion x={x} y={y}");
-                            if x.is_finite() && y.is_finite() {
-                                events.push(InputEvent::PointerMotionAbsolute {
-                                    x_micropixels: (x * 1_000_000.0) as i64,
-                                    y_micropixels: (y * 1_000_000.0) as i64,
-                                });
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                LIBINPUT_EVENT_POINTER_BUTTON => {
+                    let pointer_event = (libinput.event_get_pointer_event)(event);
+                    if !pointer_event.is_null() {
+                        let state = if (libinput.pointer_get_button_state)(pointer_event)
+                            == LIBINPUT_BUTTON_STATE_PRESSED
+                        {
+                            PointerButtonState::Pressed
+                        } else {
+                            PointerButtonState::Released
+                        };
+                        events.push(InputEvent::PointerButton {
+                            button: (libinput.pointer_get_button)(pointer_event),
+                            state,
+                        });
+                    }
+                }
+                LIBINPUT_EVENT_POINTER_MOTION => {
+                    let pointer_event = (libinput.event_get_pointer_event)(event);
+                    if !pointer_event.is_null() {
+                        let dx = (libinput.pointer_get_dx)(pointer_event);
+                        let dy = (libinput.pointer_get_dy)(pointer_event);
+                        if dx.is_finite() && dy.is_finite() {
+                            events.push(InputEvent::PointerMotion {
+                                dx_micropixels: (dx * 1_000_000.0) as i64,
+                                dy_micropixels: (dy * 1_000_000.0) as i64,
+                            });
+                        }
+                    }
+                }
+                // PSD-055: ABSOLUTE pointer motion (VMware's EV_ABS VMMouse). libinput gives the
+                // position transformed into our output pixel space; SET the cursor there. This
+                // is the event the VMware pointer actually emits — handling only relative motion
+                // above dropped it, which is why the cursor never moved.
+                LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
+                    let pointer_event = (libinput.event_get_pointer_event)(event);
+                    if !pointer_event.is_null() {
+                        let x = (libinput.pointer_get_absolute_x_transformed)(
+                            pointer_event,
+                            OUTPUT_WIDTH,
+                        );
+                        let y = (libinput.pointer_get_absolute_y_transformed)(
+                            pointer_event,
+                            OUTPUT_HEIGHT,
+                        );
+                        eprintln!("VITA-INPUT-DIAG: abs-motion x={x} y={y}");
+                        if x.is_finite() && y.is_finite() {
+                            events.push(InputEvent::PointerMotionAbsolute {
+                                x_micropixels: (x * 1_000_000.0) as i64,
+                                y_micropixels: (y * 1_000_000.0) as i64,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }

@@ -759,11 +759,7 @@ impl<B: RenderBackend> Compositor<B> {
             }
         }
 
-        placements.sort_by(|left, right| {
-            left.z_index
-                .cmp(&right.z_index)
-                .then_with(|| left.surface_id.cmp(&right.surface_id))
-        });
+        sort_placements(&mut placements);
 
         let old_by_id = placement_map(&self.placements);
         let new_by_id = placement_map(&placements);
@@ -795,6 +791,67 @@ impl<B: RenderBackend> Compositor<B> {
         })
     }
 
+    pub fn set_z(&mut self, id: &SurfaceId, z_index: i32) -> Result<DamageReport, CompositorError> {
+        if !self.surfaces.contains_key(id) {
+            return Err(CompositorError::UnknownSurface(id.clone()));
+        }
+
+        let Some(index) = self
+            .placements
+            .iter()
+            .position(|placement| &placement.surface_id == id)
+        else {
+            return Ok(empty_damage_report());
+        };
+
+        if self.placements[index].z_index == z_index {
+            return Ok(empty_damage_report());
+        }
+
+        let rect = self.placements[index].rect();
+        self.placements[index].z_index = z_index;
+        sort_placements(&mut self.placements);
+
+        Ok(DamageReport {
+            changed_surfaces: vec![id.clone()],
+            rects: vec![rect],
+        })
+    }
+
+    pub fn raise_surface(&mut self, id: &SurfaceId) -> Result<DamageReport, CompositorError> {
+        if !self.surfaces.contains_key(id) {
+            return Err(CompositorError::UnknownSurface(id.clone()));
+        }
+
+        let Some(index) = self
+            .placements
+            .iter()
+            .position(|placement| &placement.surface_id == id)
+        else {
+            return Ok(empty_damage_report());
+        };
+
+        if self
+            .placements
+            .last()
+            .is_some_and(|placement| &placement.surface_id == id)
+        {
+            return Ok(empty_damage_report());
+        }
+
+        let top_z = self
+            .placements
+            .last()
+            .map_or(self.placements[index].z_index, |placement| {
+                placement.z_index
+            });
+        let raised_z = top_z.checked_add(1).ok_or_else(|| {
+            CompositorError::Protocol("cannot raise surface above i32::MAX z-index".to_owned())
+        })?;
+
+        self.set_z(id, raised_z)
+    }
+
     pub fn remove_surface(&mut self, id: &SurfaceId) -> Result<DamageReport, CompositorError> {
         if self.surfaces.remove(id).is_none() {
             return Err(CompositorError::UnknownSurface(id.clone()));
@@ -824,16 +881,19 @@ impl<B: RenderBackend> Compositor<B> {
     }
 
     pub fn composite(&mut self, damage: &DamageReport) -> Result<CompositeReport, CompositorError> {
-        let surfaces = self
-            .surfaces
-            .values()
-            .map(|surface| RenderSurface {
+        let mut surfaces = Vec::with_capacity(self.placements.len());
+        for placement in &self.placements {
+            let surface = self
+                .surfaces
+                .get(&placement.surface_id)
+                .ok_or_else(|| CompositorError::UnknownSurface(placement.surface_id.clone()))?;
+            surfaces.push(RenderSurface {
                 id: surface.id.clone(),
                 width: surface.width,
                 height: surface.height,
                 texture: surface.texture.clone(),
-            })
-            .collect::<Vec<_>>();
+            });
+        }
 
         self.backend.composite(
             &surfaces,
@@ -1441,6 +1501,21 @@ fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
         map.insert(placement.surface_id.clone(), placement);
     }
     map
+}
+
+fn sort_placements(placements: &mut [Placement]) {
+    placements.sort_by(|left, right| {
+        left.z_index
+            .cmp(&right.z_index)
+            .then_with(|| left.surface_id.cmp(&right.surface_id))
+    });
+}
+
+fn empty_damage_report() -> DamageReport {
+    DamageReport {
+        changed_surfaces: Vec::new(),
+        rects: Vec::new(),
+    }
 }
 
 fn topmost_placement_at(placements: &[Placement], x: u32, y: u32) -> Option<&Placement> {
