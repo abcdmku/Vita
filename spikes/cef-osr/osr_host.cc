@@ -200,7 +200,12 @@ class OsrClient : public CefClient,
         "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
         "  }"
         "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
-        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' (a real click drives the host-bridge delegate)');"
+        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING'));"
+        // Self-test the click delegate with a SYNTHETIC DOM click (isolates delegate wiring from
+        // whether CEF SendMouseClickEvent produces a DOM click). If the delegate fires, the Files
+        // surface appears (proving click->real-action) even before a real injected click.
+        "  if(fm){ L('VITA-HOSTTEST firing synthetic click to drive the host-bridge delegate');"
+        "    fm.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }"
         "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
