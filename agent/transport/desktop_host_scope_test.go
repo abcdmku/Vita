@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -39,7 +41,7 @@ func TestDesktopHostPeerAllowsAllowlistedCapabilities(t *testing.T) {
 			&routedTxCapability{name: capsule.ExecuteName, events: &events},
 			&routedTxCapability{name: nodeconfig.Name, events: &events},
 		),
-		filesStateRoot: t.TempDir(),
+		filesStateRoot: newDesktopHostFilesStateRoot(t),
 		filesGrants: []filecap.Grant{
 			{Name: "desktop", Root: "desktop", Access: filecap.AccessReadWrite},
 		},
@@ -53,7 +55,10 @@ func TestDesktopHostPeerAllowsAllowlistedCapabilities(t *testing.T) {
 		base64.StdEncoding.EncodeToString(data),
 	)
 	filesStatus, filesResponse := desktopHostRequest(t, client, http.MethodPost, "/files", filesBody)
-	assertFilesRouteServedByHandler(t, filesStatus, filesResponse)
+	assertFilesWriteServedByHandler(t, filesStatus, filesResponse, int64(len(data)))
+
+	readFileStatus, readFileResponse := desktopHostRequest(t, client, http.MethodPost, "/files", `{"op":"read","grant":"desktop","path":"note.txt"}`)
+	assertFilesReadServedByHandler(t, readFileStatus, readFileResponse, data)
 
 	readStatus, readResponse := desktopHostRequest(t, client, http.MethodGet, "/read/"+capsule.ExecuteName, "")
 	if readStatus != http.StatusOK {
@@ -106,6 +111,35 @@ func TestDesktopHostPeerRejectsForbiddenApplyBeforeRegistryAndAudits(t *testing.
 	defer shutdown()
 
 	status, body := desktopHostRequest(t, client, http.MethodPost, "/apply", `{"operations":[{"capability":"capsule.execute","request":{"desired":{"id":"local.test.capsule","version":"1.0.0","integrity":"`+transportSHA256SRI+`"}}},{"capability":"identity.attestation","request":{"value":"must-not-decode"}}]}`)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", status, http.StatusForbidden, body)
+	}
+	assertCapabilityForbidden(t, body)
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want no registry/transaction effect", events)
+	}
+	assertDesktopScopeAuditEvents(t, store, []auditlog.Operation{auditlog.OperationApply})
+}
+
+func TestDesktopHostPeerDefaultDeniesExplicitDesktopWithoutServiceBinding(t *testing.T) {
+	events := []string{}
+	store := newAuditStore(t)
+	handler := mustDesktopHostScopeHandler(t, desktopHostScopeHandlerConfig{
+		auditStore: store,
+		registry: mustRegistry(t, &routedTxCapability{
+			name:   capsule.ExecuteName,
+			events: &events,
+			apply: func(capabilities.TypedRequest) error {
+				t.Fatal("allowlisted apply reached registry without the explicit desktop service binding")
+				return nil
+			},
+		}),
+		unixPeerRoles: []UnixPeerRoleBinding{},
+	})
+	client, shutdown := serveDesktopHostScopeHandler(t, handler, store, desktopPeerInfo)
+	defer shutdown()
+
+	status, body := desktopHostRequest(t, client, http.MethodPost, "/apply", `{"operations":[{"capability":"capsule.execute","request":{"desired":{"id":"local.test.capsule","version":"1.0.0","integrity":"`+transportSHA256SRI+`"}}}]}`)
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d; body=%s", status, http.StatusForbidden, body)
 	}
@@ -287,31 +321,84 @@ func TestDesktopHostPeerScopeUsesPeerPrincipalKeysNotRequestBody(t *testing.T) {
 	})
 }
 
-type desktopHostScopeHandlerConfig struct {
-	auditStore      AuditStore
-	registry        *capabilities.Registry
-	requestDecoders map[string]RequestDecoder
-	filesStateRoot  string
-	filesGrants     []filecap.Grant
-}
-
-func mustDesktopHostScopeHandler(t *testing.T, config desktopHostScopeHandlerConfig) http.Handler {
-	t.Helper()
-
-	handler, err := NewHandler(Config{
-		Version:         "test-version",
-		StartedAt:       transportStartedAt,
-		Registry:        config.registry,
-		RequestDecoders: config.requestDecoders,
-		FilesStateRoot:  config.filesStateRoot,
-		FilesGrants:     config.filesGrants,
-		UnixPeerRoles: []UnixPeerRoleBinding{
+func TestDesktopHostPeerGenericServiceRoleDoesNotIdentifyDesktopHost(t *testing.T) {
+	const forbiddenCapability = "test.forbidden"
+	events := []string{}
+	store := newAuditStore(t)
+	handler := mustDesktopHostScopeHandler(t, desktopHostScopeHandlerConfig{
+		auditStore: store,
+		registry: mustRegistry(t, &spoofAwareTxCapability{
+			name:   forbiddenCapability,
+			events: &events,
+		}),
+		requestDecoders: map[string]RequestDecoder{
+			forbiddenCapability: decodeSpoofAwareRequest,
+		},
+		desktopHostPrincipalKeys: []string{},
+		unixPeerRoles: []UnixPeerRoleBinding{
 			{
 				PrincipalKey: UnixPeerUserPrincipalKey(desktopHostPeerUID),
 				Role:         identityroles.RoleService,
 			},
 		},
-		AuditStore: config.auditStore,
+	})
+	client, shutdown := serveDesktopHostScopeHandler(t, handler, store, desktopPeerInfo)
+	defer shutdown()
+
+	status, responseBody := desktopHostRequest(t, client, http.MethodPost, "/apply", `{"operations":[{"capability":"test.forbidden","request":{"value":"service","capability":"capsule.execute"}}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", status, http.StatusOK, responseBody)
+	}
+	if !reflect.DeepEqual(events, []string{"apply:service"}) {
+		t.Fatalf("events = %v, want normal unscoped service-role apply path", events)
+	}
+
+	auditEvents, err := store.Read()
+	if err != nil {
+		t.Fatalf("audit Read returned error: %v", err)
+	}
+	if len(auditEvents) != 1 || auditEvents[0].Outcome != auditlog.OutcomeCommitted || auditEvents[0].Reason != "" {
+		t.Fatalf("audit events = %#v, want one committed non-scope apply event", auditEvents)
+	}
+}
+
+type desktopHostScopeHandlerConfig struct {
+	auditStore               AuditStore
+	registry                 *capabilities.Registry
+	requestDecoders          map[string]RequestDecoder
+	filesStateRoot           string
+	filesGrants              []filecap.Grant
+	desktopHostPrincipalKeys []string
+	unixPeerRoles            []UnixPeerRoleBinding
+}
+
+func mustDesktopHostScopeHandler(t *testing.T, config desktopHostScopeHandlerConfig) http.Handler {
+	t.Helper()
+
+	desktopHostPrincipalKeys := config.desktopHostPrincipalKeys
+	if desktopHostPrincipalKeys == nil {
+		desktopHostPrincipalKeys = []string{UnixPeerUserPrincipalKey(desktopHostPeerUID)}
+	}
+	unixPeerRoles := config.unixPeerRoles
+	if unixPeerRoles == nil {
+		unixPeerRoles = []UnixPeerRoleBinding{
+			{
+				PrincipalKey: UnixPeerUserPrincipalKey(desktopHostPeerUID),
+				Role:         identityroles.RoleService,
+			},
+		}
+	}
+
+	handler, err := NewHandler(Config{
+		Version:                  "test-version",
+		StartedAt:                transportStartedAt,
+		Registry:                 config.registry,
+		RequestDecoders:          config.requestDecoders,
+		FilesStateRoot:           config.filesStateRoot,
+		FilesGrants:              config.filesGrants,
+		UnixPeerRoles:            unixPeerRoles,
+		DesktopHostPrincipalKeys: desktopHostPrincipalKeys,
+		AuditStore:               config.auditStore,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
 		},
@@ -436,22 +523,43 @@ func assertCapabilityForbidden(t *testing.T, body string) {
 	}
 }
 
-func assertFilesRouteServedByHandler(t *testing.T, status int, body string) {
+func assertFilesWriteServedByHandler(t *testing.T, status int, body string, wantSize int64) {
 	t.Helper()
 
-	if status == http.StatusOK {
-		return
+	if status != http.StatusOK {
+		t.Fatalf("files write status = %d, want %d; body=%s", status, http.StatusOK, body)
 	}
-
-	var response ErrorResponse
+	var response filecap.Response
 	if err := json.Unmarshal([]byte(body), &response); err != nil {
-		t.Fatalf("files route body is not JSON: %v; body=%s", err, body)
+		t.Fatalf("files write body is not JSON: %v; body=%s", err, body)
 	}
-	if response.Error.Code == desktopHostScopeForbiddenCode {
-		t.Fatalf("files route was denied by desktop scope; body=%s", body)
+	if response.Kind == nil || *response.Kind != filecap.KindFile {
+		t.Fatalf("files write response kind = %#v, want %q", response.Kind, filecap.KindFile)
 	}
-	if response.Error.Code == "" {
-		t.Fatalf("files route returned an untyped error; status=%d body=%s", status, body)
+	if response.Size == nil || *response.Size != wantSize {
+		t.Fatalf("files write response size = %#v, want %d", response.Size, wantSize)
+	}
+}
+
+func assertFilesReadServedByHandler(t *testing.T, status int, body string, want []byte) {
+	t.Helper()
+
+	if status != http.StatusOK {
+		t.Fatalf("files read status = %d, want %d; body=%s", status, http.StatusOK, body)
+	}
+	var response filecap.Response
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("files read body is not JSON: %v; body=%s", err, body)
+	}
+	if response.Data == nil {
+		t.Fatalf("files read response = %#v, want data", response)
+	}
+	got, err := base64.StdEncoding.DecodeString(*response.Data)
+	if err != nil {
+		t.Fatalf("files read data is not base64: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("files read data = %q, want %q", got, want)
 	}
 }
 
@@ -494,6 +602,21 @@ func nonDesktopPeerInfo() unixPeerInfo {
 
 func ptrUint32(value uint32) *uint32 {
 	return &value
+}
+
+func newDesktopHostFilesStateRoot(t *testing.T) string {
+	t.Helper()
+
+	root, err := os.MkdirTemp(".", ".desktop-host-files-")
+	if err != nil {
+		t.Fatalf("MkdirTemp desktop files root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Fatalf("RemoveAll desktop files root: %v", err)
+		}
+	})
+	return root
 }
 
 type desktopHostPipeListener struct {

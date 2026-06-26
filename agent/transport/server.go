@@ -87,10 +87,14 @@ type Config struct {
 	FilesGrants     []filecap.Grant
 	FilesPrincipals []filecap.Principal
 	// UnixPeerRoles binds authenticated unix peer principal keys to the closed
-	// role vocabulary for transport-level peer scoping. A peer whose first bound
-	// role is service is treated as the desktop host and receives the narrow
-	// desktop allowlist in desktop_host_scope.go.
+	// role vocabulary for transport-level peer scoping.
 	UnixPeerRoles []UnixPeerRoleBinding
+	// DesktopHostPrincipalKeys explicitly names the kernel-derived principal keys
+	// that identify the desktop host. A matching peer is scoped by the desktop
+	// allowlist only when the same principal key is bound to RoleService in
+	// UnixPeerRoles; an explicit desktop principal with no matching service binding
+	// is denied by default.
+	DesktopHostPrincipalKeys []string
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
@@ -631,7 +635,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		return nil, fmt.Errorf("build files handler: %w", err)
 	}
 
-	desktopScope, err := newDesktopHostScope(config.UnixPeerRoles)
+	desktopScope, err := newDesktopHostScope(config.DesktopHostPrincipalKeys, config.UnixPeerRoles)
 	if err != nil {
 		return nil, err
 	}

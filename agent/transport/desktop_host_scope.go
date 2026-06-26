@@ -24,20 +24,30 @@ const (
 )
 
 // UnixPeerRoleBinding binds a kernel-authenticated unix peer principal key to
-// one closed spec section 11 role. The desktop host is represented by the existing
-// service role; there is no transport-local role value or inheritance.
+// one closed spec section 11 role. It does not by itself identify the desktop
+// host; desktop scope is keyed by Config.DesktopHostPrincipalKeys, and the
+// matching explicit desktop principal must be bound to the existing service
+// role. There is no transport-local role value or inheritance.
 type UnixPeerRoleBinding struct {
 	PrincipalKey string
 	Role         identityroles.Role
 }
 
 type desktopHostScope struct {
-	roles map[string]identityroles.Role
+	desktopPrincipals map[string]struct{}
+	roles             map[string]identityroles.Role
 }
 
-func newDesktopHostScope(bindings []UnixPeerRoleBinding) (desktopHostScope, error) {
-	if len(bindings) == 0 {
-		return desktopHostScope{}, nil
+func newDesktopHostScope(desktopPrincipalKeys []string, bindings []UnixPeerRoleBinding) (desktopHostScope, error) {
+	desktopPrincipals := make(map[string]struct{}, len(desktopPrincipalKeys))
+	for i, key := range desktopPrincipalKeys {
+		if key == "" {
+			return desktopHostScope{}, fmt.Errorf("desktop host principal %d: principal key is required", i)
+		}
+		if _, exists := desktopPrincipals[key]; exists {
+			return desktopHostScope{}, fmt.Errorf("desktop host principal %d: duplicate principal key %q", i, key)
+		}
+		desktopPrincipals[key] = struct{}{}
 	}
 
 	roles := make(map[string]identityroles.Role, len(bindings))
@@ -54,27 +64,33 @@ func newDesktopHostScope(bindings []UnixPeerRoleBinding) (desktopHostScope, erro
 		roles[binding.PrincipalKey] = binding.Role
 	}
 
-	return desktopHostScope{roles: roles}, nil
+	for principalKey := range desktopPrincipals {
+		if role, ok := roles[principalKey]; ok && role != identityroles.RoleService {
+			return desktopHostScope{}, fmt.Errorf("desktop host principal %q role must be %q", principalKey, identityroles.RoleService)
+		}
+	}
+
+	return desktopHostScope{
+		desktopPrincipals: desktopPrincipals,
+		roles:             roles,
+	}, nil
 }
 
-func (s desktopHostScope) isDesktopHostPeer(ctx context.Context) bool {
+func (s desktopHostScope) desktopHostPeerRole(ctx context.Context) (identityroles.Role, bool) {
 	principalKeys, ok := unixPeerPrincipalKeysFromContext(ctx)
 	if !ok {
-		return false
-	}
-
-	role, ok := s.resolveRole(principalKeys)
-	return ok && role == identityroles.RoleService
-}
-
-func (s desktopHostScope) resolveRole(principalKeys []string) (identityroles.Role, bool) {
-	if len(s.roles) == 0 {
 		return "", false
 	}
+
 	for _, key := range principalKeys {
-		if role, ok := s.roles[key]; ok {
-			return role, true
+		if _, ok := s.desktopPrincipals[key]; !ok {
+			continue
 		}
+		role, ok := s.roles[key]
+		if !ok {
+			return "", true
+		}
+		return role, true
 	}
 	return "", false
 }
@@ -89,7 +105,11 @@ func (s desktopHostScope) allowsCapability(name string) bool {
 }
 
 func (h *handler) authorizeDesktopHostCapability(ctx context.Context, name string, operation auditlog.Operation) *requestError {
-	if !h.desktopHostScope.isDesktopHostPeer(ctx) || h.desktopHostScope.allowsCapability(name) {
+	role, ok := h.desktopHostScope.desktopHostPeerRole(ctx)
+	if !ok {
+		return nil
+	}
+	if role == identityroles.RoleService && h.desktopHostScope.allowsCapability(name) {
 		return nil
 	}
 
@@ -98,8 +118,13 @@ func (h *handler) authorizeDesktopHostCapability(ctx context.Context, name strin
 }
 
 func (h *handler) authorizeDesktopHostApply(ctx context.Context, operations []rawOperation) *requestError {
-	if !h.desktopHostScope.isDesktopHostPeer(ctx) {
+	role, ok := h.desktopHostScope.desktopHostPeerRole(ctx)
+	if !ok {
 		return nil
+	}
+	if role != identityroles.RoleService {
+		h.recordDesktopHostScopeForbidden(ctx, auditlog.OperationApply)
+		return desktopHostScopeForbidden()
 	}
 
 	for _, operation := range operations {
