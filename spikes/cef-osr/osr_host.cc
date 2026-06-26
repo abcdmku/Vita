@@ -776,6 +776,25 @@ void ApplyInputLineOnUi(std::string line) {
     InjectMouseButton(browser, vx, vy, button, down);
     fprintf(stderr, "[osr] input: SendMouseClick view=(%d,%d) button=%d %s\n", vx, vy,
             button, down ? "down" : "up");
+    // PSD-500: in headless single-process OSR, SendMouseClickEvent reliably drives mousedown/mouseup
+    // but does NOT always synthesize a DOM 'click'. On the button RELEASE, dispatch a real DOM click
+    // at the cursor's view position (elementFromPoint -> full mousedown/mouseup/click sequence) so a
+    // real injected pointer click reaches DOM handlers (the host-bridge delegate + any hydrated
+    // handlers) — the same path a synthetic click takes, now driven by the REAL pointer.
+    if (!down && (button == 272 || button == 1)) {
+      CefRefPtr<CefFrame> mf = browser->GetMainFrame();
+      if (mf) {
+        char js[512];
+        snprintf(js, sizeof(js),
+                 "(function(){var x=%d,y=%d;var el=document.elementFromPoint(x,y);"
+                 "if(!el)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"
+                 "el.dispatchEvent(new MouseEvent('mousedown',o));"
+                 "el.dispatchEvent(new MouseEvent('mouseup',o));"
+                 "el.dispatchEvent(new MouseEvent('click',o));}());",
+                 vx, vy);
+        mf->ExecuteJavaScript(js, "vita://pointer-click", 0);
+      }
+    }
   } else if (kind == "key") {
     int code = std::atoi(kv["key-code"].c_str());
     bool pressed = kv["pressed"] == "true";
