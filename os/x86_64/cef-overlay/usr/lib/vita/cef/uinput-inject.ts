@@ -15,8 +15,10 @@ const O_WRONLY = 1, O_NONBLOCK = 0o4000;
 const EV_SYN = 0x00, EV_KEY = 0x01, EV_ABS = 0x03;
 const ABS_X = 0x00, ABS_Y = 0x01, BTN_LEFT = 0x110;
 const UI_DEV_CREATE = 0x5501n, UI_DEV_DESTROY = 0x5502n;
-// _IOW('U', N, int): UI_SET_EVBIT=100, UI_SET_KEYBIT=101, UI_SET_ABSBIT=103.
+// _IOW('U', N, int): UI_SET_EVBIT=100, UI_SET_KEYBIT=101, UI_SET_ABSBIT=103, UI_SET_PROPBIT=110.
 const UI_SET_EVBIT = 0x40045564n, UI_SET_KEYBIT = 0x40045565n, UI_SET_ABSBIT = 0x40045567n;
+const UI_SET_PROPBIT = 0x4004556en;
+const INPUT_PROP_POINTER = 0x00;  // mark this absolute device as a POINTER (mouse-like), not a joystick
 
 const MAXX = 1280, MAXY = 720;
 
@@ -27,6 +29,7 @@ function ioctl(req: bigint, arg: number) {
 }
 ioctl(UI_SET_EVBIT, EV_KEY); ioctl(UI_SET_KEYBIT, BTN_LEFT);
 ioctl(UI_SET_EVBIT, EV_ABS); ioctl(UI_SET_ABSBIT, ABS_X); ioctl(UI_SET_ABSBIT, ABS_Y);
+ioctl(UI_SET_PROPBIT, INPUT_PROP_POINTER);  // classify as an absolute POINTER (libinput pointer, not js)
 
 // struct uinput_user_dev: char name[80]; input_id{u16 bus,vendor,product,version}; u32 ff_max;
 // s32 absmax[64], absmin[64], absfuzz[64], absflat[64]  (ABS_CNT=64).
