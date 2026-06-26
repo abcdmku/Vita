@@ -71,6 +71,12 @@ mkdir -p "$VITA_CEF_CACHE" "$HOME" "$XDG_CONFIG_HOME" 2>/dev/null
 INPUT_FIFO=/run/vita-cef-input.fifo
 rm -f "$INPUT_FIFO"
 mkfifo "$INPUT_FIFO" 2>/dev/null || true
+# Hold the FIFO open read-write from the script (fd 3) for the life of the service. The compositor
+# opens --input-out for WRITE with O_NONBLOCK, which fails (ENXIO) and silently disables input if
+# no reader is open yet — and the compositor opens it at startup, BEFORE osr_host execs (osr_host
+# runs only after the ~7MB snapshot prelude is cat'd). Keeping a reader present (fd 3, never read,
+# so it does not steal events from osr_host's reader) makes the write-open always succeed.
+exec 3<>"$INPUT_FIFO" || true
 
 # --- instant-desktop prelude (baked snapshot + cursor) -----------------------
 # Prepend the baked flagship first-frame + the cursor surface + a present so the compositor shows
