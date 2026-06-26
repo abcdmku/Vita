@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Offline, local-only: a strict CSP that forbids ANY network origin. Only same-origin
+     (vita://browser) assets + inline styles load; there is no way to reach the internet. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'none'; frame-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Vita Browser — Start</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #1b2330;
+    background:
+      radial-gradient(1200px 480px at 50% -10%, #eaf1fb 0%, rgba(234,241,251,0) 60%),
+      #f6f8fc;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 26px 20px 30px;
+  }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom: 4px; }
+  .brand .glyph { width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg,#3178c6,#5b9af0); display:flex; align-items:center;
+    justify-content:center; color:#fff; font-size:18px; }
+  h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color:#69748a; font-size: 12.5px; margin: 2px 0 18px; }
+  .bar {
+    width: min(560px, 100%); display:flex; gap:8px; margin-bottom: 20px;
+  }
+  .bar input {
+    flex:1; padding: 10px 14px; border:1px solid #cdd6e4; border-radius: 11px;
+    font-size: 14px; background:#fff; color:#1b2330; outline:none;
+  }
+  .bar input:focus { border-color:#3178c6; box-shadow:0 0 0 3px rgba(49,120,198,.15); }
+  .bar button {
+    padding: 10px 16px; border:1px solid #3178c6; background:#3178c6; color:#fff;
+    border-radius: 11px; font-size: 14px; cursor:pointer;
+  }
+  .grid { width: min(560px, 100%); display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  a.card {
+    display:block; text-decoration:none; color:inherit; background:#fff;
+    border:1px solid #e3e9f2; border-radius: 13px; padding: 14px 16px;
+    transition: border-color .12s, transform .12s;
+  }
+  a.card:hover { border-color:#3178c6; transform: translateY(-1px); }
+  a.card .t { font-weight: 600; font-size: 14px; }
+  a.card .d { color:#69748a; font-size: 12px; margin-top: 3px; }
+  .note { margin-top: 22px; color:#8a93a6; font-size: 11.5px; text-align:center;
+    max-width: 520px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius: 999px; background:#eaf1fb;
+    color:#3178c6; font-size: 11px; font-weight:600; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+  <div class="brand"><span class="glyph">🌐</span><h1>Vita Browser</h1></div>
+  <div class="sub">A local, offline web surface — rendered by a real CEF web view.</div>
+  <div class="badge">offline · capability-scoped · same-origin only</div>
+
+  <form class="bar" onsubmit="go(event)">
+    <input id="addr" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+           placeholder="vita://browser/…  (local pages only)" value="vita://browser/index.html">
+    <button type="submit">Open</button>
+  </form>
+
+  <div class="grid">
+    <a class="card" href="page-start.html">
+      <div class="t">📄 Local page</div>
+      <div class="d">A bundled HTML document served from this origin.</div>
+    </a>
+    <a class="card" href="page-about.html">
+      <div class="t">ℹ️ About this browser</div>
+      <div class="d">What this web surface can and cannot do.</div>
+    </a>
+    <a class="card" href="page-start.html#assets">
+      <div class="t">🖼️ Same-origin asset</div>
+      <div class="d">An inline SVG image rendered from local content.</div>
+    </a>
+    <a class="card" href="index.html">
+      <div class="t">🏠 Home</div>
+      <div class="d">Return to this start page.</div>
+    </a>
+  </div>
+
+  <div class="note">
+    This is a genuine web view (a second CEF browser surface inside the desktop), but scoped to
+    <b>offline, local content only</b> (the <code>vita://browser</code> origin). A strict CSP
+    (<code>connect-src 'none'</code>) blocks every network request — there is no path to the open
+    internet. It is honest about scope: a working local browser, not a full internet browser.
+  </div>
+
+  <script>
+    // Only allow navigation to same-origin vita://browser pages (offline). Anything else is
+    // refused in-page (belt-and-suspenders with the CSP above).
+    function go(e) {
+      e.preventDefault();
+      var v = (document.getElementById('addr').value || '').trim();
+      if (!v) return;
+      try {
+        var u = new URL(v, location.href);
+        if (u.protocol === 'vita:' && u.host === 'browser') {
+          location.href = u.href;
+        } else {
+          flash('Only local vita://browser pages can be opened (offline).');
+        }
+      } catch (_) {
+        // treat as a relative local path under this origin
+        location.href = v;
+      }
+    }
+    function flash(msg) {
+      var n = document.createElement('div');
+      n.textContent = msg;
+      n.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);' +
+        'background:#1b2330;color:#fff;padding:9px 14px;border-radius:10px;font-size:12.5px;' +
+        'box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9';
+      document.body.appendChild(n);
+      setTimeout(function(){ n.remove(); }, 2600);
+    }
+  </script>
+</body>
+</html>

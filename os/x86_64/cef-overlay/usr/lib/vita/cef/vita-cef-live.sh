@@ -303,6 +303,13 @@ if [ "$seen_ok" -eq 1 ]; then
           emit_line "$MARKER: verify clicked Settings tile @ $xy (read persisted)"
         sleep 1.5
         ;;
+      browser)
+        # FEATURE 1 verify: click the Browser dock tile -> the desktop binder launches the Browser
+        # app, whose window renders a REAL local web surface (an <iframe> loading vita://browser/).
+        xy=$(tile_cxcy vita.app.browser) && move_click $xy && \
+          emit_line "$MARKER: verify clicked Browser tile @ $xy"
+        sleep 2.0
+        ;;
       activity|*)
         xy=$(tile_cxcy vita.app.activity) && move_click $xy && \
           emit_line "$MARKER: verify clicked Activity tile @ $xy"

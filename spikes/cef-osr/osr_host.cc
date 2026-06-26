@@ -34,6 +34,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 
 #include "include/base/cef_callback.h"
@@ -42,10 +43,14 @@
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_resource_handler.h"
+#include "include/cef_scheme.h"
+#include "include/cef_stream.h"
 #include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_stream_resource_handler.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -322,6 +327,19 @@ class OsrClient : public CefClient,
 // function can do a blocking unix-socket round-trip and return synchronously.
 std::string g_host_proxy_sock = "/run/vita-host-proxy.sock";
 
+// PSD-502 PRODUCTION ORIGIN: the desktop is served over a REAL, SECURE custom scheme
+// (vita://desktop/...) instead of file:// — so ES modules load under a true origin and the
+// native binder hydrates WITHOUT --disable-web-security. A CefSchemeHandlerFactory serves files
+// from a doc-root on disk. Two authorities, each its own secure origin:
+//   vita://desktop/  -> g_scheme_root  (the WHOLE ui_kits tree, so index at desktop/index.html
+//                       and its ../styles.css / ../_vendor/* relatives all resolve same-origin)
+//   vita://browser/  -> g_browser_root (the bundled, OFFLINE local browser start page — Feature 1)
+std::string g_scheme_root = "/usr/lib/vita/ui_kits";          // --scheme-root=
+std::string g_browser_root = "/usr/lib/vita/ui_kits/browser"; // --browser-root=
+constexpr const char* kVitaScheme = "vita";
+constexpr const char* kDesktopAuthority = "desktop";
+constexpr const char* kBrowserAuthority = "browser";
+
 // One blocking request/response round-trip to the host proxy. Returns the response JSON, or a
 // fail-closed host-error JSON if the proxy is unreachable (the desktop's guards consume it).
 static std::string HostProxyRoundTrip(const std::string& request_json) {
@@ -394,6 +412,148 @@ class HostBridgeV8Handler : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(HostBridgeV8Handler);
 };
 
+// --- PSD-502 production-origin scheme handler ----------------------------------------------------
+// Serves the desktop bundle (and the offline browser start page) over a REAL secure custom scheme.
+// This replaces the file:// dev origin + --disable-web-security: under a STANDARD+SECURE scheme the
+// page is a secure context, ES-module fetch is allowed same-origin (CORS-clean), and the native
+// binder hydrates with web security ENABLED. Strictly local/offline — these factories only ever read
+// files from g_scheme_root / g_browser_root; there is no network fetch path.
+
+// Map a file extension to a MIME type (the small set the bundle actually serves).
+static std::string MimeForPath(const std::string& path) {
+  auto ends = [&](const char* ext) {
+    size_t n = std::strlen(ext);
+    return path.size() >= n && path.compare(path.size() - n, n, ext) == 0;
+  };
+  if (ends(".html") || ends(".htm")) return "text/html";
+  if (ends(".js") || ends(".mjs")) return "text/javascript";
+  if (ends(".css")) return "text/css";
+  if (ends(".json")) return "application/json";
+  if (ends(".svg")) return "image/svg+xml";
+  if (ends(".png")) return "image/png";
+  if (ends(".jpg") || ends(".jpeg")) return "image/jpeg";
+  if (ends(".gif")) return "image/gif";
+  if (ends(".webp")) return "image/webp";
+  if (ends(".woff2")) return "font/woff2";
+  if (ends(".woff")) return "font/woff";
+  if (ends(".ttf")) return "font/ttf";
+  if (ends(".ico")) return "image/x-icon";
+  if (ends(".map")) return "application/json";
+  if (ends(".wasm")) return "application/wasm";
+  return "application/octet-stream";
+}
+
+// Resolve "<authority>/<path>" under a doc-root, REJECTING any path that escapes the root.
+// Returns the absolute on-disk path on success, or "" if the request path is unsafe.
+static std::string ResolveUnderRoot(const std::string& root, const std::string& rel_in) {
+  std::string rel = rel_in;
+  // Strip a query/fragment (defensive; CEF usually pre-strips for standard schemes).
+  size_t q = rel.find_first_of("?#");
+  if (q != std::string::npos) rel.erase(q);
+  // Decode a minimal set of percent-escapes (%20 etc.) so on-disk names with spaces resolve.
+  std::string dec;
+  dec.reserve(rel.size());
+  for (size_t i = 0; i < rel.size(); ++i) {
+    if (rel[i] == '%' && i + 2 < rel.size()) {
+      auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      int hi = hex(rel[i + 1]), lo = hex(rel[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        dec.push_back(static_cast<char>(hi * 16 + lo));
+        i += 2;
+        continue;
+      }
+    }
+    dec.push_back(rel[i]);
+  }
+  rel = dec;
+  // Reject NUL and any traversal component. We split on '/' and forbid "" leading double-slash,
+  // "." and "..": only plain forward segments are allowed, so the result can never leave root.
+  if (rel.find('\0') != std::string::npos) return "";
+  std::string out = root;
+  size_t i = 0;
+  while (i < rel.size()) {
+    size_t slash = rel.find('/', i);
+    std::string seg = rel.substr(i, slash == std::string::npos ? std::string::npos : slash - i);
+    i = (slash == std::string::npos) ? rel.size() : slash + 1;
+    if (seg.empty() || seg == ".") continue;       // collapse // and ./
+    if (seg == "..") return "";                      // traversal -> reject (fail closed)
+    out.push_back('/');
+    out += seg;
+  }
+  // Canonicalize and re-check containment: realpath collapses any residual symlink/.. so a symlink
+  // inside the tree cannot point outside it. Missing files (realpath fails) fall through to a 404.
+  char buf[4096];
+  if (realpath(out.c_str(), buf) != nullptr) {
+    std::string canon(buf);
+    std::string canon_root;
+    char rbuf[4096];
+    if (realpath(root.c_str(), rbuf) != nullptr) canon_root = rbuf; else canon_root = root;
+    if (canon != canon_root &&
+        canon.compare(0, canon_root.size() + 1, canon_root + "/") != 0) {
+      return "";  // escaped the root
+    }
+    return canon;
+  }
+  return out;  // does not exist yet: caller stat()s and 404s if absent
+}
+
+// A resource handler that streams a single on-disk file (or a 404) for a scheme request.
+class VitaFileSchemeFactory : public CefSchemeHandlerFactory {
+ public:
+  explicit VitaFileSchemeFactory(std::string authority, std::string root)
+      : authority_(std::move(authority)), root_(std::move(root)) {}
+
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser> /*browser*/,
+                                       CefRefPtr<CefFrame> /*frame*/,
+                                       const CefString& /*scheme_name*/,
+                                       CefRefPtr<CefRequest> request) override {
+    // request URL: vita://<authority>/<path>. Extract the path after the authority.
+    std::string url = request->GetURL().ToString();
+    std::string prefix = std::string(kVitaScheme) + "://" + authority_ + "/";
+    std::string rel;
+    if (url.compare(0, prefix.size(), prefix) == 0) {
+      rel = url.substr(prefix.size());
+    } else {
+      // vita://<authority>  (no trailing slash) -> serve the directory index.
+      rel = "";
+    }
+    if (rel.empty()) rel = "index.html";
+
+    std::string disk = ResolveUnderRoot(root_, rel);
+    if (disk.empty()) {
+      return Make404("forbidden");
+    }
+    struct stat st;
+    if (stat(disk.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+      return Make404("not found");
+    }
+    CefRefPtr<CefStreamReader> reader = CefStreamReader::CreateForFile(disk);
+    if (!reader) {
+      return Make404("unreadable");
+    }
+    fprintf(stderr, "[osr] scheme: %s://%s/%s -> %s (%s)\n", kVitaScheme,
+            authority_.c_str(), rel.c_str(), disk.c_str(), MimeForPath(disk).c_str());
+    return new CefStreamResourceHandler(MimeForPath(disk), reader);
+  }
+
+ private:
+  static CefRefPtr<CefResourceHandler> Make404(const char* why) {
+    std::string body = std::string("vita scheme: ") + why;
+    CefRefPtr<CefStreamReader> r = CefStreamReader::CreateForData(
+        const_cast<char*>(body.data()), body.size());
+    return new CefStreamResourceHandler(404, "Not Found", "text/plain",
+                                        CefResponse::HeaderMap(), r);
+  }
+  std::string authority_;
+  std::string root_;
+  IMPLEMENT_REFCOUNTING(VitaFileSchemeFactory);
+};
+
 // App: configures command-line switches before CEF init, AND (render side) installs the host bridge.
 class OsrApp : public CefApp,
                public CefBrowserProcessHandler,
@@ -407,6 +567,17 @@ class OsrApp : public CefApp,
 
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
+  }
+
+  // PSD-502: register the production-origin custom scheme. Called in EVERY process (browser +
+  // renderer) before init. STANDARD => has an origin + supports relative URLs / ES modules; SECURE
+  // => the page is a secure context (so it is treated like https for powerful-feature / CORS gating);
+  // CORS_ENABLED + FETCH_ENABLED => same-origin module + fetch loads succeed. This is what lets the
+  // ES-module bundle load and the native binder hydrate WITHOUT --disable-web-security.
+  void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
+    const int options = CEF_SCHEME_OPTION_STANDARD | CEF_SCHEME_OPTION_SECURE |
+                        CEF_SCHEME_OPTION_CORS_ENABLED | CEF_SCHEME_OPTION_FETCH_ENABLED;
+    registrar->AddCustomScheme(kVitaScheme, options);
   }
 
   // Install window.vitaDesktopBridge BEFORE the desktop bootstrap runs (OnContextCreated fires when
@@ -464,13 +635,11 @@ class OsrApp : public CefApp,
     // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
     // VMware-boot 0.3s early-exit. ANGLE swiftshader keeps GL software so no GPU process is needed.
     command_line->AppendSwitchWithValue("ozone-platform", "headless");
-    // KEYSTONE (PSD-501): the desktop loads from file:// and bootstrap.js is an ES module. Chromium
-    // blocks ES-module fetch from a file:// origin ("null") under CORS, so the bundle never executes
-    // and the NATIVE binder never hydrates (this is why the prior build needed a C++ click delegate).
-    // Allow file access from files + relax web security so the module loads and the desktop hydrates
-    // its own DOM click/action handlers (ADR-0013). Local trusted boot asset only; no network origin.
-    command_line->AppendSwitch("allow-file-access-from-files");
-    command_line->AppendSwitch("disable-web-security");
+    // PSD-502 PRODUCTION ORIGIN: the desktop is served over the vita:// custom scheme (STANDARD +
+    // SECURE + CORS + FETCH, registered in OnRegisterCustomSchemes), NOT file://. Under a real secure
+    // origin the ES-module bundle loads same-origin and the NATIVE binder hydrates with WEB SECURITY
+    // ENABLED — so the file:// dev shortcuts --allow-file-access-from-files + --disable-web-security
+    // are GONE. Nothing here weakens the renderer's same-origin policy anymore.
   }
 
   void OnContextInitialized() override {
@@ -483,6 +652,17 @@ class OsrApp : public CefApp,
     CefBrowserSettings browser_settings;
     browser_settings.windowless_frame_rate = 30;
     browser_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+
+    // PSD-502: wire the production-origin scheme factories (IO-thread file serving). The desktop
+    // authority serves the whole ui_kits tree; the browser authority serves the OFFLINE local
+    // browser start page (Feature 1). Both are strictly local file reads — no network path.
+    CefRegisterSchemeHandlerFactory(kVitaScheme, kDesktopAuthority,
+                                    new VitaFileSchemeFactory(kDesktopAuthority, g_scheme_root));
+    CefRegisterSchemeHandlerFactory(kVitaScheme, kBrowserAuthority,
+                                    new VitaFileSchemeFactory(kBrowserAuthority, g_browser_root));
+    fprintf(stderr, "[osr] scheme: registered %s://%s (root=%s) + %s://%s (root=%s)\n",
+            kVitaScheme, kDesktopAuthority, g_scheme_root.c_str(),
+            kVitaScheme, kBrowserAuthority, g_browser_root.c_str());
 
     CefBrowserHost::CreateBrowser(window_info, client, g_url, browser_settings,
                                   nullptr, nullptr);
@@ -878,11 +1058,16 @@ int main(int argc, char* argv[]) {
   int exit_code = CefExecuteProcess(main_args, app, nullptr);
   if (exit_code >= 0) return exit_code;
 
-  g_url = "file:///home/borg/Vita/ui_kits/desktop/index.html";
+  // PSD-502: default to the PRODUCTION ORIGIN (vita://desktop/...), not file://. The desktop
+  // authority is rooted at the ui_kits tree, so index.html lives at desktop/index.html and its
+  // ../styles.css + ../_vendor/* relatives resolve same-origin under vita://desktop/.
+  g_url = "vita://desktop/desktop/index.html";
   g_out_png = "/home/borg/Vita/spikes/cef-osr/out/cef-m0.png";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a.rfind("--url=", 0) == 0) g_url = a.substr(6);
+    else if (a.rfind("--scheme-root=", 0) == 0) g_scheme_root = a.substr(14);
+    else if (a.rfind("--browser-root=", 0) == 0) g_browser_root = a.substr(15);
     else if (a.rfind("--out=", 0) == 0) g_out_png = a.substr(6);
     else if (a.rfind("--compositor-out=", 0) == 0) g_compositor_out = a.substr(17);
     else if (a.rfind("--surface-id=", 0) == 0) g_surface_id = a.substr(13);

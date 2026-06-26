@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'none'; base-uri 'none'">
+<title>Local page — Vita Browser</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; color:#1b2330; background:#fff; margin:0; padding:30px 34px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .crumb { color:#69748a; font-size:12.5px; margin-bottom: 18px; }
+  .crumb a { color:#3178c6; text-decoration:none; }
+  p { max-width: 640px; }
+  code { background:#f1f4f9; padding:1px 6px; border-radius:6px; font-size:13px; }
+  .svgwrap { margin-top: 22px; padding: 20px; border:1px solid #e3e9f2; border-radius: 14px;
+    background:#f8fafd; display:inline-block; }
+</style>
+</head>
+<body>
+  <div class="crumb"><a href="index.html">← Start</a> · vita://browser/page-start.html</div>
+  <h1>This is a real local page</h1>
+  <p>You are looking at <code>vita://browser/page-start.html</code>, a bundled HTML document served
+     from the desktop image over the secure <code>vita://browser</code> origin. The Vita Browser
+     loaded it as a genuine web document inside a CEF web view — no internet was contacted.</p>
+  <p>Navigation between local pages works (you arrived here by clicking a link or typing an address),
+     and same-origin assets render. Below is an inline SVG drawn from local content:</p>
+  <a id="assets"></a>
+  <div class="svgwrap">
+    <svg width="220" height="90" viewBox="0 0 220 90" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#3178c6"/><stop offset="1" stop-color="#5b9af0"/>
+      </linearGradient></defs>
+      <rect x="2" y="2" width="216" height="86" rx="14" fill="url(#g)"/>
+      <text x="110" y="52" font-family="system-ui" font-size="22" font-weight="700"
+            fill="#fff" text-anchor="middle">Vita · local</text>
+    </svg>
+  </div>
+  <p style="margin-top:24px;color:#8a93a6;font-size:12.5px">
+    Offline by construction: this page's CSP sets <code>connect-src 'none'</code>.
+  </p>
+</body>
+</html>

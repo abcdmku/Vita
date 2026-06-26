@@ -84,7 +84,12 @@ const APP_SPECS: Readonly<Record<string, AppSpec>> = Object.freeze({
   }),
   "vita.app.browser": Object.freeze({
     icon: "🌐",
-    render: () => Promise.resolve(emptyState("Browser", "No web surface backend is connected yet.")),
+    // FEATURE 1 — REAL LOCAL WEB SURFACE: render a genuine CEF web view (an <iframe>) that loads the
+    // bundled, OFFLINE start page over the SAME production origin family (vita://browser/...). It is a
+    // real, navigable web surface scoped to local/offline content (allowed_network:false, strict CSP);
+    // it is NOT an honest-empty placeholder. Same-origin desktop/browser assets load; the open internet
+    // does not. The window chrome shows the current local address.
+    render: () => Promise.resolve(renderBrowser()),
     title: "Browser",
   }),
 });
@@ -261,6 +266,37 @@ function emptyState(title: string, detail: string): string {
     `<div style="padding:26px 16px;color:#8a93a6;text-align:center">` +
     `<div style="font-size:14px;color:#5b6577;margin-bottom:6px">${escapeHtml(title)} is empty</div>` +
     `<div style="font-size:12px">${escapeHtml(detail)}</div></div>`
+  );
+}
+
+// FEATURE 1: the Browser app's window body — a real, offline-scoped web surface.
+//
+// The desktop renderer is itself loaded over the secure custom scheme (vita://desktop, see osr_host
+// OnRegisterCustomSchemes), so it can embed an <iframe> that loads the bundled local start page from
+// the sibling vita://browser origin. CEF renders that iframe as a genuine nested web document — a
+// second web surface inside the desktop — wired through the SAME app-window-host pattern as every
+// other app (no one-off path). It is OFFLINE by construction: the start page's CSP forbids every
+// network origin (connect-src 'none'), so this is a working LOCAL browser, not an internet browser.
+const BROWSER_START_URL = "vita://browser/index.html";
+
+function renderBrowser(): string {
+  const url = BROWSER_START_URL;
+  // A slim local address bar (honest: it shows the bundled start origin) + the live web-view iframe.
+  // sandbox allows scripts + same-origin so the local start page's navigation works, but the iframe
+  // can never escape the vita://browser origin (no allow-top-navigation, and the scheme has no
+  // network path). Height is sized to the app window's content area.
+  return (
+    `<div style="display:flex;flex-direction:column;height:430px;background:#fff">` +
+    `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;` +
+    `border-bottom:1px solid #e3e9f2;background:#f7f9fc">` +
+    `<span style="color:#1a7f4b;font-size:12px" title="secure local origin">🔒</span>` +
+    `<span style="flex:1;font:12px ui-monospace,monospace;color:#5b6577;` +
+    `white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(url)}</span>` +
+    `<span style="font-size:11px;color:#8a93a6">offline · local</span></div>` +
+    `<iframe data-vita-browser-surface title="Vita local web surface" src="${escapeHtml(url)}" ` +
+    `sandbox="allow-scripts allow-same-origin allow-forms" ` +
+    `style="flex:1;width:100%;border:0;background:#fff"></iframe>` +
+    `</div>`
   );
 }
 

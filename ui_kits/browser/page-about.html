@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; base-uri 'none'">
+<title>About — Vita Browser</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; color:#1b2330; background:#fff; margin:0; padding:30px 34px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .crumb { color:#69748a; font-size:12.5px; margin-bottom: 18px; }
+  .crumb a { color:#3178c6; text-decoration:none; }
+  ul { max-width: 640px; } li { margin: 5px 0; }
+  .yes { color:#1a7f4b; font-weight:600; } .no { color:#b3261e; font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="crumb"><a href="index.html">← Start</a> · vita://browser/page-about.html</div>
+  <h1>About this web surface</h1>
+  <p>The Vita Browser is a real CEF web view embedded in the desktop, scoped for safety:</p>
+  <ul>
+    <li><span class="yes">CAN</span> render bundled local pages over <code>vita://browser</code></li>
+    <li><span class="yes">CAN</span> render same-origin assets (SVG, CSS, images, fonts)</li>
+    <li><span class="yes">CAN</span> navigate between local pages</li>
+    <li><span class="no">CANNOT</span> reach the open internet (<code>allowed_network: false</code>)</li>
+    <li><span class="no">CANNOT</span> issue cross-origin requests (strict CSP <code>connect-src 'none'</code>)</li>
+  </ul>
+  <p style="color:#8a93a6;font-size:12.5px;margin-top:22px">
+    Honest about scope: a working local/offline browser, not a full internet browser.
+  </p>
+</body>
+</html>
