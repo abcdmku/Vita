@@ -536,11 +536,7 @@ impl<B: RenderBackend> Compositor<B> {
             }
         }
 
-        placements.sort_by(|left, right| {
-            left.z_index
-                .cmp(&right.z_index)
-                .then_with(|| left.surface_id.cmp(&right.surface_id))
-        });
+        sort_placements(&mut placements);
 
         let old_by_id = placement_map(&self.placements);
         let new_by_id = placement_map(&placements);
@@ -569,6 +565,74 @@ impl<B: RenderBackend> Compositor<B> {
         Ok(DamageReport {
             changed_surfaces,
             rects,
+        })
+    }
+
+    pub fn set_z(&mut self, id: &SurfaceId, z_index: i32) -> Result<DamageReport, CompositorError> {
+        if !self.surfaces.contains_key(id) {
+            return Err(CompositorError::UnknownSurface(id.clone()));
+        }
+
+        let Some(placement) = self
+            .placements
+            .iter_mut()
+            .find(|placement| &placement.surface_id == id)
+        else {
+            return Ok(empty_damage_report());
+        };
+
+        if placement.z_index == z_index {
+            return Ok(empty_damage_report());
+        }
+
+        let rect = placement.rect();
+        placement.z_index = z_index;
+        sort_placements(&mut self.placements);
+
+        Ok(DamageReport {
+            changed_surfaces: vec![id.clone()],
+            rects: vec![rect],
+        })
+    }
+
+    pub fn raise_surface(&mut self, id: &SurfaceId) -> Result<DamageReport, CompositorError> {
+        if !self.surfaces.contains_key(id) {
+            return Err(CompositorError::UnknownSurface(id.clone()));
+        }
+
+        let Some(target) = self
+            .placements
+            .iter()
+            .find(|placement| &placement.surface_id == id)
+        else {
+            return Ok(empty_damage_report());
+        };
+
+        let Some(top) = self.placements.last() else {
+            return Ok(empty_damage_report());
+        };
+
+        if &top.surface_id == id {
+            return Ok(empty_damage_report());
+        }
+
+        let raised_z = top.z_index.checked_add(1).ok_or_else(|| {
+            CompositorError::Protocol("cannot raise surface above i32::MAX z-index".to_owned())
+        })?;
+        let rect = target.rect();
+        let changed_surface = id.clone();
+
+        for placement in &mut self.placements {
+            if &placement.surface_id == id {
+                placement.z_index = raised_z;
+                break;
+            }
+        }
+        sort_placements(&mut self.placements);
+
+        Ok(DamageReport {
+            changed_surfaces: vec![changed_surface],
+            rects: vec![rect],
         })
     }
 
@@ -1192,6 +1256,21 @@ fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
         map.insert(placement.surface_id.clone(), placement);
     }
     map
+}
+
+fn sort_placements(placements: &mut [Placement]) {
+    placements.sort_by(|left, right| {
+        left.z_index
+            .cmp(&right.z_index)
+            .then_with(|| left.surface_id.cmp(&right.surface_id))
+    });
+}
+
+fn empty_damage_report() -> DamageReport {
+    DamageReport {
+        changed_surfaces: Vec::new(),
+        rects: Vec::new(),
+    }
 }
 
 fn push_unique_rect(rects: &mut Vec<Rect>, rect: Rect) {
