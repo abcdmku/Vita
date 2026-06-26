@@ -39,6 +39,17 @@ import type {
   IndexPaletteState,
   IndexPaletteViewModel,
 } from "../viewmodels/index.ts";
+import {
+  MENU_BAR_MENU_IDS,
+  createDesktopMenuViewModel,
+} from "../viewmodels/menu-bar.ts";
+import type {
+  DesktopMenuEffect,
+  DesktopMenuRenderItem,
+  DesktopMenuSnapshot,
+  DesktopMenuViewModel,
+  DesktopMenuWindow,
+} from "../viewmodels/menu-bar.ts";
 
 // PSD-501: the index screen also receives an app-window host. After a dock tile's NATIVE binder
 // action launches an app via the real host bridge, the index view-model asks the window host to
@@ -66,6 +77,17 @@ export interface IndexScreenRootState {
   readonly palette: IndexPaletteState;
   readonly dock: IndexDockState;
   readonly error: IndexScreenError | null;
+  readonly paletteOpen: boolean;
+  readonly menu: DesktopMenuSnapshot;
+}
+
+export interface IndexMenuItemRowState {
+  readonly scope: "index.menu.item";
+  readonly id: string;
+  readonly label: string;
+  readonly accelerator: string;
+  readonly disabled: boolean;
+  readonly checked: boolean;
 }
 
 export interface IndexPaletteResultRowState {
@@ -91,22 +113,48 @@ export interface IndexDockRowState {
 export type IndexScreenState =
   | IndexScreenRootState
   | IndexPaletteResultRowState
-  | IndexDockRowState;
+  | IndexDockRowState
+  | IndexMenuItemRowState;
 
 export interface IndexScreenViewModel extends ScreenViewModel<IndexScreenState> {
   readonly palette: IndexPaletteViewModel;
   readonly dock: IndexDockViewModel;
+  readonly menu: DesktopMenuViewModel;
   snapshot(): IndexScreenRootState;
   setPaletteQuery(query: string): void;
   movePaletteSelection(delta: number): void;
   executePalette(index?: number): Promise<void>;
   launchOrFocusDock(appId: string): Promise<void>;
+  openPalette(): void;
+  closePalette(): void;
+  togglePalette(): void;
+  toggleMenu(menuId: string): void;
+  closeMenu(): void;
+  setWindows(windows: readonly DesktopMenuWindow[]): void;
+  selectMenuItem(itemId: string): DesktopMenuEffect;
+  dismissOverlays(): void;
 }
 
 const INDEX_SCREEN_ID = "desktop";
 const INDEX_SCREEN_EVENTS = Object.freeze(["click", "input", "keydown"] as const);
 const PALETTE_EXECUTE_ACTION = "palette.execute";
 const DOCK_LAUNCH_ACTION = "dock.launchOrFocus";
+const MENU_ITEM_SELECT_ACTION = "menu.select";
+
+// Per-menu open-flag bind ids consumed by the static menu-title spans in index.html.
+const MENU_OPEN_BIND_IDS: readonly { readonly bindId: string; readonly menuId: string }[] = Object.freeze([
+  Object.freeze({ bindId: "menu.file.open", menuId: MENU_BAR_MENU_IDS.file }),
+  Object.freeze({ bindId: "menu.edit.open", menuId: MENU_BAR_MENU_IDS.edit }),
+  Object.freeze({ bindId: "menu.view.open", menuId: MENU_BAR_MENU_IDS.view }),
+  Object.freeze({ bindId: "menu.go.open", menuId: MENU_BAR_MENU_IDS.go }),
+  Object.freeze({ bindId: "menu.window.open", menuId: MENU_BAR_MENU_IDS.window }),
+  Object.freeze({ bindId: "menu.help.open", menuId: MENU_BAR_MENU_IDS.help }),
+]);
+
+// CSS selectors for the live managed windows (window-manager.ts contract). Used by the Window menu
+// to enumerate / focus / close / minimize real windows. The screen treats these read-only.
+const LIVE_WINDOW_SELECTOR = ".v-win[data-vita-window]";
+const ACTIVE_WINDOW_DOM_ID = "vita-app-window";
 
 export function createIndexScreenViewModel(ports: IndexScreenPorts): IndexScreenViewModel {
   return new IndexScreenModel(ports);
@@ -118,7 +166,29 @@ export const indexScreenActions: ReadonlyMap<string, ScreenActionHandler<IndexSc
       viewModel.setPaletteQuery(queryFromContext(context));
     }],
     ["palette.nav", (viewModel, context) => {
+      const key = readEventKey(context.event);
+
+      if (key === "Escape") {
+        viewModel.closePalette();
+        return;
+      }
+      if (isPaletteToggleChord(context.event)) {
+        viewModel.closePalette();
+        return;
+      }
+
       viewModel.movePaletteSelection(navDeltaFromContext(context));
+    }],
+    ["shell.key", (viewModel, context) => {
+      const key = readEventKey(context.event);
+
+      if (isPaletteToggleChord(context.event)) {
+        viewModel.togglePalette();
+        return;
+      }
+      if (key === "Escape") {
+        viewModel.dismissOverlays();
+      }
     }],
     [PALETTE_EXECUTE_ACTION, async (viewModel, context) => {
       await viewModel.executePalette(paletteIndexFromContext(viewModel, context));
@@ -127,8 +197,39 @@ export const indexScreenActions: ReadonlyMap<string, ScreenActionHandler<IndexSc
       const appId = dockAppIdFromContext(context);
 
       if (appId !== undefined) {
+        viewModel.closeMenu();
         await viewModel.launchOrFocusDock(appId);
       }
+    }],
+    ["menu.toggle", (viewModel, context) => {
+      const menuId = menuIdFromContext(context);
+
+      if (menuId === undefined) return;
+
+      viewModel.setWindows(readLiveWindows(context.target));
+      viewModel.toggleMenu(menuId);
+    }],
+    [MENU_ITEM_SELECT_ACTION, (viewModel, context) => {
+      const itemId = menuItemIdFromContext(context);
+
+      if (itemId === undefined) return;
+
+      const effect = viewModel.selectMenuItem(itemId);
+
+      viewModel.closeMenu();
+      applyMenuEffect(effect, viewModel, context.target);
+    }],
+    ["palette.toggle", (viewModel) => {
+      viewModel.togglePalette();
+    }],
+    ["palette.open", (viewModel) => {
+      viewModel.openPalette();
+    }],
+    ["palette.close", (viewModel) => {
+      viewModel.closePalette();
+    }],
+    ["overlay.dismiss", (viewModel) => {
+      viewModel.dismissOverlays();
     }],
   ]);
 
@@ -152,17 +253,22 @@ export default indexScreenModule;
 class IndexScreenModel implements IndexScreenViewModel {
   readonly palette: IndexPaletteViewModel;
   readonly dock: IndexDockViewModel;
+  readonly menu: DesktopMenuViewModel;
   readonly #appWindow: IndexAppWindowPort | undefined;
   #error: IndexScreenError | null = null;
+  #paletteOpen = false;
+  #menuSnapshot: DesktopMenuSnapshot;
 
   constructor(ports: IndexScreenPorts) {
     this.palette = createIndexPaletteViewModel(ports satisfies IndexPalettePorts);
     this.dock = createIndexDockViewModel(ports satisfies IndexDockPorts);
+    this.menu = createDesktopMenuViewModel();
+    this.#menuSnapshot = this.menu.snapshot();
     this.#appWindow = ports.appWindow;
   }
 
   snapshot(): IndexScreenRootState {
-    return freezeRootState(this.palette.snapshot(), this.dock.snapshot(), this.#error);
+    return freezeRootState(this.palette.snapshot(), this.dock.snapshot(), this.#error, this.#paletteOpen, this.#menuSnapshot);
   }
 
   setPaletteQuery(query: string): void {
@@ -173,6 +279,46 @@ class IndexScreenModel implements IndexScreenViewModel {
   movePaletteSelection(delta: number): void {
     this.#error = null;
     this.palette.moveSelection(delta);
+  }
+
+  openPalette(): void {
+    this.#paletteOpen = true;
+    this.#menuSnapshot = this.menu.close();
+  }
+
+  closePalette(): void {
+    this.#paletteOpen = false;
+  }
+
+  togglePalette(): void {
+    this.#paletteOpen = !this.#paletteOpen;
+    if (this.#paletteOpen) this.#menuSnapshot = this.menu.close();
+  }
+
+  toggleMenu(menuId: string): void {
+    this.#paletteOpen = false;
+    this.#menuSnapshot = this.menu.toggle(menuId);
+  }
+
+  closeMenu(): void {
+    this.#menuSnapshot = this.menu.close();
+  }
+
+  setWindows(windows: readonly DesktopMenuWindow[]): void {
+    this.#menuSnapshot = this.menu.setWindows(windows);
+  }
+
+  selectMenuItem(itemId: string): DesktopMenuEffect {
+    const effect = this.menu.resolve(itemId);
+
+    if (effect.kind === "openPalette") this.#paletteOpen = true;
+
+    return effect;
+  }
+
+  dismissOverlays(): void {
+    this.#paletteOpen = false;
+    this.#menuSnapshot = this.menu.close();
   }
 
   async executePalette(index?: number): Promise<void> {
@@ -187,6 +333,7 @@ class IndexScreenModel implements IndexScreenViewModel {
 
     if (result.ok) {
       this.#error = null;
+      this.#paletteOpen = false;
       return;
     }
 
@@ -277,7 +424,26 @@ function createIndexScreenBinds(): ReadonlyMap<string, ScreenBindResolver<IndexS
     ["dock.running", (snapshot) => isDockRowState(snapshot) ? snapshot.running : false],
     ["dock.focused", (snapshot) => isDockRowState(snapshot) ? snapshot.focused : false],
     ["dock.active", (snapshot) => isDockRowState(snapshot) ? snapshot.active : false],
+    // Palette + dismiss-overlay visibility (hidden by default; shown via ⌘K / menu).
+    ["palette.open", (snapshot) => isRootState(snapshot) ? snapshot.paletteOpen : false],
+    ["overlay.open", (snapshot) => isRootState(snapshot) ? snapshot.paletteOpen || snapshot.menu.openMenuId !== null : false],
+    // Menu bar — per-menu open flags, the open menu's item list, and the anchored dropdown.
+    ["menu.anyOpen", (snapshot) => isRootState(snapshot) ? snapshot.menu.openMenuId !== null : false],
+    ["menu.dropdownStyle", (snapshot) => isRootState(snapshot) ? dropdownStyle(snapshot.menu) : ""],
+    ["menuItems", (snapshot) => isRootState(snapshot) ? menuItemRows(snapshot.menu) : Object.freeze([])],
+    ["item.label", (snapshot) => isMenuItemRowState(snapshot) ? snapshot.label : ""],
+    ["item.accelerator", (snapshot) => isMenuItemRowState(snapshot) ? snapshot.accelerator : ""],
+    ["item.disabled", (snapshot) => isMenuItemRowState(snapshot) ? snapshot.disabled : false],
+    ["item.checked", (snapshot) => isMenuItemRowState(snapshot) ? snapshot.checked : false],
   ]);
+
+  for (let index = 0; index < MENU_OPEN_BIND_IDS.length; index += 1) {
+    const entry = MENU_OPEN_BIND_IDS[index];
+
+    if (entry !== undefined) {
+      binds.set(entry.bindId, (snapshot) => isRootState(snapshot) && snapshot.menu.openMenuId === entry.menuId);
+    }
+  }
 
   for (let index = 0; index < DEFAULT_INDEX_DOCK_APPS.length; index += 1) {
     const app = DEFAULT_INDEX_DOCK_APPS[index];
@@ -350,6 +516,48 @@ function dockListItems(snapshot: IndexScreenRootState): readonly VitaListItem[] 
   return Object.freeze(output);
 }
 
+function menuItemRows(menu: DesktopMenuSnapshot): readonly VitaListItem[] {
+  const output: VitaListItem[] = [];
+
+  for (let index = 0; index < menu.items.length; index += 1) {
+    const item = menu.items[index];
+
+    if (item === undefined) continue;
+
+    output.push(Object.freeze({
+      attrs: Object.freeze([
+        attr("data-vita-action", MENU_ITEM_SELECT_ACTION),
+        attr("data-vita-event", "click"),
+        attr("data-vita-item-id", item.id),
+        attr("aria-disabled", item.disabled ? "true" : "false"),
+      ]),
+      classes: Object.freeze([
+        classPatch("disabled", item.disabled),
+        classPatch("is-checked", item.checked),
+      ]),
+      key: item.id,
+      snapshot: menuItemRowSnapshot(item),
+    }));
+  }
+
+  return Object.freeze(output);
+}
+
+function menuItemRowSnapshot(item: DesktopMenuRenderItem): IndexMenuItemRowState {
+  return Object.freeze({
+    accelerator: item.accelerator,
+    checked: item.checked,
+    disabled: item.disabled,
+    id: item.id,
+    label: item.label,
+    scope: "index.menu.item",
+  });
+}
+
+function dropdownStyle(menu: DesktopMenuSnapshot): string {
+  return `left:${menu.dropdownLeft}px`;
+}
+
 function paletteRowSnapshot(
   command: IndexPaletteCommand,
   index: number,
@@ -393,7 +601,7 @@ function navDeltaFromContext(context: VitaActionContext<IndexScreenState>): numb
 
   if (delta !== undefined) return delta;
 
-  const key = readOwnString(context.event, "key");
+  const key = readEventKey(context.event);
 
   if (key === "ArrowUp") return -1;
   if (key === "ArrowDown") return 1;
@@ -419,6 +627,66 @@ function paletteIndexFromContext(
 
 function dockAppIdFromContext(context: VitaActionContext<IndexScreenState>): string | undefined {
   return readDataset(context.target, Object.freeze(["vitaDockAppId", "vitaAppId"]));
+}
+
+function menuIdFromContext(context: VitaActionContext<IndexScreenState>): string | undefined {
+  return readDataset(context.target, Object.freeze(["vitaMenuId"]));
+}
+
+function menuItemIdFromContext(context: VitaActionContext<IndexScreenState>): string | undefined {
+  return readDataset(context.target, Object.freeze(["vitaItemId"]));
+}
+
+// Cmd/Ctrl-K toggles the command palette (the global shell shortcut).
+function isPaletteToggleChord(event: VitaActionContext<IndexScreenState>["event"]): boolean {
+  const key = readEventKey(event);
+
+  if (key !== "k" && key !== "K") return false;
+
+  return readEventBoolean(event, "metaKey") || readEventBoolean(event, "ctrlKey");
+}
+
+// A keyboard event's `key`/`ctrlKey`/`metaKey` are OWN data props on the binder's plain test events
+// but INHERITED accessors on a real DOM KeyboardEvent. Resolve both so the chord works live AND in
+// tests (mirrors bootstrap.ts's own-or-getter reader; still no prototype WALK beyond the getter).
+function readEventKey(event: unknown): string | undefined {
+  return readObjectString(event, "key") ?? readObjectString(event, "code");
+}
+
+function readObjectString(source: unknown, key: string): string | undefined {
+  const value = readOwnOrAccessor(source, key);
+
+  return typeof value === "string" ? value : undefined;
+}
+
+function readEventBoolean(source: unknown, key: string): boolean {
+  return readOwnOrAccessor(source, key) === true;
+}
+
+function readOwnOrAccessor(source: unknown, key: string): unknown {
+  if (!isObjectLike(source)) return undefined;
+
+  try {
+    let current: object | null = source;
+
+    for (let depth = 0; depth < 4 && current !== null; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+
+      if (descriptor !== undefined) {
+        if (Object.prototype.hasOwnProperty.call(descriptor, "value")) return descriptor.value;
+
+        const getter = descriptor.get;
+
+        return typeof getter === "function" ? Reflect.apply(getter, source, []) : undefined;
+      }
+
+      current = Object.getPrototypeOf(current) as object | null;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
 }
 
 function rootSnapshotFromContext(context: VitaActionContext<IndexScreenState>): IndexScreenRootState | undefined {
@@ -453,11 +721,15 @@ function freezeRootState(
   palette: IndexPaletteState,
   dock: IndexDockState,
   errorValue: IndexScreenError | null,
+  paletteOpen: boolean,
+  menu: DesktopMenuSnapshot,
 ): IndexScreenRootState {
   return Object.freeze({
     dock,
     error: errorValue,
+    menu,
     palette,
+    paletteOpen,
     scope: "index.screen",
   });
 }
@@ -511,6 +783,265 @@ function classPatch(className: string, enabled: boolean): VitaListClassPatch {
     className,
     enabled,
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Live-window adapter + menu effects.
+//
+// The Window menu and a handful of menu items act on the REAL desktop. We reach the live managed
+// windows (window-manager.ts) through the action target's DOM root and operate on them via the
+// standard browser API (querySelector / dispatchEvent / click), feature-detected so the headless
+// test stub (a narrow VitaElement) simply no-ops. We never import window-manager.ts (owned by the
+// app-window parallel agent) — only its stable `.v-win[data-vita-window]` DOM contract.
+// ---------------------------------------------------------------------------------------------
+
+interface LiveDomNode {
+  readonly id?: string;
+  readonly dataset?: Readonly<Record<string, string | undefined>>;
+  getAttribute?(name: string): string | null;
+  querySelector?(selector: string): LiveDomNode | null;
+  querySelectorAll?(selector: string): ArrayLike<LiveDomNode>;
+  closest?(selector: string): LiveDomNode | null;
+  click?(): void;
+  focus?(): void;
+}
+
+interface LiveWindowNode extends DesktopMenuWindow {
+  readonly node: LiveDomNode;
+}
+
+function liveDomNode(value: unknown): LiveDomNode | null {
+  return value !== null && typeof value === "object" ? (value as LiveDomNode) : null;
+}
+
+function screenRootFrom(target: unknown): LiveDomNode | null {
+  const node = liveDomNode(target);
+
+  if (node === null || typeof node.closest !== "function") return null;
+
+  try {
+    return node.closest("[data-vita-screen]");
+  } catch {
+    return null;
+  }
+}
+
+function liveWindowNodes(target: unknown): readonly LiveWindowNode[] {
+  const root = screenRootFrom(target);
+
+  if (root === null || typeof root.querySelectorAll !== "function") return Object.freeze([]);
+
+  let list: ArrayLike<LiveDomNode>;
+
+  try {
+    list = root.querySelectorAll(LIVE_WINDOW_SELECTOR);
+  } catch {
+    return Object.freeze([]);
+  }
+
+  const output: LiveWindowNode[] = [];
+
+  for (let index = 0; index < list.length; index += 1) {
+    const node = list[index];
+
+    if (node === null || node === undefined) continue;
+
+    const appId = liveWindowAttr(node, "data-vita-window") ?? "";
+    const domId = typeof node.id === "string" && node.id.length > 0 ? node.id : `window:${index}`;
+    const focused = node.id === ACTIVE_WINDOW_DOM_ID;
+    const title = liveWindowTitle(node) ?? appId ?? domId;
+
+    output.push(Object.freeze({
+      appId,
+      focused,
+      id: domId,
+      minimized: false,
+      node,
+      title,
+    }));
+  }
+
+  return Object.freeze(output);
+}
+
+function readLiveWindows(target: unknown): readonly DesktopMenuWindow[] {
+  const nodes = liveWindowNodes(target);
+  const output: DesktopMenuWindow[] = [];
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+
+    if (node !== undefined) {
+      output.push(Object.freeze({
+        appId: node.appId,
+        focused: node.focused,
+        id: node.id,
+        minimized: node.minimized,
+        title: node.title,
+      }));
+    }
+  }
+
+  return Object.freeze(output);
+}
+
+function liveWindowAttr(node: LiveDomNode, name: string): string | undefined {
+  if (typeof node.getAttribute !== "function") return undefined;
+
+  try {
+    const value = node.getAttribute(name);
+
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function liveWindowTitle(node: LiveDomNode): string | undefined {
+  if (typeof node.querySelector !== "function") return undefined;
+
+  try {
+    const el = node.querySelector("[data-vita-window-title]");
+    const text = el === null ? undefined : (el as { textContent?: string | null }).textContent;
+
+    return typeof text === "string" && text.trim().length > 0 ? text.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function focusedWindowNode(target: unknown): LiveWindowNode | undefined {
+  const nodes = liveWindowNodes(target);
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+
+    if (node !== undefined && node.focused) return node;
+  }
+
+  return nodes[0];
+}
+
+function clickWindowControl(node: LiveDomNode | undefined, selector: string): void {
+  if (node === undefined || typeof node.querySelector !== "function") return;
+
+  try {
+    const control = node.querySelector(selector);
+
+    if (control !== null && typeof control.click === "function") control.click();
+  } catch {
+    // a missing/closed control must not break the shell.
+  }
+}
+
+function focusWindowNode(node: LiveDomNode | undefined): void {
+  if (node === undefined) return;
+
+  // Bringing a window forward: prefer the WM's own focus path (clicking the title bar fires the
+  // pointerdown that raises it); fall back to element.focus().
+  try {
+    if (typeof node.querySelector === "function") {
+      const titlebar = node.querySelector("[data-vita-window-titlebar]");
+
+      if (titlebar !== null && typeof titlebar.click === "function") {
+        titlebar.click();
+        return;
+      }
+    }
+
+    if (typeof node.focus === "function") node.focus();
+    else if (typeof node.click === "function") node.click();
+  } catch {
+    // ignore
+  }
+}
+
+function findLiveWindowById(target: unknown, windowId: string): LiveDomNode | undefined {
+  const nodes = liveWindowNodes(target);
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+
+    if (node !== undefined && node.id === windowId) return node.node;
+  }
+
+  return undefined;
+}
+
+function nextWindowNode(target: unknown): LiveDomNode | undefined {
+  const nodes = liveWindowNodes(target);
+
+  if (nodes.length === 0) return undefined;
+
+  let focusedIndex = -1;
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    if (nodes[index]?.focused) {
+      focusedIndex = index;
+      break;
+    }
+  }
+
+  const next = nodes[(focusedIndex + 1) % nodes.length];
+
+  return next?.node;
+}
+
+function toggleScreenTheme(target: unknown): void {
+  const root = screenRootFrom(target);
+  const classList = root === null ? undefined : (root as { classList?: { toggle(token: string, force?: boolean): boolean } }).classList;
+
+  if (classList === undefined || typeof classList.toggle !== "function") return;
+
+  try {
+    const isDark = liveWindowAttr(root as LiveDomNode, "class")?.includes("theme-dark") ?? true;
+
+    classList.toggle("theme-dark", !isDark);
+    classList.toggle("theme-light", isDark);
+    classList.toggle("v-wall-dark", !isDark);
+    classList.toggle("v-wall-light", isDark);
+  } catch {
+    // ignore
+  }
+}
+
+function applyMenuEffect(
+  effect: DesktopMenuEffect,
+  viewModel: IndexScreenViewModel,
+  target: unknown,
+): void {
+  switch (effect.kind) {
+    case "openSettings":
+      void viewModel.launchOrFocusDock("vita.app.settings");
+      return;
+    case "launchApp":
+      void viewModel.launchOrFocusDock(effect.appId);
+      return;
+    case "toggleTheme":
+      toggleScreenTheme(target);
+      return;
+    case "focusWindow":
+      focusWindowNode(findLiveWindowById(target, effect.windowId));
+      return;
+    case "closeFocusedWindow":
+      clickWindowControl(focusedWindowNode(target)?.node, "[data-vita-window-close]");
+      return;
+    case "minimizeFocusedWindow":
+      clickWindowControl(focusedWindowNode(target)?.node, "[data-vita-window-min]");
+      return;
+    case "maximizeFocusedWindow":
+      clickWindowControl(focusedWindowNode(target)?.node, "[data-vita-window-zoom]");
+      return;
+    case "cycleWindow":
+      focusWindowNode(nextWindowNode(target));
+      return;
+    case "openPalette":
+    case "showAbout":
+    case "showHelp":
+    case "none":
+    default:
+      return;
+  }
 }
 
 function readDataset(element: Pick<VitaActionContext<IndexScreenState>, "target">["target"], keys: readonly string[]): string | undefined {
@@ -595,6 +1126,10 @@ function isPaletteRowState(snapshot: IndexScreenState): snapshot is IndexPalette
 
 function isDockRowState(snapshot: IndexScreenState): snapshot is IndexDockRowState {
   return snapshot.scope === "index.dock.item";
+}
+
+function isMenuItemRowState(snapshot: IndexScreenState): snapshot is IndexMenuItemRowState {
+  return snapshot.scope === "index.menu.item";
 }
 
 function isObjectLike(value: unknown): value is object {
