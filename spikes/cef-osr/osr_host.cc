@@ -20,6 +20,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -600,27 +602,43 @@ void ApplyInputLineOnUi(std::string line) {
 }
 
 // Background thread: read the reverse-input channel line-by-line and post each onto the UI thread.
+// Uses POSIX open()+read() (not std::ifstream): on a FIFO, libstdc++ ifstream can buffer such that
+// getline never returns for line-oriented streaming — raw read() with manual line assembly is the
+// reliable way to stream lines from a FIFO as the compositor writes them.
 void InputReaderThread() {
   fprintf(stderr, "[osr] input: reader thread starting, channel=%s\n", g_input_in.c_str());
-  // The channel is a FIFO the compositor opens for write; opening for read blocks until the
-  // writer appears, which is fine (boot ordering). Reopen on EOF so a compositor restart resumes.
   while (!g_input_stop.load()) {
-    std::ifstream in(g_input_in);
-    if (!in.is_open()) {
+    // Blocking open of the FIFO read end: blocks until a writer (the compositor) is present.
+    int fd = open(g_input_in.c_str(), O_RDONLY);
+    if (fd < 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
       continue;
     }
-    std::string line;
-    while (!g_input_stop.load() && std::getline(in, line)) {
-      if (line.empty()) continue;
-      fprintf(stderr, "[osr] input: read line: %s\n", line.c_str());  // DIAG
-      if (line.rfind("inputEvent", 0) != 0) continue;  // ignore non-event lines
-      std::string copy = line;
-      CefPostTask(TID_UI,
-                  CefCreateClosureTask(base::BindOnce(&ApplyInputLineOnUi, copy)));
+    fprintf(stderr, "[osr] input: channel opened (fd=%d), reading events\n", fd);
+    std::string buf;
+    char chunk[512];
+    while (!g_input_stop.load()) {
+      ssize_t n = read(fd, chunk, sizeof(chunk));
+      if (n > 0) {
+        buf.append(chunk, static_cast<size_t>(n));
+        size_t nl;
+        while ((nl = buf.find('\n')) != std::string::npos) {
+          std::string line = buf.substr(0, nl);
+          buf.erase(0, nl + 1);
+          if (line.empty()) continue;
+          if (line.rfind("inputEvent", 0) != 0) continue;  // ignore non-event lines
+          std::string copy = line;
+          CefPostTask(TID_UI,
+                      CefCreateClosureTask(base::BindOnce(&ApplyInputLineOnUi, copy)));
+        }
+      } else if (n == 0) {
+        break;  // all writers closed -> EOF; reopen.
+      } else {
+        break;  // error -> reopen.
+      }
     }
-    // EOF (writer closed): brief pause, then reopen.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    close(fd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   fprintf(stderr, "[osr] input: reader thread exiting\n");
 }
