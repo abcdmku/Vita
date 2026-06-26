@@ -1,9 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
 use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test,
@@ -11,12 +17,18 @@ use vita_compositor_core::platform::{
 use vita_compositor_core::{
     failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
     start_desktop_demo_or_failsafe, Compositor, CompositorError, DamageReport, InputAvailability,
-    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, SelfTestReport, SelfTestStatus,
-    SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
+    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, RoutedInputEvent,
+    SelfTestReport, SelfTestStatus, SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT,
+    DESKTOP_DEMO_OUTPUT_WIDTH,
 };
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
 const MAX_COMMAND_RGBA_BYTES: usize = 16 * 1024 * 1024;
+const INPUT_EVENT_QUEUE_CAPACITY: usize = 256;
+const MAX_INPUT_EVENTS_PER_TICK: usize = 256;
+const MAX_INPUT_EVENT_LINE_BYTES: usize = 512;
+#[cfg(target_os = "linux")]
+const LINUX_O_NONBLOCK: i32 = 0o4000;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -33,7 +45,11 @@ fn dispatch(args: Vec<String>) -> Result<(), CompositorError> {
         .iter()
         .any(|arg| arg == "--commands" || arg == "--command-stream")
     {
-        run_command_stream(parse_hold_seconds(&args)?, parse_screenshot_path(&args)?)
+        run_command_stream(
+            parse_hold_seconds(&args)?,
+            parse_screenshot_path(&args)?,
+            parse_input_out_path(&args)?,
+        )
     } else if args.iter().any(|arg| arg == "--serve") {
         serve()
     } else if args.iter().any(|arg| arg == "--demo") {
@@ -80,13 +96,21 @@ fn run_demo(hold_seconds: u64, screenshot_path: Option<PathBuf>) -> Result<(), C
 fn run_command_stream(
     hold_seconds: u64,
     screenshot_path: Option<PathBuf>,
+    input_out_path: Option<PathBuf>,
 ) -> Result<(), CompositorError> {
+    let mut reverse_input = input_out_path
+        .as_deref()
+        .map(ReverseInputChannel::open_path);
     let backend = match open_default_gpu_backend_for_self_test(
         DESKTOP_DEMO_OUTPUT_WIDTH,
         DESKTOP_DEMO_OUTPUT_HEIGHT,
     ) {
         Ok(backend) => backend,
         Err(error) => {
+            if let Some(channel) = reverse_input.as_mut() {
+                channel.finish();
+                emit_marker(&channel.summary_marker())?;
+            }
             let report = failsafe_report("unavailable", command_failsafe_reason(&error));
             emit_marker(&report.marker_line())?;
             return Ok(());
@@ -97,15 +121,25 @@ fn run_command_stream(
         DESKTOP_DEMO_OUTPUT_WIDTH,
         DESKTOP_DEMO_OUTPUT_HEIGHT,
     )?;
+    if let Some(channel) = reverse_input.take() {
+        session.set_reverse_input_channel(channel);
+    }
     let stdin = io::stdin();
     let report = match session.run(stdin.lock()) {
         Ok(report) => report,
         Err(error) => {
+            if let Some(line) = session.reverse_input_summary_marker() {
+                emit_marker(&line)?;
+            }
             let report = session.failsafe_report(command_failsafe_reason(&error));
             emit_marker(&report.marker_line())?;
             return Err(error);
         }
     };
+
+    if let Some(line) = session.reverse_input_summary_marker() {
+        emit_marker(&line)?;
+    }
 
     if let Some(path) = screenshot_path {
         if let Err(error) = session.write_screenshot_png(&path) {
@@ -239,7 +273,7 @@ fn handle_command<B: vita_compositor_core::RenderBackend>(
     }
 }
 
-struct CommandDrivenSession<B: RenderBackend> {
+pub(crate) struct CommandDrivenSession<B: RenderBackend> {
     compositor: Compositor<B>,
     placements: BTreeMap<SurfaceId, Placement>,
     pending_damage: DamageReport,
@@ -248,10 +282,15 @@ struct CommandDrivenSession<B: RenderBackend> {
     input: InputAvailability,
     reposition_no_repaint: bool,
     presented: bool,
+    reverse_input: Option<ReverseInputChannel>,
 }
 
 impl<B: RenderBackend> CommandDrivenSession<B> {
-    fn new(backend: B, output_width: u32, output_height: u32) -> Result<Self, CompositorError> {
+    pub(crate) fn new(
+        backend: B,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self, CompositorError> {
         let gpu = backend.backend_name().to_owned();
         let present = backend.presentation_mode();
         let input = backend.input_availability();
@@ -264,10 +303,27 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             present,
             presented: false,
             reposition_no_repaint: true,
+            reverse_input: None,
         })
     }
 
-    fn run<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
+    pub(crate) fn set_reverse_input_channel(&mut self, channel: ReverseInputChannel) {
+        self.reverse_input = Some(channel);
+    }
+
+    pub(crate) fn reverse_input_summary_marker(&self) -> Option<String> {
+        self.reverse_input
+            .as_ref()
+            .map(ReverseInputChannel::summary_marker)
+    }
+
+    pub(crate) fn run<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
+        let result = self.run_inner(reader);
+        self.finish_reverse_input();
+        result
+    }
+
+    fn run_inner<R: BufRead>(&mut self, reader: R) -> Result<SelfTestReport, CompositorError> {
         for line in reader.lines() {
             let line = line.map_err(|err| CompositorError::Protocol(err.to_string()))?;
             if line.trim().is_empty() {
@@ -298,6 +354,7 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             "updatePlacement" => self.update_placement(&fields),
             "removeSurface" => self.remove_surface(&fields),
             "present" => self.present(&fields),
+            "routeInput" => self.route_input(&fields),
             _ => Err(CompositorError::Protocol(format!(
                 "unknown command {command:?}"
             ))),
@@ -417,8 +474,62 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         }
 
         self.pending_damage = empty_damage();
+        self.drain_reverse_input();
         self.presented = true;
         Ok(())
+    }
+
+    fn route_input(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 1, "routeInput")?;
+        self.drain_reverse_input();
+        Ok(())
+    }
+
+    fn drain_reverse_input(&mut self) {
+        let Some(mut channel) = self.reverse_input.take() else {
+            return;
+        };
+
+        self.drain_reverse_input_into(&mut channel);
+        self.reverse_input = Some(channel);
+    }
+
+    fn drain_reverse_input_into(&mut self, channel: &mut ReverseInputChannel) {
+        let events = match self.compositor.poll_input_events() {
+            Ok(events) => events,
+            Err(error) => {
+                channel.record_failsafe(format!("poll_failed:{error}"));
+                return;
+            }
+        };
+
+        let overflow = events.len().saturating_sub(MAX_INPUT_EVENTS_PER_TICK);
+        if overflow > 0 {
+            channel.drop_events(overflow);
+        }
+
+        for event in events.iter().take(MAX_INPUT_EVENTS_PER_TICK) {
+            let routed = match self.compositor.route_input_event(event) {
+                Ok(routed) => routed,
+                Err(error) => {
+                    channel.record_failsafe(format!("route_failed:{error}"));
+                    channel.drop_events(1);
+                    continue;
+                }
+            };
+            channel.enqueue(format_reverse_input_event(
+                routed_input_surface(&routed),
+                event,
+            ));
+        }
+
+        channel.drain_best_effort();
+    }
+
+    fn finish_reverse_input(&mut self) {
+        if let Some(channel) = &mut self.reverse_input {
+            channel.finish();
+        }
     }
 
     fn merge_damage(&mut self, damage: DamageReport) {
@@ -465,6 +576,153 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             surfaces: self.compositor.surface_count(),
         }
     }
+}
+
+pub(crate) struct ReverseInputChannel {
+    writer: Option<Box<dyn Write>>,
+    queue: VecDeque<String>,
+    capacity: usize,
+    routed: u64,
+    dropped: u64,
+    failsafe_reason: Option<String>,
+}
+
+impl ReverseInputChannel {
+    fn open_path(path: &Path) -> Self {
+        match open_input_out_writer(path) {
+            Ok(writer) => Self::new(writer, INPUT_EVENT_QUEUE_CAPACITY),
+            Err(error) => {
+                let mut channel = Self::closed(INPUT_EVENT_QUEUE_CAPACITY);
+                channel.record_failsafe(format!("open_failed:{error}"));
+                channel
+            }
+        }
+    }
+
+    pub(crate) fn new(writer: Box<dyn Write>, capacity: usize) -> Self {
+        Self {
+            writer: Some(writer),
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+            routed: 0,
+            dropped: 0,
+            failsafe_reason: None,
+        }
+    }
+
+    fn closed(capacity: usize) -> Self {
+        Self {
+            writer: None,
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+            routed: 0,
+            dropped: 0,
+            failsafe_reason: None,
+        }
+    }
+
+    fn enqueue(&mut self, line: String) {
+        if line.len() > MAX_INPUT_EVENT_LINE_BYTES || self.queue.len() >= self.capacity {
+            self.drop_events(1);
+            return;
+        }
+
+        self.queue.push_back(line);
+    }
+
+    fn drain_best_effort(&mut self) {
+        while let Some(line) = self.queue.pop_front() {
+            match self.write_line(&line) {
+                ReverseInputWriteResult::Written => {
+                    self.routed = self.routed.saturating_add(1);
+                }
+                ReverseInputWriteResult::Backpressure => {
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+                ReverseInputWriteResult::Closed => {
+                    self.writer = None;
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+                ReverseInputWriteResult::Failed(reason) => {
+                    self.record_failsafe(reason);
+                    self.writer = None;
+                    self.drop_events(1 + self.queue.len());
+                    self.queue.clear();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn write_line(&mut self, line: &str) -> ReverseInputWriteResult {
+        let Some(writer) = self.writer.as_mut() else {
+            return ReverseInputWriteResult::Closed;
+        };
+        let mut bytes = Vec::with_capacity(line.len() + 1);
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+
+        match writer.write(&bytes) {
+            Ok(written) if written == bytes.len() => ReverseInputWriteResult::Written,
+            Ok(_) => ReverseInputWriteResult::Failed("partial_write".to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                ReverseInputWriteResult::Backpressure
+            }
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                ReverseInputWriteResult::Closed
+            }
+            Err(error) => ReverseInputWriteResult::Failed(format!("write_failed:{error}")),
+        }
+    }
+
+    fn finish(&mut self) {
+        self.drain_best_effort();
+        if let Some(writer) = self.writer.as_mut() {
+            if let Err(error) = writer.flush() {
+                if error.kind() != io::ErrorKind::BrokenPipe
+                    && error.kind() != io::ErrorKind::WouldBlock
+                {
+                    self.record_failsafe(format!("flush_failed:{error}"));
+                }
+            }
+        }
+    }
+
+    fn drop_events(&mut self, count: usize) {
+        self.dropped = self.dropped.saturating_add(count as u64);
+    }
+
+    fn record_failsafe(&mut self, reason: impl Into<String>) {
+        if self.failsafe_reason.is_none() {
+            self.failsafe_reason = Some(reason.into());
+        }
+    }
+
+    fn summary_marker(&self) -> String {
+        match self.failsafe_reason.as_deref() {
+            Some(reason) => format!(
+                "VITA-INPUT: routed={} dropped={} status=FAILSAFE reason={}",
+                self.routed,
+                self.dropped,
+                marker_token(reason)
+            ),
+            None => format!(
+                "VITA-INPUT: routed={} dropped={} status=OK",
+                self.routed, self.dropped
+            ),
+        }
+    }
+}
+
+enum ReverseInputWriteResult {
+    Written,
+    Backpressure,
+    Closed,
+    Failed(String),
 }
 
 fn stream_input_events<B: vita_compositor_core::RenderBackend>(
@@ -551,6 +809,27 @@ fn parse_screenshot_path(args: &[String]) -> Result<Option<PathBuf>, CompositorE
             index += 1;
         }
     }
+    Ok(path)
+}
+
+fn parse_input_out_path(args: &[String]) -> Result<Option<PathBuf>, CompositorError> {
+    let mut path = None;
+
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("--input-out=") {
+            if value.is_empty() {
+                return Err(CompositorError::Protocol(
+                    "missing input-out path".to_owned(),
+                ));
+            }
+            path = Some(PathBuf::from(value));
+        } else if arg == "--input-out" {
+            return Err(CompositorError::Protocol(
+                "input-out must use --input-out=<path>".to_owned(),
+            ));
+        }
+    }
+
     Ok(path)
 }
 
@@ -793,10 +1072,95 @@ fn format_input_event(event: &InputEvent) -> String {
     }
 }
 
+fn format_reverse_input_event(surface_id: Option<&SurfaceId>, event: &InputEvent) -> String {
+    format!(
+        "inputEvent surface={} {}",
+        surface_id.map_or("none", SurfaceId::as_str),
+        format_input_event(event)
+    )
+}
+
+fn routed_input_surface(event: &RoutedInputEvent) -> Option<&SurfaceId> {
+    match event {
+        RoutedInputEvent::PointerMotion { surface_id, .. }
+        | RoutedInputEvent::PointerButton { surface_id, .. }
+        | RoutedInputEvent::Key { surface_id, .. } => Some(surface_id),
+        RoutedInputEvent::Dropped { .. } => None,
+    }
+}
+
 fn empty_damage() -> DamageReport {
     DamageReport {
         changed_surfaces: Vec::new(),
         rects: Vec::new(),
+    }
+}
+
+fn open_input_out_writer(path: &Path) -> io::Result<Box<dyn Write>> {
+    #[cfg(unix)]
+    {
+        open_input_out_writer_unix(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(Box::new(file))
+    }
+}
+
+#[cfg(unix)]
+fn open_input_out_writer_unix(path: &Path) -> io::Result<Box<dyn Write>> {
+    let file_type = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.file_type());
+
+    if file_type
+        .as_ref()
+        .is_some_and(|file_type| file_type.is_socket())
+    {
+        let stream = UnixStream::connect(path)?;
+        stream.set_nonblocking(true)?;
+        return Ok(Box::new(stream));
+    }
+
+    let is_fifo = file_type
+        .as_ref()
+        .is_some_and(|file_type| file_type.is_fifo());
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if !is_fifo {
+        options.create(true).truncate(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        options.custom_flags(LINUX_O_NONBLOCK);
+    }
+
+    let file = options.open(path)?;
+    Ok(Box::new(file))
+}
+
+fn marker_token(value: &str) -> String {
+    let token = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if token.is_empty() {
+        "unknown".to_owned()
+    } else {
+        token
     }
 }
 
