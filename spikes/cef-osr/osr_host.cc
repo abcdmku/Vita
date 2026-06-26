@@ -144,7 +144,8 @@ class OsrRenderHandler : public CefRenderHandler {
 // Client: owns the render handler + load tracking; quits the loop after settle.
 class OsrClient : public CefClient,
                   public CefLifeSpanHandler,
-                  public CefLoadHandler {
+                  public CefLoadHandler,
+                  public CefDisplayHandler {
  public:
   OsrClient() : render_handler_(new OsrRenderHandler()) {}
 
@@ -153,6 +154,19 @@ class OsrClient : public CefClient,
   }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+
+  // Route page console.* to stderr so the desktop bundle's diagnostics (hydration, errors) are
+  // visible in CEF_LOG. CEF normally drops these in headless OSR.
+  bool OnConsoleMessage(CefRefPtr<CefBrowser> /*browser*/,
+                        cef_log_severity_t /*level*/,
+                        const CefString& message,
+                        const CefString& source,
+                        int line) override {
+    fprintf(stderr, "[osr] CONSOLE %s @ %s:%d\n",
+            message.ToString().c_str(), source.ToString().c_str(), line);
+    return false;
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
@@ -205,8 +219,12 @@ class OsrClient : public CefClient,
         "    var la = b.request({method:'launchApp',args:[{id:'vita.app.file-manager'}]});"
         "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
         "  }"
-        "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
-        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' — a REAL injected click now drives the host-bridge delegate');"
+        "  var tiles = document.querySelectorAll('[data-vita-dock-app-id]');"
+        "  L('VITA-DOCK tiles=' + tiles.length);"
+        "  for(var i=0;i<tiles.length;i++){ var r=tiles[i].getBoundingClientRect();"
+        "    L('VITA-DOCK tile ' + tiles[i].getAttribute('data-vita-dock-app-id') + ' cx=' + Math.round(r.left+r.width/2) + ' cy=' + Math.round(r.top+r.height/2)); }"
+        "  var win=document.getElementById('vita-app-window');"
+        "  L('VITA-NATIVE app-window=' + (win?'present':'absent'));"
         "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
@@ -415,33 +433,10 @@ class OsrApp : public CefApp,
         "    catch (e) { return { ok:false, error:{ code:'HOST_BRIDGE_PARSE', message:String(e), path:'/host-bridge' } }; }"
         "  }};"
         "  globalThis.vitaDesktopBridge = bridge;"
-        // PSD-500: a document-level click delegate that turns a dock-tile / palette click into a REAL
-        // host action via the bridge, and reflects the result on screen (active dock tile + a small
-        // 'launched' surface listing the REAL files). This makes a CLICK do a real thing even though
-        // the desktop's own binder hydration does not wire DOM clicks in this build; it uses the SAME
-        // bridge + real backends, so it is genuine, not a mock.
-        "  document.addEventListener('click', function(ev){"
-        "    var L = globalThis.__vitaLog || function(){};"
-        "    var t = ev.target && ev.target.closest ? ev.target.closest('[data-vita-dock-app-id]') : null;"
-        "    if(!t) return;"
-        "    var appId = t.getAttribute('data-vita-dock-app-id');"
-        "    L('VITA-CLICK dock tile clicked appId=' + appId);"
-        "    var la = bridge.request({method:'launchApp',args:[{id:appId}]});"
-        "    L('VITA-CLICK launchApp -> ' + JSON.stringify(la));"
-        "    try{ document.querySelectorAll('[data-vita-dock-app-id]').forEach(function(e){e.classList.remove('on');}); t.classList.add('on'); }catch(e){}"
-        "    if(la && la.ok){"
-        "      var win = document.getElementById('vita-launched-surface');"
-        "      if(!win){ win=document.createElement('div'); win.id='vita-launched-surface';"
-        "        win.style.cssText='position:absolute;left:120px;top:90px;width:520px;min-height:240px;'+"
-        "          'background:#fff;border:1px solid #c7d0de;border-radius:14px;box-shadow:0 24px 60px rgba(20,30,50,.28);'+"
-        "          'z-index:60;font:13px system-ui;color:#1b2330;overflow:hidden';"
-        "        document.body.appendChild(win); }"
-        "      var files = bridge.request({method:'requestFile',args:[{op:'list',grant:'g',path:'/'}]});"
-        "      var rows = (files && files.entries) ? files.entries.map(function(e){return '<div style=\"padding:7px 14px;border-top:1px solid #eef1f6;display:flex;justify-content:space-between\"><span>'+(e.kind==='dir'?'\\uD83D\\uDCC1 ':'\\uD83D\\uDCC4 ')+e.name+'</span><span style=\"color:#8a93a6\">'+e.size+' B</span></div>';}).join('') : '<div style=\"padding:14px\">(no files)</div>';"
-        "      win.innerHTML = '<div style=\"padding:10px 14px;background:#f3f6fb;border-bottom:1px solid #e3e9f2;font-weight:600\">Files \\u2014 '+appId+' (launched via host bridge, surface='+la.value.surfaceId+')</div>'+rows;"
-        "      L('VITA-CLICK launched surface rendered with REAL files');"
-        "    }"
-        "  }, true);"
+        // PSD-501: NO C++ click delegate. The desktop's own binder hydration (ADR-0013) wires
+        // dock/action clicks; a real injected pointer click is synthesized into a DOM click in
+        // ApplyInputLineOnUi, the binder fires dock.launchOrFocus -> host.launchApp, and the
+        // desktop's app-window host opens a real surface populated via this SAME bridge.
         "}());";
     context->GetFrame()->ExecuteJavaScript(shim, "vita://host-bridge", 0);
     fprintf(stderr, "[osr] host-bridge: window.vitaDesktopBridge installed (proxy sock=%s)\n",
@@ -469,6 +464,13 @@ class OsrApp : public CefApp,
     // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
     // VMware-boot 0.3s early-exit. ANGLE swiftshader keeps GL software so no GPU process is needed.
     command_line->AppendSwitchWithValue("ozone-platform", "headless");
+    // KEYSTONE (PSD-501): the desktop loads from file:// and bootstrap.js is an ES module. Chromium
+    // blocks ES-module fetch from a file:// origin ("null") under CORS, so the bundle never executes
+    // and the NATIVE binder never hydrates (this is why the prior build needed a C++ click delegate).
+    // Allow file access from files + relax web security so the module loads and the desktop hydrates
+    // its own DOM click/action handlers (ADR-0013). Local trusted boot asset only; no network origin.
+    command_line->AppendSwitch("allow-file-access-from-files");
+    command_line->AppendSwitch("disable-web-security");
   }
 
   void OnContextInitialized() override {
@@ -793,7 +795,7 @@ void ApplyInputLineOnUi(std::string line) {
                  // backdrop). Click the TOPMOST interactive element at this point (the first that is a
                  // dock tile, palette item, or has a vita action) rather than the inert scrim.
                  "var pick=null;for(var i=0;i<stack.length;i++){var e=stack[i];"
-                 "  if(e.closest&&(e.closest('[data-vita-dock-app-id]')||e.closest('[data-vita-action]'))){pick=e;break;}}"
+                 "  if(e.closest&&(e.closest('[data-vita-dock-app-id]')||e.closest('[data-vita-action]')||e.closest('[data-vita-setting-key]')||e.closest('#vita-app-window'))){pick=e;break;}}"
                  "var tgt=pick||el;"
                  "L('VITA-POINTERCLICK at ('+x+','+y+') top='+(el?el.tagName+'.'+(el.className||''):'NULL')+' pick='+(pick?pick.tagName+'.'+(pick.className||''):'none'));"
                  "if(!tgt)return;var o={bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};"

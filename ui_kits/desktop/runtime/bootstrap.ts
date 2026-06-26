@@ -10,6 +10,9 @@ import settingsScreen from "../screens/settings.ts";
 import shellScreen from "../screens/shell.ts";
 import tilingScreen from "../screens/tiling.ts";
 import {
+  createAppWindowHost,
+} from "./app-window-host.ts";
+import {
   createSurfaceHost,
 } from "./host-bridge.ts";
 import type {
@@ -84,7 +87,14 @@ export async function bootstrapDesktop(
   // work in a plain browser while host actions fail closed. Previously this early-returned
   // an empty runtime, leaving the desktop inert with no signal — the silent-failure mode
   // the ADR explicitly warns against.
-  const host = options.host ?? createSurfaceHost(transport);
+  const baseHost = options.host ?? createSurfaceHost(transport);
+
+  // PSD-501: attach the app-window host so a NATIVE dock click opens a real surface populated via
+  // the host bridge (Files/Mail/Editor/Settings/Activity). When a real document is present, the
+  // index screen reads host.appWindow and opens windows on launch; otherwise the desktop hydrates
+  // exactly as before (the field is simply absent). createSurfaceHost returns a frozen object, so
+  // we extend a shallow copy rather than mutate it.
+  const host = installAppWindowHost(baseHost, options);
   const roots = selectScreenRoots(options);
   const screens: HydratedScreen[] = [];
 
@@ -105,7 +115,21 @@ export async function bootstrapDesktop(
     }
   }
 
+  vitaDiag(`bootstrap: hydrated ${screens.length}/${roots.length} screens [${screens.map((s) => `${s.id}:${s.ok}`).join(",")}] appWindow=${"appWindow" in (host as object)}`);
+
   return runtime(screens);
+}
+
+// Diagnostic: route a one-line status through the native __vitaLog (visible in CEF_LOG) so a real
+// boot can confirm the desktop's NATIVE binder hydration ran. No-op outside CEF.
+function vitaDiag(line: string): void {
+  try {
+    const log = (globalThis as Record<string, unknown>)["__vitaLog"];
+
+    if (typeof log === "function") (log as (s: string) => void)(`VITA-HYDRATE ${line}`);
+  } catch {
+    // ignore
+  }
 }
 
 export async function bootstrapDesktopFromGlobal(
@@ -117,7 +141,9 @@ export async function bootstrapDesktopFromGlobal(
   });
 }
 
-void bootstrapDesktopFromGlobal().catch(() => {});
+void bootstrapDesktopFromGlobal().catch((error: unknown) => {
+  vitaDiag(`bootstrap THREW: ${error instanceof Error ? error.message : String(error)}`);
+});
 
 function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
   const frozenScreens = Object.freeze([...screens]);
@@ -134,6 +160,34 @@ function runtime(screens: readonly HydratedScreen[]): DesktopHydrationRuntime {
       }
     },
   });
+}
+
+function installAppWindowHost(host: DesktopHost, options: BootstrapOptions): DesktopHost {
+  // Only meaningful with a live DOM (the window host creates elements). In headless tests there is
+  // no real document, so we return the host unchanged and the index screen omits the appWindow port.
+  const globalObject = options.global ?? defaultGlobal();
+  const documentValue = readOwnAny(globalObject, "document");
+
+  if (!isLiveDocument(documentValue)) return host;
+
+  try {
+    const appWindow = createAppWindowHost(host, documentValue as never);
+
+    return Object.freeze({ ...host, appWindow }) as DesktopHost;
+  } catch {
+    return host;
+  }
+}
+
+function isLiveDocument(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+
+  try {
+    return typeof Reflect.get(value, "createElement") === "function" &&
+      typeof Reflect.get(value, "getElementById") === "function";
+  } catch {
+    return false;
+  }
 }
 
 function resolveTransport(options: BootstrapOptions): Exclude<SurfaceHostTransportLike, null | undefined> | undefined {

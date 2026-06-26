@@ -620,6 +620,10 @@ if (MODE === "smoke") {
     // PSD-055 verification: bake the input self-test token so the CEF launch script injects a
     // scripted gesture at boot (uinput -> libinput -> route -> CEF) on the real GPU. Off by default.
     (process.env.VITA_INPUT_SELFTEST === "1" ? " vita.input_selftest=1" : "") +
+    // PSD-501: bake the verification scenario so the CEF self-test clicks real dock tiles and proves
+    // a real action (settings-toggle persists a setting; settings-read shows it survived a reboot;
+    // activity shows real /proc stats). Off by default; the boot script defaults to no-op without it.
+    (process.env.VITA_VERIFY ? ` vita.verify=${process.env.VITA_VERIFY}` : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,

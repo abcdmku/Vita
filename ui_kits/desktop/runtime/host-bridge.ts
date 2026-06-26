@@ -56,7 +56,8 @@ export type SurfaceHostMethod =
   | "previewSetting"
   | "applySetting"
   | "emitLauncherIntent"
-  | "readTheme";
+  | "readTheme"
+  | "sampleActivity";
 
 export interface SurfaceHostRequest {
   readonly method: SurfaceHostMethod;
@@ -199,6 +200,12 @@ export function createSurfaceHost(
     previewSetting?: NonNullable<DesktopHost["previewSetting"]>;
     applySetting?: NonNullable<DesktopHost["applySetting"]>;
     emitLauncherIntent?: NonNullable<DesktopHost["emitLauncherIntent"]>;
+    // PSD-501: the Activity screen reads real /proc metrics through an injected `metrics` port
+    // (optionalHostPort(host, "metrics")). We expose it on the host and forward `sampleActivity`
+    // over the SAME transport so it reaches the platform proxy's real /proc sampler.
+    metrics?: {
+      sample(request: HostBridgeJson): Promise<DesktopHostResult<HostBridgeJson>>;
+    };
     readTheme(): DesktopTheme;
   } = {
     applyShell(definition) {
@@ -264,6 +271,16 @@ export function createSurfaceHost(
       [intent],
       isTrue,
     );
+    host.metrics = {
+      // Forward to the platform proxy's real /proc sampler. The Activity view-model strictly
+      // normalizes the {cpuPercent, memory, processes} shape itself, so we pass the JSON through.
+      sample: async (sampleRequest) => await forwardHostResult(
+        request,
+        "sampleActivity",
+        [sampleRequest],
+        isJson,
+      ),
+    };
   }
 
   return Object.freeze(host);

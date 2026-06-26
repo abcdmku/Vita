@@ -21,6 +21,10 @@
 const SOCK = Deno.env.get("VITA_HOST_PROXY_SOCK") ?? "/run/vita-host-proxy.sock";
 const FILES_ROOT = Deno.env.get("VITA_FILES_ROOT") ?? "/var/lib/vita/files";
 const LOG = Deno.env.get("VITA_HOST_PROXY_LOG") ?? "/run/vita-host-proxy.log";
+// PSD-501: settings PERSIST on the persistent /var data partition (survives reboot); the editor
+// VFS and mailbox are real on-disk trees the apps read live. State root is mutable /var/lib/vita.
+const STATE_ROOT = Deno.env.get("VITA_STATE_ROOT") ?? "/var/lib/vita";
+const SETTINGS_FILE = `${STATE_ROOT}/settings.json`;
 
 function log(line: string): void {
   const msg = `[host-proxy] ${line}\n`;
@@ -51,11 +55,13 @@ const METHOD_CAPABILITY: Record<string, string> = {
   applySetting: "settings.write",
   emitLauncherIntent: "launcher.launch",
   readTheme: "settings.read",
+  sampleActivity: "metrics.read",
 };
 
 const GRANTED = new Set<string>([
   "apps.launch", "apps.stop", "files.read", "files.write", "launcher.launch",
   "settings.read", "settings.write", "shell.notifications.post", "shell.tray.register",
+  "metrics.read",
 ]);
 
 function hostError(code: string, message: string, path = "/host-proxy") {
@@ -136,7 +142,7 @@ function launchAppBackend(app: unknown): unknown {
     surfaceId: `surface:${appId}#${launchSeq}`,
     windowId: `window:${appId}#${launchSeq}`,
     textureId: `texture:${appId}#${launchSeq}`,
-    intents: [{ kind: "focus", windowId: `window:${appId}#${launchSeq}` }],
+    intents: [{ type: "setFocus", windowId: `window:${appId}#${launchSeq}` }],
   };
   launched.set(appId, launch);
   log(`launchApp id=${appId} -> ${launch.surfaceId}`);
@@ -150,6 +156,182 @@ function themeBackend(): unknown {
     tokens: {
       colors: { background: "#e9edf3", foreground: "#1b2330", accent: "#3178c6" },
       radii: { sm: 6 }, spacing: { sm: 8 }, typography: { body: "system-ui" },
+    },
+  };
+}
+
+// --- real Settings store (PERSISTED on /var, survives reboot) -----------------------------------
+// Valid default values so the desktop Settings screen hydrates (its view-model rejects an
+// out-of-enum value). On first boot the file is absent -> defaults; after applySetting the value
+// is written to /var/lib/vita/settings.json and read back on the next boot.
+const SETTINGS_DEFAULTS: Record<string, string> = {
+  "appearance.theme": "dark",
+  "appearance.accent": "blue",
+  "appearance.layout": "comfortable",
+  "settings.activeSection": "appearance",
+};
+
+function loadSettings(): Record<string, unknown> {
+  try {
+    const text = Deno.readTextFileSync(SETTINGS_FILE);
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch { /* absent or unreadable -> defaults */ }
+  return {};
+}
+
+function persistSettings(store: Record<string, unknown>): void {
+  try { Deno.mkdirSync(STATE_ROOT, { recursive: true }); } catch { /* best-effort */ }
+  const tmp = `${SETTINGS_FILE}.tmp.${Date.now()}`;
+  Deno.writeTextFileSync(tmp, JSON.stringify(store, null, 2) + "\n");
+  Deno.renameSync(tmp, SETTINGS_FILE);
+}
+
+function settingsReadBackend(req: { key?: string }): unknown {
+  const key = typeof req.key === "string" ? req.key : "";
+  if (key.length === 0) return hostError("SETTINGS_KEY_REQUIRED", "readSetting requires a key", "/readSetting");
+  const store = loadSettings();
+  const stored = Object.prototype.hasOwnProperty.call(store, key) ? store[key] : undefined;
+  const value = stored !== undefined ? stored : (SETTINGS_DEFAULTS[key] ?? null);
+  log(`readSetting ${key} -> ${JSON.stringify(value)}`);
+  return { ok: true, value };
+}
+
+function settingsPreviewBackend(req: { key?: string; value?: unknown }): unknown {
+  const key = typeof req.key === "string" ? req.key : "";
+  if (key.length === 0) return hostError("SETTINGS_KEY_REQUIRED", "previewSetting requires a key", "/previewSetting");
+  const store = loadSettings();
+  const previous = Object.prototype.hasOwnProperty.call(store, key) ? store[key] : (SETTINGS_DEFAULTS[key] ?? null);
+  const value = req.value ?? null;
+  return { ok: true, value: { revision: `preview:${key}`, diff: { key, previous, value } } };
+}
+
+function settingsApplyBackend(req: { key?: string; value?: unknown }): unknown {
+  const key = typeof req.key === "string" ? req.key : "";
+  if (key.length === 0) return hostError("SETTINGS_KEY_REQUIRED", "applySetting requires a key", "/applySetting");
+  const value = req.value ?? null;
+  const store = loadSettings();
+  store[key] = value;
+  try {
+    persistSettings(store);
+  } catch (err) {
+    return hostError("SETTINGS_WRITE_FAILED", `${(err as Error).message}`, "/applySetting");
+  }
+  log(`applySetting ${key} = ${JSON.stringify(value)} (persisted ${SETTINGS_FILE})`);
+  return { ok: true, value: { revision: `settings:${key}:${Date.now()}`, applied: { key, value } } };
+}
+
+// --- real Activity metrics (REAL /proc CPU + memory + per-process stats) ------------------------
+// Two-shot sampling over a short window: read /proc/stat (machine) + each /proc/<pid>/stat, sleep,
+// read again, compute delta-based CPU%. This is REAL kernel data, not a hardcoded 38%/8.2GB.
+interface ProcSnap { utimeStime: number; name: string; rssBytes: number; }
+interface CpuTotals { total: number; idle: number; }
+
+function readMemInfo(): { totalBytes: number; usedBytes: number } {
+  try {
+    const text = Deno.readTextFileSync("/proc/meminfo");
+    const kv: Record<string, number> = {};
+    for (const line of text.split("\n")) {
+      const m = /^(\w+):\s+(\d+)\s*kB/.exec(line);
+      if (m) kv[m[1]] = Number(m[2]) * 1024;
+    }
+    const total = kv["MemTotal"] ?? 0;
+    const available = kv["MemAvailable"] ?? (kv["MemFree"] ?? 0);
+    const used = Math.max(0, total - available);
+    return { totalBytes: total, usedBytes: Math.min(used, total) };
+  } catch {
+    return { totalBytes: 0, usedBytes: 0 };
+  }
+}
+
+function readCpuTotals(): CpuTotals {
+  try {
+    const line = Deno.readTextFileSync("/proc/stat").split("\n").find((l) => l.startsWith("cpu "));
+    if (!line) return { total: 0, idle: 0 };
+    const p = line.trim().split(/\s+/).slice(1).map(Number);
+    const idle = (p[3] ?? 0) + (p[4] ?? 0); // idle + iowait
+    const total = p.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+    return { total, idle };
+  } catch { return { total: 0, idle: 0 }; }
+}
+
+function machineCpuPercent(a: CpuTotals, b: CpuTotals): number {
+  const dt = b.total - a.total;
+  const di = b.idle - a.idle;
+  if (dt <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((1 - di / dt) * 100 * 100) / 100));
+}
+
+function readProcSnap(pid: string): ProcSnap | null {
+  try {
+    const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
+    const rp = stat.lastIndexOf(")");
+    const lp = stat.indexOf("(");
+    if (lp < 0 || rp < 0) return null;
+    const name = stat.slice(lp + 1, rp);
+    const rest = stat.slice(rp + 2).trim().split(/\s+/);
+    // After comm, rest[0] = state. utime = field 14 -> rest[11]; stime = field 15 -> rest[12];
+    // rss(pages) = field 24 -> rest[21].
+    const utime = Number(rest[11] ?? 0);
+    const stime = Number(rest[12] ?? 0);
+    const rssPages = Number(rest[21] ?? 0);
+    return { name, rssBytes: rssPages * 4096, utimeStime: utime + stime };
+  } catch {
+    return null;
+  }
+}
+
+function listPids(): string[] {
+  const out: string[] = [];
+  try {
+    for (const e of Deno.readDirSync("/proc")) {
+      if (e.isDirectory && /^\d+$/.test(e.name)) out.push(e.name);
+    }
+  } catch { /* best-effort */ }
+  return out;
+}
+
+async function sampleActivityBackend(): Promise<unknown> {
+  const ncpu = (() => {
+    try {
+      const text = Deno.readTextFileSync("/proc/cpuinfo");
+      return Math.max(1, (text.match(/^processor\s*:/gm) ?? []).length);
+    } catch { return 1; }
+  })();
+
+  const pids = listPids();
+  const cpu0 = readCpuTotals();
+  const p0 = new Map<string, ProcSnap>();
+  for (const pid of pids) {
+    const s = readProcSnap(pid);
+    if (s) p0.set(pid, s);
+  }
+  await new Promise((r) => setTimeout(r, 350));
+  const cpu1 = readCpuTotals();
+  const totalDelta = Math.max(1, cpu1.total - cpu0.total);
+
+  const procs: { pid: number; name: string; cpuPercent: number; memoryBytes: number }[] = [];
+  for (const pid of pids) {
+    const s1 = readProcSnap(pid);
+    const s0 = p0.get(pid);
+    if (!s1) continue;
+    const cpuDelta = s0 ? Math.max(0, s1.utimeStime - s0.utimeStime) : 0;
+    const cpuPercent = Math.min(100, Math.round((cpuDelta / totalDelta) * 100 * ncpu * 100) / 100);
+    procs.push({ pid: Number(pid), name: s1.name, cpuPercent, memoryBytes: s1.rssBytes });
+  }
+  procs.sort((a, b) => b.cpuPercent - a.cpuPercent || b.memoryBytes - a.memoryBytes);
+  const top = procs.slice(0, 24);
+
+  const mem = readMemInfo();
+  log(`sampleActivity cpu=${machineCpuPercent(cpu0, cpu1)}% procs=${procs.length} mem=${mem.usedBytes}/${mem.totalBytes}`);
+  return {
+    ok: true,
+    value: {
+      cpuPercent: machineCpuPercent(cpu0, cpu1),
+      memory: { usedBytes: mem.usedBytes, totalBytes: mem.totalBytes },
+      processes: top,
     },
   };
 }
@@ -196,13 +378,16 @@ async function handle(reqText: string): Promise<string> {
       result = { ok: true, value: { id: `tray:${Date.now()}`, ...(args[0] as object ?? {}) } };
       break;
     case "readSetting":
-      result = { ok: true, value: null };
+      result = settingsReadBackend((args[0] ?? {}) as { key?: string });
       break;
     case "previewSetting":
-      result = { ok: true, value: { request: args[0] ?? null, diff: { added: [], changed: [], removed: [] } } };
+      result = settingsPreviewBackend((args[0] ?? {}) as { key?: string; value?: unknown });
       break;
     case "applySetting":
-      result = { ok: true, value: { request: args[0] ?? null, applied: true } };
+      result = settingsApplyBackend((args[0] ?? {}) as { key?: string; value?: unknown });
+      break;
+    case "sampleActivity":
+      result = await sampleActivityBackend();
       break;
     case "emitLauncherIntent":
       log(`launcherIntent: ${JSON.stringify(args[0])}`);

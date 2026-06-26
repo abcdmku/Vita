@@ -39,7 +39,17 @@ import type {
   IndexPaletteViewModel,
 } from "../viewmodels/index.ts";
 
-export type IndexScreenPorts = Pick<DesktopHost, "package" | "launchApp" | "emitLauncherIntent">;
+// PSD-501: the index screen also receives an app-window host. After a dock tile's NATIVE binder
+// action launches an app via the real host bridge, the index view-model asks the window host to
+// open a real surface for it (populated with live data from the host bridge). Optional so the
+// screen still hydrates headless / in a plain browser without a window host.
+export interface IndexAppWindowPort {
+  open(appId: string, launch: DesktopAppLaunch): Promise<void>;
+}
+
+export type IndexScreenPorts =
+  & Pick<DesktopHost, "package" | "launchApp" | "emitLauncherIntent">
+  & { readonly appWindow?: IndexAppWindowPort };
 
 export interface IndexScreenError {
   readonly surface: "palette" | "dock";
@@ -141,11 +151,13 @@ export default indexScreenModule;
 class IndexScreenModel implements IndexScreenViewModel {
   readonly palette: IndexPaletteViewModel;
   readonly dock: IndexDockViewModel;
+  readonly #appWindow: IndexAppWindowPort | undefined;
   #error: IndexScreenError | null = null;
 
   constructor(ports: IndexScreenPorts) {
     this.palette = createIndexPaletteViewModel(ports satisfies IndexPalettePorts);
     this.dock = createIndexDockViewModel(ports satisfies IndexDockPorts);
+    this.#appWindow = ports.appWindow;
   }
 
   snapshot(): IndexScreenRootState {
@@ -192,6 +204,22 @@ class IndexScreenModel implements IndexScreenViewModel {
 
     if (result.ok) {
       this.#error = null;
+
+      indexDiag(`launchOrFocusDock ${appId} ok dispatch=${result.dispatch} appWindow=${this.#appWindow !== undefined}`);
+
+      // Native binder path: a real dock click launched (or focused) the app via the real host
+      // bridge; now open its window with REAL data. `focus` re-opens the same surface; both carry
+      // the launch value on the "launchApp" dispatch (focus reuses the existing window).
+      if (this.#appWindow !== undefined && result.dispatch === "launchApp") {
+        try {
+          await this.#appWindow.open(result.appId, result.value);
+          indexDiag(`appWindow.open ${appId} returned`);
+        } catch (openError) {
+          indexDiag(`appWindow.open ${appId} THREW ${openError instanceof Error ? openError.message : String(openError)}`);
+          // window host failures must not break the dock lifecycle.
+        }
+      }
+
       return;
     }
 
@@ -204,12 +232,17 @@ function selectIndexScreenPorts(host: DesktopHost): IndexScreenPorts {
     package: DesktopUiPackageManifest;
     launchApp(app: DesktopLaunchableApp): ReturnType<DesktopHost["launchApp"]>;
     emitLauncherIntent?: NonNullable<DesktopHost["emitLauncherIntent"]>;
+    appWindow?: IndexAppWindowPort;
   } = {
     launchApp(app) {
       return host.launchApp(app);
     },
     package: host.package,
   };
+
+  const appWindow = readAppWindowPort(host);
+
+  if (appWindow !== undefined) ports.appWindow = appWindow;
 
   if (host.emitLauncherIntent !== undefined) {
     ports.emitLauncherIntent = (intent) => host.emitLauncherIntent?.(intent) ?? {
@@ -486,6 +519,31 @@ function readDataset(element: Pick<VitaActionContext<IndexScreenState>, "target"
       const value = key === undefined ? undefined : element.dataset[key];
 
       if (typeof value === "string" && value.length > 0) return value;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function indexDiag(line: string): void {
+  try {
+    const log = (globalThis as Record<string, unknown>)["__vitaLog"];
+
+    if (typeof log === "function") (log as (s: string) => void)(`VITA-INDEX ${line}`);
+  } catch {
+    // ignore
+  }
+}
+
+function readAppWindowPort(host: DesktopHost): IndexAppWindowPort | undefined {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(host, "appWindow");
+    const value = descriptor?.value;
+
+    if (value !== null && typeof value === "object" && typeof (value as { open?: unknown }).open === "function") {
+      return value as IndexAppWindowPort;
     }
   } catch {
     return undefined;

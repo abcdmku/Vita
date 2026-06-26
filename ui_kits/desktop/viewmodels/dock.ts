@@ -11,6 +11,7 @@ import type {
 } from "../../../sdk/typescript/src/desktop-sdk/index.ts";
 
 export const INDEX_DOCK_APP_IDS = Object.freeze({
+  activity: "vita.app.activity",
   browser: "vita.app.browser",
   code: "vita.app.code",
   files: "vita.app.file-manager",
@@ -20,7 +21,7 @@ export const INDEX_DOCK_APP_IDS = Object.freeze({
 });
 
 export type IndexDockAppId = typeof INDEX_DOCK_APP_IDS[keyof typeof INDEX_DOCK_APP_IDS];
-export type IndexDockIcon = "terminal" | "code" | "folder" | "mail" | "globe" | "settings";
+export type IndexDockIcon = "terminal" | "code" | "folder" | "mail" | "globe" | "settings" | "activity";
 
 export interface IndexDockAppDefinition {
   readonly appId: IndexDockAppId;
@@ -85,6 +86,7 @@ export const DEFAULT_INDEX_DOCK_APPS: readonly IndexDockAppDefinition[] = freeze
   dockApp(INDEX_DOCK_APP_IDS.files, "Files", "folder"),
   dockApp(INDEX_DOCK_APP_IDS.mail, "Mail", "mail"),
   dockApp(INDEX_DOCK_APP_IDS.browser, "Browser", "globe"),
+  dockApp(INDEX_DOCK_APP_IDS.activity, "Activity", "activity"),
   dockApp(INDEX_DOCK_APP_IDS.settings, "Settings", "settings"),
 ]);
 

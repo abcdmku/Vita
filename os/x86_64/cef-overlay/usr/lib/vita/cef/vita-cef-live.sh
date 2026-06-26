@@ -129,13 +129,25 @@ if [ -x "$DENO" ] && [ -e "$HOST_PROXY" ]; then
   [ -e /var/lib/vita/files/proof.txt ] || \
     printf 'VITA-REAL-FILE-PROOF: this file is on /var/lib/vita/files and was read live via the host bridge\n' \
       > /var/lib/vita/files/proof.txt 2>/dev/null || true
+  # PSD-501: seed REAL on-disk content for Mail + Editor under the files root so the same proven
+  # requestFile backend serves them as live windows (honest empty state if a user clears them).
+  mkdir -p /var/lib/vita/files/mail /var/lib/vita/files/editor 2>/dev/null || true
+  [ -e /var/lib/vita/files/mail/welcome.eml ] || \
+    printf 'From: vita@localhost\nSubject: Welcome to Vita Mail\n\nThis mailbox is the REAL /var/lib/vita/files/mail directory, read live via the host bridge.\n' \
+      > /var/lib/vita/files/mail/welcome.eml 2>/dev/null || true
+  [ -e /var/lib/vita/files/editor/kernel.ts ] || \
+    printf 'export async function main() {\n  const sys = await vita.boot("kernel.ts");\n  return sys; // REAL file from the editor VFS, read via the host bridge\n}\n' \
+      > /var/lib/vita/files/editor/kernel.ts 2>/dev/null || true
   rm -f "$HOST_PROXY_SOCK" 2>/dev/null || true
+  # Run with -A: the proxy is the TRUSTED platform-side component (it reads /proc for real Activity
+  # stats, which Deno's read model gates behind all-access, and writes the persistent settings store).
+  # Capability enforcement is done INSIDE the proxy (METHOD_CAPABILITY + GRANTED), not via Deno flags.
   setsid env VITA_HOST_PROXY_SOCK="$HOST_PROXY_SOCK" VITA_FILES_ROOT=/var/lib/vita/files \
-    VITA_HOST_PROXY_LOG=/run/vita-host-proxy.log \
-    "$DENO" run --allow-read --allow-write --allow-env "$HOST_PROXY" >/run/vita-host-proxy.boot 2>&1 &
+    VITA_STATE_ROOT=/var/lib/vita VITA_HOST_PROXY_LOG=/run/vita-host-proxy.log \
+    "$DENO" run -A "$HOST_PROXY" >/run/vita-host-proxy.boot 2>&1 &
   # Wait (bounded) for the socket so the first host call from CEF connects rather than failing.
   hp=0; while [ "$hp" -lt 50 ]; do [ -S "$HOST_PROXY_SOCK" ] && break; sleep 0.1; hp=$((hp+1)); done
-  emit_line "$MARKER: host-proxy sock=$([ -S "$HOST_PROXY_SOCK" ] && echo up || echo down) files-root=/var/lib/vita/files"
+  emit_line "$MARKER: host-proxy sock=$([ -S "$HOST_PROXY_SOCK" ] && echo up || echo down) files-root=/var/lib/vita/files settings=/var/lib/vita/settings.json"
 else
   emit_line "$MARKER: host-proxy=absent (desktop boots; host actions fail-closed)"
 fi
@@ -230,24 +242,84 @@ if [ "$seen_ok" -eq 1 ]; then
     emit_line "$MARKER: live-swap=UNCONFIRMED cef-frames ${f1}->${f2} (may be the static snapshot)"
   fi
 
-  # OPTIONAL input self-test (verification only): inject an ABSOLUTE move to a known on-screen
-  # target + a click, then report how many events CEF actually received. The self-test device is
-  # an absolute pointer like the real VMware mouse, so it exercises the exact fixed code path.
+  # PSD-501 VERIFICATION DRIVER (input injection on the REAL GPU): click actual DOCK TILES so a
+  # real injected pointer click drives the desktop's NATIVE binder -> host.launchApp -> the app
+  # window renders REAL data via the host bridge. Coords come from osr_host's VITA-DOCK markers
+  # (CEF view space, 1280x800); the injector uses compositor space (1280x720), so y is scaled by
+  # 720/800. Scenario selects which tile(s) to click (so persistence can be proven across reboots).
   if [ -n "$INJ_FD" ]; then
     sleep 1
-    # Target the command-palette "Run kernel.ts" row (~430,150 in 1280x720) so a click visibly opens
-    # / activates it on the live desktop. Move in a few steps so the cursor visibly travels there.
-    for xy in "200 360" "300 280" "380 200" "430 150"; do echo "moveto $xy" >&6 2>/dev/null; sleep 0.2; done
-    sleep 0.5; echo "click" >&6 2>/dev/null; sleep 0.5
-    echo "moveto 430 150" >&6 2>/dev/null; sleep 1.5
+    # Scenario priority: env > persistent /var file (set by a prior boot) > kernel cmdline > default.
+    VERIFY="${VITA_VERIFY:-}"
+    if [ -z "$VERIFY" ] && [ -s /var/lib/vita/verify.scenario ]; then
+      VERIFY="$(cat /var/lib/vita/verify.scenario 2>/dev/null)"
+    fi
+    if [ -z "$VERIFY" ]; then
+      VERIFY="$(grep -aoE 'vita.verify=[a-z-]+' /proc/cmdline 2>/dev/null | head -1 | sed 's/.*=//')"
+    fi
+    [ -z "$VERIFY" ] && VERIFY="activity"
+    emit_line "$MARKER: verify-scenario=$VERIFY persisted-settings=$(cat /var/lib/vita/settings.json 2>/dev/null | tr -d '\n' | head -c 200)"
+
+    # tile_cxcy <app-id> -> echoes "CX CY_comp" (CY scaled from CEF view 800 to compositor 720).
+    tile_cxcy() {
+      local id="$1" line cx cy
+      line=$(grep -aE "VITA-DOCK tile $id " "$CEF_LOG" 2>/dev/null | tail -1)
+      cx=$(printf '%s' "$line" | sed -n 's/.* cx=\([0-9]*\).*/\1/p')
+      cy=$(printf '%s' "$line" | sed -n 's/.* cy=\([0-9]*\).*/\1/p')
+      [ -z "$cx" ] && return 1
+      cy=$(( cy * 720 / 800 ))
+      printf '%s %s' "$cx" "$cy"
+    }
+    move_click() {  # move in steps to <cx> <cy_comp>, then click
+      local tx="$1" ty="$2" sx=640 sy=360
+      for f in 25 50 75 100; do
+        local mx=$(( sx + (tx - sx) * f / 100 )) my=$(( sy + (ty - sy) * f / 100 ))
+        echo "moveto $mx $my" >&6 2>/dev/null; sleep 0.15
+      done
+      sleep 0.3; echo "click" >&6 2>/dev/null; sleep 0.6
+    }
+
+    case "$VERIFY" in
+      settings-toggle)
+        xy=$(tile_cxcy vita.app.settings) && move_click $xy && \
+          emit_line "$MARKER: verify clicked Settings tile @ $xy"
+        sleep 1.2
+        # The Settings window's 'light' theme option sits near the top-left of the window
+        # (window at left:140 top:96 in CEF view; the option row ~y=150, 'light' is the 2nd chip).
+        # Click it to call the REAL applySetting (persist theme=light to /var).
+        # Target the 'light' theme chip. Prefer the rect the window logged (VITA-CHIP, CEF view
+        # space -> compositor y *720/800); fall back to the computed position.
+        chip=$(grep -aE "VITA-CHIP light " "$CEF_LOG" 2>/dev/null | tail -1)
+        olx=$(printf '%s' "$chip" | sed -n 's/.* cx=\([0-9]*\).*/\1/p')
+        ocy=$(printf '%s' "$chip" | sed -n 's/.* cy=\([0-9]*\).*/\1/p')
+        if [ -n "$olx" ] && [ -n "$ocy" ]; then oly=$(( ocy * 720 / 800 )); else olx=180; oly=$(( 170 * 720 / 800 )); fi
+        move_click $olx $oly && emit_line "$MARKER: verify clicked theme option @ $olx $oly (applySetting light)"
+        sleep 1.5
+        mkdir -p /var/lib/vita 2>/dev/null || true
+        echo settings-read > /var/lib/vita/verify.scenario 2>/dev/null || true
+        ;;
+      settings-read)
+        xy=$(tile_cxcy vita.app.settings) && move_click $xy && \
+          emit_line "$MARKER: verify clicked Settings tile @ $xy (read persisted)"
+        sleep 1.5
+        ;;
+      activity|*)
+        xy=$(tile_cxcy vita.app.activity) && move_click $xy && \
+          emit_line "$MARKER: verify clicked Activity tile @ $xy"
+        sleep 1.5
+        ;;
+    esac
+
     sends=$(grep -acE "input: SendMouse" "$CEF_LOG" 2>/dev/null)
     clicks=$(grep -acE "input: SendMouseClick" "$CEF_LOG" 2>/dev/null)
-    lastmove=$(grep -aE "input: SendMouse" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*input:/input:/')
+    appwin=$(grep -aE "VITA-NATIVE app-window=" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*app-window=//')
     if [ "$sends" -gt 0 ]; then
-      emit_line "$MARKER: interactive=CONFIRMED input-selftest SendMouse=$sends clicks=$clicks $lastmove"
+      emit_line "$MARKER: interactive=CONFIRMED input-selftest SendMouse=$sends clicks=$clicks app-window-after=$appwin"
     else
-      emit_line "$MARKER: interactive=FAILED input-selftest SendMouse=0 (events not reaching CEF) $lastmove"
+      emit_line "$MARKER: interactive=FAILED input-selftest SendMouse=0 (events not reaching CEF)"
     fi
+    # Keep the final state on screen long enough for an external screenshot.
+    sleep 4
   fi
 else
   cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error|input:" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
