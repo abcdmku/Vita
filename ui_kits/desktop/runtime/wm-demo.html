@@ -100,7 +100,7 @@
 
     function frame(content) {
       return `
-        <div class="v-tt" data-tt style="cursor:default;user-select:none">
+        <div class="v-tt" data-tt style="cursor:move;user-select:none">
           <div class="v-dots">
             <span data-close title="Close" style="background:#f0584f;cursor:pointer;display:flex;align-items:center;justify-content:center">
               <span data-glyph style="font-size:8px;line-height:1;color:rgba(0,0,0,.55);opacity:0">✕</span></span>
@@ -172,13 +172,19 @@
         applyRect(win);
       });
 
+      // Pin a global cursor for the whole drag/resize gesture. The pointer leaves the title bar /
+      // 16x16 grip almost immediately during any real drag, so a cursor declared only on those
+      // elements reverts to the default arrow mid-gesture. Setting it on the screen host keeps the
+      // move/resize cursor showing until pointerup. (Mirrors window-manager.ts begin/endGestureCursor.)
+      const setHostCursor = (c) => { screen.style.cursor = c; document.body.style.cursor = c; };
+
       // drag by title bar
       let dragging = false, sx = 0, sy = 0, ol = 0, ot = 0;
       tt.addEventListener("pointerdown", (e) => {
         if (e.target.closest("[data-close],[data-zoom],[data-resize]")) return;
         if (e.button !== 0) return;
         dragging = true; sx = e.clientX; sy = e.clientY; ol = rect.left; ot = rect.top;
-        focus(win); tt.setPointerCapture?.(e.pointerId); e.preventDefault();
+        focus(win); setHostCursor("grabbing"); tt.setPointerCapture?.(e.pointerId); e.preventDefault();
       });
       tt.addEventListener("pointermove", (e) => {
         if (!dragging) return;
@@ -186,14 +192,14 @@
         rect.top = clamp(ot + (e.clientY - sy), MENUBAR_H, vp().h - CLAMP);
         applyRect(win); e.preventDefault();
       });
-      tt.addEventListener("pointerup", () => dragging = false);
+      tt.addEventListener("pointerup", () => { if (dragging) { dragging = false; setHostCursor(""); } });
 
       // resize from bottom-right grip
       const grip = el.querySelector("[data-resize]");
       let resizing = false, rsx = 0, rsy = 0, ow = 0, oh = 0;
       grip.addEventListener("pointerdown", (e) => {
         resizing = true; rsx = e.clientX; rsy = e.clientY; ow = rect.width; oh = rect.height;
-        focus(win); grip.setPointerCapture?.(e.pointerId); e.preventDefault(); e.stopPropagation();
+        focus(win); setHostCursor("nwse-resize"); grip.setPointerCapture?.(e.pointerId); e.preventDefault(); e.stopPropagation();
       });
       grip.addEventListener("pointermove", (e) => {
         if (!resizing) return;
@@ -201,7 +207,7 @@
         rect.height = clamp(oh + (e.clientY - rsy), MIN_H, vp().h - rect.top - 8);
         applyRect(win); e.preventDefault();
       });
-      grip.addEventListener("pointerup", () => resizing = false);
+      grip.addEventListener("pointerup", () => { if (resizing) { resizing = false; setHostCursor(""); } });
     }
 
     function applyRect(win) {

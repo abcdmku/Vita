@@ -3,6 +3,14 @@
 // VitaApp (see app-sdk.ts): renders CPU / memory / a process table from `ctx.host.metrics.sample`
 // and POLLS every ~1.5s so the numbers stay live. The poll interval is cleared on window close via
 // the `on("close")` cleanup (and the returned cleanup). Fully token-driven (dark).
+//
+// LIVE-UPDATE STRATEGY (PSD polish): the static structure (header cells + process-table container)
+// is rendered ONCE on mount. Each poll then does TARGETED, in-place updates — it writes the CPU% /
+// memory cells' textContent and reconciles process rows BY PID — instead of replacing the whole
+// body's innerHTML every 1.5s. Replacing innerHTML destroyed + recreated the entire DOM subtree on
+// every tick, which flashed and janked (and would re-run any icon init). Targeted textContent writes
+// don't touch unchanged nodes, so there is zero flash on a steady-state refresh. innerHTML is still
+// used for one-shot transitions (loading / empty / error states), where a full swap is correct.
 
 import type {
   DesktopHost,
@@ -15,20 +23,25 @@ import type {
   AppContext,
   VitaApp,
 } from "../app-sdk.ts";
+import type {
+  WmElement,
+} from "../window-manager.ts";
 
 interface MetricsPortLike {
   sample(request: { capability: string }): Promise<DesktopHostResult<unknown>>;
 }
 
+type ActivityProcess = {
+  readonly pid: number;
+  readonly name: string;
+  readonly cpuPercent: number;
+  readonly memoryBytes: number;
+};
+
 type ActivitySample = {
   readonly cpuPercent?: number;
   readonly memory?: { readonly usedBytes?: number; readonly totalBytes?: number };
-  readonly processes?: readonly {
-    readonly pid: number;
-    readonly name: string;
-    readonly cpuPercent: number;
-    readonly memoryBytes: number;
-  }[];
+  readonly processes?: readonly ActivityProcess[];
 };
 
 const POLL_INTERVAL_MS = 1_500;
@@ -69,6 +82,10 @@ export const activityApp: VitaApp = defineApp({
     const metrics = readMetricsPort(ctx.host);
     let disposed = false;
     let interval: ReturnType<typeof setInterval> | undefined;
+    // The live view (header cell refs + the rows container) once the structure is mounted. While
+    // this is non-null we do TARGETED updates; it is reset to null whenever we fall back to a
+    // full-innerHTML state (loading / empty / error) so the next data tick re-mounts the structure.
+    let view: ActivityView | null = null;
 
     root.style.cssText = "display:block;height:100%;background:var(--surface);color:var(--text)";
 
@@ -88,24 +105,31 @@ export const activityApp: VitaApp = defineApp({
       return typeof seconds === "number" && seconds > 0 ? Math.round(seconds * 1000) : POLL_INTERVAL_MS;
     }
 
+    // Drop any live structure so the next render rebuilds it (used by the loading/empty/error paths).
+    function showFullState(html: string): void {
+      view = null;
+      root.innerHTML = html;
+    }
+
     async function refresh(): Promise<void> {
       let result: DesktopHostResult<unknown>;
 
       try {
         result = await metrics!.sample(Object.freeze({ capability: "metrics.read" }));
       } catch {
-        if (!disposed) root.innerHTML = emptyState("The metrics backend failed closed.");
+        if (!disposed) showFullState(emptyState("The metrics backend failed closed."));
         return;
       }
 
       if (disposed) return;
 
       if (!result.ok) {
-        root.innerHTML = emptyState(`${result.error.code}: ${result.error.message}`);
+        showFullState(emptyState(`${result.error.code}: ${result.error.message}`));
         return;
       }
 
-      root.innerHTML = renderSample(result.value as ActivitySample, showProcesses());
+      // TARGETED update: mount the structure once, then patch values in place every tick.
+      view = renderInto(root, view, result.value as ActivitySample, showProcesses());
     }
 
     function startPolling(): void {
@@ -159,38 +183,125 @@ function readMetricsPort(host: DesktopHost): MetricsPortLike | undefined {
   return undefined;
 }
 
-function renderSample(sample: ActivitySample, showProcesses: boolean): string {
+// ---------------------------------------------------------------------------------------------
+// Live (targeted) rendering. The structure is built ONCE; subsequent ticks patch textContent and
+// reconcile process rows by pid — no innerHTML replacement of the whole body.
+// ---------------------------------------------------------------------------------------------
+
+interface ActivityView {
+  readonly cpuCell: WmElement | null;
+  readonly memCell: WmElement | null;
+  readonly rowsHost: WmElement | null;
+  // Whether the structure was built WITH a process table (config can toggle this; a change forces a
+  // structural rebuild so the table appears/disappears).
+  readonly withProcesses: boolean;
+  // Last keyset (pids, in order) we built rows for — when it changes we rebuild the rows' skeleton.
+  keyset: string;
+}
+
+// Render `sample` into `root`. If `view` is null or its shape no longer matches (process-table
+// toggled), (re)build the static structure and return a fresh view. Otherwise patch the existing
+// nodes in place and return the same view.
+function renderInto(
+  root: WmElement,
+  view: ActivityView | null,
+  sample: ActivitySample,
+  withProcesses: boolean,
+): ActivityView {
+  if (view === null || view.withProcesses !== withProcesses) {
+    return buildView(root, sample, withProcesses);
+  }
+
+  patchView(view, sample);
+  return view;
+}
+
+function buildView(root: WmElement, sample: ActivitySample, withProcesses: boolean): ActivityView {
+  root.innerHTML = structureHtml(withProcesses);
+
+  const view: ActivityView = {
+    cpuCell: safeQuery(root, "[data-activity-cpu]"),
+    keyset: "",
+    memCell: safeQuery(root, "[data-activity-mem]"),
+    rowsHost: safeQuery(root, "[data-activity-rows]"),
+    withProcesses,
+  };
+
+  patchView(view, sample);
+  return view;
+}
+
+function patchView(view: ActivityView, sample: ActivitySample): void {
   const cpu = typeof sample.cpuPercent === "number" ? sample.cpuPercent : 0;
   const used = sample.memory?.usedBytes ?? 0;
   const total = sample.memory?.totalBytes ?? 0;
-  const procs = (sample.processes ?? []).slice(0, 12);
 
+  setText(view.cpuCell, `${cpu.toFixed(1)}%`);
+  setText(view.memCell, `${gib(used)} / ${gib(total)} GB`);
+
+  if (!view.withProcesses || view.rowsHost === null) return;
+
+  const procs = (sample.processes ?? []).slice(0, 12);
+  const keyset = procs.map((proc) => proc.pid).join(",");
+
+  // Rebuild the rows' skeleton only when the SET of processes (pids/order) actually changes — this
+  // is the only path that touches innerHTML on a live tick, and it's rare (steady process set). The
+  // common case below patches each row's value cells with textContent, so unchanged rows never flash.
+  if (keyset !== view.keyset) {
+    view.rowsHost.innerHTML = rowsSkeletonHtml(procs);
+    view.keyset = keyset;
+  }
+
+  for (let index = 0; index < procs.length; index += 1) {
+    const proc = procs[index];
+
+    if (proc === undefined) continue;
+
+    const row = safeQuery(view.rowsHost, `[data-activity-row="${proc.pid}"]`);
+
+    if (row === null) continue;
+
+    setText(safeQuery(row, "[data-activity-row-name]"), proc.name);
+    setText(safeQuery(row, "[data-activity-row-cpu]"), `${proc.cpuPercent.toFixed(1)}%`);
+    setText(safeQuery(row, "[data-activity-row-mem]"), `${mib(proc.memoryBytes)} MB`);
+    setText(safeQuery(row, "[data-activity-row-pid]"), `pid ${proc.pid}`);
+  }
+}
+
+// The static structure: header (CPU + Memory cells) + an empty rows container the patch step fills.
+function structureHtml(withProcesses: boolean): string {
   const header =
     `<div style="display:flex;gap:14px;padding:12px 16px;border-bottom:1px solid var(--hairline)">` +
     `<div style="flex:1"><div style="font-size:11px;color:var(--text-faint)">CPU Load</div>` +
-    `<div style="font-size:22px;font-weight:600;color:var(--text)">${cpu.toFixed(1)}%</div></div>` +
+    `<div style="font-size:22px;font-weight:600;color:var(--text)" data-activity-cpu>0.0%</div></div>` +
     `<div style="flex:1"><div style="font-size:11px;color:var(--text-faint)">Memory</div>` +
-    `<div style="font-size:22px;font-weight:600;color:var(--text)">${gib(used)} / ${gib(total)} GB</div></div></div>`;
+    `<div style="font-size:22px;font-weight:600;color:var(--text)" data-activity-mem>0.0 / 0.0 GB</div></div></div>`;
 
-  // The process table is config-gated (Properties → "Show process table").
-  if (!showProcesses) {
+  if (!withProcesses) {
     return `${header}<div style="padding:18px 16px;color:var(--text-faint);font-size:12px">Process table hidden (enable it in Properties).</div>`;
   }
 
+  return (
+    `${header}<div style="padding:4px 16px;color:var(--text-faint);font-size:11px">` +
+    `Live /proc · refreshes every ${(POLL_INTERVAL_MS / 1000).toFixed(1)}s</div>` +
+    `<div data-activity-rows></div>`
+  );
+}
+
+// One row per process, keyed by pid. Value cells carry data-* hooks so the patch step can update
+// their textContent without rebuilding the row.
+function rowsSkeletonHtml(procs: readonly ActivityProcess[]): string {
   if (procs.length === 0) {
-    return `${header}<div style="padding:18px 16px;color:var(--text-faint);font-size:12px">No processes reported yet (sampling…).</div>`;
+    return `<div style="padding:18px 16px;color:var(--text-faint);font-size:12px">No processes reported yet (sampling…).</div>`;
   }
 
-  const rows = procs.map((proc) =>
-    `<div style="padding:7px 16px;border-top:1px solid var(--hairline);display:flex;gap:10px;color:var(--text)">` +
-    `<span style="flex:1">${escapeHtml(proc.name)}</span>` +
-    `<span style="width:48px;text-align:right;color:var(--text-muted)">${proc.cpuPercent.toFixed(1)}%</span>` +
-    `<span style="width:80px;text-align:right;color:var(--text-faint)">${mib(proc.memoryBytes)} MB</span>` +
-    `<span style="width:54px;text-align:right;color:var(--text-faint)">pid ${proc.pid}</span></div>`,
+  return procs.map((proc) =>
+    `<div data-activity-row="${proc.pid}" style="padding:7px 16px;border-top:1px solid var(--hairline);display:flex;gap:10px;color:var(--text)">` +
+    `<span data-activity-row-name style="flex:1"></span>` +
+    `<span data-activity-row-cpu style="width:48px;text-align:right;color:var(--text-muted)"></span>` +
+    `<span data-activity-row-mem style="width:80px;text-align:right;color:var(--text-faint)"></span>` +
+    `<span data-activity-row-pid style="width:54px;text-align:right;color:var(--text-faint)"></span></div>`,
   ).join("");
-
-  return `${header}<div style="padding:4px 16px;color:var(--text-faint);font-size:11px">` +
-    `${procs.length} processes (live /proc · refreshes every ${(POLL_INTERVAL_MS / 1000).toFixed(1)}s)</div>${rows}`;
 }
 
 function renderLoading(): string {
@@ -203,6 +314,24 @@ function emptyState(detail: string): string {
     `<div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Activity unavailable</div>` +
     `<div style="font-size:12px">${escapeHtml(detail)}</div></div>`
   );
+}
+
+function setText(element: WmElement | null, value: string): void {
+  if (element === null) return;
+
+  try {
+    if (element.textContent !== value) element.textContent = value;
+  } catch {
+    // ignore — best-effort cell update.
+  }
+}
+
+function safeQuery(root: WmElement, selector: string): WmElement | null {
+  try {
+    return root.querySelector?.(selector) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function gib(bytes: number): string {

@@ -77,6 +77,7 @@ export interface WmElement {
 export interface WmDocument {
   createElement(tag: string): WmElement;
   getElementById(id: string): WmElement | null;
+  querySelector?(selector: string): WmElement | null;
   readonly body: WmElement | null;
   addEventListener?(type: string, listener: WmListener, options?: unknown): void;
   removeEventListener?(type: string, listener: WmListener, options?: unknown): void;
@@ -350,9 +351,59 @@ class ManagedWindow implements WindowHandle {
     this.captureRefs();
     this.wire();
 
-    const body = this.#doc.body;
+    // Mount INSIDE the dark desktop scope, not document.body. The design tokens
+    // (var(--surface) / var(--text) / var(--border) …) are scoped to the `.v-screen.theme-dark`
+    // element; a window appended to document.body lives OUTSIDE that scope and resolves the tokens
+    // to their :root LIGHT defaults — rendering the whole window (chrome + app body) light. The
+    // `.v-screen` is `position:relative` and fills the viewport, so absolute children anchor to it
+    // exactly as they did to the body. Fall back to body only if no screen host is present (stub).
+    const host = this.#screenHost();
 
-    if (body !== null) body.appendChild(el);
+    if (host !== null) host.appendChild(el);
+  }
+
+  // Resolve the dark desktop host the window should mount into: the live `.v-screen` (which carries
+  // theme-dark + data-vita-screen="desktop"). Falls back to document.body when no screen exists.
+  #screenHost(): WmElement | null {
+    const doc = this.#doc;
+
+    try {
+      const screen = doc.querySelector?.(".v-screen") ?? null;
+
+      if (screen !== null) return screen;
+    } catch {
+      // ignore — fall through to body.
+    }
+
+    return doc.body;
+  }
+
+  // Force a global cursor for the duration of a drag/resize gesture. While dragging, the pointer
+  // frequently leaves the tiny title bar / resize grip (it moves faster than the window follows), so
+  // a cursor declared only on the grip/title bar reverts to the default arrow mid-gesture. Pinning
+  // the cursor on the screen host (and document.body, which actually owns the pointer during capture)
+  // keeps the resize/move cursor showing for the whole gesture; `endGestureCursor` restores it.
+  // (NOTE: on the real device the on-screen cursor is a FIXED compositor sprite that ignores CSS —
+  // see the compositor follow-up — but this is correct for the preview/browser and any future CEF
+  // OnCursorChange propagation.)
+  beginGestureCursor(cursor: string): void {
+    this.setHostCursor(cursor);
+  }
+
+  endGestureCursor(): void {
+    this.setHostCursor("");
+  }
+
+  setHostCursor(cursor: string): void {
+    const targets = [this.#screenHost(), this.#doc.body];
+
+    for (const target of targets) {
+      try {
+        target?.style.setProperty("cursor", cursor);
+      } catch {
+        // ignore — best-effort cursor hint.
+      }
+    }
   }
 
   applyRectStyle(): void {
@@ -371,7 +422,7 @@ class ManagedWindow implements WindowHandle {
     const badge = content.badge === undefined ? "" : content.badge;
 
     return (
-      `<div class="v-tt" data-vita-window-titlebar style="cursor:default;user-select:none">` +
+      `<div class="v-tt" data-vita-window-titlebar style="cursor:move;user-select:none">` +
       `<div class="v-dots" data-vita-window-controls>` +
       // Close (red) — hover reveals an ✕. Title color via CSS var; the dot fill is set inline so
       // it reads as a real traffic light against the dark title bar.
@@ -467,6 +518,8 @@ class ManagedWindow implements WindowHandle {
       if (!dragging) return;
       dragging = false;
 
+      this.endGestureCursor();
+
       if (pointerId !== undefined) this.element.releasePointerCapture?.(pointerId);
       this.removeWindowMoveListeners(onMove, onUp);
     };
@@ -489,6 +542,9 @@ class ManagedWindow implements WindowHandle {
       originTop = this.#rect.top;
       pointerId = event.pointerId;
       this.#cb.onFocus(this);
+      // Pin the "grabbing" cursor for the whole move so it doesn't revert when the pointer leaves
+      // the title bar mid-drag.
+      this.beginGestureCursor("grabbing");
 
       if (pointerId !== undefined) this.element.setPointerCapture?.(pointerId);
       this.addWindowMoveListeners(onMove, onUp);
@@ -566,6 +622,8 @@ class ManagedWindow implements WindowHandle {
       if (!resizing) return;
       resizing = false;
 
+      this.endGestureCursor();
+
       if (pointerId !== undefined) this.element.releasePointerCapture?.(pointerId);
       this.removeWindowMoveListeners(onMove, onUp);
     };
@@ -581,6 +639,9 @@ class ManagedWindow implements WindowHandle {
       originH = this.#rect.height;
       pointerId = event.pointerId;
       this.#cb.onFocus(this);
+      // Pin the resize cursor for the whole gesture so it persists once the pointer leaves the
+      // 16x16 grip (which happens immediately on any real drag).
+      this.beginGestureCursor("nwse-resize");
 
       if (pointerId !== undefined) this.element.setPointerCapture?.(pointerId);
       this.addWindowMoveListeners(onMove, onUp);
@@ -689,6 +750,9 @@ class ManagedWindow implements WindowHandle {
 
   teardown(): void {
     this.#open = false;
+    // Defensive: clear any cursor pinned by an in-flight drag/resize if the window is torn down
+    // mid-gesture (e.g. closed via keyboard) so the desktop isn't left with a stuck cursor.
+    this.endGestureCursor();
 
     for (const dispose of this.#disposers.splice(0)) {
       try {
@@ -702,9 +766,9 @@ class ManagedWindow implements WindowHandle {
       if (this.element.remove !== undefined) {
         this.element.remove();
       } else {
-        const body = this.#doc.body;
+        const host = this.#screenHost();
 
-        if (body?.removeChild !== undefined) body.removeChild(this.element);
+        if (host?.removeChild !== undefined) host.removeChild(this.element);
       }
     } catch {
       // ignore
