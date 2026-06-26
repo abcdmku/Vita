@@ -104,6 +104,9 @@ export {
   validateDesktopUiPackageManifest,
 } from "./loader.ts";
 export {
+  createAppRegistry,
+} from "./app-registry.ts";
+export {
   AGENTD_HEALTH_CAPABILITY,
   DEFAULT_AGENTD_HOST_BASE_URL,
   DEFAULT_AGENTD_HOST_MAX_RESPONSE_BYTES,
@@ -303,6 +306,16 @@ export type {
   DesktopUiValidationError,
   DesktopUiValidationResult,
 } from "./loader.ts";
+export type {
+  CreateAppRegistryOptions,
+  DesktopAppRegistry,
+  DesktopFirstPartyRegistryDescriptorSeed,
+  DesktopFirstPartyRegistryInlineSeed,
+  DesktopFirstPartyRegistrySeed,
+  DesktopRegistryApp,
+  DesktopRegistryError,
+  DesktopRegistryValidationResult,
+} from "./app-registry.ts";
 export type {
   AgentdHostClient,
   AgentdHostClientErrorCode,

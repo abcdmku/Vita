@@ -1,0 +1,31 @@
+{
+  "id": "PSD-347",
+  "command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/app-registry.test.ts",
+  "status": "pass",
+  "environmentNote": "Executed via cmd /c with NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main because the sandbox cannot lstat the nvm junction used by the npm shim.",
+  "output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "TAP version 13",
+    "ok 1 - registry lists first-party and capsule apps by id with declared grants",
+    "ok 2 - validateLaunch authorizes listed apps and fails closed",
+    "ok 3 - seeded descriptors satisfy the DesktopLaunchableApp union shape",
+    "ok 4 - launcher launch intents resolve listed apps only",
+    "ok 5 - first-party SRI failures are dropped fail-closed",
+    "ok 6 - defineAppPackage accepts and freezes a valid web app package",
+    "ok 7 - defineAppPackage fails closed on malformed app manifests and descriptors",
+    "ok 8 - defineAppPackage rejects hostile and cyclic definitions without invoking accessors",
+    "ok 9 - hasAppCapabilityGrant mirrors desktop capability resource matching",
+    "ok 10 - app registry lists installed apps deterministically and frozen",
+    "ok 11 - app registry launches and stops installed apps through injected ports",
+    "ok 12 - app registry fails closed on unknown app, double launch, missing running app, and denying ports",
+    "1..12",
+    "# tests 12",
+    "# suites 0",
+    "# pass 12",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0"
+  ]
+}
