@@ -7,8 +7,22 @@ BIN=/usr/lib/vita/compositor/vita-compositor
 COMMANDS=/usr/lib/vita/compositor/vita-compositor-smoke.commands
 TTY=/dev/ttyS0
 TMP=
+WALLPAPER_CMDS=
 HOLD_SECONDS=30
 SCREENSHOT=/run/vita-compositor-driver.png
+
+# CEF live-desktop boot (spike/cef-vm): when the CEF overlay is present, the persistent
+# vita-cef-live service renders the REAL flagship desktop right after this self-test releases
+# the GPU. In that mode the user must NEVER see the self-test's demo geometry (3 colored
+# rectangles + a bar) on screen. So instead of the committed demo layout we present a single
+# clean full-screen WALLPAPER surface (one solid color, matching the flagship light wallpaper
+# ~#e9edf3) and hold IT until CEF takes over. The self-test verification still holds:
+# surfaces=1 composited=OK present=kms status=OK. (The drift-guarded committed .commands file
+# is untouched; we only choose a different on-screen layout at runtime for CEF boots.)
+CEF_LAUNCH=/usr/lib/vita/cef/vita-cef-live.sh
+WALLPAPER_RGBA=e9edf3ff
+WALLPAPER_W=1280
+WALLPAPER_H=720
 
 emit_line() {
   printf '%s\n' "$1"
@@ -24,6 +38,9 @@ emit_failsafe() {
 cleanup() {
   if [ -n "${TMP:-}" ]; then
     rm -f "$TMP"
+  fi
+  if [ -n "${WALLPAPER_CMDS:-}" ]; then
+    rm -f "$WALLPAPER_CMDS"
   fi
 }
 trap cleanup EXIT
@@ -53,7 +70,21 @@ TMP=$(mktemp /run/vita-compositor-selftest.XXXXXX 2>/dev/null || mktemp /tmp/vit
 : > "$TMP"
 rc=0
 rm -f "$SCREENSHOT"
-timeout 45s "$BIN" --commands --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" < "$COMMANDS" 2>&1 | while IFS= read -r line; do
+
+# Choose the on-screen layout: clean wallpaper for CEF boots, the demo otherwise.
+FEED=$COMMANDS
+if [ -e "$CEF_LAUNCH" ]; then
+  WALLPAPER_CMDS=$(mktemp /run/vita-compositor-wall.XXXXXX 2>/dev/null || mktemp /tmp/vita-compositor-wall.XXXXXX)
+  {
+    printf 'registerSurface vita:wallpaper %s %s %s\n' "$WALLPAPER_W" "$WALLPAPER_H" "$WALLPAPER_RGBA"
+    printf 'updatePlacement vita:wallpaper 0 0 %s %s 0 true\n' "$WALLPAPER_W" "$WALLPAPER_H"
+    printf 'present\n'
+  } > "$WALLPAPER_CMDS"
+  FEED=$WALLPAPER_CMDS
+  emit_line "$MARKER: cef-mode=yes layout=wallpaper (suppressing demo geometry until CEF paints)"
+fi
+
+timeout 45s "$BIN" --commands --screenshot "$SCREENSHOT" --hold-seconds "$HOLD_SECONDS" < "$FEED" 2>&1 | while IFS= read -r line; do
   printf '%s\n' "$line" >> "$TMP"
   emit_line "$line"
 done

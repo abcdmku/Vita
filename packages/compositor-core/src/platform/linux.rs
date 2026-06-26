@@ -838,13 +838,42 @@ void main() {
         texture: GlUInt,
         placement: &Placement,
     ) -> Result<(), CompositorError> {
+        self.draw_placement_inner(texture, placement, false)
+    }
+
+    // KMS-scanout blit of the composited output texture. The composited frame lives in
+    // `output_fbo` with the SAME orientation the readback consumes: read_output_rgba does
+    // glReadPixels (which returns rows bottom-up) THEN flip_rgba_rows, yielding an UPRIGHT
+    // PNG (cef-live.png). The scanout, however, re-draws that texture straight into the GBM
+    // default framebuffer and KMS scans it out top-left-origin, which lands one vertical flip
+    // away from the upright readback — so the live screen showed the desktop UPSIDE-DOWN.
+    // Fix: blit the output texture with its V texcoords inverted for the scanout draw ONLY.
+    // This touches neither the compositing of surfaces into output_fbo nor the readback path,
+    // so cef-live.png stays upright and present=kms markers are unchanged.
+    fn draw_placement_scanout_flipped(
+        &self,
+        texture: GlUInt,
+        placement: &Placement,
+    ) -> Result<(), CompositorError> {
+        self.draw_placement_inner(texture, placement, true)
+    }
+
+    fn draw_placement_inner(
+        &self,
+        texture: GlUInt,
+        placement: &Placement,
+        flip_v: bool,
+    ) -> Result<(), CompositorError> {
         let left = pixel_to_clip_x(placement.x, self.output_width);
         let right = pixel_to_clip_x(placement.x + placement.width as i32, self.output_width);
         let top = pixel_to_clip_y(placement.y, self.output_height);
         let bottom = pixel_to_clip_y(placement.y + placement.height as i32, self.output_height);
+        // Texcoord rows: v_top maps to the top clip edge, v_bot to the bottom. flip_v swaps
+        // them so the sampled texture is vertically mirrored (used for the KMS-scanout blit).
+        let (v_top, v_bot) = if flip_v { (1.0_f32, 0.0_f32) } else { (0.0_f32, 1.0_f32) };
         let vertices: [f32; 24] = [
-            left, top, 0.0, 0.0, right, top, 1.0, 0.0, left, bottom, 0.0, 1.0, right, top, 1.0,
-            0.0, right, bottom, 1.0, 1.0, left, bottom, 0.0, 1.0,
+            left, top, 0.0, v_top, right, top, 1.0, v_top, left, bottom, 0.0, v_bot, right, top,
+            1.0, v_top, right, bottom, 1.0, v_bot, left, bottom, 0.0, v_bot,
         ];
         let stride = (4 * mem::size_of::<f32>()) as i32;
 
@@ -1016,7 +1045,9 @@ impl RenderBackend for PlatformGpuBackend {
                 self.output_height,
                 0,
             )?;
-            self.draw_placement(self.output_texture, &output_placement)?;
+            // V-flipped blit so the live KMS scanout matches the upright readback (cef-live.png)
+            // instead of rendering the desktop upside-down. See draw_placement_scanout_flipped.
+            self.draw_placement_scanout_flipped(self.output_texture, &output_placement)?;
             if unsafe { (self.egl.swap_buffers)(self.egl_display, self.egl_surface) } == 0 {
                 return Err(CompositorError::Unavailable(
                     "eglSwapBuffers(GBM scanout) failed".to_owned(),
