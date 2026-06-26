@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Text Editor</title>
+    <style>
+      :root {
+        --editor-bg: #f7f8fa;
+        --editor-surface: #ffffff;
+        --editor-border: #d8dde6;
+        --editor-text: #17202a;
+        --editor-muted: #657085;
+        --editor-accent: #1769aa;
+        --editor-accent-weak: #e7f1fb;
+        --editor-radius: 8px;
+        --editor-space-1: 4px;
+        --editor-space-2: 8px;
+        --editor-space-3: 12px;
+        --editor-space-4: 16px;
+        --editor-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --editor-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: var(--editor-bg);
+        color: var(--editor-text);
+        font-family: var(--editor-sans);
+      }
+
+      .editor-shell {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        height: 100%;
+        min-height: 0;
+      }
+
+      .toolbar {
+        align-items: center;
+        background: var(--editor-surface);
+        border-bottom: 1px solid var(--editor-border);
+        display: flex;
+        gap: var(--editor-space-2);
+        padding: var(--editor-space-3) var(--editor-space-4);
+      }
+
+      .toolbar__title {
+        font-size: 14px;
+        font-weight: 650;
+        margin-right: auto;
+      }
+
+      .toolbar__button {
+        background: var(--editor-accent-weak);
+        border: 1px solid color-mix(in srgb, var(--editor-accent) 28%, transparent);
+        border-radius: 6px;
+        color: var(--editor-accent);
+        font: 600 13px/1 var(--editor-sans);
+        padding: 7px 10px;
+      }
+
+      .toolbar__button[data-primary="true"] {
+        background: var(--editor-accent);
+        color: #ffffff;
+      }
+
+      .document {
+        display: grid;
+        grid-template-columns: 52px 1fr;
+        min-height: 0;
+      }
+
+      .gutter {
+        background: #eef1f5;
+        border-right: 1px solid var(--editor-border);
+        color: var(--editor-muted);
+        font: 13px/1.6 var(--editor-mono);
+        padding: var(--editor-space-4) var(--editor-space-3);
+        text-align: right;
+      }
+
+      .editor {
+        background: var(--editor-surface);
+        border: 0;
+        color: var(--editor-text);
+        font: 14px/1.6 var(--editor-mono);
+        min-height: 0;
+        outline: 0;
+        padding: var(--editor-space-4);
+        resize: none;
+        width: 100%;
+      }
+
+      .status {
+        align-items: center;
+        background: var(--editor-surface);
+        border-top: 1px solid var(--editor-border);
+        color: var(--editor-muted);
+        display: flex;
+        font-size: 12px;
+        gap: var(--editor-space-4);
+        min-height: 32px;
+        padding: var(--editor-space-2) var(--editor-space-4);
+      }
+
+      .status__spacer {
+        flex: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="editor-shell" data-view-model="editor-app">
+      <header class="toolbar" aria-label="Document toolbar">
+        <div class="toolbar__title" data-bind="document.title">Untitled</div>
+        <button class="toolbar__button" type="button" data-action="open">Open</button>
+        <button class="toolbar__button" type="button" data-action="undo">Undo</button>
+        <button class="toolbar__button" type="button" data-action="redo">Redo</button>
+        <button class="toolbar__button" type="button" data-action="save" data-primary="true">Save</button>
+      </header>
+
+      <section class="document" aria-label="Document editor">
+        <aside class="gutter" aria-hidden="true" data-bind="document.lineNumbers">1</aside>
+        <textarea
+          class="editor"
+          aria-label="Document text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          data-bind="document.content"
+        ></textarea>
+      </section>
+
+      <footer class="status" aria-label="Document status">
+        <span data-bind="document.path">No file open</span>
+        <span class="status__spacer"></span>
+        <span data-bind="document.language">Plain Text</span>
+        <span data-bind="document.dirty">Saved</span>
+        <span data-bind="document.cursor">Ln 1, Col 1</span>
+      </footer>
+    </main>
+  </body>
+</html>
