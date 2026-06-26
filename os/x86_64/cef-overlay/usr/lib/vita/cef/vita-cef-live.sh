@@ -113,6 +113,28 @@ COMP_OUT=/run/vita-cef-comp.out
 cd "$CEF_DIR" || { emit_failsafe "cef_dir_cd"; exit 0; }
 set -o pipefail
 
+# --- PSD-500 host proxy: the platform side of the desktop host bridge -------------------------
+# A small Deno service on a unix socket; the CEF renderer's window.vitaDesktopBridge forwards each
+# SurfaceHostRequest here, where it is routed to REAL backends (files under /var/lib/vita/files,
+# launchApp, settings, notifications). Capability-enforced + fail-closed. Start it BEFORE CEF so the
+# bridge connects on the first host call. If deno or the proxy is missing the desktop still boots —
+# host actions just fail closed (HOST_BRIDGE_UNAVAILABLE), which the desktop guards already handle.
+HOST_PROXY_SOCK=/run/vita-host-proxy.sock
+DENO=/usr/lib/vita/deno
+HOST_PROXY=$CEF_DIR/vita-host-proxy.ts
+if [ -x "$DENO" ] && [ -e "$HOST_PROXY" ]; then
+  mkdir -p /var/lib/vita/files 2>/dev/null || true
+  rm -f "$HOST_PROXY_SOCK" 2>/dev/null || true
+  setsid env VITA_HOST_PROXY_SOCK="$HOST_PROXY_SOCK" VITA_FILES_ROOT=/var/lib/vita/files \
+    VITA_HOST_PROXY_LOG=/run/vita-host-proxy.log \
+    "$DENO" run --allow-read --allow-write --allow-env "$HOST_PROXY" >/run/vita-host-proxy.boot 2>&1 &
+  # Wait (bounded) for the socket so the first host call from CEF connects rather than failing.
+  hp=0; while [ "$hp" -lt 50 ]; do [ -S "$HOST_PROXY_SOCK" ] && break; sleep 0.1; hp=$((hp+1)); done
+  emit_line "$MARKER: host-proxy sock=$([ -S "$HOST_PROXY_SOCK" ] && echo up || echo down) files-root=/var/lib/vita/files"
+else
+  emit_line "$MARKER: host-proxy=absent (desktop boots; host actions fail-closed)"
+fi
+
 # --- OPTIONAL input self-test (verification only; VITA_CEF_INPUT_SELFTEST=1) ------------------
 # Creates a virtual uinput pointer BEFORE the compositor starts (so libinput enumerates it on the
 # real vmwgfx/KMS at boot — no GPU-master race), then injects a scripted motion+click AFTER the
@@ -152,7 +174,8 @@ fi
   exec 3>&-
   cat "$PRELUDE"
   LD_LIBRARY_PATH="$CEF_DIR" exec "$OSR" --url="$URL" --compositor-out=- \
-    --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO"
+    --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO" \
+    --host-proxy-sock="$HOST_PROXY_SOCK"
 ) 2>"$CEF_LOG" \
   | { exec 3>&-; LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
       "$COMPOSITOR" --commands --continuous --input-out="$INPUT_FIFO" > "$COMP_OUT" 2>&1; } &

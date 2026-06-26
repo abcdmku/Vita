@@ -28,4 +28,5 @@ cef-overlay/usr/lib/vita/cef/*
 !cef-overlay/usr/lib/vita/cef/loading.commands
 !cef-overlay/usr/lib/vita/cef/cursor.commands
 !cef-overlay/usr/lib/vita/cef/uinput-inject.ts
+!cef-overlay/usr/lib/vita/cef/vita-host-proxy.ts
 cef-overlay/usr/lib/vita/ui_kits/

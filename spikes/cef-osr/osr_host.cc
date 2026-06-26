@@ -33,6 +33,9 @@
 #include <thread>
 #include <vector>
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include "include/base/cef_callback.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
@@ -40,6 +43,7 @@
 #include "include/cef_command_line.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_task.h"
+#include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
 
@@ -265,13 +269,117 @@ class OsrClient : public CefClient,
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
 };
 
-// App: configures command-line switches before CEF init.
-class OsrApp : public CefApp, public CefBrowserProcessHandler {
+// PSD-500 host bridge: the renderer-side endpoint. window.vitaDesktopBridge.request(req) forwards
+// each SurfaceHostRequest as JSON to the on-device Deno host-proxy over a unix socket and returns
+// the response JSON. Single-process CEF runs the renderer in the browser process, so this V8 native
+// function can do a blocking unix-socket round-trip and return synchronously.
+std::string g_host_proxy_sock = "/run/vita-host-proxy.sock";
+
+// One blocking request/response round-trip to the host proxy. Returns the response JSON, or a
+// fail-closed host-error JSON if the proxy is unreachable (the desktop's guards consume it).
+static std::string HostProxyRoundTrip(const std::string& request_json) {
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_SOCKET\",\"message\":\"socket() failed\",\"path\":\"/host-bridge\"}}";
+  }
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, g_host_proxy_sock.c_str(), sizeof(addr.sun_path) - 1);
+  if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+    close(fd);
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_UNAVAILABLE\",\"message\":\"host proxy not reachable\",\"path\":\"/host-bridge\"}}";
+  }
+  std::string out = request_json;
+  out.push_back('\n');
+  size_t off = 0;
+  while (off < out.size()) {
+    ssize_t w = write(fd, out.data() + off, out.size() - off);
+    if (w <= 0) break;
+    off += static_cast<size_t>(w);
+  }
+  std::string resp;
+  char chunk[4096];
+  while (true) {
+    ssize_t n = read(fd, chunk, sizeof(chunk));
+    if (n > 0) {
+      resp.append(chunk, static_cast<size_t>(n));
+      if (resp.find('\n') != std::string::npos) break;
+    } else {
+      break;  // EOF or error
+    }
+  }
+  close(fd);
+  size_t nl = resp.find('\n');
+  if (nl != std::string::npos) resp.erase(nl);
+  if (resp.empty()) {
+    return "{\"ok\":false,\"error\":{\"code\":\"HOST_BRIDGE_EMPTY\",\"message\":\"empty host response\",\"path\":\"/host-bridge\"}}";
+  }
+  return resp;
+}
+
+// V8 native function: __vitaHostProxyCall(requestJsonString) -> responseJsonString.
+class HostBridgeV8Handler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name,
+               CefRefPtr<CefV8Value> /*object*/,
+               const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval,
+               CefString& /*exception*/) override {
+    if (name != "__vitaHostProxyCall") return false;
+    std::string req = (arguments.size() >= 1 && arguments[0]->IsString())
+                          ? arguments[0]->GetStringValue().ToString()
+                          : std::string("{}");
+    std::string resp = HostProxyRoundTrip(req);
+    retval = CefV8Value::CreateString(resp);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(HostBridgeV8Handler);
+};
+
+// App: configures command-line switches before CEF init, AND (render side) installs the host bridge.
+class OsrApp : public CefApp,
+               public CefBrowserProcessHandler,
+               public CefRenderProcessHandler {
  public:
   OsrApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
     return this;
+  }
+
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
+    return this;
+  }
+
+  // Install window.vitaDesktopBridge BEFORE the desktop bootstrap runs (OnContextCreated fires when
+  // the page's JS context is created, before page scripts execute). The native string round-trip is
+  // wrapped in JS so the transport speaks the JSON-only SurfaceHostRequest contract host-bridge.ts
+  // expects: request(req) -> JSON.parse(__vitaHostProxyCall(JSON.stringify(req))).
+  void OnContextCreated(CefRefPtr<CefBrowser> /*browser*/,
+                        CefRefPtr<CefFrame> /*frame*/,
+                        CefRefPtr<CefV8Context> context) override {
+    CefRefPtr<CefV8Value> global = context->GetGlobal();
+    CefRefPtr<CefV8Handler> handler(new HostBridgeV8Handler());
+    CefRefPtr<CefV8Value> fn =
+        CefV8Value::CreateFunction("__vitaHostProxyCall", handler);
+    global->SetValue("__vitaHostProxyCall", fn, V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // JS shim: expose the transport under the names bootstrap.ts looks for (TRANSPORT_GLOBALS).
+    const char* shim =
+        "(function(){"
+        "  var call = globalThis.__vitaHostProxyCall;"
+        "  var bridge = { request: function(req){"
+        "    try { return JSON.parse(call(JSON.stringify(req))); }"
+        "    catch (e) { return { ok:false, error:{ code:'HOST_BRIDGE_PARSE', message:String(e), path:'/host-bridge' } }; }"
+        "  }};"
+        "  globalThis.vitaDesktopBridge = bridge;"
+        "}());";
+    context->GetFrame()->ExecuteJavaScript(shim, "vita://host-bridge", 0);
+    fprintf(stderr, "[osr] host-bridge: window.vitaDesktopBridge installed (proxy sock=%s)\n",
+            g_host_proxy_sock.c_str());
   }
 
   void OnBeforeCommandLineProcessing(
@@ -285,6 +393,11 @@ class OsrApp : public CefApp, public CefBrowserProcessHandler {
     command_line->AppendSwitchWithValue("use-gl", "disabled");
     command_line->AppendSwitchWithValue("use-angle", "swiftshader");
     command_line->AppendSwitch("hide-scrollbars");
+    // PSD-500: single-process so the renderer (V8 host bridge) runs IN the browser process. This
+    // lets the window.vitaDesktopBridge native function do a blocking unix-socket round-trip to the
+    // host proxy and return synchronously to JS — no cross-process IPC plumbing. OSR already runs
+    // software-only here, so single-process is safe.
+    command_line->AppendSwitch("single-process");
     // Headless Ozone: windowless OSR must NOT require an X server / $DISPLAY. Without this CEF's
     // Ozone defaults to X11 and aborts ("Missing X server or $DISPLAY" -> platform init failed)
     // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
@@ -687,6 +800,7 @@ int main(int argc, char* argv[]) {
       if (g_frame_interval_ms < 1) g_frame_interval_ms = 1;
     }
     else if (a.rfind("--input-in=", 0) == 0) g_input_in = a.substr(11);  // PSD-055
+    else if (a.rfind("--host-proxy-sock=", 0) == 0) g_host_proxy_sock = a.substr(18);  // PSD-500
     else if (a == "--surface-prearmed") g_surface_prearmed = true;       // instant-desktop
   }
   // If the launch stream pre-registered cef:desktop (baked snapshot), skip the register and

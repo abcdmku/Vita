@@ -459,9 +459,11 @@ function installCefOverlay() {
     const loadingPath = join(cefDst, "loading.commands");
     const cursorPath = join(cefDst, "cursor.commands");
     const injectorPath = join(cefDst, "uinput-inject.ts");
+    const hostProxyPath = join(cefDst, "vita-host-proxy.ts");
     const loadingBody = existsSync(loadingPath) ? readFileSync(loadingPath) : null;
     const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
     const injectorBody = existsSync(injectorPath) ? readFileSync(injectorPath) : null;
+    const hostProxyBody = existsSync(hostProxyPath) ? readFileSync(hostProxyPath) : null;
     rmSync(cefDst, { recursive: true, force: true });
     mkdirSync(cefDst, { recursive: true });
     cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
@@ -477,6 +479,7 @@ function installCefOverlay() {
     if (loadingBody) writeFileSync(loadingPath, loadingBody);
     if (cursorBody) writeFileSync(cursorPath, cursorBody);
     if (injectorBody) writeFileSync(injectorPath, injectorBody);  // PSD-055 verification injector
+    if (hostProxyBody) writeFileSync(hostProxyPath, hostProxyBody);  // PSD-500 host proxy (Deno)
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
     // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
     rmSync(uikitsDst, { recursive: true, force: true });
