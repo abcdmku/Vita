@@ -2333,7 +2333,14 @@ unsafe extern "C" fn libinput_open_restricted(
     flags: c_int,
     _user_data: *mut c_void,
 ) -> c_int {
-    libc_open(path, flags)
+    let fd = libc_open(path, flags);
+    let p = if path.is_null() {
+        String::from("<null>")
+    } else {
+        std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned()
+    };
+    eprintln!("VITA-INPUT-DIAG: open_restricted {p} flags={flags} -> fd={fd}");
+    fd
 }
 
 unsafe extern "C" fn libinput_close_restricted(fd: c_int, _user_data: *mut c_void) {
