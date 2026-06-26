@@ -20,6 +20,7 @@ export interface VitaElementList {
 
 export interface VitaElement {
   readonly dataset: VitaDataset;
+  readonly children?: VitaElementList;
   textContent: string | null;
   readonly classList: VitaClassList;
   querySelectorAll(selector: string): VitaElementList;
@@ -694,8 +695,21 @@ function applyListTarget<State>(
   if (items === null) return;
 
   const currentNodes = currentKeyedNodes(target.element);
+  const seedNodes = currentUnkeyedSeedNodes(target.element, target.template);
   const usedKeys = new Set<string>();
   const desiredNodes: VitaElement[] = [];
+
+  for (let index = 0; index < seedNodes.length; index += 1) {
+    const node = seedNodes[index];
+
+    if (node !== undefined) {
+      try {
+        target.element.removeChild(node);
+      } catch {
+        return;
+      }
+    }
+  }
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
@@ -824,6 +838,26 @@ function currentKeyedNodes(element: VitaElement): {
     duplicates,
     nodes,
   });
+}
+
+function currentUnkeyedSeedNodes(element: VitaElement, template: VitaElement | null): readonly VitaElement[] {
+  const children = directChildren(element);
+  const output: VitaElement[] = [];
+
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index];
+
+    if (child === undefined || child === template) continue;
+    if (datasetValue(child, Object.freeze(["vitaKey"])) === undefined) output.push(child);
+  }
+
+  return Object.freeze(output);
+}
+
+function directChildren(element: VitaElement): readonly VitaElement[] {
+  const children = element.children;
+
+  return children === undefined ? Object.freeze([]) : elementsFromList(children);
 }
 
 function cloneListNode(template: VitaElement | null, key: string): VitaElement | null {

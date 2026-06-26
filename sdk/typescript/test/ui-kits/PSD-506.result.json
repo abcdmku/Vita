@@ -1,0 +1,22 @@
+{
+  "id": "PSD-506",
+  "command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/shell-seed-fallback.test.ts",
+  "status": "pass",
+  "environmentNote": "Executed via cmd /c with NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main because the sandbox cannot lstat the nvm junction used by the npm shim.",
+  "output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "TAP version 13",
+    "ok 1 - shell output list markup does not contain the fabricated boot transcript",
+    "ok 2 - empty shell output clears un-keyed seed rows in degraded no-host mode",
+    "ok 3 - shell output renders only the live buffer rows after a real session command",
+    "ok 4 - applyListTarget reconciliation leaves only keyed rows derived from shell.output",
+    "1..4",
+    "# tests 4",
+    "# pass 4",
+    "# fail 0"
+  ],
+  "extraChecks": [
+    "node --experimental-strip-types --test sdk/typescript/test/ui-kits/binder.test.ts sdk/typescript/test/ui-kits/screens-rest.test.ts: pass (10 tests)"
+  ]
+}
