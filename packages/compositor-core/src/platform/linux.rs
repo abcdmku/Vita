@@ -2151,16 +2151,49 @@ impl LibinputState {
 
         let mut events = Vec::new();
         unsafe {
-            if (libinput.dispatch)(self.context) < 0 {
-                return Err(input_unavailable("libinput_dispatch failed"));
-            }
+            // PSD-055: canonical libinput read loop. libinput multiplexes all device fds onto a
+            // single epoll fd (libinput_get_fd). We must poll THAT fd and call libinput_dispatch
+            // whenever it is readable, then drain libinput_get_event. Calling dispatch alone (the
+            // previous behaviour) reliably delivered the initial DEVICE_ADDED events but NOT the
+            // subsequent pointer/key events on the VMware guest — poll(get_fd) before dispatch is
+            // what actually pumps the per-device reads. Poll with a 0ms timeout (non-blocking) and
+            // dispatch in a loop so a burst of events injected between presents is fully drained.
+            let lfd = (libinput.get_fd)(self.context);
             loop {
-                let event = (libinput.get_event)(self.context);
-                if event.is_null() {
+                let mut pfd = PollFd { fd: lfd, events: POLLIN, revents: 0 };
+                let prc = poll(&mut pfd, 1, 0);
+                let readable = prc > 0 && (pfd.revents & POLLIN) != 0;
+                if (libinput.dispatch)(self.context) < 0 {
+                    return Err(input_unavailable("libinput_dispatch failed"));
+                }
+                let mut drained_any = false;
+                loop {
+                    let event = (libinput.get_event)(self.context);
+                    if event.is_null() {
+                        break;
+                    }
+                    drained_any = true;
+                    let event_type = (libinput.event_get_type)(event);
+                    Self::translate_event(libinput, event, event_type, &mut events);
+                    (libinput.event_destroy)(event);
+                }
+                // Stop once the epoll fd has no more pending data AND we drained nothing this pass.
+                if !readable && !drained_any {
                     break;
                 }
-                let event_type = (libinput.event_get_type)(event);
-                eprintln!("VITA-INPUT-DIAG: libinput raw event type={event_type}");
+            }
+        }
+        Ok(events)
+    }
+
+    // Translate one libinput event into our InputEvent (factored out of the poll loop).
+    fn translate_event(
+        libinput: &Libinput,
+        event: *mut c_void,
+        event_type: u32,
+        events: &mut Vec<InputEvent>,
+    ) {
+        unsafe {
                 match event_type {
                     LIBINPUT_EVENT_KEYBOARD_KEY => {
                         let key_event = (libinput.event_get_keyboard_event)(event);
@@ -2203,11 +2236,7 @@ impl LibinputState {
                     }
                     _ => {}
                 }
-                (libinput.event_destroy)(event);
-            }
         }
-
-        Ok(events)
     }
 }
 
@@ -2241,10 +2270,7 @@ fn add_default_input_devices(
         let cpath = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| input_unavailable("input device path contained an interior NUL byte"))?;
         let device = unsafe { (libinput.path_add_device)(context, cpath.as_ptr()) };
-        let ok = !device.is_null();
-        eprintln!("VITA-INPUT-DIAG: path_add_device {} -> {}", path.display(),
-                  if ok { "ADDED" } else { "skip" });
-        Ok(ok)
+        Ok(!device.is_null())
     })
 }
 
@@ -2318,6 +2344,7 @@ struct Libinput {
     _lib: DynamicLibrary,
     path_create_context: unsafe extern "C" fn(*const LibinputInterface, *mut c_void) -> *mut c_void,
     path_add_device: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+    get_fd: unsafe extern "C" fn(*mut c_void) -> c_int,
     dispatch: unsafe extern "C" fn(*mut c_void) -> c_int,
     get_event: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     event_get_type: unsafe extern "C" fn(*mut c_void) -> u32,
@@ -2339,6 +2366,7 @@ impl Libinput {
         Ok(Self {
             path_create_context: lib.symbol("libinput_path_create_context")?,
             path_add_device: lib.symbol("libinput_path_add_device")?,
+            get_fd: lib.symbol("libinput_get_fd")?,
             dispatch: lib.symbol("libinput_dispatch")?,
             get_event: lib.symbol("libinput_get_event")?,
             event_get_type: lib.symbol("libinput_event_get_type")?,
