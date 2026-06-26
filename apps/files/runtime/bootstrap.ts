@@ -107,6 +107,8 @@ const FILES_CAPABILITIES = Object.freeze([
   "files.write",
   "files.read",
 ] as const) satisfies readonly DesktopCapability[];
+const DEFAULT_FILES_GRANT = "desktop";
+const HOST_BRIDGE_DEFAULT_PACKAGE_ID = "vita.desktop.surface";
 const FILES_APP_BINDS: VitaBindMap<FilesAppSurfaceSnapshot> = new Map<string, (snapshot: FilesAppSurfaceSnapshot) => VitaBindValue>([
   ["files.path", (snapshot) => isFilesAppState(snapshot) ? snapshot.path : ""],
   ["files.status", (snapshot) => isFilesAppState(snapshot) ? snapshot.status : ""],
@@ -197,7 +199,7 @@ export async function bootstrapFilesAppFromGlobal(): Promise<FilesAppBootstrapRu
 
 export function selectFilesAppPorts(host: DesktopHost): FilesAppPorts {
   const files = filesPortFromHost(host);
-  const grant = firstCapabilityResource(host, FILES_CAPABILITIES);
+  const grant = firstCapabilityResource(host, FILES_CAPABILITIES, DEFAULT_FILES_GRANT);
   const output: {
     files?: FilesCapabilityPort;
     grant?: string;
@@ -290,9 +292,11 @@ function isHostRequestFile(value: unknown): value is (request: FilesRequest) => 
 function firstCapabilityResource(
   host: DesktopHost,
   capabilities: readonly DesktopCapability[],
+  fallback: string,
 ): string | undefined {
   try {
     const grants = host.package.capabilityGrants;
+    const allowUnscoped = host.package.id !== HOST_BRIDGE_DEFAULT_PACKAGE_ID;
 
     for (let capabilityIndex = 0; capabilityIndex < capabilities.length; capabilityIndex += 1) {
       const capability = capabilities[capabilityIndex];
@@ -306,6 +310,7 @@ function firstCapabilityResource(
           const resourceId = grant.resourceId;
 
           if (typeof resourceId === "string" && resourceId.length > 0) return resourceId;
+          if (allowUnscoped) return fallback;
         }
       }
     }

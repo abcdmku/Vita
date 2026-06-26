@@ -7,6 +7,9 @@ import type {
   FilesAppRuntime,
 } from "../../../../apps/files/runtime/bootstrap.ts";
 import {
+  filesAppManifest,
+} from "../../../../apps/files/manifest.ts";
+import {
   createSurfaceHost,
 } from "../../../../ui_kits/desktop/runtime/host-bridge.ts";
 import type {
@@ -198,6 +201,50 @@ test("Files app bootstrap fails closed when transport exists without an injected
   assert.match(dom.notice.textContent ?? "", /MissingFilesGrant/u);
   assertHeaderSurvived(dom);
   assert.deepEqual(entryRows(dom.list), []);
+});
+
+test("Files app bootstrap accepts the real unscoped app manifest grant as a wildcard", async () => {
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
+  const calls: FilesRequest[] = [];
+  const dom = filesDom();
+  const runtime = expectActive(await bootstrapFilesApp({
+    initialPath: "/device",
+    root: dom.root,
+    transport: Object.freeze({
+      package: filesAppManifest,
+      request(request: SurfaceHostRequest) {
+        assert.equal(request.method, "requestFile");
+
+        const fileRequest = expectFilesRequest(request.args[0]);
+
+        calls.push(fileRequest);
+        return listResponse(Object.freeze([
+          entry("real-home", "dir", 0, "2026-06-25T14:00:00Z"),
+          entry("budget.csv", "file", 2_048, "2026-06-25T14:30:00Z"),
+        ]));
+      },
+    }),
+  }));
+
+  assert.deepEqual(calls, [
+    {
+      grant: "desktop",
+      op: "list",
+      path: "/device",
+    },
+  ]);
+  assert.equal(runtime.snapshot().error, undefined);
+  assert.equal(runtime.snapshot().path, "/device");
+  assert.equal(dom.root.getAttribute("data-vita-status"), "ready");
+  assertHeaderSurvived(dom);
+  assert.deepEqual(entryRows(dom.list).map(rowName), ["real-home", "budget.csv"]);
+  assert.deepEqual(rowCells(requiredElement(rowByName(dom.list, "budget.csv"))), [
+    "\u25a1",
+    "budget.csv",
+    "File",
+    "2 KB",
+    "2026-06-25T14:30:00Z",
+  ]);
 });
 
 test("Files app select and open actions update state through the injected files port", async () => {
@@ -442,11 +489,17 @@ function packageWith(grants: readonly DesktopCapabilityGrant[]): DesktopUiPackag
   });
 }
 
-function grant(capability: DesktopCapability, resourceId: string): DesktopCapabilityGrant {
-  return Object.freeze({
+function grant(capability: DesktopCapability, resourceId?: string): DesktopCapabilityGrant {
+  const output: {
+    capability: DesktopCapability;
+    resourceId?: string;
+  } = {
     capability,
-    resourceId,
-  });
+  };
+
+  if (resourceId !== undefined) output.resourceId = resourceId;
+
+  return Object.freeze(output);
 }
 
 function filesPort(
