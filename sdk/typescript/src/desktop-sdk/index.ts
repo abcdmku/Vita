@@ -82,6 +82,10 @@ export {
   settleSettingsControlPlaneResult,
 } from "../apps/index.ts";
 export {
+  defineAppPackage,
+  hasAppCapabilityGrant,
+} from "./app-package.ts";
+export {
   DesktopUiPackageLoader,
   KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID,
   createDesktopHostForPackage,
@@ -253,6 +257,10 @@ export type {
   SettingsWidget,
   SettingsWidgetKind,
 } from "../apps/index.ts";
+export type {
+  AppPackage,
+  AppPackageManifest,
+} from "./app-package.ts";
 export type {
   DesktopAppLaunch,
   DesktopAppStop,
