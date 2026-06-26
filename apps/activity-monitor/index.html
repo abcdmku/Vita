@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Activity Monitor</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --activity-accent: var(--vita-color-accent, #3178c6);
+        --activity-accent-soft: color-mix(in srgb, var(--activity-accent) 14%, transparent);
+        --activity-bg: var(--vita-color-surface, #f5f7fb);
+        --activity-border: var(--vita-color-border, #ccd4e0);
+        --activity-hairline: var(--vita-color-hairline, #e3e8f0);
+        --activity-muted: var(--vita-color-muted, #596579);
+        --activity-panel: var(--vita-color-panel, #ffffff);
+        --activity-sunken: var(--vita-color-sunken, #edf2f8);
+        --activity-text: var(--vita-color-text, #152033);
+        --activity-text-soft: var(--vita-color-text-soft, #344055);
+        --activity-radius: var(--vita-radius-control, 8px);
+        --activity-radius-sm: var(--vita-radius-sm, 5px);
+        --activity-space: var(--vita-space-md, 16px);
+        --activity-font: var(--vita-font-ui, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        --activity-mono: var(--vita-font-mono, "Geist Mono", "SFMono-Regular", Consolas, monospace);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: var(--activity-bg);
+        color: var(--activity-text);
+        font: 13px/1.4 var(--activity-font);
+      }
+
+      .activity {
+        display: grid;
+        grid-template-rows: 78px 128px minmax(0, 1fr);
+        min-height: 100vh;
+        overflow: hidden;
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--activity-hairline);
+        background: var(--activity-panel);
+      }
+
+      .traffic {
+        display: inline-flex;
+        gap: 6px;
+      }
+
+      .traffic span {
+        width: 11px;
+        height: 11px;
+        border: 1px solid var(--activity-border);
+        border-radius: 50%;
+        background: var(--activity-sunken);
+      }
+
+      .title {
+        font-weight: 650;
+        color: var(--activity-text-soft);
+      }
+
+      .segmented {
+        display: inline-flex;
+        gap: 2px;
+        margin-left: 16px;
+        padding: 3px;
+        border: 1px solid var(--activity-border);
+        border-radius: var(--activity-radius);
+        background: var(--activity-sunken);
+      }
+
+      .segmented button {
+        min-width: 72px;
+        min-height: 28px;
+        border: 0;
+        border-radius: var(--activity-radius-sm);
+        background: transparent;
+        color: var(--activity-muted);
+        font: inherit;
+      }
+
+      .segmented button[aria-pressed="true"] {
+        background: var(--activity-panel);
+        color: var(--activity-accent);
+        font-weight: 650;
+      }
+
+      .search {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: min(240px, 28vw);
+        min-width: 160px;
+        height: 32px;
+        margin-left: auto;
+        padding: 0 11px;
+        border: 1px solid var(--activity-border);
+        border-radius: var(--activity-radius);
+        background: var(--activity-sunken);
+        color: var(--activity-muted);
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--activity-space);
+        padding: var(--activity-space) 18px;
+      }
+
+      .metric {
+        min-width: 0;
+        padding: 14px 16px;
+        border: 1px solid var(--activity-hairline);
+        border-radius: var(--activity-radius);
+        background: var(--activity-panel);
+      }
+
+      .metric-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        color: var(--activity-muted);
+      }
+
+      .metric-value {
+        margin-left: auto;
+        color: var(--activity-text);
+        font-size: 22px;
+        font-weight: 650;
+      }
+
+      .bars {
+        display: flex;
+        align-items: end;
+        gap: 3px;
+        height: 32px;
+        margin-top: 12px;
+      }
+
+      .bars span {
+        flex: 1;
+        min-width: 3px;
+        border-radius: 2px;
+        background: var(--activity-accent-soft);
+      }
+
+      .meter {
+        height: 8px;
+        margin-top: 17px;
+        overflow: hidden;
+        border-radius: 4px;
+        background: var(--activity-sunken);
+      }
+
+      .meter span {
+        display: block;
+        width: 52%;
+        height: 100%;
+        background: var(--activity-accent);
+      }
+
+      .table {
+        min-width: 0;
+        overflow: auto;
+        background: var(--activity-panel);
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: minmax(180px, 1.5fr) 88px 112px 112px 104px;
+        align-items: center;
+        min-height: 38px;
+        padding: 0 18px;
+        border-top: 1px solid var(--activity-hairline);
+      }
+
+      .row.header {
+        min-height: 32px;
+        color: var(--activity-muted);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+
+      .mono {
+        font-family: var(--activity-mono);
+      }
+
+      .muted {
+        color: var(--activity-muted);
+      }
+
+      .cpu {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .cpu-meter {
+        flex: 1;
+        height: 6px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: var(--activity-sunken);
+      }
+
+      .cpu-meter span {
+        display: block;
+        height: 100%;
+        background: var(--activity-accent);
+      }
+
+      .row[data-vita-selected="true"] {
+        background: var(--activity-accent-soft);
+      }
+
+      @media (max-width: 720px) {
+        .activity {
+          grid-template-rows: auto auto minmax(0, 1fr);
+        }
+
+        .titlebar {
+          flex-wrap: wrap;
+          min-height: 92px;
+          padding: 12px 14px;
+        }
+
+        .segmented {
+          order: 2;
+          width: 100%;
+          margin-left: 0;
+        }
+
+        .segmented button {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .search {
+          display: none;
+        }
+
+        .summary {
+          grid-template-columns: 1fr;
+        }
+
+        .row {
+          grid-template-columns: minmax(140px, 1fr) 72px 86px;
+        }
+
+        .row > :nth-child(4),
+        .row > :nth-child(5) {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="activity" data-vita-app="vita.app.activity-monitor">
+      <header class="titlebar">
+        <span class="traffic" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="title">Activity Monitor</span>
+        <nav class="segmented" aria-label="Activity category">
+          <button type="button" data-vita-action="activity-monitor.sort" data-vita-sort-key="cpu" aria-pressed="true">CPU</button>
+          <button type="button" data-vita-action="activity-monitor.sort" data-vita-sort-key="mem">Memory</button>
+          <button type="button" data-vita-action="activity-monitor.sort" data-vita-sort-key="name">Process</button>
+        </nav>
+        <div class="search" aria-hidden="true">
+          <span class="mono">/</span>
+          <span>Filter processes</span>
+        </div>
+      </header>
+      <section class="summary" aria-label="System summary">
+        <article class="metric" data-vita-action="activity-monitor.refresh">
+          <div class="metric-head">
+            <span>CPU Load</span>
+            <span class="metric-value" data-vita-bind-text="activityMonitor.totals.cpuPercent">38%</span>
+          </div>
+          <div class="bars" aria-hidden="true">
+            <span style="height:12%"></span>
+            <span style="height:18%"></span>
+            <span style="height:9%"></span>
+            <span style="height:24%"></span>
+            <span style="height:38%"></span>
+            <span style="height:30%"></span>
+            <span style="height:42%"></span>
+            <span style="height:28%"></span>
+            <span style="height:52%"></span>
+            <span style="height:38%"></span>
+            <span style="height:46%"></span>
+            <span style="height:33%"></span>
+            <span style="height:40%"></span>
+          </div>
+        </article>
+        <article class="metric">
+          <div class="metric-head">
+            <span>Memory</span>
+            <span class="metric-value" data-vita-bind-text="activityMonitor.totals.memBytes">8.2 GB</span>
+          </div>
+          <div class="meter" aria-hidden="true"><span></span></div>
+          <div class="mono muted" data-vita-bind-text="activityMonitor.entries.length">7 entries</div>
+        </article>
+      </section>
+      <section class="table" aria-label="Running activity entries" data-vita-bind-list="activityMonitor.entries">
+        <div class="row header" aria-hidden="true">
+          <span>Name</span>
+          <span>Kind</span>
+          <span>CPU</span>
+          <span>Memory</span>
+          <span>Status</span>
+        </div>
+        <button class="row" type="button" data-vita-action="activity-monitor.select" data-vita-entry-id="studio" data-vita-selected="true">
+          <span class="name">Studio</span>
+          <span class="muted">app</span>
+          <span class="cpu"><span class="cpu-meter"><span style="width:46%"></span></span><span class="mono">46%</span></span>
+          <span class="mono muted">612 MB</span>
+          <span class="muted">running</span>
+        </button>
+        <button class="row" type="button" data-vita-action="activity-monitor.select" data-vita-entry-id="web" data-vita-selected="false">
+          <span class="name">Web</span>
+          <span class="muted">app</span>
+          <span class="cpu"><span class="cpu-meter"><span style="width:28%"></span></span><span class="mono">28%</span></span>
+          <span class="mono muted">1.1 GB</span>
+          <span class="muted">running</span>
+        </button>
+        <button class="row" type="button" data-vita-action="activity-monitor.select" data-vita-entry-id="shell" data-vita-selected="false">
+          <span class="name">Shell</span>
+          <span class="muted">process</span>
+          <span class="cpu"><span class="cpu-meter"><span style="width:12%"></span></span><span class="mono">12%</span></span>
+          <span class="mono muted">88 MB</span>
+          <span class="muted">running</span>
+        </button>
+        <button class="row" type="button" data-vita-action="activity-monitor.select" data-vita-entry-id="compositor" data-vita-selected="false">
+          <span class="name">compositor</span>
+          <span class="muted">process</span>
+          <span class="cpu"><span class="cpu-meter"><span style="width:8%"></span></span><span class="mono">8%</span></span>
+          <span class="mono muted">140 MB</span>
+          <span class="muted">idle</span>
+        </button>
+      </section>
+    </main>
+  </body>
+</html>
