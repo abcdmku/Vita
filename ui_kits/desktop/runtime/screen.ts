@@ -11,6 +11,7 @@ export const DESKTOP_SCREEN_IDS = Object.freeze([
   "desktop",
   "desktop/settings",
   "desktop/files",
+  "desktop/mail",
   "desktop/shell",
   "desktop/activity",
   "desktop/notifications",
