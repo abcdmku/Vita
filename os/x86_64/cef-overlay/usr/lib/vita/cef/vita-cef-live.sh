@@ -300,6 +300,25 @@ if [ "$seen_ok" -eq 1 ]; then
     emit_line "$MARKER: live-swap=UNCONFIRMED cef-frames ${f1}->${f2} (may be the static snapshot)"
   fi
 
+  # PSD-FPS STEADY-FPS measurement (dirty-rect): count emitted CONTENT frames over a fixed 10s window
+  # on the (mostly static) live desktop and report frames-per-second. With dirty-rect partial-frame
+  # transport the per-frame serialize+upload cost collapses for a near-static desktop, so the steady
+  # content rate should jump well above the old ~15fps full-frame cap toward the INTERVAL_MS ceiling.
+  # Also break out region (partial) vs full emits so the win is visible in the marker.
+  if [ "$f2" -gt 0 ]; then
+    s0=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+    # Only the dirty-rect partial-frame emit logs " region X,Y WxH"; count those vs total frames.
+    r0=$(grep -ac "emitted compositor frame.* region " "$CEF_LOG" 2>/dev/null)
+    sleep 10
+    s1=$(grep -ac "emitted compositor frame" "$CEF_LOG" 2>/dev/null)
+    r1=$(grep -ac "emitted compositor frame.* region " "$CEF_LOG" 2>/dev/null)
+    dframes=$((s1 - s0))
+    dregion=$((r1 - r0))
+    dfull=$((dframes - dregion))
+    fps=$((dframes / 10))
+    emit_line "$MARKER: fps-steady=${fps} window=10s content-frames=${dframes} region=${dregion} full=${dfull} interval-ms=${INTERVAL_MS}"
+  fi
+
   # PSD-501 VERIFICATION DRIVER (input injection on the REAL GPU): click actual DOCK TILES so a
   # real injected pointer click drives the desktop's NATIVE binder -> host.launchApp -> the app
   # window renders REAL data via the host bridge. Coords come from osr_host's VITA-DOCK markers

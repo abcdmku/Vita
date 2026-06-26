@@ -464,6 +464,7 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             "registerSurface" => self.register_surface(&fields),
             "registerBufferSurface" => self.register_buffer_surface(&fields),
             "updateBufferSurface" => self.update_buffer_surface(&fields),
+            "updateBufferSurfaceRegion" => self.update_buffer_surface_region(&fields),
             "updatePlacement" => self.update_placement(&fields),
             "removeSurface" => self.remove_surface(&fields),
             "present" => self.present(&fields),
@@ -521,6 +522,76 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         self.merge_damage(damage);
         // Scene changed: invalidate the last present (see register_surface).
         self.presented = false;
+        Ok(())
+    }
+
+    // PSD-FPS dirty-rect partial-frame transport:
+    //   updateBufferSurfaceRegion <id> <x> <y> <w> <h> <hex-rgba(w*h*4)>
+    // Upload ONLY the (x,y,w,h) sub-rectangle of an already-registered buffer surface (a
+    // glTexSubImage2D), leaving the rest of the texture intact. A mostly-static desktop changes only
+    // a tiny region per frame, so this transports + uploads kilobytes instead of the whole ~11 MB
+    // surface — the core of the dirty-rect fps win.
+    //
+    // FAIL-SAFE: a malformed / out-of-bounds / wrong-length region is LOGGED and SKIPPED (returns Ok
+    // without mutating the texture or `presented`), so a bad frame can never corrupt the surface or
+    // tear down the long-lived compositor pipe. The desktop just keeps its previous pixels for that
+    // region until the next valid frame (or the producer's next full-frame update).
+    fn update_buffer_surface_region(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        // A structurally malformed line (wrong arity / unparseable coords) is skipped, not fatal.
+        if fields.len() != 7 {
+            eprintln!(
+                "[compositor] updateBufferSurfaceRegion: expected 7 fields, got {} — skipping",
+                fields.len()
+            );
+            return Ok(());
+        }
+        let id = match SurfaceId::new(fields[1]) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!("[compositor] updateBufferSurfaceRegion: bad surface id — {err} — skipping");
+                return Ok(());
+            }
+        };
+        let (x, y, w, h) = match (
+            parse_u32(fields[2], "x"),
+            parse_u32(fields[3], "y"),
+            parse_u32(fields[4], "width"),
+            parse_u32(fields[5], "height"),
+        ) {
+            (Ok(x), Ok(y), Ok(w), Ok(h)) => (x, y, w, h),
+            _ => {
+                eprintln!("[compositor] updateBufferSurfaceRegion: bad region coords — skipping");
+                return Ok(());
+            }
+        };
+        // Expected payload is the REGION's own w*h*4 bytes. Reject oversized regions before decoding.
+        let expected_len = match rgba_buffer_byte_len(w, h) {
+            Ok(len) if len <= MAX_COMMAND_RGBA_BYTES => len,
+            _ => {
+                eprintln!("[compositor] updateBufferSurfaceRegion: region {w}x{h} invalid/oversized — skipping");
+                return Ok(());
+            }
+        };
+        let rgba = match parse_buffer_payload(fields[6], expected_len) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("[compositor] updateBufferSurfaceRegion: payload decode failed — {err} — skipping");
+                return Ok(());
+            }
+        };
+        match self
+            .compositor
+            .update_buffer_surface_region(&id, x, y, w, h, &rgba)
+        {
+            Ok(damage) => {
+                self.merge_damage(damage);
+                self.presented = false;
+            }
+            Err(err) => {
+                // Out-of-bounds region / unknown surface: skip, keep the pipe + texture intact.
+                eprintln!("[compositor] updateBufferSurfaceRegion: rejected — {err} — skipping");
+            }
+        }
         Ok(())
     }
 

@@ -63,6 +63,10 @@ bool EmitCompositorFrame();
 // PSD-500: emit a CHEAP cursor-only present (a bare `present` line) so the compositor repositions
 // the top-most cursor surface and re-composites WITHOUT a CEF repaint or a buffer re-upload.
 bool EmitCursorPresent();
+// PSD-FPS dirty-rect: has the buffer surface been registered (or pre-armed) yet? Defined with the
+// compositor sink globals below; forward-declared here because OnPaint (above) reads it to force the
+// first live frame to be a full register rather than a partial region.
+extern bool g_registered;
 
 // --- configuration (CEF view surface) ---
 // PSD-500: the CEF view + compositor-output dimensions are RUNTIME-configurable so the live boot
@@ -117,6 +121,18 @@ std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
 int g_paint_count = 0;
 
+// PSD-FPS dirty-rect: the union bounding rect of the LAST OnPaint's dirtyRects, in VIEW pixels
+// (clamped to the view). A near-static desktop only repaints the clock + the focused app's small
+// region, so this box is tiny; we transport + upload ONLY this box instead of the whole frame.
+// g_paint_full_damage is set when the paint covers the whole surface (first frame, full Invalidate,
+// or a dirtyRects list that already spans the surface) — then we send the full frame (legacy path).
+// Touched on the CEF UI thread only (OnPaint and the emit pump both run there), so no lock needed.
+int g_dirty_x = 0;
+int g_dirty_y = 0;
+int g_dirty_w = 0;
+int g_dirty_h = 0;
+bool g_paint_full_damage = true;
+
 // PSD-055 input: the reverse-channel the compositor writes routed input events to (a FIFO/path).
 // osr_host reads it on a background thread and injects the events into CEF on the UI thread.
 std::string g_input_in;   // --input-in=<path>; empty = no input wiring.
@@ -156,8 +172,51 @@ class OsrRenderHandler : public CefRenderHandler {
     g_last_frame.assign(static_cast<const unsigned char*>(buffer),
                         static_cast<const unsigned char*>(buffer) + bytes);
     g_have_frame.store(true);
-    fprintf(stderr, "[osr] OnPaint #%d %dx%d (%zu bytes)\n", g_paint_count, width,
-            height, bytes);
+
+    // PSD-FPS dirty-rect: union of dirtyRects -> a single bounding box (simple + robust v1; per-rect
+    // is a future refinement). CEF gives the changed regions in VIEW pixels. If the list is empty
+    // (defensive), spans the whole surface, or this is one of the FIRST few paints, treat it as full
+    // damage so the next emit sends the whole frame. Otherwise carry the tight box to the emitter so
+    // it transports + uploads only those pixels.
+    int min_x = width, min_y = height, max_x = 0, max_y = 0;
+    bool any = false;
+    for (const CefRect& r : dirtyRects) {
+      if (r.width <= 0 || r.height <= 0) continue;
+      int rx0 = r.x < 0 ? 0 : r.x;
+      int ry0 = r.y < 0 ? 0 : r.y;
+      int rx1 = r.x + r.width;
+      int ry1 = r.y + r.height;
+      if (rx1 > width) rx1 = width;
+      if (ry1 > height) ry1 = height;
+      if (rx1 <= rx0 || ry1 <= ry0) continue;
+      if (rx0 < min_x) min_x = rx0;
+      if (ry0 < min_y) min_y = ry0;
+      if (rx1 > max_x) max_x = rx1;
+      if (ry1 > max_y) max_y = ry1;
+      any = true;
+    }
+    const bool spans_surface =
+        any && min_x == 0 && min_y == 0 && max_x == width && max_y == height;
+    // The first frame must always be a full register; the next couple of paints after load often
+    // carry the bulk of the page, so keep them full too (cheap insurance against a partial first
+    // live frame). g_registered is set once the register/first-update has gone out.
+    if (!any || spans_surface || !g_registered) {
+      g_paint_full_damage = true;
+      g_dirty_x = g_dirty_y = 0;
+      g_dirty_w = width;
+      g_dirty_h = height;
+    } else {
+      g_paint_full_damage = false;
+      g_dirty_x = min_x;
+      g_dirty_y = min_y;
+      g_dirty_w = max_x - min_x;
+      g_dirty_h = max_y - min_y;
+    }
+    fprintf(stderr,
+            "[osr] OnPaint #%d %dx%d (%zu bytes) dirty=%d rects=%zu box=%d,%d %dx%d\n",
+            g_paint_count, width, height, bytes,
+            g_paint_full_damage ? 0 : 1, dirtyRects.size(),
+            g_dirty_x, g_dirty_y, g_dirty_w, g_dirty_h);
   }
 
   IMPLEMENT_REFCOUNTING(OsrRenderHandler);
@@ -802,6 +861,29 @@ void FrameBgraToRgbaHexFused(const std::vector<unsigned char>& bgra, std::string
   }
 }
 
+// PSD-FPS dirty-rect: fused BGRA -> RGBA-hex of ONE sub-rectangle (rx,ry,rw,rh) of the full
+// kWidth x kHeight BGRA frame. Emits the region's pixels tightly packed (rw*rh*4 bytes -> rw*rh*8
+// hex chars, row 0 = top of the region) using the same 16-bit hex LUT as the full-frame path. No
+// intermediate RGBA/scaled buffers. This is the producer half of dirty-rect transport: only the
+// changed box is serialized, so a near-static desktop sends kilobytes instead of ~22 MB/frame.
+void RegionBgraToRgbaHexFused(const std::vector<unsigned char>& bgra, int frame_w,
+                              int rx, int ry, int rw, int rh, std::string* out) {
+  out->resize(static_cast<size_t>(rw) * rh * 8);
+  char* o = &(*out)[0];
+  for (int y = 0; y < rh; ++y) {
+    const unsigned char* s =
+        &bgra[(static_cast<size_t>(ry + y) * frame_w + rx) * 4];
+    for (int x = 0; x < rw; ++x) {
+      std::memcpy(o + 0, &g_hex16[s[2]], 2);  // R <- B
+      std::memcpy(o + 2, &g_hex16[s[1]], 2);  // G
+      std::memcpy(o + 4, &g_hex16[s[0]], 2);  // B <- R
+      std::memcpy(o + 6, &g_hex16[s[3]], 2);  // A
+      o += 8;
+      s += 4;
+    }
+  }
+}
+
 // M0 path: write the captured frame to a PNG (native 1280x800).
 void WritePng() {
   if (!g_have_frame.load() ||
@@ -892,6 +974,49 @@ bool CurrentFrameHex(std::string* hex) {
 // new pixels via updateBufferSurface. Every frame ends with present so the
 // compositor composites + (on EOF) reads back the latest presented frame.
 bool EmitCompositorFrame() {
+  if (!g_have_frame.load() ||
+      g_last_frame.size() != (size_t)kWidth * kHeight * 4) {
+    fprintf(stderr,
+            "[osr] ERROR: no full-surface frame for compositor stream "
+            "(have=%d size=%zu)\n",
+            g_have_frame.load() ? 1 : 0, g_last_frame.size());
+    return false;
+  }
+
+  // PSD-FPS dirty-rect: the region path applies only when the surface is already registered, no
+  // vertical rescale is needed (view height == output height — the live-boot case), and the last
+  // paint reported a strict sub-region. The dirty box is in VIEW pixels which map 1:1 to OUTPUT
+  // pixels here (width preserved, height equal), so it doubles as the OUTPUT-space region the
+  // compositor uploads. Otherwise we fall back to the full-frame path (register / full damage /
+  // rescale), preserving the previous behavior exactly.
+  const bool can_region = g_registered && (kHeight == kCompHeight) &&
+                          (kWidth == kCompWidth) && !g_paint_full_damage &&
+                          g_dirty_w > 0 && g_dirty_h > 0 &&
+                          !(g_dirty_x == 0 && g_dirty_y == 0 &&
+                            g_dirty_w == kWidth && g_dirty_h == kHeight);
+
+  std::string stream;
+  if (can_region) {
+    std::string region_hex;
+    RegionBgraToRgbaHexFused(g_last_frame, kWidth, g_dirty_x, g_dirty_y,
+                             g_dirty_w, g_dirty_h, &region_hex);
+    stream.reserve(region_hex.size() + 128);
+    stream += "updateBufferSurfaceRegion " + g_surface_id + " " +
+              std::to_string(g_dirty_x) + " " + std::to_string(g_dirty_y) + " " +
+              std::to_string(g_dirty_w) + " " + std::to_string(g_dirty_h) + " " +
+              region_hex + "\n";
+    stream += "present\n";
+    if (!WriteToSink(stream)) {
+      fprintf(stderr, "[osr] ERROR: write failed for %s\n", g_compositor_out.c_str());
+      return false;
+    }
+    fprintf(stderr,
+            "[osr] emitted compositor frame (%zu bytes, surface=%s region %d,%d %dx%d) -> %s\n",
+            stream.size(), g_surface_id.c_str(), g_dirty_x, g_dirty_y, g_dirty_w,
+            g_dirty_h, g_compositor_out.c_str());
+    return true;
+  }
+
   std::string hex;
   if (!CurrentFrameHex(&hex)) {
     fprintf(stderr,
@@ -900,7 +1025,6 @@ bool EmitCompositorFrame() {
             g_have_frame.load() ? 1 : 0, g_last_frame.size());
     return false;
   }
-  std::string stream;
   stream.reserve(hex.size() + 256);
   if (!g_registered) {
     stream += "registerBufferSurface " + g_surface_id + " " +

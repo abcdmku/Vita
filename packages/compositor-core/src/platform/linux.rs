@@ -825,6 +825,51 @@ void main() {
         Ok(())
     }
 
+    // PSD-FPS dirty-rect: replace only the (x,y,width,height) box of `texture` via glTexSubImage2D,
+    // leaving the rest of the texture intact. `rgba` is the tightly-packed width*height*4 RGBA bytes
+    // for that box (row 0 = top of the box). The box is validated by the caller to lie inside the
+    // texture; we re-check here so a bad region fails closed without touching GL state.
+    fn update_rgba_texture_region(
+        &mut self,
+        texture: &mut GpuTexture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), CompositorError> {
+        validate_rgba_buffer(width, height, rgba)?;
+        let x_end = x
+            .checked_add(width)
+            .ok_or(CompositorError::Backend("texture region overflow".to_owned()))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or(CompositorError::Backend("texture region overflow".to_owned()))?;
+        if x_end > texture.width || y_end > texture.height {
+            return Err(CompositorError::Backend(
+                "texture region exceeds texture bounds".to_owned(),
+            ));
+        }
+        unsafe {
+            (self.gl.bind_texture)(GL_TEXTURE_2D, texture.id);
+            // GL_UNPACK_ALIGNMENT is pinned to 1 at backend init, so a tightly-packed width*4 row
+            // stride is read correctly without GL_UNPACK_ROW_LENGTH (the region is its own buffer).
+            (self.gl.tex_sub_image_2d)(
+                GL_TEXTURE_2D,
+                0,
+                x as i32,
+                y as i32,
+                width as i32,
+                height as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                rgba.as_ptr().cast(),
+            );
+        }
+        self.repaint_count += 1;
+        Ok(())
+    }
+
     fn check_framebuffer(&self, label: &str) -> Result<(), CompositorError> {
         let status = unsafe { (self.gl.check_framebuffer_status)(GL_FRAMEBUFFER) };
         if status != GL_FRAMEBUFFER_COMPLETE {
@@ -987,6 +1032,18 @@ impl RenderBackend for PlatformGpuBackend {
         rgba: &[u8],
     ) -> Result<(), CompositorError> {
         self.update_rgba_texture(texture, width, height, rgba)
+    }
+
+    fn update_texture_region(
+        &mut self,
+        texture: &mut Self::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), CompositorError> {
+        self.update_rgba_texture_region(texture, x, y, width, height, rgba)
     }
 
     fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle {
@@ -2074,6 +2131,20 @@ struct Gl {
         GlEnum,
         *const c_void,
     ),
+    // PSD-FPS dirty-rect: partial texture upload. glTexSubImage2D(target, level, xoffset, yoffset,
+    // width, height, format, type, pixels) replaces only the (xoffset,yoffset,width,height) box of
+    // the bound texture, leaving the rest untouched — the GPU-side half of dirty-rect transport.
+    tex_sub_image_2d: unsafe extern "C" fn(
+        GlEnum,
+        GlInt,
+        GlInt,
+        GlInt,
+        GlSizeI,
+        GlSizeI,
+        GlEnum,
+        GlEnum,
+        *const c_void,
+    ),
     tex_parameter_i: unsafe extern "C" fn(GlEnum, GlEnum, GlInt),
     uniform_1f: unsafe extern "C" fn(GlInt, GlFloat),
     uniform_1i: unsafe extern "C" fn(GlInt, GlInt),
@@ -2120,6 +2191,7 @@ impl Gl {
             scissor: gl_symbol(&lib, egl, "glScissor")?,
             shader_source: gl_symbol(&lib, egl, "glShaderSource")?,
             tex_image_2d: gl_symbol(&lib, egl, "glTexImage2D")?,
+            tex_sub_image_2d: gl_symbol(&lib, egl, "glTexSubImage2D")?,
             tex_parameter_i: gl_symbol(&lib, egl, "glTexParameteri")?,
             uniform_1f: gl_symbol(&lib, egl, "glUniform1f")?,
             uniform_1i: gl_symbol(&lib, egl, "glUniform1i")?,

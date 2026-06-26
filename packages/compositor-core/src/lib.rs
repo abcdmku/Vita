@@ -584,6 +584,28 @@ pub trait RenderBackend {
         rgba: &[u8],
     ) -> Result<(), CompositorError>;
 
+    /// PSD-FPS dirty-rect: upload ONLY the sub-rectangle `(x, y, w, h)` of an existing texture,
+    /// leaving every other texel untouched (a `glTexSubImage2D`-style partial upload). `rgba` is the
+    /// tightly-packed `w*h*4` BGRA->RGBA pixels of that sub-region (row 0 = top of the region). The
+    /// region is guaranteed by the caller to lie fully inside the texture and to be the right length.
+    ///
+    /// The default falls back to no partial-upload support (`Unavailable`); the caller treats that as
+    /// "this backend cannot do partial uploads" and re-uploads the full surface instead. The GL
+    /// backend overrides this with a real `glTexSubImage2D`.
+    fn update_texture_region(
+        &mut self,
+        _texture: &mut Self::Texture,
+        _x: u32,
+        _y: u32,
+        _width: u32,
+        _height: u32,
+        _rgba: &[u8],
+    ) -> Result<(), CompositorError> {
+        Err(CompositorError::Unavailable(
+            "backend does not support partial texture region upload".to_owned(),
+        ))
+    }
+
     fn export_handle(&self, texture: &Self::Texture) -> GpuTextureHandle;
 
     fn composite(
@@ -728,6 +750,64 @@ impl<B: RenderBackend> Compositor<B> {
             rgba,
         )?;
 
+        let mut rects = Vec::new();
+        for placement in &self.placements {
+            if &placement.surface_id == id {
+                push_unique_rect(&mut rects, placement.rect());
+            }
+        }
+
+        Ok(DamageReport {
+            changed_surfaces: vec![id.clone()],
+            rects,
+        })
+    }
+
+    /// PSD-FPS dirty-rect: replace ONLY the `(x, y, w, h)` sub-rectangle of a buffer surface's
+    /// texture with `rgba` (tightly packed `w*h*4` RGBA bytes for that region, row 0 = top), leaving
+    /// the rest of the texture intact. This is the partial-frame transport: a mostly-static desktop
+    /// only repaints a small region per frame, so we upload just those pixels via `glTexSubImage2D`
+    /// instead of re-uploading the whole ~11 MB surface.
+    ///
+    /// Fails closed: a region that escapes the surface bounds, a zero-area region, or a wrong-length
+    /// payload returns an error and does NOT mutate the texture (the command layer swallows it so a
+    /// malformed region is skipped rather than tearing down the pipe or corrupting the surface).
+    pub fn update_buffer_surface_region(
+        &mut self,
+        id: &SurfaceId,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<DamageReport, CompositorError> {
+        let surface = self
+            .surfaces
+            .get_mut(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
+
+        // Region must be non-empty and fully contained in the surface (fail closed on overflow).
+        if width == 0 || height == 0 {
+            return Err(CompositorError::InvalidDimensions { width, height });
+        }
+        let x_end = x
+            .checked_add(width)
+            .ok_or(CompositorError::InvalidDimensions { width, height })?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or(CompositorError::InvalidDimensions { width, height })?;
+        if x_end > surface.width || y_end > surface.height {
+            return Err(CompositorError::InvalidDimensions { width, height });
+        }
+        // Region payload is exactly w*h*4 (its OWN dimensions, not the surface's).
+        validate_rgba_buffer(width, height, rgba)?;
+
+        self.backend
+            .update_texture_region(&mut surface.texture, x, y, width, height, rgba)?;
+
+        // Damage is the on-output footprint of every placement of this surface. A buffer surface is
+        // placed 1:1 over the output (the live desktop), so re-damaging the whole placement rect is
+        // correct and simple; the GL backend's scissored composite still only touches that area.
         let mut rects = Vec::new();
         for placement in &self.placements {
             if &placement.surface_id == id {
@@ -2267,6 +2347,72 @@ mod tests {
     }
 
     #[test]
+    fn buffer_surface_region_updates_only_the_subrect() {
+        // 3x2 surface; seed every texel, then patch a 1x1 region at (2,1) only.
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 8, 8).unwrap();
+        let surface = SurfaceId::new("surface-region").unwrap();
+        let full = vec![
+            // row 0
+            1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, //
+            // row 1
+            4, 4, 4, 255, 5, 5, 5, 255, 6, 6, 6, 255,
+        ];
+        compositor
+            .register_buffer_surface(surface.clone(), 3, 2, &full)
+            .unwrap();
+        compositor
+            .update_placements(vec![Placement::new(surface.clone(), 0, 0, 3, 2, 0).unwrap()])
+            .unwrap();
+
+        // Patch only the pixel at (x=2,y=1) — was [6,6,6,255], becomes [99,88,77,255].
+        let damage = compositor
+            .update_buffer_surface_region(&surface, 2, 1, 1, 1, &[99, 88, 77, 255])
+            .unwrap();
+        // Damage is the placement footprint of the surface.
+        assert_eq!(damage.changed_surfaces, vec![surface.clone()]);
+        assert_eq!(damage.rects, vec![Rect::new(0, 0, 3, 2).unwrap()]);
+
+        let tex = compositor.surface_readback_rgba_for_test(&surface).unwrap();
+        // Only the patched texel changed; all others retained their original bytes.
+        assert_eq!(&tex[0..4], &[1, 1, 1, 255]); // (0,0) untouched
+        assert_eq!(&tex[8..12], &[3, 3, 3, 255]); // (2,0) untouched
+        assert_eq!(&tex[12..16], &[4, 4, 4, 255]); // (0,1) untouched
+        assert_eq!(&tex[20..24], &[99, 88, 77, 255]); // (2,1) patched
+    }
+
+    #[test]
+    fn buffer_surface_region_rejects_out_of_bounds_fail_closed() {
+        let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 8, 8).unwrap();
+        let surface = SurfaceId::new("surface-region").unwrap();
+        compositor
+            .register_buffer_surface(surface.clone(), 2, 2, &[0; 16])
+            .unwrap();
+
+        // Region escapes the surface bounds -> error, texture untouched.
+        let err = compositor
+            .update_buffer_surface_region(&surface, 1, 1, 2, 2, &[7; 16])
+            .unwrap_err();
+        assert!(matches!(err, CompositorError::InvalidDimensions { .. }));
+        assert_eq!(
+            compositor.surface_readback_rgba_for_test(&surface).unwrap(),
+            vec![0; 16]
+        );
+
+        // Wrong-length payload for the stated region -> error, texture untouched.
+        let err = compositor
+            .update_buffer_surface_region(&surface, 0, 0, 1, 1, &[1, 2, 3])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CompositorError::InvalidBufferLength { .. }
+        ));
+        assert_eq!(
+            compositor.surface_readback_rgba_for_test(&surface).unwrap(),
+            vec![0; 16]
+        );
+    }
+
+    #[test]
     fn buffer_surface_rejects_mismatched_lengths_fail_closed() {
         let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 6, 5).unwrap();
         let surface = SurfaceId::new("surface-buffer").unwrap();
@@ -2443,6 +2589,34 @@ mod tests {
                 ));
             }
             texture.bytes = rgba.to_vec();
+            self.repaint_count += 1;
+            Ok(())
+        }
+
+        fn update_texture_region(
+            &mut self,
+            texture: &mut Self::Texture,
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+        ) -> Result<(), CompositorError> {
+            validate_rgba_buffer(width, height, rgba)?;
+            if x + width > texture.width || y + height > texture.height {
+                return Err(CompositorError::Backend(
+                    "recording texture region exceeds bounds".to_owned(),
+                ));
+            }
+            // Blit the tightly-packed region rows into the right offsets of the full texture buffer,
+            // leaving every other texel untouched (mirrors glTexSubImage2D semantics).
+            let row_bytes = (width * 4) as usize;
+            for row in 0..height {
+                let src = (row * width * 4) as usize;
+                let dst = (((y + row) * texture.width + x) * 4) as usize;
+                texture.bytes[dst..dst + row_bytes]
+                    .copy_from_slice(&rgba[src..src + row_bytes]);
+            }
             self.repaint_count += 1;
             Ok(())
         }
