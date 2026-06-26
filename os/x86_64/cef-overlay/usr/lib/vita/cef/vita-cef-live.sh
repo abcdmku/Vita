@@ -69,25 +69,40 @@ while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
 done
 if [ ! -e /dev/dri/card0 ]; then emit_failsafe "dri_card0_absent"; exit 0; fi
 
-# --- PSD-500: detect the REAL display resolution -----------------------------
-# Read the primary DRM/KMS connector's PREFERRED mode (the VMware virtual display size, e.g.
-# 1920x1080) so the desktop renders full-size instead of a hardcoded 1280x720 corner. The
-# compositor independently reads the SAME connector mode (query_default_output_mode); we read it
-# here too so the upstream CEF view + buffer surface match. Source: /sys/class/drm/<conn>/modes
-# (first non-empty line = current/preferred mode). Fall back to 1280x720 if it cannot be read.
+# --- PSD-503: detect the REAL display resolution (LARGEST mode <= 1920 wide) --
+# The VMware vmwgfx connector advertises a 16:10/4:3 mode ladder (1280x800, 1920x1440, 2560x1600,
+# 4096x2160 -- there is NO 1920x1080). Its PREFERRED/first entry is the small 1280x800 default, so
+# taking modes.first() (the old behaviour) undersized the desktop into a corner. Instead enumerate
+# the connector's FULL mode list and pick the LARGEST mode (by pixel area) whose width is <=
+# MAX_DISP_W (1920) -> 1920x1440 here. The compositor selects the SAME mode independently
+# (pick_best_mode in linux.rs); we mirror the rule here so the CEF view + buffer surface match the
+# scanout. Source: /sys/class/drm/<conn>/modes (one WxH per line). Fall back to 1280x800 if nothing
+# is readable.
+MAX_DISP_W=1920
 DISP_W=1280
-DISP_H=720
+DISP_H=800
+best_area=0
 for mp in /sys/class/drm/card0-*/modes; do
   [ -r "$mp" ] || continue
-  # The connected connector's modes file is non-empty; its first line is the preferred mode.
-  first=$(grep -aoE '^[0-9]{3,5}x[0-9]{3,5}' "$mp" 2>/dev/null | head -1)
-  if [ -n "$first" ]; then
-    w=${first%x*}; h=${first#*x}
-    if [ "$w" -ge 320 ] && [ "$h" -ge 240 ] && [ "$w" -le 16384 ] && [ "$h" -le 16384 ]; then
-      DISP_W=$w; DISP_H=$h
-      break
+  # Enumerate EVERY advertised mode (not just the first/preferred line) and keep the largest-area
+  # one within the width cap.
+  while IFS= read -r m; do
+    case "$m" in
+      [0-9]*x[0-9]*) : ;;
+      *) continue ;;
+    esac
+    w=${m%x*}; h=${m#*x}
+    # Strip any trailing suffix (e.g. "i" for interlaced) from h.
+    h=${h%%[!0-9]*}
+    case "$w$h" in *[!0-9]*) continue ;; esac
+    [ "$w" -ge 320 ] && [ "$h" -ge 240 ] && [ "$w" -le 16384 ] && [ "$h" -le 16384 ] || continue
+    [ "$w" -le "$MAX_DISP_W" ] || continue
+    area=$(( w * h ))
+    if [ "$area" -gt "$best_area" ]; then
+      best_area=$area; DISP_W=$w; DISP_H=$h
     fi
-  fi
+  done < <(grep -aoE '^[0-9]{3,5}x[0-9]{3,5}' "$mp" 2>/dev/null)
+  [ "$best_area" -gt 0 ] && break
 done
 # CEF view height: render the flagship at the real height so 1:1 vertical mapping (no upscaling).
 # View width == output width (the vertical box-filter downscale preserves width). The historical
