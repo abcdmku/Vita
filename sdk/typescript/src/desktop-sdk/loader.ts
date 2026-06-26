@@ -52,6 +52,10 @@ import type {
   DesktopUiPackage,
   DesktopUiPackageManifest,
   DesktopLauncherIntent,
+  OwnerAuthAgentdTransport,
+  OwnerAuthRequest,
+  OwnerAuthSession,
+  OwnerAuthUser,
 } from "./ui-package.ts";
 
 export const KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID = "vita.desktop-ui.known-good";
@@ -144,6 +148,21 @@ const SETTINGS_READ_FIELDS = Object.freeze(["key"]);
 const SETTINGS_WRITE_FIELDS = Object.freeze(["key", "value"]);
 const LAUNCHER_INTENT_REQUIRED_FIELDS = Object.freeze(["type"]);
 const LAUNCHER_INTENT_OPTIONAL_FIELDS = Object.freeze(["appId", "query"]);
+const OWNER_AUTH_REQUEST_FIELDS = Object.freeze(["assertion"]);
+const OWNER_AUTH_ASSERTION_FIELDS = Object.freeze(["action", "authenticatorData", "clientDataJSON", "credentialId", "signature"]);
+const OWNER_AUTH_IDENTITY_FIELDS = Object.freeze(["displayName", "id", "initials"]);
+const OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS = Object.freeze(["ok"]);
+const OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS = Object.freeze(["error", "value"]);
+const OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
+const OWNER_AUTH_AGENTD_ERROR_OPTIONAL_FIELDS = Object.freeze(["status"]);
+// The agentd owner verifier (`agent/capabilities/owner/owner.go`, VerifyResponse at
+// lines 242-248) returns ONLY `{ verified: bool, action?: string, reason?: string }`.
+// It does NOT return a `user`. The success signal is `verified === true`. The
+// authenticated identity is the node's single known owner, supplied by the trusted
+// host via `ownerIdentity` (see createDesktopHostForPackage), NEVER carried in the
+// verdict or the caller-controlled request.
+const OWNER_AUTH_VERDICT_REQUIRED_FIELDS = Object.freeze(["verified"]);
+const OWNER_AUTH_VERDICT_OPTIONAL_FIELDS = Object.freeze(["action", "reason"]);
 const CAPABILITY_DENIED_CODE = "CAP_DENIED";
 
 export const knownGoodDesktopUiPackage: DesktopUiPackage = Object.freeze({
@@ -427,9 +446,26 @@ export function createDesktopHostForPackage(
   manifest: DesktopUiPackageManifest,
   options: {
     readonly builtIn?: boolean;
+    readonly ownerAuthAgentd?: OwnerAuthAgentdTransport;
+    readonly ownerIdentity?: OwnerAuthUser;
   } = Object.freeze({}),
 ): DesktopHost {
   const canRegisterReservedComponents = options.builtIn === true;
+  const ownerAuthAgentd = options.ownerAuthAgentd;
+  // Single-owner node: the authenticated identity is the node's known owner,
+  // supplied by the trusted host here — never sourced from the (caller-controlled)
+  // request or from the agentd verify verdict (which carries no user). The agentd
+  // assertion only proves THAT the owner authenticated; THIS is who they are.
+  //
+  // Snapshot the configured identity ONCE into a frozen, deep-cloned plain object.
+  // Returning the host's captured object by reference would let a UI package mutate a
+  // returned session's `.user` and poison every later session (the same object is
+  // reused). Deep-clone strips any prototype/non-plain data crossing the boundary; the
+  // snapshot is frozen so neither the captured copy nor any returned session is
+  // mutable. Invalid config fails closed at authenticate-time (no throw at construction).
+  const ownerIdentity = options.ownerIdentity === undefined
+    ? undefined
+    : snapshotOwnerIdentity(options.ownerIdentity);
   const packageManifest = snapshotDesktopCapabilityManifest(manifest);
   const scoped: {
     package: DesktopUiPackageManifest;
@@ -447,6 +483,7 @@ export function createDesktopHostForPackage(
     previewSetting?: (request: DesktopSettingsWriteRequest) => DesktopMaybePromise<DesktopHostResult<DesktopSettingsPreview>>;
     applySetting?: (request: DesktopSettingsWriteRequest) => DesktopMaybePromise<DesktopHostResult<DesktopSettingsApply>>;
     emitLauncherIntent?: (intent: DesktopLauncherIntent) => DesktopMaybePromise<DesktopHostResult<true>>;
+    authenticateOwner?: (request: OwnerAuthRequest) => DesktopMaybePromise<DesktopHostResult<OwnerAuthSession>>;
     readTheme: () => DesktopTheme;
   } = {
     applyShell(definition) {
@@ -595,8 +632,83 @@ export function createDesktopHostForPackage(
       return host.emitLauncherIntent?.(snapshot.value) ?? hostReject("LAUNCHER_PORT_UNAVAILABLE", "launcher port is unavailable.", "/launcher");
     };
   }
+  if (ownerAuthAgentd !== undefined || host.authenticateOwner !== undefined) {
+    scoped.authenticateOwner = async (request) => {
+      const snapshot = normalizeOwnerAuthRequest(request, "/authenticateOwner");
+
+      if (!snapshot.ok) return hostRejectFromValidation(snapshot.error);
+      if (!hasDesktopCapabilityGrant(packageManifest, "owner.auth")) {
+        return hostReject(
+          "MISSING_CAPABILITY",
+          "package cannot authenticate the local owner.",
+          "/capabilityGrants/owner.auth",
+        );
+      }
+
+      if (ownerAuthAgentd !== undefined) {
+        if (ownerIdentity === undefined) {
+          return hostReject(
+            "OWNER_AUTH_PORT_UNAVAILABLE",
+            "owner identity is not configured on this node.",
+            "/authenticateOwner",
+          );
+        }
+        if (!ownerIdentity.ok) {
+          // Invalid owner-identity configuration (missing/empty id, non-plain object,
+          // wrong types) — fail closed rather than mint a session from bad config.
+          return hostReject(
+            "OWNER_AUTH_PORT_UNAVAILABLE",
+            "owner identity is misconfigured on this node.",
+            "/authenticateOwner",
+          );
+        }
+
+        return await authenticateOwnerWithAgentd(ownerAuthAgentd, snapshot.value, ownerIdentity.value);
+      }
+
+      return await (host.authenticateOwner?.(snapshot.value) ?? hostReject(
+        "OWNER_AUTH_PORT_UNAVAILABLE",
+        "owner authentication port is unavailable.",
+        "/authenticateOwner",
+      ));
+    };
+  }
 
   return Object.freeze(scoped);
+}
+
+async function authenticateOwnerWithAgentd(
+  agentd: OwnerAuthAgentdTransport,
+  request: OwnerAuthRequest,
+  ownerIdentity: OwnerAuthUser,
+): Promise<DesktopHostResult<OwnerAuthSession>> {
+  let rawResult: unknown;
+
+  try {
+    rawResult = await agentd.call("webauthn.get", ownerAuthAgentdRequest(request));
+  } catch {
+    return hostReject("OWNER_AUTH_AGENTD_FAILED", "owner authentication transport failed closed.", "/authenticateOwner");
+  }
+
+  const agentdResult = normalizeOwnerAuthAgentdResult(rawResult);
+
+  if (!agentdResult.ok) return hostRejectFromValidation(agentdResult.error);
+
+  const verdict = normalizeOwnerAuthVerdict(agentdResult.value, ownerIdentity);
+
+  return verdict.ok ? acceptHost(verdict.value) : hostRejectFromValidation(verdict.error);
+}
+
+function ownerAuthAgentdRequest(request: OwnerAuthRequest): PlainJsonObject {
+  return Object.freeze({
+    assertion: Object.freeze({
+      action: request.assertion.action,
+      authenticatorData: request.assertion.authenticatorData,
+      clientDataJSON: request.assertion.clientDataJSON,
+      credentialId: request.assertion.credentialId,
+      signature: request.assertion.signature,
+    }),
+  });
 }
 
 function snapshotDesktopCapabilityManifest(manifest: DesktopUiPackageManifest): DesktopUiPackageManifest {
@@ -1161,6 +1273,201 @@ function normalizeLauncherIntent(input: unknown, path: string): DesktopUiValidat
   if (query.value !== undefined) output.query = query.value;
 
   return accept(Object.freeze(output));
+}
+
+function normalizeOwnerAuthRequest(input: unknown, path: string): DesktopUiValidationResult<OwnerAuthRequest> {
+  const object = normalizeHostRequestObject(input, OWNER_AUTH_REQUEST_FIELDS, Object.freeze([]), path);
+
+  if (!object.ok) return object;
+
+  const assertion = normalizeOwnerAuthAssertion(field(object.value, "assertion"), `${path}/assertion`);
+
+  if (!assertion.ok) return assertion;
+
+  return accept(Object.freeze({
+    assertion: assertion.value,
+  }));
+}
+
+function normalizeOwnerAuthAssertion(
+  input: PlainJson | undefined,
+  path: string,
+): DesktopUiValidationResult<OwnerAuthRequest["assertion"]> {
+  if (!isPlainObject(input)) {
+    return reject("INVALID_HOST_REQUEST", "owner auth assertion must be an object.", path);
+  }
+
+  const fields = expectFields(input, OWNER_AUTH_ASSERTION_FIELDS, Object.freeze([]), path);
+
+  if (!fields.ok) return fields;
+
+  const credentialId = normalizePlainString(field(input, "credentialId"), `${path}/credentialId`, true);
+  const authenticatorData = normalizePlainString(field(input, "authenticatorData"), `${path}/authenticatorData`, true);
+  const clientDataJSON = normalizePlainString(field(input, "clientDataJSON"), `${path}/clientDataJSON`, true);
+  const signature = normalizePlainString(field(input, "signature"), `${path}/signature`, true);
+  const action = normalizePlainString(field(input, "action"), `${path}/action`, true);
+
+  if (!credentialId.ok) return credentialId;
+  if (!authenticatorData.ok) return authenticatorData;
+  if (!clientDataJSON.ok) return clientDataJSON;
+  if (!signature.ok) return signature;
+  if (!action.ok) return action;
+
+  return accept(Object.freeze({
+    action: action.value,
+    authenticatorData: authenticatorData.value,
+    clientDataJSON: clientDataJSON.value,
+    credentialId: credentialId.value,
+    signature: signature.value,
+  }));
+}
+
+// Validate + snapshot the host-configured owner identity ONCE into a frozen, plain
+// OwnerAuthUser. `safeNormalize` deep-clones to plain JSON (strips any prototype,
+// rejects functions / non-finite numbers / exotic objects), so nothing non-plain can
+// cross the package boundary and the returned object shares no reference with the
+// caller-supplied config. The result is frozen, so a returned session's `.user` cannot
+// be mutated to poison later sessions. Invalid config → fail closed.
+function snapshotOwnerIdentity(input: OwnerAuthUser): DesktopUiValidationResult<OwnerAuthUser> {
+  const normalized = safeNormalize(input);
+
+  if (!normalized.ok) {
+    return reject("INVALID_HOST_REQUEST", normalized.reason, "/ownerIdentity");
+  }
+  if (!isPlainObject(normalized.value)) {
+    return reject("INVALID_HOST_REQUEST", "owner identity must be a plain object.", "/ownerIdentity");
+  }
+
+  const fields = expectFields(normalized.value, OWNER_AUTH_IDENTITY_FIELDS, Object.freeze([]), "/ownerIdentity");
+
+  if (!fields.ok) return fields;
+
+  const id = normalizePlainString(field(normalized.value, "id"), "/ownerIdentity/id", true);
+  const displayName = normalizePlainString(field(normalized.value, "displayName"), "/ownerIdentity/displayName", true);
+  const initials = normalizePlainString(field(normalized.value, "initials"), "/ownerIdentity/initials", true);
+
+  if (!id.ok) return id;
+  if (!displayName.ok) return displayName;
+  if (!initials.ok) return initials;
+
+  return accept(Object.freeze({
+    displayName: displayName.value,
+    id: id.value,
+    initials: initials.value,
+  }));
+}
+
+function normalizeOwnerAuthAgentdResult(input: unknown): DesktopUiValidationResult<PlainJsonObject> {
+  const object = normalizePlainObjectInput(input, "/authenticateOwner/agentd");
+
+  if (!object.ok) {
+    return reject("MALFORMED_OWNER_AUTH_RESPONSE", object.error.message, "/authenticateOwner/agentd");
+  }
+
+  const fields = expectFields(
+    object.value,
+    OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS,
+    OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS,
+    "/authenticateOwner/agentd",
+  );
+
+  if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
+
+  const ok = field(object.value, "ok");
+
+  if (ok === true) {
+    const value = field(object.value, "value");
+
+    if (!isPlainObject(value) || Object.hasOwn(object.value, "error")) {
+      return reject("MALFORMED_OWNER_AUTH_RESPONSE", "agentd success result is malformed.", "/authenticateOwner/agentd/value");
+    }
+
+    return accept(value);
+  }
+  if (ok === false) {
+    const errorValue = field(object.value, "error");
+    const errorObject = isPlainObject(errorValue) ? errorValue : undefined;
+
+    if (errorObject !== undefined) {
+      const errorFields = expectFields(
+        errorObject,
+        OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS,
+        OWNER_AUTH_AGENTD_ERROR_OPTIONAL_FIELDS,
+        "/authenticateOwner/agentd/error",
+      );
+
+      if (!errorFields.ok) {
+        return reject("MALFORMED_OWNER_AUTH_RESPONSE", errorFields.error.message, errorFields.error.path);
+      }
+    }
+
+    return reject("OWNER_AUTH_AGENTD_FAILED", "agentd rejected owner authentication.", "/authenticateOwner/agentd");
+  }
+
+  return reject("MALFORMED_OWNER_AUTH_RESPONSE", "agentd result is malformed.", "/authenticateOwner/agentd/ok");
+}
+
+// Maps the agentd owner verifier reply (`agent/capabilities/owner/owner.go`
+// VerifyResponse: `{ verified, action?, reason? }`) to an OwnerAuthSession.
+//
+// SECURITY: the verdict carries NO identity. `verified === true` proves only that the
+// node's owner authenticated; the session's `user` is the trusted `ownerIdentity`
+// supplied by the host, so a forged/extra `user` can never enter the session — there
+// is nowhere in this path for one to come from.
+function normalizeOwnerAuthVerdict(
+  input: PlainJsonObject,
+  ownerIdentity: OwnerAuthUser,
+): DesktopUiValidationResult<OwnerAuthSession> {
+  const fields = expectFields(
+    input,
+    OWNER_AUTH_VERDICT_REQUIRED_FIELDS,
+    OWNER_AUTH_VERDICT_OPTIONAL_FIELDS,
+    "/authenticateOwner/agentd/value",
+  );
+
+  if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
+
+  const verified = field(input, "verified");
+
+  if (verified === true) {
+    // `action` is optional in VerifyResponse; agentd echoes the asserted action on a
+    // successful verify. When present it must be a non-empty string. The session id is
+    // bound to the trusted owner identity, never to any caller-supplied value.
+    const actionField = field(input, "action");
+    let action: string | undefined;
+
+    if (actionField !== undefined) {
+      const normalizedAction = normalizePlainString(actionField, "/authenticateOwner/agentd/value/action", true);
+
+      if (!normalizedAction.ok) {
+        return reject("MALFORMED_OWNER_AUTH_RESPONSE", normalizedAction.error.message, normalizedAction.error.path);
+      }
+      action = normalizedAction.value;
+    }
+
+    const sessionId = action === undefined
+      ? `owner:${ownerIdentity.id}`
+      : `owner:${ownerIdentity.id}:${action}`;
+
+    return accept(Object.freeze({
+      sessionId,
+      user: ownerIdentity,
+    }));
+  }
+  if (verified === false) {
+    // Deny verdicts may carry a `reason`; when present it must be a non-empty string.
+    const reasonField = field(input, "reason");
+
+    if (reasonField !== undefined) {
+      const reason = normalizePlainString(reasonField, "/authenticateOwner/agentd/value/reason", true);
+
+      if (!reason.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", reason.error.message, reason.error.path);
+    }
+
+    return reject("AUTHENTICATION_REJECTED", "owner passkey assertion was denied.", "/authenticateOwner");
+  }
+
+  return reject("MALFORMED_OWNER_AUTH_RESPONSE", "owner passkey verdict is malformed.", "/authenticateOwner/agentd/value/verified");
 }
 
 function normalizeHostRequestObject(
@@ -1954,6 +2261,7 @@ function isDesktopCapability(value: PlainJson | undefined): value is DesktopCapa
     value === "files.read" ||
     value === "files.write" ||
     value === "launcher.launch" ||
+    value === "owner.auth" ||
     value === "settings.read" ||
     value === "settings.write" ||
     value === "shell.notifications.post" ||
@@ -2014,6 +2322,13 @@ function reject<T>(code: string, message: string, path: string): DesktopUiValida
 
 function hostRejectFromValidation<T>(error: DesktopUiValidationError): DesktopHostResult<T> {
   return hostReject(error.code, error.message, error.path);
+}
+
+function acceptHost<T>(value: T): DesktopHostResult<T> {
+  return {
+    ok: true,
+    value,
+  };
 }
 
 function hostReject<T>(code: string, message: string, path: string): DesktopHostResult<T> {

@@ -94,6 +94,9 @@ export {
   hasAppCapabilityGrant,
 } from "./app-package.ts";
 export {
+  createOwnerAuthPort,
+} from "./ui-package.ts";
+export {
   createDesktopAppsBackend,
 } from "./apps-backend.ts";
 export {
@@ -306,6 +309,12 @@ export type {
   DesktopUiInstance,
   DesktopUiPackage,
   DesktopUiPackageManifest,
+  OwnerAuthAgentdCapability,
+  OwnerAuthAgentdTransport,
+  OwnerAuthAssertion,
+  OwnerAuthRequest,
+  OwnerAuthSession,
+  OwnerAuthUser,
 } from "./ui-package.ts";
 export type {
   DesktopUiLoadedPackage,
