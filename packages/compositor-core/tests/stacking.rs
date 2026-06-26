@@ -7,7 +7,7 @@ use vita_compositor_core::{
 };
 
 #[test]
-fn stacking_multi_surface_zorder_raise_remove_latest_snapshot_and_marker() {
+fn stacking_multi_surface_zorder_raise_remove_and_marker() {
     let bottom = surface_id("surface:bottom");
     let middle = surface_id("surface:middle");
     let top = surface_id("surface:top");
@@ -88,67 +88,6 @@ fn stacking_multi_surface_zorder_raise_remove_latest_snapshot_and_marker() {
     assert_output_pixel(&output, 10, 4, 4, [0, 0, 230, 255]);
     assert_output_pixel(&output, 10, 2, 2, [220, 0, 0, 255]);
 
-    let mut latest = Compositor::new(RecordingBackend::new("stacking-test-gpu"), 10, 10)
-        .expect("latest snapshot compositor should initialize");
-    register_solid(&mut latest, &bottom, 6, 6, [220, 0, 0, 255]);
-    register_solid(&mut latest, &middle, 6, 6, [0, 190, 0, 255]);
-    register_solid(&mut latest, &top, 6, 6, [0, 0, 230, 255]);
-    let initial = latest
-        .update_placements(vec![
-            Placement::new(bottom.clone(), 1, 1, 6, 6, 0).unwrap(),
-            Placement::new(middle.clone(), 2, 2, 6, 6, 1).unwrap(),
-            Placement::new(top.clone(), 3, 3, 6, 6, 2).unwrap(),
-        ])
-        .expect("initial latest placements should update");
-    latest
-        .composite(&initial)
-        .expect("initial latest stack should composite");
-
-    let stale_middle_pixels = solid_rgba(6, 6, [120, 120, 120, 255]);
-    let latest_middle_pixels = solid_rgba(6, 6, [240, 240, 0, 255]);
-    let latest_top_pixels = solid_rgba(6, 6, [180, 0, 220, 255]);
-    let latest_damage = latest
-        .update_buffer_surface_snapshot(&middle, 10, &latest_middle_pixels)
-        .expect("latest middle pixels should apply");
-    let z_latest_damage = latest
-        .set_z_snapshot(&middle, 11, 20)
-        .expect("latest z update should apply");
-    let top_damage = latest
-        .update_buffer_surface_snapshot(&top, 10, &latest_top_pixels)
-        .expect("latest top pixels should apply");
-    let repaint_count_after_latest = latest.source_repaint_count();
-    let stale_damage = latest
-        .update_buffer_surface_snapshot(&middle, 9, &stale_middle_pixels)
-        .expect("older middle pixels should be reconciled away");
-    let stale_z_damage = latest
-        .set_z_snapshot(&middle, 9, -5)
-        .expect("older z update should be reconciled away");
-
-    assert_eq!(latest_damage.rects, vec![middle_rect]);
-    assert_eq!(z_latest_damage.rects, vec![middle_rect]);
-    assert_eq!(top_damage.rects, vec![top_rect]);
-    assert_eq!(stale_damage.rects, Vec::<Rect>::new());
-    assert_eq!(stale_z_damage.rects, Vec::<Rect>::new());
-    assert_eq!(latest.source_repaint_count(), repaint_count_after_latest);
-
-    let merged = merge_damage([
-        latest_damage,
-        top_damage,
-        z_latest_damage,
-        stale_damage,
-        stale_z_damage,
-    ]);
-    let report = latest
-        .composite(&merged)
-        .expect("latest snapshot should composite");
-    assert_eq!(report.surfaces, 3);
-    let output = latest
-        .output_readback_rgba()
-        .expect("latest output should be readable");
-    assert_output_pixel(&output, 10, 4, 4, [240, 240, 0, 255]);
-    assert_output_pixel(&output, 10, 8, 8, [180, 0, 220, 255]);
-    assert_output_pixel(&output, 10, 1, 1, [220, 0, 0, 255]);
-
     let marker_report = SelfTestReport {
         gpu: "stacking-test-gpu".to_owned(),
         surfaces: 3,
@@ -178,6 +117,108 @@ fn stacking_multi_surface_zorder_raise_remove_latest_snapshot_and_marker() {
             "surface:missing"
         )))
     );
+}
+
+/// Out-of-order async reconciliation: the LATEST snapshot is applied and
+/// composited first, THEN an OLDER (lower-revision) async buffer + z update is
+/// delivered. The compositor must KEEP the latest frame and never regress to
+/// the stale one. This is deliberately the reverse of last-call-wins: a naive
+/// implementation that simply applies whatever update arrives most recently
+/// would here overwrite the latest pixels/z with the stale ones and fail.
+#[test]
+fn out_of_order_updates_keep_latest_frame() {
+    let bottom = surface_id("surface:bottom");
+    let middle = surface_id("surface:middle");
+    let top = surface_id("surface:top");
+
+    let middle_rect = Rect::new(2, 2, 6, 6).unwrap();
+
+    let mut compositor = Compositor::new(RecordingBackend::new("stacking-test-gpu"), 10, 10)
+        .expect("compositor should initialize");
+    register_solid(&mut compositor, &bottom, 6, 6, [220, 0, 0, 255]);
+    register_solid(&mut compositor, &middle, 6, 6, [0, 190, 0, 255]);
+    register_solid(&mut compositor, &top, 6, 6, [0, 0, 230, 255]);
+
+    let initial = compositor
+        .update_placements(vec![
+            Placement::new(bottom.clone(), 1, 1, 6, 6, 0).unwrap(),
+            Placement::new(middle.clone(), 2, 2, 6, 6, 1).unwrap(),
+            Placement::new(top.clone(), 3, 3, 6, 6, 2).unwrap(),
+        ])
+        .expect("initial placements should update");
+    compositor
+        .composite(&initial)
+        .expect("initial stack should composite");
+
+    // The LATEST truth for `middle`: yellow pixels at revision 10, raised to the
+    // top of the stack via z=20 at revision 11.
+    let latest_middle_pixels = solid_rgba(6, 6, [240, 240, 0, 255]);
+    let stale_middle_pixels = solid_rgba(6, 6, [120, 120, 120, 255]);
+
+    let latest_buffer_damage = compositor
+        .update_buffer_surface_snapshot(&middle, 10, &latest_middle_pixels)
+        .expect("latest middle pixels should apply");
+    let latest_z_damage = compositor
+        .set_z_snapshot(&middle, 11, 20)
+        .expect("latest middle z should apply");
+    assert_eq!(latest_buffer_damage.rects, vec![middle_rect]);
+    assert_eq!(latest_z_damage.rects, vec![middle_rect]);
+
+    // Composite the LATEST state FIRST and snapshot the frame: `middle` is on top
+    // (z=20 > top's z=2) showing the latest yellow pixels.
+    let latest_merged = merge_damage([latest_buffer_damage, latest_z_damage]);
+    let latest_report = compositor
+        .composite(&latest_merged)
+        .expect("latest stack should composite");
+    assert_eq!(latest_report.surfaces, 3);
+    let latest_frame = compositor
+        .output_readback_rgba()
+        .expect("latest output should be readable");
+    assert_output_pixel(&latest_frame, 10, 4, 4, [240, 240, 0, 255]);
+
+    let repaint_after_latest = compositor.source_repaint_count();
+
+    // Now an OLDER async update arrives AFTER the latest was already composited:
+    // a stale buffer (revision 9 < 10) and a stale z that would sink `middle`
+    // below `top` (revision 9 < 11). Both are out-of-order and must be dropped.
+    let stale_buffer_damage = compositor
+        .update_buffer_surface_snapshot(&middle, 9, &stale_middle_pixels)
+        .expect("older middle pixels must be reconciled away (not an error)");
+    let stale_z_damage = compositor
+        .set_z_snapshot(&middle, 9, -5)
+        .expect("older middle z must be reconciled away (not an error)");
+
+    // The stale updates produced no damage, no texture re-upload, and did not
+    // reorder the stack.
+    assert_eq!(stale_buffer_damage.rects, Vec::<Rect>::new());
+    assert_eq!(stale_buffer_damage.changed_surfaces, Vec::<SurfaceId>::new());
+    assert_eq!(stale_z_damage.rects, Vec::<Rect>::new());
+    assert_eq!(stale_z_damage.changed_surfaces, Vec::<SurfaceId>::new());
+    assert_eq!(compositor.source_repaint_count(), repaint_after_latest);
+
+    // Re-composite (even merging in the stale damage) and assert the frame is
+    // STILL the latest — the compositor did NOT regress to the stale grey pixels
+    // and `middle` is still raised on top. A stale-frame bug would show grey here.
+    let stale_merged = merge_damage([stale_buffer_damage, stale_z_damage]);
+    let after_stale_report = compositor
+        .composite(&stale_merged)
+        .expect("stack should still composite after stale updates");
+    assert_eq!(after_stale_report.surfaces, 3);
+    let frame_after_stale = compositor
+        .output_readback_rgba()
+        .expect("post-stale output should be readable");
+    assert_eq!(
+        frame_after_stale, latest_frame,
+        "out-of-order stale update must not change the composited frame"
+    );
+    assert_output_pixel(&frame_after_stale, 10, 4, 4, [240, 240, 0, 255]);
+
+    // The middle surface's own texture still holds the latest pixels, proving the
+    // stale buffer never reached the GPU even at the per-surface level.
+    let middle_after_stale = compositor
+        .surface_readback_rgba_for_test(&middle)
+        .expect("middle readback should work");
+    assert_eq!(middle_after_stale, latest_middle_pixels);
 }
 
 #[derive(Clone, Debug)]
