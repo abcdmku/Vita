@@ -389,11 +389,40 @@ if [ "$seen_ok" -eq 1 ]; then
         ;;
     esac
 
+    # --- HONEST interactivity verdict (cef-selftest-false-verdicts) -----------------------------
+    # The OLD verdict declared CONFIRMED on SendMouse>0 ALONE — a false POSITIVE that masked the
+    # scrim bug (events reached CEF but no window opened because an inert scrim ate the DOM click).
+    # The HONEST proof that a click drove the desktop is a NATIVE APP WINDOW that exists AFTER the
+    # click. Require ALL of:
+    #   (a) SendMouse>0            — injected events actually reached CEF (loop wired end-to-end), AND
+    #   (b) app-window=present on a probe taken AFTER the action — either osr_host's recurring
+    #       `VITA-NATIVE app-window=present probe=post-action` re-probe, OR the desktop's own
+    #       `VITA-INDEX launchOrFocusDock <id> ... appWindow=true` launch signal, AND
+    #   (c) the VMware GPU path (input=available). The surfaceless QEMU `-nographic` path reports
+    #       input=unavailable and can NEVER prove interactivity — there we report UNVERIFIED, not
+    #       CONFIRMED, so a headless boot cannot mint a false positive.
     sends=$(grep -acE "input: SendMouse" "$CEF_LOG" 2>/dev/null)
     clicks=$(grep -acE "input: SendMouseClick" "$CEF_LOG" 2>/dev/null)
-    appwin=$(grep -aE "VITA-NATIVE app-window=" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*app-window=//')
-    if [ "$sends" -gt 0 ]; then
-      emit_line "$MARKER: interactive=CONFIRMED input-selftest SendMouse=$sends clicks=$clicks app-window-after=$appwin"
+    # POST-ACTION app-window probe: only probe=post-action lines count (the probe=on-load one-shot
+    # fires ~1.8s after load, BEFORE the clicks, and must NOT satisfy the verdict). tail -1 = latest.
+    appwin=$(grep -aE "VITA-NATIVE app-window=.* probe=post-action" "$CEF_LOG" 2>/dev/null | tail -1 | sed -n 's/.*app-window=\([a-z]*\).*/\1/p')
+    # The desktop's OWN launch signal: a real dock click that reached launchOrFocusDock and had a
+    # window host bound (appWindow=true). Independent corroboration of (b) from the renderer side.
+    launchsig=$(grep -acE "VITA-INDEX launchOrFocusDock .* appWindow=true" "$CEF_LOG" 2>/dev/null)
+    gpu_path=0
+    [ "$input_state" = "input=available" ] && gpu_path=1
+    win_after=0
+    { [ "$appwin" = "present" ] || [ "${launchsig:-0}" -gt 0 ]; } && win_after=1
+
+    if [ "$gpu_path" -ne 1 ]; then
+      # Surfaceless/headless path: input is unavailable; we cannot honestly prove interactivity here.
+      emit_line "$MARKER: interactive=UNVERIFIED ${input_state} (surfaceless path: cannot prove interactivity; SendMouse=$sends app-window=${appwin:-none} launch-signal=$launchsig)"
+    elif [ "$sends" -gt 0 ] && [ "$win_after" -eq 1 ]; then
+      emit_line "$MARKER: interactive=CONFIRMED app-window=present (probed AFTER action) SendMouse=$sends clicks=$clicks app-window-after=${appwin:-via-launch-signal} launch-signal=$launchsig path=vmware-gpu"
+    elif [ "$sends" -gt 0 ]; then
+      # Events reached CEF but NO native window opened after the click — this is exactly the scrim
+      # regression the old SendMouse>0 check masked. Report FAILED, not CONFIRMED.
+      emit_line "$MARKER: interactive=FAILED no-app-window-after-click SendMouse=$sends clicks=$clicks app-window-after=${appwin:-absent} launch-signal=$launchsig (click reached CEF but opened no window — possible inert scrim/hit-test regression)"
     else
       emit_line "$MARKER: interactive=FAILED input-selftest SendMouse=0 (events not reaching CEF)"
     fi

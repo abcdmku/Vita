@@ -247,7 +247,10 @@ class OsrClient : public CefClient,
         "  for(var i=0;i<tiles.length;i++){ var r=tiles[i].getBoundingClientRect();"
         "    L('VITA-DOCK tile ' + tiles[i].getAttribute('data-vita-dock-app-id') + ' cx=' + Math.round(r.left+r.width/2) + ' cy=' + Math.round(r.top+r.height/2)); }"
         "  var win=document.getElementById('vita-app-window');"
-        "  L('VITA-NATIVE app-window=' + (win?'present':'absent'));"
+        // probe=on-load: the EARLY one-shot probe (~1.8s after load, BEFORE any dock click). The
+        // verdict in vita-cef-live.sh must NOT treat this as proof of interactivity — it gates on a
+        // later probe=post-action line (emitted by ReProbeAppWindow from the streaming pump).
+        "  L('VITA-NATIVE app-window=' + (win?'present':'absent') + ' probe=on-load');"
         "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
@@ -314,6 +317,15 @@ class OsrClient : public CefClient,
       ok = EmitCompositorFrame();
       if (ok) {
         frames_emitted_++;
+        // cef-selftest-false-verdicts: the verdict in vita-cef-live.sh must gate interactivity on an
+        // app-window probe taken AFTER the dock clicks land (~t=16s,23s), not the one-shot OnLoadEnd
+        // probe at ~1.8s. Re-probe getElementById('vita-app-window') on a recurring cadence so a FRESH
+        // `VITA-NATIVE app-window=` line is always present in the log AFTER any user/injected action —
+        // `tail -1` in the verdict then reflects the CURRENT DOM (window opened by a real click), never
+        // the stale early-load state. Cadence: every kReProbeEveryFrames content frames.
+        if (frames_emitted_ % kReProbeEveryFrames == 0) {
+          ReProbeAppWindow();
+        }
         // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the pump
         // reschedules itself forever, so the compositor keeps presenting the live desktop.
         if (g_frames != 0 && frames_emitted_ >= g_frames) {
@@ -354,6 +366,28 @@ class OsrClient : public CefClient,
   }
 
  private:
+  // cef-selftest-false-verdicts: re-probe the live DOM for the native app window on a recurring
+  // cadence so the verdict gates on a probe taken AFTER the dock clicks, not the one-shot OnLoadEnd
+  // probe at ~1.8s. At ~10 content fps (100ms interval) this fires roughly every ~3s.
+  static constexpr int kReProbeEveryFrames = 30;
+
+  // Emit a FRESH `VITA-NATIVE app-window=<present|absent>` line reflecting the CURRENT DOM. Driven
+  // from the streaming pump so a post-action line always exists; `tail -1` in vita-cef-live.sh's
+  // verdict consumes the most recent one (i.e. the state after a real click opened the window).
+  void ReProbeAppWindow() {
+    if (!browser_) return;
+    CefRefPtr<CefFrame> frame = browser_->GetMainFrame();
+    if (!frame) return;
+    // probe=post-action marks this as a re-probe (vs the OnLoadEnd one tagged probe=on-load); the
+    // verdict requires app-window=present on a probe=post-action line before declaring CONFIRMED.
+    frame->ExecuteJavaScript(
+        "try{ var L=globalThis.__vitaLog||function(){};"
+        "  var win=document.getElementById('vita-app-window');"
+        "  L('VITA-NATIVE app-window=' + (win?'present':'absent') + ' probe=post-action'); }"
+        "catch(e){ (globalThis.__vitaLog||function(){})('VITA-NATIVE app-window=error probe=post-action ' + String(e)); }",
+        "vita://app-window-reprobe", 0);
+  }
+
   CefRefPtr<OsrRenderHandler> render_handler_;
   CefRefPtr<CefBrowser> browser_;
   int frames_emitted_ = 0;  // M4 streaming: CONTENT frames pushed to the compositor sink
