@@ -458,11 +458,14 @@ bool EmitCompositorFrame() {
     stream += "registerBufferSurface " + g_surface_id + " " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
               " " + hex + "\n";
-    // z=10: the live desktop sits ABOVE the honest loading screen (z=0) so its first real frame
-    // covers the loading indicator. The cursor surface is higher still (z=1000).
+    // z=10: the live desktop sits ABOVE the honest loading screen (z=0). The cursor is higher
+    // still (z=1000).
     stream += "updatePlacement " + g_surface_id + " 0 0 " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
               " 10 true\n";
+    // The live desktop has arrived: remove the honest loading screen so ONLY the live render (and
+    // cursor) remain. removeSurface is a no-op if vita:loading was never registered.
+    stream += "removeSurface vita:loading\n";
     g_registered = true;
   } else {
     stream += "updateBufferSurface " + g_surface_id + " " + hex + "\n";
@@ -657,6 +660,9 @@ void InputReaderThread() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // Unbuffered stderr: the input diagnostics (SendMouse/channel) go to a redirected log file and
+  // were block-buffered, so the boot-time self-test read 0 events even when CEF received them.
+  setvbuf(stderr, nullptr, _IONBF, 0);
   CefMainArgs main_args(argc, argv);
   CefRefPtr<OsrApp> app(new OsrApp());
 
