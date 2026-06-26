@@ -159,6 +159,141 @@ test("the session identity is the host-trusted owner even when the assertion nam
   assert.equal(authenticated.value.sessionId, "owner:alt-owner:approve-transaction");
 });
 
+test("mutating a returned session's user does NOT poison a subsequently-minted session", async () => {
+  // The host captures the configured identity once. If sessions returned the captured
+  // object by reference, a UI package could reassign `.user.id` on a returned session
+  // and every later session would inherit the mutated identity. The returned user must
+  // be a frozen snapshot that shares no reference with the host-side identity.
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      verified: true,
+    }),
+  });
+  const scoped = scopedHost(["owner.auth"], agentd);
+
+  const first = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(first.ok, true);
+  if (!first.ok) assert.fail("expected the first owner auth to succeed");
+
+  // Attempt to tamper with the returned session's identity. Frozen objects throw on
+  // assignment in strict mode (ESM is strict); either way the mutation must not take.
+  const mutableUser = first.value.user as { id: string; displayName: string };
+
+  try {
+    mutableUser.id = FORGED_USER.id;
+    mutableUser.displayName = FORGED_USER.displayName;
+  } catch {
+    // Frozen — assignment threw, which is the desired protection.
+  }
+
+  // The returned user must be frozen and unchanged by the tamper attempt.
+  assert.equal(Object.isFrozen(first.value.user), true);
+  assert.equal(first.value.user.id, OWNER_USER.id);
+
+  // A subsequently-minted session must carry the pristine trusted identity.
+  const second = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(second.ok, true);
+  if (!second.ok) assert.fail("expected the second owner auth to succeed");
+  assert.deepEqual(second.value.user, OWNER_USER);
+  assert.equal(second.value.user.id, OWNER_USER.id);
+  assert.notEqual(second.value.user.id, FORGED_USER.id);
+  assert.equal(second.value.sessionId, "owner:vita-owner:unlock");
+});
+
+test("the snapshot does not share a reference with the configured ownerIdentity", async () => {
+  // Even mutating the ORIGINAL config object after construction must not change minted
+  // sessions — the host deep-clones the identity once at construction.
+  const mutableIdentity = {
+    displayName: "Vita Owner",
+    id: "vita-owner",
+    initials: "VO",
+  };
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      verified: true,
+    }),
+  });
+  const scoped = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: mutableIdentity,
+  });
+
+  mutableIdentity.id = FORGED_USER.id;
+
+  const authenticated = await callAuthenticateOwner(scoped, ownerAuthRequest());
+
+  assert.equal(authenticated.ok, true);
+  if (!authenticated.ok) assert.fail("expected owner auth to succeed");
+  assert.equal(authenticated.value.user.id, "vita-owner");
+  assert.notEqual(authenticated.value.user.id, FORGED_USER.id);
+});
+
+test("an invalid or non-plain ownerIdentity config is rejected fail-closed", async () => {
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      verified: true,
+    }),
+  });
+
+  // Missing/empty id.
+  const emptyId = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: Object.freeze({ displayName: "Vita Owner", id: "", initials: "VO" }),
+  });
+  const emptyIdResult = await callAuthenticateOwner(emptyId, ownerAuthRequest());
+
+  assert.equal(emptyIdResult.ok, false);
+  if (emptyIdResult.ok) assert.fail("expected empty owner id to fail closed");
+  assert.equal(emptyIdResult.error.code, "OWNER_AUTH_PORT_UNAVAILABLE");
+  assert.equal(agentd.calls.length, 0);
+
+  // Wrong field type.
+  const wrongType = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: Object.freeze({ displayName: "Vita Owner", id: 7, initials: "VO" }) as unknown as OwnerAuthUser,
+  });
+  const wrongTypeResult = await callAuthenticateOwner(wrongType, ownerAuthRequest());
+
+  assert.equal(wrongTypeResult.ok, false);
+  if (wrongTypeResult.ok) assert.fail("expected non-string owner id to fail closed");
+  assert.equal(wrongTypeResult.error.code, "OWNER_AUTH_PORT_UNAVAILABLE");
+
+  // Non-plain (prototype-bearing / exotic) identity object.
+  const nonPlain = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: new Date(0) as unknown as OwnerAuthUser,
+  });
+  const nonPlainResult = await callAuthenticateOwner(nonPlain, ownerAuthRequest());
+
+  assert.equal(nonPlainResult.ok, false);
+  if (nonPlainResult.ok) assert.fail("expected non-plain owner identity to fail closed");
+  assert.equal(nonPlainResult.error.code, "OWNER_AUTH_PORT_UNAVAILABLE");
+
+  // Extra/unknown field on the identity (strict field set).
+  const extraField = createDesktopHostForPackage(fakeHost(), manifest("ui.owner-auth", ["owner.auth"]), {
+    ownerAuthAgentd: agentd,
+    ownerIdentity: Object.freeze({
+      displayName: "Vita Owner",
+      id: "vita-owner",
+      initials: "VO",
+      role: "admin",
+    }) as unknown as OwnerAuthUser,
+  });
+  const extraFieldResult = await callAuthenticateOwner(extraField, ownerAuthRequest());
+
+  assert.equal(extraFieldResult.ok, false);
+  if (extraFieldResult.ok) assert.fail("expected an extra identity field to fail closed");
+  assert.equal(extraFieldResult.error.code, "OWNER_AUTH_PORT_UNAVAILABLE");
+});
+
 test("a verified:false VerifyResponse fails closed without leaking a session", async () => {
   const agentd = agentdStub({
     ok: true,

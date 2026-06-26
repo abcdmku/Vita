@@ -150,6 +150,7 @@ const LAUNCHER_INTENT_REQUIRED_FIELDS = Object.freeze(["type"]);
 const LAUNCHER_INTENT_OPTIONAL_FIELDS = Object.freeze(["appId", "query"]);
 const OWNER_AUTH_REQUEST_FIELDS = Object.freeze(["assertion"]);
 const OWNER_AUTH_ASSERTION_FIELDS = Object.freeze(["action", "authenticatorData", "clientDataJSON", "credentialId", "signature"]);
+const OWNER_AUTH_IDENTITY_FIELDS = Object.freeze(["displayName", "id", "initials"]);
 const OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS = Object.freeze(["ok"]);
 const OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS = Object.freeze(["error", "value"]);
 const OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
@@ -455,7 +456,16 @@ export function createDesktopHostForPackage(
   // supplied by the trusted host here — never sourced from the (caller-controlled)
   // request or from the agentd verify verdict (which carries no user). The agentd
   // assertion only proves THAT the owner authenticated; THIS is who they are.
-  const ownerIdentity = options.ownerIdentity;
+  //
+  // Snapshot the configured identity ONCE into a frozen, deep-cloned plain object.
+  // Returning the host's captured object by reference would let a UI package mutate a
+  // returned session's `.user` and poison every later session (the same object is
+  // reused). Deep-clone strips any prototype/non-plain data crossing the boundary; the
+  // snapshot is frozen so neither the captured copy nor any returned session is
+  // mutable. Invalid config fails closed at authenticate-time (no throw at construction).
+  const ownerIdentity = options.ownerIdentity === undefined
+    ? undefined
+    : snapshotOwnerIdentity(options.ownerIdentity);
   const packageManifest = snapshotDesktopCapabilityManifest(manifest);
   const scoped: {
     package: DesktopUiPackageManifest;
@@ -643,8 +653,17 @@ export function createDesktopHostForPackage(
             "/authenticateOwner",
           );
         }
+        if (!ownerIdentity.ok) {
+          // Invalid owner-identity configuration (missing/empty id, non-plain object,
+          // wrong types) — fail closed rather than mint a session from bad config.
+          return hostReject(
+            "OWNER_AUTH_PORT_UNAVAILABLE",
+            "owner identity is misconfigured on this node.",
+            "/authenticateOwner",
+          );
+        }
 
-        return await authenticateOwnerWithAgentd(ownerAuthAgentd, snapshot.value, ownerIdentity);
+        return await authenticateOwnerWithAgentd(ownerAuthAgentd, snapshot.value, ownerIdentity.value);
       }
 
       return await (host.authenticateOwner?.(snapshot.value) ?? hostReject(
@@ -1300,6 +1319,41 @@ function normalizeOwnerAuthAssertion(
     clientDataJSON: clientDataJSON.value,
     credentialId: credentialId.value,
     signature: signature.value,
+  }));
+}
+
+// Validate + snapshot the host-configured owner identity ONCE into a frozen, plain
+// OwnerAuthUser. `safeNormalize` deep-clones to plain JSON (strips any prototype,
+// rejects functions / non-finite numbers / exotic objects), so nothing non-plain can
+// cross the package boundary and the returned object shares no reference with the
+// caller-supplied config. The result is frozen, so a returned session's `.user` cannot
+// be mutated to poison later sessions. Invalid config → fail closed.
+function snapshotOwnerIdentity(input: OwnerAuthUser): DesktopUiValidationResult<OwnerAuthUser> {
+  const normalized = safeNormalize(input);
+
+  if (!normalized.ok) {
+    return reject("INVALID_HOST_REQUEST", normalized.reason, "/ownerIdentity");
+  }
+  if (!isPlainObject(normalized.value)) {
+    return reject("INVALID_HOST_REQUEST", "owner identity must be a plain object.", "/ownerIdentity");
+  }
+
+  const fields = expectFields(normalized.value, OWNER_AUTH_IDENTITY_FIELDS, Object.freeze([]), "/ownerIdentity");
+
+  if (!fields.ok) return fields;
+
+  const id = normalizePlainString(field(normalized.value, "id"), "/ownerIdentity/id", true);
+  const displayName = normalizePlainString(field(normalized.value, "displayName"), "/ownerIdentity/displayName", true);
+  const initials = normalizePlainString(field(normalized.value, "initials"), "/ownerIdentity/initials", true);
+
+  if (!id.ok) return id;
+  if (!displayName.ok) return displayName;
+  if (!initials.ok) return initials;
+
+  return accept(Object.freeze({
+    displayName: displayName.value,
+    id: id.value,
+    initials: initials.value,
   }));
 }
 
