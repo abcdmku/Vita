@@ -1,0 +1,263 @@
+<!doctype html>
+<!-- @dsCard group="Desktop OS" viewport="1280x800" subtitle="Window manager preview — drag / close / resize / focus 3 mock VitaApps (dark)" name="WM Demo" -->
+<!--
+  wm-demo.html — a standalone preview harness for the desktop window manager (Phase A CORE).
+
+  It exercises the SAME managed-window contract the runtime WindowManager produces (.v-win / .v-tt /
+  .v-dots dark chrome, draggable title bar, red-dot close, bottom-right resize grip, raise-on-focus)
+  by mounting 3 MOCK VitaApps into managed windows. This is a visual/interaction smoke surface for
+  drag/close/resize/focus/theme — open it at:
+      http://localhost:8137/desktop/runtime/wm-demo.html
+
+  It is intentionally self-contained (no build step / no host bridge): the production WM lives in
+  window-manager.ts and is exercised by the unit tests + the live VM boot. The chrome here mirrors
+  that module 1:1 (same classes, tokens, geometry constants, traffic-light controls) so a designer /
+  reviewer can feel the windows. The mock apps stand in for real VitaApp.mount(ctx) bodies.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Vita — Window Manager Preview</title>
+  <link rel="stylesheet" href="../../styles.css" />
+  <link rel="stylesheet" href="../kit.css" />
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #08090c; overflow: hidden; }
+    .v-screen { width: 100vw; height: 100vh; }
+    .wm-help {
+      position: absolute; top: 40px; left: 16px; z-index: 41;
+      font: 12px var(--font-sans, system-ui); color: var(--text-faint);
+      max-width: 320px; line-height: 1.6;
+    }
+    .wm-help b { color: var(--text-secondary); }
+    .wm-launch {
+      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; z-index: 41;
+    }
+    .wm-launch button {
+      font: 13px var(--font-sans, system-ui); color: var(--text);
+      background: var(--surface-raised); border: 1px solid var(--border);
+      border-radius: var(--radius-md, 9px); padding: 9px 14px; cursor: pointer;
+    }
+    .wm-launch button:hover { border-color: var(--accent); color: var(--accent); }
+    .v-win.is-focused { outline: none; }
+  </style>
+</head>
+<body>
+  <div class="v-screen theme-dark v-wall-dark" id="screen">
+    <div class="v-menubar">
+      <div style="display:flex;align-items:center;gap:18px">
+        <span class="v-brand">Vita<i>.ts</i></span>
+        <div class="v-menus"><span>Window Manager Preview</span></div>
+      </div>
+    </div>
+    <div class="wm-help">
+      <b>WM preview.</b> Drag windows by their title bar, click the red dot to close,
+      drag the bottom-right grip to resize, click any window to raise + focus it.
+      The focused window carries <code>id="vita-app-window"</code>.
+    </div>
+    <div class="wm-launch">
+      <button data-launch="files">📁 Files</button>
+      <button data-launch="activity">📊 Activity</button>
+      <button data-launch="notes">📝 Notes</button>
+    </div>
+  </div>
+
+  <script type="module">
+    // A faithful, minimal re-creation of window-manager.ts for the preview (same classes/tokens/
+    // geometry). Production code lives in window-manager.ts; this mirrors it for a no-build preview.
+    const ACTIVE_WINDOW_ID = "vita-app-window";
+    const DEFAULT_RECT = { left: 150, top: 92, width: 560, height: 420 };
+    const CASCADE_STEP = 28, MIN_W = 320, MIN_H = 200, MENUBAR_H = 32, CLAMP = 24, Z_BASE = 70;
+    const screen = document.getElementById("screen");
+    let zCounter = Z_BASE, cascade = 0, focusedId = null;
+    const registry = new Map();
+
+    function clamp(v, lo, hi) { return hi < lo ? lo : v < lo ? lo : v > hi ? hi : v; }
+    function vp() { return { w: window.innerWidth, h: window.innerHeight }; }
+
+    function focus(win) {
+      for (const w of registry.values()) {
+        const isTarget = w === win;
+        w.el.classList.toggle("is-focused", isTarget);
+        w.tt.style.background = isTarget ? "var(--surface-raised)" : "var(--surface-sunken)";
+        w.el.style.borderColor = isTarget ? "var(--border-strong)" : "var(--border)";
+        if (isTarget) { w.el.id = ACTIVE_WINDOW_ID; zCounter += 1; w.el.style.zIndex = String(zCounter); }
+        else if (w.el.id === ACTIVE_WINDOW_ID) w.el.id = w.domId;
+      }
+      focusedId = win.id;
+    }
+
+    function close(win) {
+      registry.delete(win.id);
+      win.el.remove();
+      if (focusedId === win.id) {
+        focusedId = null;
+        let top, topZ = -1;
+        for (const w of registry.values()) { const z = +w.el.style.zIndex || Z_BASE; if (z > topZ) { topZ = z; top = w; } }
+        if (top) focus(top);
+      }
+    }
+
+    function frame(content) {
+      return `
+        <div class="v-tt" data-tt style="cursor:default;user-select:none">
+          <div class="v-dots">
+            <span data-close title="Close" style="background:#f0584f;cursor:pointer;display:flex;align-items:center;justify-content:center">
+              <span data-glyph style="font-size:8px;line-height:1;color:rgba(0,0,0,.55);opacity:0">✕</span></span>
+            <span title="Minimize" style="background:#f0b429"></span>
+            <span data-zoom title="Zoom" style="background:#23c65a;cursor:pointer"></span>
+          </div>
+          <span style="display:flex;align-items:center;gap:8px;margin-left:4px">
+            <span style="font-size:13px">${content.icon}</span>
+            <span class="v-tname" style="color:var(--text-secondary)">${content.title}</span>
+          </span>
+          <span class="v-tname" data-badge style="margin-left:auto;color:var(--text-faint);font-size:10.5px">${content.badge || ""}</span>
+        </div>
+        <div data-body style="flex:1;min-height:0;overflow:auto;background:var(--surface)">${content.body}</div>
+        <div data-resize title="Resize" style="position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
+          background:linear-gradient(135deg,transparent 50%,var(--border-strong) 50%,var(--border-strong) 60%,transparent 60%,transparent 72%,var(--border-strong) 72%,var(--border-strong) 82%,transparent 82%)"></div>`;
+    }
+
+    let seq = 0;
+    function open(appId, seed) {
+      const existing = registry.get(appId);
+      if (existing) { focus(existing); return existing; }
+
+      seq += 1;
+      const step = cascade % 6; cascade += 1;
+      const rect = {
+        left: clamp(DEFAULT_RECT.left + step * CASCADE_STEP, CLAMP - DEFAULT_RECT.width, vp().w - CLAMP),
+        top: clamp(DEFAULT_RECT.top + step * CASCADE_STEP, MENUBAR_H, vp().h - CLAMP),
+        width: DEFAULT_RECT.width, height: DEFAULT_RECT.height,
+      };
+      const el = document.createElement("div");
+      const domId = "vita-win-" + seq;
+      el.id = domId;
+      el.className = "v-win";
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-label", seed.title);
+      el.style.cssText = `position:absolute;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;` +
+        `min-width:${MIN_W}px;min-height:${MIN_H}px;z-index:${Z_BASE};font:13px var(--font-sans,system-ui);color:var(--text)`;
+      el.innerHTML = frame(seed);
+      const win = { id: appId, domId, el, tt: el.querySelector("[data-tt]"), body: el.querySelector("[data-body]"), rect };
+      registry.set(appId, win);
+      screen.appendChild(el);
+      wire(win);
+      focus(win);
+      return win;
+    }
+
+    function wire(win) {
+      const { el, tt, rect } = win;
+      el.addEventListener("pointerdown", () => focus(win));
+
+      // close
+      const close$ = el.querySelector("[data-close]");
+      const glyph = el.querySelector("[data-glyph]");
+      close$.addEventListener("pointerenter", () => glyph.style.opacity = "1");
+      close$.addEventListener("pointerleave", () => glyph.style.opacity = "0");
+      close$.addEventListener("click", (e) => { e.stopPropagation(); close(win); });
+
+      // zoom (maximize/restore)
+      let maximized = false, restoreRect = null;
+      el.querySelector("[data-zoom]").addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (maximized) {
+          Object.assign(rect, restoreRect); maximized = false; el.classList.remove("is-maximized");
+        } else {
+          restoreRect = { ...rect }; maximized = true; el.classList.add("is-maximized");
+          rect.left = 8; rect.top = MENUBAR_H + 8;
+          rect.width = Math.max(MIN_W, vp().w - 16); rect.height = Math.max(MIN_H, vp().h - MENUBAR_H - 72);
+        }
+        applyRect(win);
+      });
+
+      // drag by title bar
+      let dragging = false, sx = 0, sy = 0, ol = 0, ot = 0;
+      tt.addEventListener("pointerdown", (e) => {
+        if (e.target.closest("[data-close],[data-zoom],[data-resize]")) return;
+        if (e.button !== 0) return;
+        dragging = true; sx = e.clientX; sy = e.clientY; ol = rect.left; ot = rect.top;
+        focus(win); tt.setPointerCapture?.(e.pointerId); e.preventDefault();
+      });
+      tt.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        rect.left = clamp(ol + (e.clientX - sx), CLAMP - rect.width, vp().w - CLAMP);
+        rect.top = clamp(ot + (e.clientY - sy), MENUBAR_H, vp().h - CLAMP);
+        applyRect(win); e.preventDefault();
+      });
+      tt.addEventListener("pointerup", () => dragging = false);
+
+      // resize from bottom-right grip
+      const grip = el.querySelector("[data-resize]");
+      let resizing = false, rsx = 0, rsy = 0, ow = 0, oh = 0;
+      grip.addEventListener("pointerdown", (e) => {
+        resizing = true; rsx = e.clientX; rsy = e.clientY; ow = rect.width; oh = rect.height;
+        focus(win); grip.setPointerCapture?.(e.pointerId); e.preventDefault(); e.stopPropagation();
+      });
+      grip.addEventListener("pointermove", (e) => {
+        if (!resizing) return;
+        rect.width = clamp(ow + (e.clientX - rsx), MIN_W, vp().w - rect.left - 8);
+        rect.height = clamp(oh + (e.clientY - rsy), MIN_H, vp().h - rect.top - 8);
+        applyRect(win); e.preventDefault();
+      });
+      grip.addEventListener("pointerup", () => resizing = false);
+    }
+
+    function applyRect(win) {
+      const { el, rect } = win;
+      el.style.left = rect.left + "px"; el.style.top = rect.top + "px";
+      el.style.width = rect.width + "px"; el.style.height = rect.height + "px";
+    }
+
+    // Three MOCK VitaApps (manifest + body) standing in for runtime/apps/*. The real apps render the
+    // same dark, token-driven bodies into ctx.surface.root via the host bridge.
+    const MOCK_APPS = {
+      files: {
+        id: "vita.app.file-manager", icon: "📁", title: "Files", badge: "/",
+        body: row("📁 apps", "open ›", true) + row("📁 documents", "open ›", true) +
+              row("📄 readme.md", "1240 B") + row("📄 budget.csv", "2048 B"),
+      },
+      activity: {
+        id: "vita.app.activity", icon: "📊", title: "Activity", badge: "live",
+        body: `<div style="display:flex;gap:14px;padding:12px 16px;border-bottom:1px solid var(--hairline)">
+          <div style="flex:1"><div style="font-size:11px;color:var(--text-faint)">CPU Load</div>
+          <div style="font-size:22px;font-weight:600;color:var(--text)" data-cpu>4.2%</div></div>
+          <div style="flex:1"><div style="font-size:11px;color:var(--text-faint)">Memory</div>
+          <div style="font-size:22px;font-weight:600;color:var(--text)">3.1 / 8.0 GB</div></div></div>` +
+          row("kernel", "1.2%") + row("compositor", "3.8%") + row("agentd", "0.4%"),
+      },
+      notes: {
+        id: "vita.app.notes", icon: "📝", title: "Notes", badge: "draft",
+        body: `<div style="padding:16px;color:var(--text);line-height:1.7">
+          <div style="font-weight:600;margin-bottom:8px">Phase A CORE</div>
+          <div style="color:var(--text-secondary);font-size:13px">Window manager + app-host SDK wired into the live
+          launch path. Every app is a VitaApp mounted into a managed, dark window — drag, close, resize, focus all work.</div></div>`,
+      },
+    };
+
+    function row(label, right, dir) {
+      return `<div style="padding:8px 16px;border-top:1px solid var(--hairline);display:flex;justify-content:space-between;color:var(--text)${dir ? ';cursor:pointer' : ''}">
+        <span>${label}</span><span style="color:${dir ? 'var(--accent)' : 'var(--text-faint)'};font-size:11px">${right}</span></div>`;
+    }
+
+    function launch(name) {
+      const app = MOCK_APPS[name];
+      if (app) open(app.id, app);
+    }
+
+    document.querySelectorAll("[data-launch]").forEach((btn) =>
+      btn.addEventListener("click", () => launch(btn.getAttribute("data-launch"))));
+
+    // Open two windows so drag/focus/raise is immediately exercisable.
+    launch("files");
+    launch("activity");
+
+    // Live-tick the Activity CPU so the preview feels alive (mirrors the real ~1.5s poll).
+    setInterval(() => {
+      const cpu = document.querySelector("[data-cpu]");
+      if (cpu) cpu.textContent = (2 + Math.random() * 6).toFixed(1) + "%";
+    }, 1500);
+  </script>
+</body>
+</html>
