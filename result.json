@@ -1,0 +1,9 @@
+{
+  "contract": "PSD-350",
+  "acceptance_command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/notifications-tray-backend.test.ts",
+  "command_run": "cmd /c \"set NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main&& npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/notifications-tray-backend.test.ts\"",
+  "exit_code": 0,
+  "status": "pass",
+  "output_summary": "typecheck passed; node:test ran 5 tests, 5 passed, 0 failed",
+  "stdout": "> vita@0.0.0 typecheck\n> tsc --noEmit -p tsconfig.json\n\nTAP version 13\n# Subtest: postNotification stores and returns a guard-passing ShellNotification\nok 1 - postNotification stores and returns a guard-passing ShellNotification\n# Subtest: registerTrayItem stores and returns a guard-passing TrayItem\nok 2 - registerTrayItem stores and returns a guard-passing TrayItem\n# Subtest: NotificationsViewModel reads back backend notifications and tray controls\nok 3 - NotificationsViewModel reads back backend notifications and tray controls\n# Subtest: missing grants fail closed and store nothing\nok 4 - missing grants fail closed and store nothing\n# Subtest: notification and tray intents route back to the originating app\nok 5 - notification and tray intents route back to the originating app\n1..5\n# tests 5\n# suites 0\n# pass 5\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0"
+}

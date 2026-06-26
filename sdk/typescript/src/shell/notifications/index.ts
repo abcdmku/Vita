@@ -119,6 +119,31 @@ export interface TrayModelOptions {
   readonly capabilities?: ShellCapabilityPort;
 }
 
+export interface ShellNotificationsHostOptions {
+  readonly capabilities: ShellCapabilityPort;
+  readonly clock: NotificationClock;
+  readonly maxVisible?: number;
+}
+
+export interface ShellNotificationsHostSnapshot {
+  readonly notifications: NotificationCenterSnapshot;
+  readonly tray: TraySnapshot;
+}
+
+export interface ShellNotificationsHost {
+  readonly notificationCenter: NotificationCenter;
+  readonly trayModel: TrayModel;
+  postNotification(appId: string, input: NotificationPostInput): ShellResult<ShellNotification>;
+  registerTrayItem(appId: string, input: TrayItemInput): ShellResult<TrayItem>;
+  snapshot(): ShellNotificationsHostSnapshot;
+  dismiss(appId: string, notificationId: string): ShellResult<readonly ShellNotification[]>;
+  createActionIntent(notificationId: string, actionId: string, appId?: string): ShellResult<NotificationIntent>;
+  createDismissIntent(notificationId: string, appId?: string): ShellResult<NotificationIntent>;
+  click(itemId: string): ShellResult<TrayIntent>;
+  openMenu(itemId: string): ShellResult<TrayIntent>;
+  selectMenuItem(itemId: string, menuItemId: string): ShellResult<TrayIntent>;
+}
+
 export interface TrayMenuItemInput {
   readonly id: string;
   readonly label: string;
@@ -622,6 +647,59 @@ export function createStaticShellCapabilityPort(
     hasGrant(request: ShellCapabilityRequest): boolean {
       return hasStaticGrant(granted, request);
     },
+  });
+}
+
+export function createShellNotificationsHost(
+  options: ShellNotificationsHostOptions,
+): ShellNotificationsHost {
+  const notificationCenter = new NotificationCenter(options.maxVisible === undefined
+    ? {
+        capabilities: options.capabilities,
+        clock: options.clock,
+      }
+    : {
+        capabilities: options.capabilities,
+        clock: options.clock,
+        maxVisible: options.maxVisible,
+      });
+  const trayModel = new TrayModel({
+    capabilities: options.capabilities,
+  });
+
+  return Object.freeze({
+    click(itemId: string) {
+      return trayModel.click(itemId);
+    },
+    createActionIntent(notificationId: string, actionId: string, appId?: string) {
+      return notificationCenter.createActionIntent(notificationId, actionId, appId);
+    },
+    createDismissIntent(notificationId: string, appId?: string) {
+      return notificationCenter.createDismissIntent(notificationId, appId);
+    },
+    dismiss(appId: string, notificationId: string) {
+      return notificationCenter.dismiss(appId, notificationId);
+    },
+    notificationCenter,
+    openMenu(itemId: string) {
+      return trayModel.openMenu(itemId);
+    },
+    postNotification(appId: string, input: NotificationPostInput) {
+      return notificationCenter.post(appId, input);
+    },
+    registerTrayItem(appId: string, input: TrayItemInput) {
+      return trayModel.register(appId, input);
+    },
+    selectMenuItem(itemId: string, menuItemId: string) {
+      return trayModel.selectMenuItem(itemId, menuItemId);
+    },
+    snapshot() {
+      return Object.freeze({
+        notifications: notificationCenter.snapshot(),
+        tray: trayModel.snapshot(),
+      });
+    },
+    trayModel,
   });
 }
 

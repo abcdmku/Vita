@@ -51,6 +51,7 @@ export {
 export {
   NotificationCenter,
   TrayModel,
+  createShellNotificationsHost,
   createStaticShellCapabilityPort,
 } from "../shell/notifications/index.ts";
 export {
@@ -201,6 +202,9 @@ export type {
   ShellCapabilityRequest,
   ShellGrantCapability,
   ShellNotification,
+  ShellNotificationsHost,
+  ShellNotificationsHostOptions,
+  ShellNotificationsHostSnapshot,
   TrayIntent,
   TrayItem,
   TrayItemInput,
