@@ -362,6 +362,75 @@ func TestDesktopHostPeerGenericServiceRoleDoesNotIdentifyDesktopHost(t *testing.
 	}
 }
 
+// TestDesktopHostPeerProductionInstallScopesViaHelper proves the production
+// install path: DesktopHostUnixPeerInstall(uid) yields the principal key + service
+// binding that, fed into the handler config, make the desktop-host scope INSTALLED
+// (not zero-value/allow-all). The same install both SERVES an allowlisted
+// capability and DENIES a non-allowlisted one for the pinned desktop-host peer.
+func TestDesktopHostPeerProductionInstallScopesViaHelper(t *testing.T) {
+	desktopPrincipalKeys, binding := DesktopHostUnixPeerInstall(desktopHostPeerUID)
+	if want := UnixPeerUserPrincipalKey(desktopHostPeerUID); len(desktopPrincipalKeys) != 1 || desktopPrincipalKeys[0] != want {
+		t.Fatalf("install principal keys = %v, want [%q]", desktopPrincipalKeys, want)
+	}
+	if binding.PrincipalKey != UnixPeerUserPrincipalKey(desktopHostPeerUID) || binding.Role != identityroles.RoleService {
+		t.Fatalf("install binding = %#v, want pinned uid bound to service", binding)
+	}
+
+	t.Run("allowlisted capability served under the installed scope", func(t *testing.T) {
+		events := []string{}
+		store := newAuditStore(t)
+		handler := mustDesktopHostScopeHandler(t, desktopHostScopeHandlerConfig{
+			auditStore: store,
+			registry: mustRegistry(t,
+				&routedTxCapability{name: capsule.ExecuteName, events: &events},
+			),
+			desktopHostPrincipalKeys: desktopPrincipalKeys,
+			unixPeerRoles:            []UnixPeerRoleBinding{binding},
+		})
+		client, shutdown := serveDesktopHostScopeHandler(t, handler, store, desktopPeerInfo)
+		defer shutdown()
+
+		capsuleBody := `{"operations":[{"capability":"capsule.execute","request":{"desired":{"id":"local.test.capsule","version":"1.0.0","integrity":"` + transportSHA256SRI + `"}}}]}`
+		status, body := desktopHostRequest(t, client, http.MethodPost, "/apply", capsuleBody)
+		if status != http.StatusOK {
+			t.Fatalf("allowlisted apply status = %d, want %d; body=%s", status, http.StatusOK, body)
+		}
+		if !reflect.DeepEqual(events, []string{capsule.ExecuteName}) {
+			t.Fatalf("events = %v, want allowlisted capsule.execute served", events)
+		}
+	})
+
+	t.Run("non-allowlisted capability denied under the installed scope", func(t *testing.T) {
+		events := []string{}
+		store := newAuditStore(t)
+		handler := mustDesktopHostScopeHandler(t, desktopHostScopeHandlerConfig{
+			auditStore: store,
+			registry: mustRegistry(t, &routedTxCapability{
+				name:   identity.Name,
+				events: &events,
+				apply: func(capabilities.TypedRequest) error {
+					t.Fatal("non-allowlisted apply reached registry under installed desktop scope")
+					return nil
+				},
+			}),
+			desktopHostPrincipalKeys: desktopPrincipalKeys,
+			unixPeerRoles:            []UnixPeerRoleBinding{binding},
+		})
+		client, shutdown := serveDesktopHostScopeHandler(t, handler, store, desktopPeerInfo)
+		defer shutdown()
+
+		status, body := desktopHostRequest(t, client, http.MethodPost, "/apply", `{"operations":[{"capability":"identity.attestation","request":{"value":"must-not-decode"}}]}`)
+		if status != http.StatusForbidden {
+			t.Fatalf("non-allowlisted apply status = %d, want %d; body=%s", status, http.StatusForbidden, body)
+		}
+		assertCapabilityForbidden(t, body)
+		if len(events) != 0 {
+			t.Fatalf("events = %v, want no registry effect for denied non-allowlisted capability", events)
+		}
+		assertDesktopScopeAuditEvents(t, store, []auditlog.Operation{auditlog.OperationApply})
+	})
+}
+
 type desktopHostScopeHandlerConfig struct {
 	auditStore               AuditStore
 	registry                 *capabilities.Registry

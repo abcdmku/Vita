@@ -33,6 +33,28 @@ type UnixPeerRoleBinding struct {
 	Role         identityroles.Role
 }
 
+// DesktopHostUnixPeerInstall is the explicit, production desktop-host scope
+// install for one pinned desktop-host uid. It returns BOTH the desktop principal
+// key (so the connecting peer is classified as the desktop host) AND its
+// RoleService binding (so the classified peer actually passes the fail-closed
+// allowlist gate). Callers MUST feed both into Config — using them together is
+// what makes the desktop-host scope INSTALLED rather than an optional zero-value:
+// declaring the principal without this binding would (correctly) fail closed and
+// deny the host on every capability.
+//
+// The desktop host is pinned by its own uid (not by the shared vita-agent group,
+// which the runtime also holds) so the scope confines ONLY the desktop host and
+// never the runtime. This keeps desktop-host identity EXPLICIT — a peer is the
+// desktop host only when it presents this uid, never merely because it carries
+// the generic service role.
+func DesktopHostUnixPeerInstall(uid uint32) ([]string, UnixPeerRoleBinding) {
+	principalKey := UnixPeerUserPrincipalKey(uid)
+	return []string{principalKey}, UnixPeerRoleBinding{
+		PrincipalKey: principalKey,
+		Role:         identityroles.RoleService,
+	}
+}
+
 type desktopHostScope struct {
 	desktopPrincipals map[string]struct{}
 	roles             map[string]identityroles.Role
@@ -64,6 +86,12 @@ func newDesktopHostScope(desktopPrincipalKeys []string, bindings []UnixPeerRoleB
 		roles[binding.PrincipalKey] = binding.Role
 	}
 
+	// A declared desktop principal bound to any NON-service role is a
+	// misconfiguration and is rejected at construction. A declared desktop principal
+	// with NO binding is allowed to build but is denied at request time
+	// (isDesktopHostPeer returns an empty role -> desktopHostAllowed is false): an
+	// identified desktop host that is not actually bound to the service role fails
+	// closed rather than silently reaching the allowlist.
 	for principalKey := range desktopPrincipals {
 		if role, ok := roles[principalKey]; ok && role != identityroles.RoleService {
 			return desktopHostScope{}, fmt.Errorf("desktop host principal %q role must be %q", principalKey, identityroles.RoleService)
@@ -76,7 +104,20 @@ func newDesktopHostScope(desktopPrincipalKeys []string, bindings []UnixPeerRoleB
 	}, nil
 }
 
-func (s desktopHostScope) desktopHostPeerRole(ctx context.Context) (identityroles.Role, bool) {
+// isDesktopHostPeer reports whether the connection's kernel-authenticated peer
+// principal keys identify the explicit desktop host. Classification is keyed off
+// the SO_PEERCRED-derived principal keys only — never request content — and is
+// EXPLICIT: a key counts as the desktop host only when it appears in
+// Config.DesktopHostPrincipalKeys. A peer that merely holds RoleService (the
+// generic service role) is NOT the desktop host.
+//
+// The returned bool is the gate; the role is reported for the fail-closed check
+// below. When the matching desktop principal carries no service binding the role
+// is empty AND ok is true, so the caller DENIES — an identified desktop host with
+// no allowlist binding is forbidden, not allowed. (newDesktopHostScope already
+// rejects a desktop principal bound to any non-service role at construction, so a
+// present binding is always RoleService; the empty-role case is the unbound one.)
+func (s desktopHostScope) isDesktopHostPeer(ctx context.Context) (identityroles.Role, bool) {
 	principalKeys, ok := unixPeerPrincipalKeysFromContext(ctx)
 	if !ok {
 		return "", false
@@ -86,10 +127,7 @@ func (s desktopHostScope) desktopHostPeerRole(ctx context.Context) (identityrole
 		if _, ok := s.desktopPrincipals[key]; !ok {
 			continue
 		}
-		role, ok := s.roles[key]
-		if !ok {
-			return "", true
-		}
+		role := s.roles[key]
 		return role, true
 	}
 	return "", false
@@ -104,12 +142,21 @@ func (s desktopHostScope) allowsCapability(name string) bool {
 	}
 }
 
+// desktopHostAllowed reports whether an IDENTIFIED desktop host peer (already
+// classified by isDesktopHostPeer) may reach capability name. It is fail-closed:
+// the peer must carry the explicit service binding AND the capability must be on
+// the default-deny allowlist. An empty role (identified desktop host with no
+// matching service binding) is denied.
+func (s desktopHostScope) desktopHostAllowed(role identityroles.Role, name string) bool {
+	return role == identityroles.RoleService && s.allowsCapability(name)
+}
+
 func (h *handler) authorizeDesktopHostCapability(ctx context.Context, name string, operation auditlog.Operation) *requestError {
-	role, ok := h.desktopHostScope.desktopHostPeerRole(ctx)
-	if !ok {
+	role, isDesktopHost := h.desktopHostScope.isDesktopHostPeer(ctx)
+	if !isDesktopHost {
 		return nil
 	}
-	if role == identityroles.RoleService && h.desktopHostScope.allowsCapability(name) {
+	if h.desktopHostScope.desktopHostAllowed(role, name) {
 		return nil
 	}
 
@@ -118,17 +165,13 @@ func (h *handler) authorizeDesktopHostCapability(ctx context.Context, name strin
 }
 
 func (h *handler) authorizeDesktopHostApply(ctx context.Context, operations []rawOperation) *requestError {
-	role, ok := h.desktopHostScope.desktopHostPeerRole(ctx)
-	if !ok {
+	role, isDesktopHost := h.desktopHostScope.isDesktopHostPeer(ctx)
+	if !isDesktopHost {
 		return nil
-	}
-	if role != identityroles.RoleService {
-		h.recordDesktopHostScopeForbidden(ctx, auditlog.OperationApply)
-		return desktopHostScopeForbidden()
 	}
 
 	for _, operation := range operations {
-		if !h.desktopHostScope.allowsCapability(operation.Capability) {
+		if !h.desktopHostScope.desktopHostAllowed(role, operation.Capability) {
 			h.recordDesktopHostScopeForbidden(ctx, auditlog.OperationApply)
 			return desktopHostScopeForbidden()
 		}
