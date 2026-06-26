@@ -2237,10 +2237,13 @@ fn add_default_input_devices(
     });
 
     add_selected_input_devices(paths, |path| {
-        let path = CString::new(path.as_os_str().as_bytes())
+        let cpath = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| input_unavailable("input device path contained an interior NUL byte"))?;
-        let device = unsafe { (libinput.path_add_device)(context, path.as_ptr()) };
-        Ok(!device.is_null())
+        let device = unsafe { (libinput.path_add_device)(context, cpath.as_ptr()) };
+        let ok = !device.is_null();
+        eprintln!("VITA-INPUT-DIAG: path_add_device {} -> {}", path.display(),
+                  if ok { "ADDED" } else { "skip" });
+        Ok(ok)
     })
 }
 
