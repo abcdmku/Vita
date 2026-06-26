@@ -74,6 +74,13 @@ const LIBINPUT_EVENT_POINTER_BUTTON: u32 = 402;
 // space. These constants apply only when no real mode is supplied.
 const OUTPUT_WIDTH: u32 = 1280;
 const OUTPUT_HEIGHT: u32 = 720;
+// PSD-503: cap the auto-selected scanout width. The VMware vmwgfx virtual connector advertises a
+// 16:10/4:3 mode ladder whose FIRST/preferred entry is the small 1280x800 default, but it also
+// offers 1920x1440, 2560x1600, 4096x2160 (there is NO 1920x1080). We want the desktop to FILL the
+// display, so we pick the LARGEST advertised mode whose width is <= this cap (-> 1920x1440 here)
+// rather than the preferred/first entry. The cap bounds CEF's software-OSR cost + the readback
+// buffer size at a sane upper limit while still going far above the 1280x800 default.
+const MAX_OUTPUT_WIDTH: u32 = 1920;
 const LIBINPUT_BUTTON_STATE_PRESSED: u32 = 1;
 const LIBINPUT_KEY_STATE_PRESSED: u32 = 1;
 
@@ -1813,7 +1820,7 @@ unsafe fn select_connected_connector(
         return None;
     }
     let modes = raw_mode_slice(connector.modes, connector.count_modes);
-    let mode = *modes.first()?;
+    let mode = pick_best_mode(modes)?;
     let encoder = find_connector_encoder(fd, drm, connector)?;
     let crtc_id = choose_crtc_id(&encoder, crtcs)?;
     let original = saved_crtc(fd, drm, crtc_id);
@@ -1823,6 +1830,36 @@ unsafe fn select_connected_connector(
         mode,
         original,
     }))
+}
+
+// PSD-503: choose the active scanout mode from the connector's FULL advertised mode list instead of
+// blindly taking the first/preferred entry. The VMware connector lists its small default (1280x800)
+// first, so `modes.first()` undersizes the desktop into a corner of a larger display. We instead
+// pick the LARGEST mode (by area) whose width is <= MAX_OUTPUT_WIDTH (1920) -> 1920x1440 on the
+// vmwgfx ladder. If every advertised mode is wider than the cap (unusual), fall back to the smallest
+// available mode so we still produce a usable scanout rather than failing. Modes with a zero
+// dimension are ignored. Ties (same area) keep the earlier/preferred entry for determinism.
+fn pick_best_mode(modes: &[DrmModeModeInfo]) -> Option<DrmModeModeInfo> {
+    let valid = |m: &&DrmModeModeInfo| m.hdisplay > 0 && m.vdisplay > 0;
+    let area = |m: &DrmModeModeInfo| u64::from(m.hdisplay) * u64::from(m.vdisplay);
+
+    // Largest-area mode within the width cap (preferred path: -> 1920x1440 on vmwgfx).
+    let within_cap = modes
+        .iter()
+        .filter(valid)
+        .filter(|m| u32::from(m.hdisplay) <= MAX_OUTPUT_WIDTH)
+        .max_by_key(|m| area(m));
+    if let Some(mode) = within_cap {
+        return Some(*mode);
+    }
+
+    // Every advertised mode exceeds the cap: fall back to the smallest valid mode so we still scan
+    // out something rather than returning None (which would abort the KMS backend entirely).
+    modes
+        .iter()
+        .filter(valid)
+        .min_by_key(|m| area(m))
+        .copied()
 }
 
 unsafe fn find_connector_encoder(

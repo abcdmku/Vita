@@ -411,8 +411,16 @@ function renderVmx(config) {
     `svga.autodetect = "FALSE"`,
     `svga.vramSize = "268435456"`,
     `svga.graphicsMemoryKB = "262144"`,
+    // PSD-503: pin the SVGA panel to 1920x1440 (min == max) so the vmwgfx connector advertises
+    // 1920x1440 as an available mode and the guest selects it. The previous maxHeight=1080 capped
+    // the panel BELOW the 1920x1440 target (the vmwgfx ladder has no 1920x1080), which is part of
+    // why the desktop fell back to the small 1280x800 default. Pinning min==max forces a single
+    // fixed mode that the compositor's pick_best_mode (largest <= 1920 wide) resolves to 1920x1440,
+    // and disables VMware's autofit so the host window does not renegotiate it.
+    `svga.minWidth = "1920"`,
     `svga.maxWidth = "1920"`,
-    `svga.maxHeight = "1080"`,
+    `svga.minHeight = "1440"`,
+    `svga.maxHeight = "1440"`,
     `vmotion.checkpointFBSize = "134217728"`,
     `vmotion.checkpointSVGAPrimarySize = "268435456"`,
     `ethernet0.present = "FALSE"`,

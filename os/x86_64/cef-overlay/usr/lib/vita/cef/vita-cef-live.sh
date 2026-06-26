@@ -69,25 +69,40 @@ while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
 done
 if [ ! -e /dev/dri/card0 ]; then emit_failsafe "dri_card0_absent"; exit 0; fi
 
-# --- PSD-500: detect the REAL display resolution -----------------------------
-# Read the primary DRM/KMS connector's PREFERRED mode (the VMware virtual display size, e.g.
-# 1920x1080) so the desktop renders full-size instead of a hardcoded 1280x720 corner. The
-# compositor independently reads the SAME connector mode (query_default_output_mode); we read it
-# here too so the upstream CEF view + buffer surface match. Source: /sys/class/drm/<conn>/modes
-# (first non-empty line = current/preferred mode). Fall back to 1280x720 if it cannot be read.
+# --- PSD-503: detect the REAL display resolution (LARGEST mode <= 1920 wide) --
+# The VMware vmwgfx connector advertises a 16:10/4:3 mode ladder (1280x800, 1920x1440, 2560x1600,
+# 4096x2160 -- there is NO 1920x1080). Its PREFERRED/first entry is the small 1280x800 default, so
+# taking modes.first() (the old behaviour) undersized the desktop into a corner. Instead enumerate
+# the connector's FULL mode list and pick the LARGEST mode (by pixel area) whose width is <=
+# MAX_DISP_W (1920) -> 1920x1440 here. The compositor selects the SAME mode independently
+# (pick_best_mode in linux.rs); we mirror the rule here so the CEF view + buffer surface match the
+# scanout. Source: /sys/class/drm/<conn>/modes (one WxH per line). Fall back to 1280x800 if nothing
+# is readable.
+MAX_DISP_W=1920
 DISP_W=1280
-DISP_H=720
+DISP_H=800
+best_area=0
 for mp in /sys/class/drm/card0-*/modes; do
   [ -r "$mp" ] || continue
-  # The connected connector's modes file is non-empty; its first line is the preferred mode.
-  first=$(grep -aoE '^[0-9]{3,5}x[0-9]{3,5}' "$mp" 2>/dev/null | head -1)
-  if [ -n "$first" ]; then
-    w=${first%x*}; h=${first#*x}
-    if [ "$w" -ge 320 ] && [ "$h" -ge 240 ] && [ "$w" -le 16384 ] && [ "$h" -le 16384 ]; then
-      DISP_W=$w; DISP_H=$h
-      break
+  # Enumerate EVERY advertised mode (not just the first/preferred line) and keep the largest-area
+  # one within the width cap.
+  while IFS= read -r m; do
+    case "$m" in
+      [0-9]*x[0-9]*) : ;;
+      *) continue ;;
+    esac
+    w=${m%x*}; h=${m#*x}
+    # Strip any trailing suffix (e.g. "i" for interlaced) from h.
+    h=${h%%[!0-9]*}
+    case "$w$h" in *[!0-9]*) continue ;; esac
+    [ "$w" -ge 320 ] && [ "$h" -ge 240 ] && [ "$w" -le 16384 ] && [ "$h" -le 16384 ] || continue
+    [ "$w" -le "$MAX_DISP_W" ] || continue
+    area=$(( w * h ))
+    if [ "$area" -gt "$best_area" ]; then
+      best_area=$area; DISP_W=$w; DISP_H=$h
     fi
-  fi
+  done < <(grep -aoE '^[0-9]{3,5}x[0-9]{3,5}' "$mp" 2>/dev/null)
+  [ "$best_area" -gt 0 ] && break
 done
 # CEF view height: render the flagship at the real height so 1:1 vertical mapping (no upscaling).
 # View width == output width (the vertical box-filter downscale preserves width). The historical
@@ -389,11 +404,40 @@ if [ "$seen_ok" -eq 1 ]; then
         ;;
     esac
 
+    # --- HONEST interactivity verdict (cef-selftest-false-verdicts) -----------------------------
+    # The OLD verdict declared CONFIRMED on SendMouse>0 ALONE — a false POSITIVE that masked the
+    # scrim bug (events reached CEF but no window opened because an inert scrim ate the DOM click).
+    # The HONEST proof that a click drove the desktop is a NATIVE APP WINDOW that exists AFTER the
+    # click. Require ALL of:
+    #   (a) SendMouse>0            — injected events actually reached CEF (loop wired end-to-end), AND
+    #   (b) app-window=present on a probe taken AFTER the action — either osr_host's recurring
+    #       `VITA-NATIVE app-window=present probe=post-action` re-probe, OR the desktop's own
+    #       `VITA-INDEX launchOrFocusDock <id> ... appWindow=true` launch signal, AND
+    #   (c) the VMware GPU path (input=available). The surfaceless QEMU `-nographic` path reports
+    #       input=unavailable and can NEVER prove interactivity — there we report UNVERIFIED, not
+    #       CONFIRMED, so a headless boot cannot mint a false positive.
     sends=$(grep -acE "input: SendMouse" "$CEF_LOG" 2>/dev/null)
     clicks=$(grep -acE "input: SendMouseClick" "$CEF_LOG" 2>/dev/null)
-    appwin=$(grep -aE "VITA-NATIVE app-window=" "$CEF_LOG" 2>/dev/null | tail -1 | sed 's/.*app-window=//')
-    if [ "$sends" -gt 0 ]; then
-      emit_line "$MARKER: interactive=CONFIRMED input-selftest SendMouse=$sends clicks=$clicks app-window-after=$appwin"
+    # POST-ACTION app-window probe: only probe=post-action lines count (the probe=on-load one-shot
+    # fires ~1.8s after load, BEFORE the clicks, and must NOT satisfy the verdict). tail -1 = latest.
+    appwin=$(grep -aE "VITA-NATIVE app-window=.* probe=post-action" "$CEF_LOG" 2>/dev/null | tail -1 | sed -n 's/.*app-window=\([a-z]*\).*/\1/p')
+    # The desktop's OWN launch signal: a real dock click that reached launchOrFocusDock and had a
+    # window host bound (appWindow=true). Independent corroboration of (b) from the renderer side.
+    launchsig=$(grep -acE "VITA-INDEX launchOrFocusDock .* appWindow=true" "$CEF_LOG" 2>/dev/null)
+    gpu_path=0
+    [ "$input_state" = "input=available" ] && gpu_path=1
+    win_after=0
+    { [ "$appwin" = "present" ] || [ "${launchsig:-0}" -gt 0 ]; } && win_after=1
+
+    if [ "$gpu_path" -ne 1 ]; then
+      # Surfaceless/headless path: input is unavailable; we cannot honestly prove interactivity here.
+      emit_line "$MARKER: interactive=UNVERIFIED ${input_state} (surfaceless path: cannot prove interactivity; SendMouse=$sends app-window=${appwin:-none} launch-signal=$launchsig)"
+    elif [ "$sends" -gt 0 ] && [ "$win_after" -eq 1 ]; then
+      emit_line "$MARKER: interactive=CONFIRMED app-window=present (probed AFTER action) SendMouse=$sends clicks=$clicks app-window-after=${appwin:-via-launch-signal} launch-signal=$launchsig path=vmware-gpu"
+    elif [ "$sends" -gt 0 ]; then
+      # Events reached CEF but NO native window opened after the click — this is exactly the scrim
+      # regression the old SendMouse>0 check masked. Report FAILED, not CONFIRMED.
+      emit_line "$MARKER: interactive=FAILED no-app-window-after-click SendMouse=$sends clicks=$clicks app-window-after=${appwin:-absent} launch-signal=$launchsig (click reached CEF but opened no window — possible inert scrim/hit-test regression)"
     else
       emit_line "$MARKER: interactive=FAILED input-selftest SendMouse=0 (events not reaching CEF)"
     fi
