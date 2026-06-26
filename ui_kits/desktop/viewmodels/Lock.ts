@@ -610,7 +610,7 @@ function freezeUser(user: LockUser): LockUser {
   });
 }
 
-function clockDisplay(epochMs: number): LockClockDisplay {
+export function formatLockClockDisplay(epochMs: number): LockClockDisplay {
   const date = new Date(epochMs);
   const weekday = WEEKDAYS[date.getUTCDay()] ?? "Sunday";
   const month = MONTHS[date.getUTCMonth()] ?? "January";
@@ -625,6 +625,8 @@ function clockDisplay(epochMs: number): LockClockDisplay {
     time: `${hours}:${minutes}`,
   });
 }
+
+const clockDisplay = formatLockClockDisplay;
 
 function contains(values: readonly string[], value: string): boolean {
   for (let index = 0; index < values.length; index += 1) {
