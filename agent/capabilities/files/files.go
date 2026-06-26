@@ -20,6 +20,8 @@ const (
 
 	MaxFileBytes        int64 = 8 * 1024 * 1024
 	MaxRequestBodyBytes int64 = 12 * 1024 * 1024
+	MaxTreeEntries            = 4096
+	MaxRecursiveDepth         = 16
 
 	directoryMode os.FileMode = 0o700
 	fileMode      os.FileMode = 0o600
@@ -35,10 +37,15 @@ const (
 type Operation string
 
 const (
-	OperationList  Operation = "list"
-	OperationRead  Operation = "read"
-	OperationWrite Operation = "write"
-	OperationStat  Operation = "stat"
+	OperationList          Operation = "list"
+	OperationRead          Operation = "read"
+	OperationWrite         Operation = "write"
+	OperationStat          Operation = "stat"
+	OperationCopy          Operation = "copy"
+	OperationMove          Operation = "move"
+	OperationMkdir         Operation = "mkdir"
+	OperationDelete        Operation = "delete"
+	OperationListRecursive Operation = "list_recursive"
 )
 
 type Kind string
@@ -66,6 +73,8 @@ type Request struct {
 	Grant string    `json:"grant"`
 	Path  string    `json:"path"`
 	Data  *string   `json:"data,omitempty"`
+	Dest  string    `json:"dest,omitempty"`
+	Depth int       `json:"depth,omitempty"`
 }
 
 func (r *Request) UnmarshalJSON(raw []byte) error {
@@ -179,7 +188,7 @@ func (r Request) Validate() error {
 		return filesError(400, "invalid_request", "op is required")
 	}
 	switch r.Op {
-	case OperationList, OperationRead, OperationWrite, OperationStat:
+	case OperationList, OperationRead, OperationWrite, OperationStat, OperationCopy, OperationMove, OperationMkdir, OperationDelete, OperationListRecursive:
 	default:
 		return filesError(400, "unknown_op", "unknown files op")
 	}
@@ -188,6 +197,20 @@ func (r Request) Validate() error {
 	}
 	if r.Path == "" {
 		return filesError(400, "path_traversal", "path is outside the grant scope")
+	}
+	if r.Op == OperationCopy || r.Op == OperationMove {
+		if r.Dest == "" {
+			return filesError(400, "invalid_request", "dest is required for copy and move")
+		}
+	} else if r.Dest != "" {
+		return filesError(400, "invalid_request", "dest is only allowed for copy and move")
+	}
+	if r.Op == OperationListRecursive {
+		if r.Depth < 0 || r.Depth > MaxRecursiveDepth {
+			return filesError(413, "tree_too_large", "recursive list depth exceeds files cap")
+		}
+	} else if r.Depth != 0 {
+		return filesError(400, "invalid_request", "depth is only allowed for recursive list")
 	}
 	if r.Op == OperationWrite {
 		if r.Data == nil {
@@ -226,7 +249,7 @@ func (h *Handler) Handle(ctx context.Context, request Request) (Response, error)
 	if !ok {
 		return Response{}, filesError(403, "role_forbidden", "files role is not allowed for this grant")
 	}
-	if request.Op == OperationWrite && effectiveAccess != AccessReadWrite {
+	if isMutatingOperation(request.Op) && effectiveAccess != AccessReadWrite {
 		if grant.roles == nil {
 			return Response{}, filesError(403, "read_only_grant", "files grant is read-only")
 		}
@@ -256,8 +279,39 @@ func (h *Handler) Handle(ctx context.Context, request Request) (Response, error)
 		return h.write(ctx, abs, data)
 	case OperationStat:
 		return h.stat(ctx, abs)
+	case OperationCopy:
+		destAbs, ok := ResolveWithinScope(base, request.Dest)
+		if !ok {
+			return Response{}, filesError(400, "path_traversal", "path is outside the grant scope")
+		}
+		return h.copy(ctx, abs, destAbs)
+	case OperationMove:
+		destAbs, ok := ResolveWithinScope(base, request.Dest)
+		if !ok {
+			return Response{}, filesError(400, "path_traversal", "path is outside the grant scope")
+		}
+		return h.move(ctx, abs, destAbs)
+	case OperationMkdir:
+		return h.mkdir(ctx, abs)
+	case OperationDelete:
+		return h.delete(ctx, abs)
+	case OperationListRecursive:
+		depth := request.Depth
+		if depth == 0 {
+			depth = MaxRecursiveDepth
+		}
+		return h.listRecursive(ctx, abs, depth)
 	default:
 		return Response{}, filesError(400, "unknown_op", "unknown files op")
+	}
+}
+
+func isMutatingOperation(op Operation) bool {
+	switch op {
+	case OperationWrite, OperationCopy, OperationMove, OperationMkdir, OperationDelete:
+		return true
+	default:
+		return false
 	}
 }
 
