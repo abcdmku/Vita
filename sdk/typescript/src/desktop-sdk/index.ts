@@ -301,7 +301,6 @@ export type {
   OwnerAuthAgentdCapability,
   OwnerAuthAgentdTransport,
   OwnerAuthAssertion,
-  OwnerAuthPortOptions,
   OwnerAuthRequest,
   OwnerAuthSession,
   OwnerAuthUser,

@@ -151,17 +151,12 @@ export interface OwnerAuthAssertion {
 
 export interface OwnerAuthRequest {
   readonly assertion: OwnerAuthAssertion;
-  readonly user: OwnerAuthUser;
 }
 
 export interface OwnerAuthSession {
   readonly user: OwnerAuthUser;
   readonly authenticatedAtMs?: number;
   readonly sessionId?: string;
-}
-
-export interface OwnerAuthPortOptions {
-  readonly user?: OwnerAuthUser;
 }
 
 export interface DesktopHost {
@@ -211,11 +206,10 @@ const OWNER_AUTH_HOST_ERROR_FIELDS = Object.freeze(["code", "message", "path"]);
 
 export function createOwnerAuthPort(
   host: Pick<DesktopHost, "authenticateOwner">,
-  options: OwnerAuthPortOptions = Object.freeze({}),
 ): LockAuthPort {
   return Object.freeze({
     async authenticate(request: LockAuthenticateRequest): Promise<DesktopHostResult<LockAuthSession>> {
-      const ownerRequest = ownerAuthRequestFromLockRequest(request, options);
+      const ownerRequest = ownerAuthRequestFromLockRequest(request);
 
       if (!ownerRequest.ok) return ownerRequest;
 
@@ -240,7 +234,6 @@ export function createOwnerAuthPort(
 
 function ownerAuthRequestFromLockRequest(
   request: LockAuthenticateRequest,
-  options: OwnerAuthPortOptions,
 ): DesktopHostResult<OwnerAuthRequest> {
   const normalized = safeNormalize(request);
 
@@ -272,17 +265,8 @@ function ownerAuthRequestFromLockRequest(
 
   if (!parsed.ok) return parsed;
 
-  const optionUser = options.user === undefined
-    ? undefined
-    : normalizeOwnerAuthUser(options.user, "/auth/options/user");
-
-  if (optionUser !== undefined && !optionUser.ok) {
-    return lockReject("AUTH_PORT_MALFORMED", optionUser.error.message, optionUser.error.path);
-  }
-
   return hostAccept(Object.freeze({
     assertion: parsed.value.assertion,
-    user: optionUser?.value ?? lockUserFromId(userId),
   }));
 }
 
@@ -496,16 +480,6 @@ function normalizeOwnerAuthUser(input: unknown, path: string): DesktopHostResult
     id,
     initials,
   }));
-}
-
-function lockUserFromId(userId: string): OwnerAuthUser {
-  const first = userId.trim().charAt(0).toUpperCase();
-
-  return Object.freeze({
-    displayName: userId,
-    id: userId,
-    initials: first.length === 0 ? "U" : first,
-  });
 }
 
 function hostErrorCodeToLockCode(code: string): LockViewModelErrorCode {

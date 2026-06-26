@@ -55,6 +55,7 @@ import type {
   OwnerAuthAgentdTransport,
   OwnerAuthRequest,
   OwnerAuthSession,
+  OwnerAuthUser,
 } from "./ui-package.ts";
 
 export const KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID = "vita.desktop-ui.known-good";
@@ -147,14 +148,14 @@ const SETTINGS_READ_FIELDS = Object.freeze(["key"]);
 const SETTINGS_WRITE_FIELDS = Object.freeze(["key", "value"]);
 const LAUNCHER_INTENT_REQUIRED_FIELDS = Object.freeze(["type"]);
 const LAUNCHER_INTENT_OPTIONAL_FIELDS = Object.freeze(["appId", "query"]);
-const OWNER_AUTH_REQUEST_FIELDS = Object.freeze(["assertion", "user"]);
+const OWNER_AUTH_REQUEST_FIELDS = Object.freeze(["assertion"]);
 const OWNER_AUTH_ASSERTION_FIELDS = Object.freeze(["action", "authenticatorData", "clientDataJSON", "credentialId", "signature"]);
 const OWNER_AUTH_USER_FIELDS = Object.freeze(["displayName", "id", "initials"]);
 const OWNER_AUTH_AGENTD_RESULT_REQUIRED_FIELDS = Object.freeze(["ok"]);
 const OWNER_AUTH_AGENTD_RESULT_OPTIONAL_FIELDS = Object.freeze(["error", "value"]);
 const OWNER_AUTH_AGENTD_ERROR_REQUIRED_FIELDS = Object.freeze(["code", "message"]);
 const OWNER_AUTH_AGENTD_ERROR_OPTIONAL_FIELDS = Object.freeze(["status"]);
-const OWNER_AUTH_VERDICT_SUCCESS_FIELDS = Object.freeze(["action", "verified"]);
+const OWNER_AUTH_VERDICT_SUCCESS_FIELDS = Object.freeze(["action", "user", "verified"]);
 const OWNER_AUTH_VERDICT_DENY_FIELDS = Object.freeze(["reason", "verified"]);
 const CAPABILITY_DENIED_CODE = "CAP_DENIED";
 
@@ -654,7 +655,7 @@ async function authenticateOwnerWithAgentd(
 
   if (!agentdResult.ok) return hostRejectFromValidation(agentdResult.error);
 
-  const verdict = normalizeOwnerAuthVerdict(agentdResult.value, request.user);
+  const verdict = normalizeOwnerAuthVerdict(agentdResult.value);
 
   return verdict.ok ? acceptHost(verdict.value) : hostRejectFromValidation(verdict.error);
 }
@@ -1241,14 +1242,11 @@ function normalizeOwnerAuthRequest(input: unknown, path: string): DesktopUiValid
   if (!object.ok) return object;
 
   const assertion = normalizeOwnerAuthAssertion(field(object.value, "assertion"), `${path}/assertion`);
-  const user = normalizeOwnerAuthUser(field(object.value, "user"), `${path}/user`);
 
   if (!assertion.ok) return assertion;
-  if (!user.ok) return user;
 
   return accept(Object.freeze({
     assertion: assertion.value,
-    user: user.value,
   }));
 }
 
@@ -1288,7 +1286,7 @@ function normalizeOwnerAuthAssertion(
 function normalizeOwnerAuthUser(
   input: PlainJson | undefined,
   path: string,
-): DesktopUiValidationResult<OwnerAuthRequest["user"]> {
+): DesktopUiValidationResult<OwnerAuthUser> {
   if (!isPlainObject(input)) {
     return reject("INVALID_HOST_REQUEST", "owner auth user must be an object.", path);
   }
@@ -1362,10 +1360,7 @@ function normalizeOwnerAuthAgentdResult(input: unknown): DesktopUiValidationResu
   return reject("MALFORMED_OWNER_AUTH_RESPONSE", "agentd result is malformed.", "/authenticateOwner/agentd/ok");
 }
 
-function normalizeOwnerAuthVerdict(
-  input: PlainJsonObject,
-  user: OwnerAuthRequest["user"],
-): DesktopUiValidationResult<OwnerAuthSession> {
+function normalizeOwnerAuthVerdict(input: PlainJsonObject): DesktopUiValidationResult<OwnerAuthSession> {
   const verified = field(input, "verified");
 
   if (verified === true) {
@@ -1374,12 +1369,14 @@ function normalizeOwnerAuthVerdict(
     if (!fields.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", fields.error.message, fields.error.path);
 
     const action = normalizePlainString(field(input, "action"), "/authenticateOwner/agentd/value/action", true);
+    const user = normalizeOwnerAuthUser(field(input, "user"), "/authenticateOwner/agentd/value/user");
 
     if (!action.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", action.error.message, action.error.path);
+    if (!user.ok) return reject("MALFORMED_OWNER_AUTH_RESPONSE", user.error.message, user.error.path);
 
     return accept(Object.freeze({
-      sessionId: `owner:${user.id}:${action.value}`,
-      user,
+      sessionId: `owner:${user.value.id}:${action.value}`,
+      user: user.value,
     }));
   }
   if (verified === false) {

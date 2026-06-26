@@ -47,6 +47,7 @@ test("authenticateOwner accepts an ok webauthn.get verdict and the Lock adapter 
     ok: true,
     value: Object.freeze({
       action: "unlock",
+      user: OWNER_USER,
       verified: true,
     }),
   });
@@ -67,9 +68,7 @@ test("authenticateOwner accepts an ok webauthn.get verdict and the Lock adapter 
   ]);
 
   const lock = createLockViewModel({
-    auth: createOwnerAuthPort(scoped, {
-      user: OWNER_USER,
-    }),
+    auth: createOwnerAuthPort(scoped),
     user: OWNER_USER,
   });
   const unlocked = await lock.submit(JSON.stringify(OWNER_ASSERTION));
@@ -126,6 +125,7 @@ test("authenticateOwner missing owner.auth grant fails closed before invoking ag
     ok: true,
     value: Object.freeze({
       action: "unlock",
+      user: OWNER_USER,
       verified: true,
     }),
   });
@@ -147,8 +147,8 @@ test("Lock adapter ignores a forged user inside the submitted credential", async
       return {
         ok: true,
         value: Object.freeze({
-          sessionId: `owner:${request.user.id}:unlock`,
-          user: request.user,
+          sessionId: `owner:${OWNER_USER.id}:unlock`,
+          user: OWNER_USER,
         }),
       };
     },
@@ -169,10 +169,37 @@ test("Lock adapter ignores a forged user inside the submitted credential", async
   const request = requests[0];
 
   if (request === undefined) assert.fail("expected adapter to call authenticateOwner");
-  assert.equal(request.user.id, OWNER_USER.id);
-  assert.notEqual(request.user.id, FORGED_USER.id);
+  assert.equal(Object.hasOwn(request, "user"), false);
   assert.equal(unlocked.state.user.id, OWNER_USER.id);
   assert.notEqual(unlocked.state.user.id, FORGED_USER.id);
+});
+
+test("authenticateOwner rejects a request-side forged user before invoking agentd", async () => {
+  const agentd = agentdStub({
+    ok: true,
+    value: Object.freeze({
+      action: "unlock",
+      user: OWNER_USER,
+      verified: true,
+    }),
+  });
+  const scoped = scopedHost(["owner.auth"], agentd);
+  const authenticateOwner = scoped.authenticateOwner;
+
+  if (authenticateOwner === undefined) {
+    assert.fail("expected authenticateOwner to be installed on the scoped host");
+  }
+
+  const forgedRequest = Object.freeze({
+    assertion: OWNER_ASSERTION,
+    user: FORGED_USER,
+  });
+  const rejected = await authenticateOwner(forgedRequest);
+
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) assert.fail("expected request-side user to be rejected");
+  assert.equal(rejected.error.code, "UNEXPECTED_FIELD");
+  assert.equal(agentd.calls.length, 0);
 });
 
 test("Lock adapter normalizes malformed and throwing host results fail closed", async () => {
@@ -212,7 +239,6 @@ test("Lock adapter normalizes malformed and throwing host results fail closed", 
 function ownerAuthRequest(): OwnerAuthRequest {
   return Object.freeze({
     assertion: OWNER_ASSERTION,
-    user: OWNER_USER,
   });
 }
 
