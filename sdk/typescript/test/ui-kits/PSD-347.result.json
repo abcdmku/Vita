@@ -1,0 +1,32 @@
+{
+  "id": "PSD-347",
+  "command": "npm run typecheck && node --experimental-strip-types --test sdk/typescript/test/ui-kits/app-registry.test.ts",
+  "status": "pass",
+  "environmentNote": "Re-run during integration (integ/PSD-347) on the recovery worktree. The 5 SDK createAppRegistry tests + 1 immutability regression test were consolidated into app-registry.test.ts alongside the pre-existing 7 view-model tests so the acceptance command covers all of them (13 total).",
+  "output": [
+    "> vita@0.0.0 typecheck",
+    "> tsc --noEmit -p tsconfig.json",
+    "TAP version 13",
+    "ok 1 - registry lists first-party and capsule apps by id with declared grants",
+    "ok 2 - validateLaunch authorizes listed apps and fails closed",
+    "ok 3 - seeded descriptors satisfy the DesktopLaunchableApp union shape",
+    "ok 4 - launcher launch intents resolve listed apps only",
+    "ok 5 - first-party SRI failures are dropped fail-closed",
+    "ok 6 - registry output is immutable against post-construction source mutation",
+    "ok 7 - defineAppPackage accepts and freezes a valid web app package",
+    "ok 8 - defineAppPackage fails closed on malformed app manifests and descriptors",
+    "ok 9 - defineAppPackage rejects hostile and cyclic definitions without invoking accessors",
+    "ok 10 - hasAppCapabilityGrant mirrors desktop capability resource matching",
+    "ok 11 - app registry lists installed apps deterministically and frozen",
+    "ok 12 - app registry launches and stops installed apps through injected ports",
+    "ok 13 - app registry fails closed on unknown app, double launch, missing running app, and denying ports",
+    "1..13",
+    "# tests 13",
+    "# suites 0",
+    "# pass 13",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0"
+  ]
+}
