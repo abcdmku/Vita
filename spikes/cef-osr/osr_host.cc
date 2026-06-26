@@ -455,9 +455,11 @@ bool EmitCompositorFrame() {
     stream += "registerBufferSurface " + g_surface_id + " " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
               " " + hex + "\n";
+    // z=10: the live desktop sits ABOVE the honest loading screen (z=0) so its first real frame
+    // covers the loading indicator. The cursor surface is higher still (z=1000).
     stream += "updatePlacement " + g_surface_id + " 0 0 " +
               std::to_string(kCompWidth) + " " + std::to_string(kCompHeight) +
-              " 0 true\n";
+              " 10 true\n";
     g_registered = true;
   } else {
     stream += "updateBufferSurface " + g_surface_id + " " + hex + "\n";

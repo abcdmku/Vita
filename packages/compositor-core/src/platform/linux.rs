@@ -2255,6 +2255,7 @@ impl LibinputState {
                                 pointer_event,
                                 OUTPUT_HEIGHT,
                             );
+                            eprintln!("VITA-INPUT-DIAG: abs-motion x={x} y={y}");
                             if x.is_finite() && y.is_finite() {
                                 events.push(InputEvent::PointerMotionAbsolute {
                                     x_micropixels: (x * 1_000_000.0) as i64,

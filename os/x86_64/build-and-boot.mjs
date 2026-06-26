@@ -448,10 +448,10 @@ function installCefOverlay() {
     // Preserve the COMMITTED launch script + the baked instant-desktop assets (first-frame snapshot
     // + cursor command streams) across the clean — they live in this dir under git (cef-vm-input).
     const launchBody = readFileSync(launchSh);
-    const snapshotPath = join(cefDst, "flagship-firstframe.commands");
+    const loadingPath = join(cefDst, "loading.commands");
     const cursorPath = join(cefDst, "cursor.commands");
     const injectorPath = join(cefDst, "uinput-inject.ts");
-    const snapshotBody = existsSync(snapshotPath) ? readFileSync(snapshotPath) : null;
+    const loadingBody = existsSync(loadingPath) ? readFileSync(loadingPath) : null;
     const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
     const injectorBody = existsSync(injectorPath) ? readFileSync(injectorPath) : null;
     rmSync(cefDst, { recursive: true, force: true });
@@ -463,10 +463,10 @@ function installCefOverlay() {
     // Restore the committed launch script into the freshly-staged runtime dir.
     writeFileSync(launchSh, launchBody);
     chmodSync(launchSh, 0o755);
-    // Restore the baked instant-desktop assets (if present). Without the snapshot the boot still
-    // works (it just falls back to the live CEF render with no instant frame); the cursor is
-    // optional too. Both are committed so they are normally present.
-    if (snapshotBody) writeFileSync(snapshotPath, snapshotBody);
+    // Restore the honest loading screen + cursor + verification injector (if present). NO baked
+    // flagship snapshot — the boot shows the honest loading screen, then the LIVE CEF render. The
+    // cursor + loading are committed so they are normally present.
+    if (loadingBody) writeFileSync(loadingPath, loadingBody);
     if (cursorBody) writeFileSync(cursorPath, cursorBody);
     if (injectorBody) writeFileSync(injectorPath, injectorBody);  // PSD-055 verification injector
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves

@@ -643,6 +643,10 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             }
         };
 
+        if !events.is_empty() {
+            eprintln!("VITA-INPUT-DIAG: drain got {} InputEvent(s)", events.len());
+        }
+
         let overflow = events.len().saturating_sub(MAX_INPUT_EVENTS_PER_TICK);
         if overflow > 0 {
             channel.drop_events(overflow);

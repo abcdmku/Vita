@@ -23,10 +23,9 @@ ts-overlay/usr/lib/vita/deno
 # the negations below re-include them after the broad cef/ + ui_kits/ ignores.
 cef-overlay/usr/lib/vita/cef/*
 !cef-overlay/usr/lib/vita/cef/vita-cef-live.sh
-# Baked instant-desktop assets (cef-vm-input): the flagship first-frame snapshot + the visible
-# cursor, as compositor command streams. Committed so the build can show the REAL desktop within
-# seconds of boot (installCefOverlay preserves them across the runtime re-stage).
-!cef-overlay/usr/lib/vita/cef/flagship-firstframe.commands
+# Honest loading screen + visible cursor + verification injector, as compositor command streams.
+# NO baked flagship snapshot — the boot shows an honest loading state, then the LIVE CEF render.
+!cef-overlay/usr/lib/vita/cef/loading.commands
 !cef-overlay/usr/lib/vita/cef/cursor.commands
 !cef-overlay/usr/lib/vita/cef/uinput-inject.ts
 cef-overlay/usr/lib/vita/ui_kits/

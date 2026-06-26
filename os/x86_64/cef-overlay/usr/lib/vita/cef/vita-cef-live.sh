@@ -1,19 +1,19 @@
 #!/bin/bash
-# Vita SMOKE/VM - CEF live-render arc (ADR-0014), PERSISTENT + INSTANT + INTERACTIVE (cef-vm-input).
+# Vita SMOKE/VM - CEF live-render arc (ADR-0014): LIVE + HONEST-LOADING + INTERACTIVE (cef-vm-input).
 #
-# Boot flow (one long-lived compositor process, on the real VMware GPU / KMS):
-#   1. INSTANT: feed a BAKED first-frame snapshot of the flagship desktop (flagship-firstframe.commands)
-#      + a visible cursor surface (cursor.commands) + present -> the REAL desktop is on screen within
-#      ~2-5s of power-on (no blank wallpaper, no 60s wait, no demo blocks).
-#   2. LIVE: CEF (windowless software OSR) warms in the BACKGROUND and streams the live flagship into
-#      the SAME cef:desktop surface (updateBufferSurface, --surface-prearmed) -> seamless swap to the
-#      interactive render. Unbounded (--frames=0) so it stays live for the life of the VM.
-#   3. INTERACTIVE (PSD-055): the compositor reads libinput, routes (PSD-300), and writes routed
-#      events (with absolute cursor coords) to a reverse-channel FIFO (--input-out); osr_host reads it
-#      (--input-in) and injects CEF SendMouseMove/Click/Key. The compositor composites a visible
-#      cursor surface that tracks the routed pointer.
+# NO fake/placeholder desktop: the moment the user sees something that looks like the desktop, it IS
+# the live CEF render. Boot flow (one long-lived compositor process, on the real VMware GPU / KMS):
+#   1. HONEST LOADING: present a wallpaper + a clear "starting" indicator (loading.commands) UNDER the
+#      desktop (z=0) + a visible cursor (cursor.commands). This is NOT a snapshot of the flagship.
+#   2. LIVE: CEF (windowless software OSR) cold-starts and streams the REAL flagship into cef:desktop
+#      at z=10 -> its first opaque full-screen frame COVERS the loading screen. The first thing that
+#      looks like the desktop IS the live render. Unbounded (--frames=0); persistent for the VM life.
+#   3. INTERACTIVE (PSD-055): the compositor reads libinput (incl. ABSOLUTE motion from VMware's
+#      EV_ABS pointer), routes (PSD-300), writes routed events to a reverse-channel FIFO (--input-out);
+#      osr_host reads it (--input-in) and injects CEF SendMouseMove/Click/Key; a visible cursor surface
+#      tracks the routed pointer.
 #
-#       ( cat snapshot+cursor ; osr_host --surface-prearmed --input-in=FIFO --frames=0 )
+#       ( cat loading+cursor ; osr_host --input-in=FIFO --frames=0 )
 #            >>pipe(commands)>>  vita-compositor --commands --continuous --input-out=FIFO
 #                                  presents every frame on KMS + moves the cursor + drains input
 #
@@ -28,7 +28,10 @@ OSR=$CEF_DIR/vita_cef_osr
 COMPOSITOR=/usr/lib/vita/compositor/vita-compositor
 DESKTOP=/usr/lib/vita/ui_kits/desktop/index.html
 URL=file://$DESKTOP
-SNAPSHOT=$CEF_DIR/flagship-firstframe.commands
+# HONEST loading screen (NOT a fake desktop): a wallpaper + a clear "starting" indicator, shown
+# UNDER the live desktop until CEF paints. We do NOT bake a snapshot of the flagship — the moment
+# the user sees something that looks like the desktop, it IS the live CEF render.
+LOADING=$CEF_DIR/loading.commands
 CURSOR=$CEF_DIR/cursor.commands
 # 0 = UNBOUNDED. A tight interval keeps the cursor + live content responsive (compositor drains
 # input + repositions the cursor every present, which is driven by this cadence).
@@ -78,27 +81,28 @@ mkfifo "$INPUT_FIFO" 2>/dev/null || true
 # so it does not steal events from osr_host's reader) makes the write-open always succeed.
 exec 3<>"$INPUT_FIFO" || true
 
-# --- instant-desktop prelude (baked snapshot + cursor) -----------------------
-# Prepend the baked flagship first-frame + the cursor surface + a present so the compositor shows
-# the REAL desktop immediately, BEFORE CEF finishes its cold start. The snapshot pre-registers
-# cef:desktop, so osr_host runs with --surface-prearmed and seamlessly updates the same surface.
+# --- honest loading prelude (NO fake desktop) --------------------------------
+# Show an HONEST loading screen (wallpaper + a clear "starting" indicator) UNDER the live desktop,
+# at z=0, until CEF paints. CEF registers cef:desktop at a HIGHER z (10) and, being an opaque
+# full-screen render, covers the loading screen the instant its first real frame arrives — so the
+# first thing that LOOKS like the desktop IS the live desktop. No baked flagship snapshot.
 PRELUDE=/run/vita-cef-prelude.commands
 : > "$PRELUDE"
-have_snapshot=0
-if [ -s "$SNAPSHOT" ]; then
-  cat "$SNAPSHOT" >> "$PRELUDE"
-  have_snapshot=1
+have_loading=0
+if [ -s "$LOADING" ]; then
+  cat "$LOADING" >> "$PRELUDE"
+  have_loading=1
 fi
 if [ -s "$CURSOR" ]; then
   cat "$CURSOR" >> "$PRELUDE"
 fi
-# One present to scan out the instant snapshot+cursor right away.
+# One present to scan out the honest loading screen + cursor right away.
 printf 'present\n' >> "$PRELUDE"
 
+# CEF registers cef:desktop itself (no pre-armed snapshot surface to update).
 PREARM=""
-[ "$have_snapshot" -eq 1 ] && PREARM="--surface-prearmed"
 
-emit_line "$MARKER: stage=start mode=instant+persistent+interactive frames=$FRAMES interval=${INTERVAL_MS}ms snapshot=$have_snapshot url=$URL card0=present"
+emit_line "$MARKER: stage=start mode=live+honest-loading+interactive frames=$FRAMES interval=${INTERVAL_MS}ms loading=$have_loading url=$URL card0=present"
 
 # --- run the long-lived pipe -------------------------------------------------
 CEF_LOG=/run/vita-cef-osr.log
@@ -174,7 +178,7 @@ if [ "$seen_ok" -eq 1 ]; then
   input_state=$(grep -aoE "input=[a-z]+" "$COMP_OUT" | head -1)
   # HONEST marker: input=available means libinput opened the devices; the loop is WIRED. We do NOT
   # claim interactive until the self-test below confirms CEF actually received events.
-  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes instant=$have_snapshot input-wiring=on"
+  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} ${input_state} status=OK persistent=yes loading-screen=$have_loading input-wiring=on"
 
   # LIVE-SWAP PROOF: confirm CEF keeps feeding updateBufferSurface AFTER the snapshot (i.e. the
   # screen is the LIVE render, not the static baked frame). CEF cold-starts after the instant
