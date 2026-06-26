@@ -92,6 +92,13 @@ export {
   validateDesktopUiPackageManifest,
 } from "./loader.ts";
 export {
+  AGENTD_HEALTH_CAPABILITY,
+  DEFAULT_AGENTD_HOST_BASE_URL,
+  DEFAULT_AGENTD_HOST_MAX_RESPONSE_BYTES,
+  DEFAULT_AGENTD_HOST_SOCKET_PATH,
+  createAgentdHostClient,
+} from "./agentd-host-client.ts";
+export {
   createInMemorySurfaceBackend,
   createSurfaceHostRouter,
   routeSurfaceHostRequest,
@@ -275,6 +282,18 @@ export type {
   DesktopUiValidationError,
   DesktopUiValidationResult,
 } from "./loader.ts";
+export type {
+  AgentdHostClient,
+  AgentdHostClientErrorCode,
+  AgentdHostClientOptions,
+  AgentdHostError,
+  AgentdHostErrorCode,
+  AgentdHostResult,
+  AgentdHostTimeout,
+  AgentdHostTransport,
+  AgentdHostTransportInit,
+  AgentdHostTransportResponse,
+} from "./agentd-host-client.ts";
 export type {
   SurfaceHostBackend,
   SurfaceHostRouter,
