@@ -8,8 +8,10 @@ use std::path::Path;
 pub mod platform;
 
 pub const VITA_COMPOSITOR_MARKER: &str = "VITA-COMPOSITOR";
+pub const VITA_INPUT_ROUTE_MARKER: &str = "VITA-INPUT-ROUTE";
 pub const DESKTOP_DEMO_OUTPUT_WIDTH: u32 = 1280;
 pub const DESKTOP_DEMO_OUTPUT_HEIGHT: u32 = 720;
+const INPUT_MICROPIXELS_PER_PIXEL: i128 = 1_000_000;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CompositorError {
@@ -218,6 +220,190 @@ pub enum InputEvent {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InputRouter {
+    cursor_x_micropixels: i128,
+    cursor_y_micropixels: i128,
+    focus: Option<SurfaceId>,
+}
+
+impl InputRouter {
+    pub fn new() -> Self {
+        Self {
+            cursor_x_micropixels: 0,
+            cursor_y_micropixels: 0,
+            focus: None,
+        }
+    }
+
+    pub fn cursor(&self) -> (u32, u32) {
+        (
+            micropixels_to_output_pixel(self.cursor_x_micropixels),
+            micropixels_to_output_pixel(self.cursor_y_micropixels),
+        )
+    }
+
+    pub fn focus(&self) -> Option<&SurfaceId> {
+        self.focus.as_ref()
+    }
+
+    pub fn set_focus(&mut self, focus: Option<SurfaceId>) {
+        self.focus = focus;
+    }
+
+    pub fn route_input_event(
+        &mut self,
+        event: &InputEvent,
+        placements: &[Placement],
+        output_width: u32,
+        output_height: u32,
+    ) -> RoutedInputEvent {
+        if output_width == 0 || output_height == 0 {
+            return self.dropped(RoutedInputDropReason::InvalidOutputBounds);
+        }
+
+        match event {
+            InputEvent::PointerMotion {
+                dx_micropixels,
+                dy_micropixels,
+            } => {
+                self.cursor_x_micropixels = self
+                    .cursor_x_micropixels
+                    .saturating_add(*dx_micropixels as i128);
+                self.cursor_y_micropixels = self
+                    .cursor_y_micropixels
+                    .saturating_add(*dy_micropixels as i128);
+                self.clamp_cursor(output_width, output_height);
+
+                let (cursor_x, cursor_y) = self.cursor();
+                match topmost_placement_at(placements, cursor_x, cursor_y).and_then(|placement| {
+                    placement_local_coordinates(placement, cursor_x, cursor_y)
+                }) {
+                    Some((surface_id, local_x, local_y)) => RoutedInputEvent::PointerMotion {
+                        surface_id,
+                        local_x,
+                        local_y,
+                        cursor_x,
+                        cursor_y,
+                        dx_micropixels: *dx_micropixels,
+                        dy_micropixels: *dy_micropixels,
+                    },
+                    None => self.dropped(RoutedInputDropReason::NoSurfaceAtCursor),
+                }
+            }
+            InputEvent::PointerButton { button, state } => {
+                self.clamp_cursor(output_width, output_height);
+
+                let (cursor_x, cursor_y) = self.cursor();
+                match topmost_placement_at(placements, cursor_x, cursor_y).and_then(|placement| {
+                    placement_local_coordinates(placement, cursor_x, cursor_y)
+                }) {
+                    Some((surface_id, local_x, local_y)) => {
+                        if *state == PointerButtonState::Pressed {
+                            self.focus = Some(surface_id.clone());
+                        }
+                        RoutedInputEvent::PointerButton {
+                            surface_id,
+                            local_x,
+                            local_y,
+                            cursor_x,
+                            cursor_y,
+                            button: *button,
+                            state: *state,
+                        }
+                    }
+                    None => self.dropped(RoutedInputDropReason::NoSurfaceAtCursor),
+                }
+            }
+            InputEvent::Key { key_code, pressed } => match self.focus.clone() {
+                Some(surface_id) => RoutedInputEvent::Key {
+                    surface_id,
+                    key_code: *key_code,
+                    pressed: *pressed,
+                },
+                None => self.dropped(RoutedInputDropReason::NoFocusedSurface),
+            },
+        }
+    }
+
+    fn clamp_cursor(&mut self, output_width: u32, output_height: u32) {
+        let max_x = ((output_width - 1) as i128) * INPUT_MICROPIXELS_PER_PIXEL;
+        let max_y = ((output_height - 1) as i128) * INPUT_MICROPIXELS_PER_PIXEL;
+        self.cursor_x_micropixels = self.cursor_x_micropixels.clamp(0, max_x);
+        self.cursor_y_micropixels = self.cursor_y_micropixels.clamp(0, max_y);
+    }
+
+    fn dropped(&self, reason: RoutedInputDropReason) -> RoutedInputEvent {
+        let (cursor_x, cursor_y) = self.cursor();
+        RoutedInputEvent::Dropped {
+            reason,
+            cursor_x,
+            cursor_y,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RoutedInputEvent {
+    PointerMotion {
+        surface_id: SurfaceId,
+        local_x: u32,
+        local_y: u32,
+        cursor_x: u32,
+        cursor_y: u32,
+        dx_micropixels: i64,
+        dy_micropixels: i64,
+    },
+    PointerButton {
+        surface_id: SurfaceId,
+        local_x: u32,
+        local_y: u32,
+        cursor_x: u32,
+        cursor_y: u32,
+        button: u32,
+        state: PointerButtonState,
+    },
+    Key {
+        surface_id: SurfaceId,
+        key_code: u32,
+        pressed: bool,
+    },
+    Dropped {
+        reason: RoutedInputDropReason,
+        cursor_x: u32,
+        cursor_y: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RoutedInputDropReason {
+    InvalidOutputBounds,
+    NoSurfaceAtCursor,
+    NoFocusedSurface,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InputRoutingSelfTestReport {
+    pub cursor_x: u32,
+    pub cursor_y: u32,
+    pub target: Option<SurfaceId>,
+    pub focus: Option<SurfaceId>,
+    pub status_ok: bool,
+}
+
+impl InputRoutingSelfTestReport {
+    pub fn marker_line(&self) -> String {
+        format!(
+            "{VITA_INPUT_ROUTE_MARKER}: cursor={},{} target={} focus={} status={}",
+            self.cursor_x,
+            self.cursor_y,
+            marker_surface(self.target.as_ref()),
+            marker_surface(self.focus.as_ref()),
+            if self.status_ok { "OK" } else { "FAIL" }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TestPattern {
     Solid { rgba: [u8; 4] },
     Checkerboard { a: [u8; 4], b: [u8; 4], tile: u32 },
@@ -405,6 +591,7 @@ pub struct Compositor<B: RenderBackend> {
     surfaces: BTreeMap<SurfaceId, SurfaceState<B::Texture>>,
     placements: Vec<Placement>,
     focus: Option<SurfaceId>,
+    input_router: InputRouter,
 }
 
 impl<B: RenderBackend> Compositor<B> {
@@ -417,6 +604,7 @@ impl<B: RenderBackend> Compositor<B> {
             surfaces: BTreeMap::new(),
             placements: Vec::new(),
             focus: None,
+            input_router: InputRouter::new(),
         })
     }
 
@@ -579,6 +767,7 @@ impl<B: RenderBackend> Compositor<B> {
 
         if self.focus.as_ref() == Some(id) {
             self.focus = None;
+            self.input_router.set_focus(None);
         }
 
         let mut changed_surfaces = Vec::new();
@@ -626,7 +815,8 @@ impl<B: RenderBackend> Compositor<B> {
                 return Err(CompositorError::UnknownSurface(id.clone()));
             }
         }
-        self.focus = focus;
+        self.focus = focus.clone();
+        self.input_router.set_focus(focus);
         Ok(())
     }
 
@@ -636,6 +826,24 @@ impl<B: RenderBackend> Compositor<B> {
 
     pub fn poll_input_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
         self.backend.poll_input_events()
+    }
+
+    pub fn route_input_event(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<RoutedInputEvent, CompositorError> {
+        self.input_router.set_focus(self.focus.clone());
+        let routed = self.input_router.route_input_event(
+            event,
+            &self.placements,
+            self.output_width,
+            self.output_height,
+        );
+        let routed_focus = self.input_router.focus().cloned();
+        if self.focus.as_ref() != routed_focus.as_ref() {
+            self.set_focus(routed_focus)?;
+        }
+        Ok(routed)
     }
 
     pub fn surface_readback_rgba_for_test(
@@ -1194,6 +1402,55 @@ fn placement_map(placements: &[Placement]) -> BTreeMap<SurfaceId, &Placement> {
     map
 }
 
+fn topmost_placement_at(placements: &[Placement], x: u32, y: u32) -> Option<&Placement> {
+    placements
+        .iter()
+        .filter(|placement| placement_contains_output_point(placement, x, y))
+        .max_by(|left, right| {
+            left.z_index
+                .cmp(&right.z_index)
+                .then_with(|| left.surface_id.cmp(&right.surface_id))
+        })
+}
+
+fn placement_contains_output_point(placement: &Placement, x: u32, y: u32) -> bool {
+    if placement.width == 0 || placement.height == 0 {
+        return false;
+    }
+
+    let point_x = i64::from(x);
+    let point_y = i64::from(y);
+    let left = i64::from(placement.x);
+    let top = i64::from(placement.y);
+    let right = left + i64::from(placement.width);
+    let bottom = top + i64::from(placement.height);
+
+    left <= point_x && point_x < right && top <= point_y && point_y < bottom
+}
+
+fn placement_local_coordinates(
+    placement: &Placement,
+    x: u32,
+    y: u32,
+) -> Option<(SurfaceId, u32, u32)> {
+    if !placement_contains_output_point(placement, x, y) {
+        return None;
+    }
+
+    let local_x = i64::from(x) - i64::from(placement.x);
+    let local_y = i64::from(y) - i64::from(placement.y);
+    Some((
+        placement.surface_id.clone(),
+        u32::try_from(local_x).ok()?,
+        u32::try_from(local_y).ok()?,
+    ))
+}
+
+fn micropixels_to_output_pixel(micropixels: i128) -> u32 {
+    let pixel = micropixels / INPUT_MICROPIXELS_PER_PIXEL;
+    pixel.clamp(0, i128::from(u32::MAX)) as u32
+}
+
 fn push_unique_rect(rects: &mut Vec<Rect>, rect: Rect) {
     if !rects.contains(&rect) {
         rects.push(rect);
@@ -1256,6 +1513,12 @@ fn marker_token(value: &str) -> String {
     }
 }
 
+fn marker_surface(surface_id: Option<&SurfaceId>) -> String {
+    surface_id
+        .map(|id| marker_token(id.as_str()))
+        .unwrap_or_else(|| "none".to_owned())
+}
+
 fn failsafe_reason(error: &CompositorError) -> String {
     match error {
         CompositorError::Unavailable(reason) | CompositorError::Backend(reason)
@@ -1273,6 +1536,386 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::rc::Rc;
+
+    mod input_routing {
+        use super::*;
+
+        const MICROPIXELS_PER_PIXEL: i64 = 1_000_000;
+
+        #[test]
+        fn motion_accumulates_relative_micropixels_and_clamps_to_edges() {
+            let desktop = surface_id("desktop");
+            let placements = vec![placement("desktop", 0, 0, 10, 8, 0)];
+            let mut router = InputRouter::new();
+
+            assert_eq!(router.cursor(), (0, 0));
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerMotion {
+                        dx_micropixels: 500_000,
+                        dy_micropixels: 500_000,
+                    },
+                    &placements,
+                    10,
+                    8,
+                ),
+                RoutedInputEvent::PointerMotion {
+                    surface_id: desktop.clone(),
+                    local_x: 0,
+                    local_y: 0,
+                    cursor_x: 0,
+                    cursor_y: 0,
+                    dx_micropixels: 500_000,
+                    dy_micropixels: 500_000,
+                }
+            );
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerMotion {
+                        dx_micropixels: 500_000,
+                        dy_micropixels: 1_500_000,
+                    },
+                    &placements,
+                    10,
+                    8,
+                ),
+                RoutedInputEvent::PointerMotion {
+                    surface_id: desktop.clone(),
+                    local_x: 1,
+                    local_y: 2,
+                    cursor_x: 1,
+                    cursor_y: 2,
+                    dx_micropixels: 500_000,
+                    dy_micropixels: 1_500_000,
+                }
+            );
+            assert_eq!(router.cursor(), (1, 2));
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerMotion {
+                        dx_micropixels: 20 * MICROPIXELS_PER_PIXEL,
+                        dy_micropixels: 20 * MICROPIXELS_PER_PIXEL,
+                    },
+                    &placements,
+                    10,
+                    8,
+                ),
+                RoutedInputEvent::PointerMotion {
+                    surface_id: desktop.clone(),
+                    local_x: 9,
+                    local_y: 7,
+                    cursor_x: 9,
+                    cursor_y: 7,
+                    dx_micropixels: 20 * MICROPIXELS_PER_PIXEL,
+                    dy_micropixels: 20 * MICROPIXELS_PER_PIXEL,
+                }
+            );
+            assert_eq!(router.cursor(), (9, 7));
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerMotion {
+                        dx_micropixels: -20 * MICROPIXELS_PER_PIXEL,
+                        dy_micropixels: -20 * MICROPIXELS_PER_PIXEL,
+                    },
+                    &placements,
+                    10,
+                    8,
+                ),
+                RoutedInputEvent::PointerMotion {
+                    surface_id: desktop,
+                    local_x: 0,
+                    local_y: 0,
+                    cursor_x: 0,
+                    cursor_y: 0,
+                    dx_micropixels: -20 * MICROPIXELS_PER_PIXEL,
+                    dy_micropixels: -20 * MICROPIXELS_PER_PIXEL,
+                }
+            );
+            assert_eq!(router.cursor(), (0, 0));
+        }
+
+        #[test]
+        fn press_hit_tests_topmost_surface_and_reports_surface_local_coordinates() {
+            let surface_c = surface_id("surface-c");
+            let placements = stacked_layout();
+            let mut router = InputRouter::new();
+
+            router.route_input_event(
+                &InputEvent::PointerMotion {
+                    dx_micropixels: 6 * MICROPIXELS_PER_PIXEL,
+                    dy_micropixels: 7 * MICROPIXELS_PER_PIXEL,
+                },
+                &placements,
+                40,
+                40,
+            );
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerButton {
+                        button: 272,
+                        state: PointerButtonState::Pressed,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::PointerButton {
+                    surface_id: surface_c.clone(),
+                    local_x: 2,
+                    local_y: 3,
+                    cursor_x: 6,
+                    cursor_y: 7,
+                    button: 272,
+                    state: PointerButtonState::Pressed,
+                }
+            );
+            assert_eq!(router.focus(), Some(&surface_c));
+        }
+
+        #[test]
+        fn key_routes_to_focus_and_subsequent_key_follows_pressed_surface() {
+            let surface_a = surface_id("surface-a");
+            let surface_c = surface_id("surface-c");
+            let placements = stacked_layout();
+            let mut router = InputRouter::new();
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::Key {
+                        key_code: 30,
+                        pressed: true,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::Dropped {
+                    reason: RoutedInputDropReason::NoFocusedSurface,
+                    cursor_x: 0,
+                    cursor_y: 0,
+                }
+            );
+
+            router.set_focus(Some(surface_a.clone()));
+            assert_eq!(router.focus(), Some(&surface_a));
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::Key {
+                        key_code: 30,
+                        pressed: true,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::Key {
+                    surface_id: surface_a,
+                    key_code: 30,
+                    pressed: true,
+                }
+            );
+
+            router.route_input_event(
+                &InputEvent::PointerMotion {
+                    dx_micropixels: 6 * MICROPIXELS_PER_PIXEL,
+                    dy_micropixels: 7 * MICROPIXELS_PER_PIXEL,
+                },
+                &placements,
+                40,
+                40,
+            );
+            router.route_input_event(
+                &InputEvent::PointerButton {
+                    button: 272,
+                    state: PointerButtonState::Pressed,
+                },
+                &placements,
+                40,
+                40,
+            );
+
+            assert_eq!(router.focus(), Some(&surface_c));
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::Key {
+                        key_code: 31,
+                        pressed: false,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::Key {
+                    surface_id: surface_c,
+                    key_code: 31,
+                    pressed: false,
+                }
+            );
+        }
+
+        #[test]
+        fn pointer_events_over_no_surface_drop_without_changing_focus() {
+            let surface_a = surface_id("surface-a");
+            let placements = stacked_layout();
+            let mut router = InputRouter::new();
+            router.set_focus(Some(surface_a.clone()));
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerMotion {
+                        dx_micropixels: 30 * MICROPIXELS_PER_PIXEL,
+                        dy_micropixels: 30 * MICROPIXELS_PER_PIXEL,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::Dropped {
+                    reason: RoutedInputDropReason::NoSurfaceAtCursor,
+                    cursor_x: 30,
+                    cursor_y: 30,
+                }
+            );
+            assert_eq!(router.focus(), Some(&surface_a));
+
+            assert_eq!(
+                router.route_input_event(
+                    &InputEvent::PointerButton {
+                        button: 272,
+                        state: PointerButtonState::Pressed,
+                    },
+                    &placements,
+                    40,
+                    40,
+                ),
+                RoutedInputEvent::Dropped {
+                    reason: RoutedInputDropReason::NoSurfaceAtCursor,
+                    cursor_x: 30,
+                    cursor_y: 30,
+                }
+            );
+            assert_eq!(router.focus(), Some(&surface_a));
+        }
+
+        #[test]
+        fn marker_line_is_stable() {
+            let report = InputRoutingSelfTestReport {
+                cursor_x: 6,
+                cursor_y: 7,
+                target: Some(surface_id("surface-c")),
+                focus: Some(surface_id("surface-c")),
+                status_ok: true,
+            };
+
+            assert_eq!(VITA_INPUT_ROUTE_MARKER, "VITA-INPUT-ROUTE");
+            assert_eq!(
+                report.marker_line(),
+                "VITA-INPUT-ROUTE: cursor=6,7 target=surface-c focus=surface-c status=OK"
+            );
+        }
+
+        #[test]
+        fn compositor_wrapper_routes_and_updates_registered_focus() {
+            let surface_c = surface_id("surface-c");
+            let mut compositor = Compositor::new(RecordingBackend::new("test-gpu"), 40, 40)
+                .expect("compositor should initialize");
+            register_surface(&mut compositor, "surface-a", 12, 12);
+            register_surface(&mut compositor, "surface-b", 10, 10);
+            register_surface(&mut compositor, "surface-c", 10, 10);
+            compositor
+                .update_placements(stacked_layout())
+                .expect("placements should be registered");
+
+            assert_eq!(
+                compositor
+                    .route_input_event(&InputEvent::Key {
+                        key_code: 30,
+                        pressed: true,
+                    })
+                    .expect("routing should be pure"),
+                RoutedInputEvent::Dropped {
+                    reason: RoutedInputDropReason::NoFocusedSurface,
+                    cursor_x: 0,
+                    cursor_y: 0,
+                }
+            );
+
+            compositor
+                .route_input_event(&InputEvent::PointerMotion {
+                    dx_micropixels: 6 * MICROPIXELS_PER_PIXEL,
+                    dy_micropixels: 7 * MICROPIXELS_PER_PIXEL,
+                })
+                .expect("motion should route");
+            assert_eq!(
+                compositor
+                    .route_input_event(&InputEvent::PointerButton {
+                        button: 272,
+                        state: PointerButtonState::Pressed,
+                    })
+                    .expect("press should route"),
+                RoutedInputEvent::PointerButton {
+                    surface_id: surface_c.clone(),
+                    local_x: 2,
+                    local_y: 3,
+                    cursor_x: 6,
+                    cursor_y: 7,
+                    button: 272,
+                    state: PointerButtonState::Pressed,
+                }
+            );
+            assert_eq!(compositor.focus(), Some(&surface_c));
+            assert_eq!(
+                compositor
+                    .route_input_event(&InputEvent::Key {
+                        key_code: 31,
+                        pressed: true,
+                    })
+                    .expect("focused key should route"),
+                RoutedInputEvent::Key {
+                    surface_id: surface_c,
+                    key_code: 31,
+                    pressed: true,
+                }
+            );
+        }
+
+        fn stacked_layout() -> Vec<Placement> {
+            vec![
+                placement("surface-a", 0, 0, 12, 12, 0),
+                placement("surface-b", 4, 4, 10, 10, 7),
+                placement("surface-c", 4, 4, 10, 10, 7),
+            ]
+        }
+
+        fn placement(id: &str, x: i32, y: i32, width: u32, height: u32, z_index: i32) -> Placement {
+            Placement::new(surface_id(id), x, y, width, height, z_index).unwrap()
+        }
+
+        fn register_surface(
+            compositor: &mut Compositor<RecordingBackend>,
+            id: &str,
+            width: u32,
+            height: u32,
+        ) {
+            compositor
+                .register_test_surface(
+                    surface_id(id),
+                    width,
+                    height,
+                    TestPattern::Solid {
+                        rgba: [1, 2, 3, 255],
+                    },
+                )
+                .expect("surface should register");
+        }
+
+        fn surface_id(id: &str) -> SurfaceId {
+            SurfaceId::new(id).unwrap()
+        }
+    }
 
     #[test]
     fn move_changes_damage_without_repainting_source_texture() {
