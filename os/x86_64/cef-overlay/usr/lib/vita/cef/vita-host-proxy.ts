@@ -163,6 +163,7 @@ async function handle(reqText: string): Promise<string> {
   }
   const method = typeof parsed.method === "string" ? parsed.method : "";
   const args = Array.isArray(parsed.args) ? parsed.args : [];
+  log(`request method=${method} args=${JSON.stringify(args).slice(0, 200)}`);
   const cap = METHOD_CAPABILITY[method];
   if (cap === undefined) {
     log(`UNKNOWN method=${method}`);

@@ -187,18 +187,23 @@ class OsrClient : public CefClient,
     // the desktop uses, and console.error the results (CEF routes console to stderr -> CEF_LOG). This
     // is the renderer-side proof that a host action does a REAL thing end-to-end.
     frame->ExecuteJavaScript(
-        "try{"
+        "setTimeout(function(){ try{"
+        "  var L = globalThis.__vitaLog || function(){};"
         "  var b = globalThis.vitaDesktopBridge;"
-        "  if(!b){ console.error('VITA-HOSTTEST: bridge MISSING'); }"
-        "  else {"
+        "  L('VITA-HOSTTEST bridge=' + (b?'present':'MISSING'));"
+        "  if(b){"
         "    var ls = b.request({method:'requestFile',args:[{op:'list',grant:'g',path:'/'}]});"
-        "    console.error('VITA-HOSTTEST requestFile.list -> ' + JSON.stringify(ls));"
+        "    L('VITA-HOSTTEST requestFile.list -> ' + JSON.stringify(ls));"
         "    var rd = b.request({method:'requestFile',args:[{op:'read',grant:'g',path:'/proof.txt'}]});"
-        "    console.error('VITA-HOSTTEST requestFile.read(proof.txt) -> ' + JSON.stringify(rd));"
-        "    var la = b.request({method:'launchApp',args:[{id:'vita.app.file-manager'}]});"
-        "    console.error('VITA-HOSTTEST launchApp(file-manager) -> ' + JSON.stringify(la));"
+        "    L('VITA-HOSTTEST requestFile.read(proof.txt) -> ' + JSON.stringify(rd));"
         "  }"
-        "}catch(e){ console.error('VITA-HOSTTEST error ' + String(e)); }",
+        "  var dock = document.querySelectorAll('[data-vita-dock-app-id]');"
+        "  L('VITA-HOSTTEST dock tiles=' + dock.length);"
+        "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
+        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING'));"
+        "  if(fm){ L('VITA-HOSTTEST dispatching synthetic click on file-manager tile');"
+        "          fm.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); }"
+        "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e)); } }, 1500);",
         "vita://host-bridge-selftest", 0);
 
     if (browser_ && browser_->GetHost()) {
@@ -346,6 +351,14 @@ class HostBridgeV8Handler : public CefV8Handler {
                const CefV8ValueList& arguments,
                CefRefPtr<CefV8Value>& retval,
                CefString& /*exception*/) override {
+    if (name == "__vitaLog") {
+      std::string s = (arguments.size() >= 1 && arguments[0]->IsString())
+                          ? arguments[0]->GetStringValue().ToString()
+                          : std::string();
+      fprintf(stderr, "[osr] %s\n", s.c_str());
+      retval = CefV8Value::CreateBool(true);
+      return true;
+    }
     if (name != "__vitaHostProxyCall") return false;
     std::string req = (arguments.size() >= 1 && arguments[0]->IsString())
                           ? arguments[0]->GetStringValue().ToString()
@@ -386,6 +399,8 @@ class OsrApp : public CefApp,
     CefRefPtr<CefV8Value> fn =
         CefV8Value::CreateFunction("__vitaHostProxyCall", handler);
     global->SetValue("__vitaHostProxyCall", fn, V8_PROPERTY_ATTRIBUTE_NONE);
+    CefRefPtr<CefV8Value> logfn = CefV8Value::CreateFunction("__vitaLog", handler);
+    global->SetValue("__vitaLog", logfn, V8_PROPERTY_ATTRIBUTE_NONE);
 
     // JS shim: expose the transport under the names bootstrap.ts looks for (TRANSPORT_GLOBALS).
     const char* shim =
