@@ -34,11 +34,19 @@ export type AppCapability =
   | "metrics.read"
   | "web.local";
 
+// How the app gets its window. "managed" (the default) = the desktop provides a managed window and
+// mounts the app into its body surface; the app never touches window chrome. "custom" reserves the
+// path where an app registers its own window/surface. Custom is a STUB for now — the desktop still
+// gives it a managed window (so every app keeps working); full custom-window support lands later.
+export type AppWindowMode = "managed" | "custom";
+
 export interface AppManifest {
   readonly id: string;
   readonly title: string;
   readonly icon: string; // emoji or glyph shown in the dock/title bar
   readonly capabilities: readonly AppCapability[];
+  // Defaults to "managed" when omitted — see AppWindowMode.
+  readonly window?: AppWindowMode;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -136,8 +144,13 @@ export function isVitaApp(value: unknown): value is VitaApp {
 
 // A tiny helper so an app file reads declaratively: `export default defineApp({ manifest, mount })`.
 export function defineApp(app: VitaApp): VitaApp {
+  // Spreading {...app.manifest} preserves the optional `window` mode; default to "managed".
   return Object.freeze({
-    manifest: Object.freeze({ ...app.manifest, capabilities: Object.freeze([...app.manifest.capabilities]) }),
+    manifest: Object.freeze({
+      ...app.manifest,
+      capabilities: Object.freeze([...app.manifest.capabilities]),
+      window: app.manifest.window ?? "managed",
+    }),
     mount: app.mount,
   });
 }
