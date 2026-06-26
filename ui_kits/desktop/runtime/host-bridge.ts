@@ -1017,8 +1017,13 @@ function isTrayMenuItemArray(value: unknown): boolean {
   return true;
 }
 
-function isRegisteredShellComponent(_value: unknown): _value is RegisteredShellComponent {
-  return false;
+function isRegisteredShellComponent(value: unknown): value is RegisteredShellComponent {
+  const component = jsonObject(value);
+
+  return component !== undefined &&
+    typeof component["id"] === "string" &&
+    typeof component["role"] === "string" &&
+    isPlacement(component["defaultPlacement"]);
 }
 
 function isShellPreviewResult(value: unknown): value is ShellPreviewResult {
