@@ -1,10 +1,25 @@
-// Settings — a DARK, interactive appearance panel mounted into a managed window's body surface.
+// Settings — a REAL dark settings panel mounted into a managed window's body.
 //
-// VitaApp (see app-sdk.ts): reads the live theme via `ctx.host.readSetting`, renders clickable theme
-// chips, and on click calls the REAL `ctx.host.applySetting` (persisted to /var/lib/vita) then
-// re-renders. One delegated click listener on the surface root; removed on window close.
-// Token-driven (dark) — chips use var(--accent)/var(--surface)/var(--border).
+// VitaApp (see app-sdk.ts): a sectioned settings app driven by the settings view-model
+// (viewmodels/apps/settings-app.ts). The Appearance section exposes the REAL persisted controls —
+// theme (light / dark / graphite), accent colour, and layout — each backed by the host's
+// readSetting / applySetting ports (persisted to /var/lib/vita/settings.json, survives reboot). On
+// mount we read the live values; clicking a control applies it through the host and re-renders.
+//
+// This is more complete than the old single chip row: a sidebar of sections, theme chips, accent
+// swatches, and layout options, all token-driven dark. One delegated click listener drives section
+// selection + control application; listeners removed on close.
 
+import {
+  createSettingsAppViewModel,
+  SETTINGS_APP_LAYOUTS,
+  SETTINGS_APP_SETTING_KEYS,
+  SETTINGS_APP_THEMES,
+} from "../../viewmodels/apps/settings-app.ts";
+import type {
+  SettingsAppState,
+  SettingsAppViewModel,
+} from "../../viewmodels/apps/settings-app.ts";
 import type {
   DesktopHost,
 } from "../../../../sdk/typescript/src/desktop-sdk/index.ts";
@@ -15,9 +30,6 @@ import type {
   AppContext,
   VitaApp,
 } from "../app-sdk.ts";
-
-const THEME_OPTIONS = ["light", "dark", "graphite"] as const;
-const EXTRA_KEYS = ["appearance.accent", "appearance.layout"] as const;
 
 export const settingsApp: VitaApp = defineApp({
   manifest: Object.freeze({
@@ -31,33 +43,59 @@ export const settingsApp: VitaApp = defineApp({
     const root = ctx.surface.root;
     let disposed = false;
 
-    root.style.cssText = "display:block;height:100%;background:var(--surface);color:var(--text)";
+    root.style.cssText = "display:flex;height:100%;background:var(--surface);color:var(--text)";
 
-    async function rerender(): Promise<void> {
-      const body = await renderSettings(ctx.host);
+    const created = createSettingsAppViewModel(ports(ctx.host));
 
-      if (!disposed) root.innerHTML = body;
+    if (!created.ok) {
+      root.innerHTML = emptyState(`Settings unavailable: ${created.error.message}`);
+      return () => {};
     }
 
-    // Delegated click: a [data-vita-setting-key] chip applies the setting then re-renders.
+    const viewModel = created.value;
+    const hasPorts = ctx.host.readSetting !== undefined && ctx.host.applySetting !== undefined;
+
+    root.innerHTML = render(viewModel.snapshot(), hasPorts);
+
+    function rerender(): void {
+      if (!disposed) root.innerHTML = render(viewModel.snapshot(), hasPorts);
+    }
+
+    // Read the live persisted values for theme/accent/layout so the panel reflects real state.
+    void (async () => {
+      for (const key of [
+        SETTINGS_APP_SETTING_KEYS.theme,
+        SETTINGS_APP_SETTING_KEYS.accent,
+        SETTINGS_APP_SETTING_KEYS.layout,
+      ]) {
+        await viewModel.readSetting(key);
+
+        if (disposed) return;
+      }
+
+      rerender();
+    })();
+
+    // Delegated click: a section row selects a section; a control applies its setting then re-renders.
     const onClick = (event: unknown): void => {
-      const target = readSettingTarget(event);
+      const section = attrValue(event, "data-vita-settings-section");
 
-      if (target === undefined) return;
+      if (section !== undefined) {
+        viewModel.selectSection(section);
+        rerender();
+        return;
+      }
 
-      const applySetting = ctx.host.applySetting;
+      const key = attrValue(event, "data-vita-settings-key");
+      const value = attrValue(event, "data-vita-settings-value");
 
-      if (applySetting === undefined) return;
+      if (key !== undefined && value !== undefined) {
+        void (async () => {
+          await viewModel.applySetting(key, value);
 
-      void (async () => {
-        try {
-          await applySetting(Object.freeze({ key: target.key, value: target.value }));
-        } catch {
-          return;
-        }
-
-        await rerender();
-      })();
+          if (!disposed) rerender();
+        })();
+      }
     };
 
     root.addEventListener("click", onClick as never);
@@ -71,77 +109,156 @@ export const settingsApp: VitaApp = defineApp({
       offClose();
     }
 
-    root.innerHTML = renderLoading();
-    void rerender();
     return cleanup;
   },
 });
 
 export default settingsApp;
 
-interface SettingTarget {
-  readonly key: string;
-  readonly value: string;
+function ports(host: DesktopHost): {
+  readSetting?: NonNullable<DesktopHost["readSetting"]>;
+  previewSetting?: NonNullable<DesktopHost["previewSetting"]>;
+  applySetting?: NonNullable<DesktopHost["applySetting"]>;
+} {
+  const out: {
+    readSetting?: NonNullable<DesktopHost["readSetting"]>;
+    previewSetting?: NonNullable<DesktopHost["previewSetting"]>;
+    applySetting?: NonNullable<DesktopHost["applySetting"]>;
+  } = {};
+
+  if (host.readSetting !== undefined) out.readSetting = host.readSetting.bind(host);
+  if (host.previewSetting !== undefined) out.previewSetting = host.previewSetting.bind(host);
+  if (host.applySetting !== undefined) out.applySetting = host.applySetting.bind(host);
+
+  return out;
 }
 
-async function renderSettings(host: DesktopHost): Promise<string> {
-  const readSetting = host.readSetting;
-
-  if (readSetting === undefined) return emptyState("The settings backend is unavailable.");
-
-  const themeResult = await readSetting(Object.freeze({ key: "appearance.theme" }));
-  const currentTheme = themeResult.ok ? String(themeResult.value) : "dark";
-
-  const options = THEME_OPTIONS.map((option) => {
-    const active = option === currentTheme;
-    const style = active
-      ? "background:var(--accent);color:#fff;border-color:var(--accent)"
-      : "background:var(--surface-raised);color:var(--text);border-color:var(--border)";
-
-    return (
-      `<span data-vita-setting-key="appearance.theme" data-vita-setting-value="${option}" ` +
-      `role="button" tabindex="0" ` +
-      `style="cursor:pointer;padding:8px 16px;border:1px solid;border-radius:9px;font-size:13px;${style}">` +
-      `${escapeHtml(option)}</span>`
-    );
-  }).join("");
-
-  const extraRows: string[] = [];
-
-  for (const key of EXTRA_KEYS) {
-    const result = await readSetting(Object.freeze({ key }));
-    const value = result.ok ? String(result.value) : `(${result.error.code})`;
-
-    extraRows.push(
-      `<div style="padding:9px 16px;border-top:1px solid var(--hairline);display:flex;justify-content:space-between;color:var(--text)">` +
-      `<span>${escapeHtml(key)}</span><span style="font-weight:600">${escapeHtml(value)}</span></div>`,
-    );
-  }
-
+function render(state: SettingsAppState, hasPorts: boolean): string {
   return (
-    `<div style="padding:14px 16px;border-bottom:1px solid var(--hairline)">` +
-    `<div style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Appearance · Theme ` +
-    `(persisted in /var/lib/vita/settings.json — survives reboot)</div>` +
-    `<div style="display:flex;gap:9px">${options}</div>` +
-    `<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">Current theme: ` +
-    `<b data-vita-current-theme style="color:var(--text)">${escapeHtml(currentTheme)}</b></div></div>` +
-    `${extraRows.join("")}`
+    `<div style="width:200px;border-right:1px solid var(--hairline);overflow:auto;background:var(--surface-sunken,var(--surface))">` +
+    renderSidebar(state) +
+    `</div>` +
+    `<div style="flex:1;overflow:auto;padding:22px 26px">` +
+    renderSection(state, hasPorts) +
+    `</div>`
   );
 }
 
-function renderLoading(): string {
-  return `<div style="padding:22px 16px;color:var(--text-faint)">Loading via the host bridge…</div>`;
+function renderSidebar(state: SettingsAppState): string {
+  const groups = new Map<string, string[]>();
+
+  for (const section of state.sections) {
+    const active = section.active;
+    const row =
+      `<div data-vita-settings-section="${escapeHtml(section.id)}" role="button" tabindex="0" ` +
+      `style="cursor:pointer;padding:8px 16px;border-radius:8px;margin:1px 8px;` +
+      `${active ? "background:var(--surface-raised);color:var(--text)" : "color:var(--text-secondary)"}">` +
+      `${escapeHtml(section.label)}</div>`;
+    const list = groups.get(section.group) ?? [];
+
+    list.push(row);
+    groups.set(section.group, list);
+  }
+
+  let out = `<div style="padding:14px 16px 8px;font-size:15px;font-weight:600;color:var(--text)">Settings</div>`;
+
+  for (const [group, rows] of groups) {
+    out += `<div style="padding:10px 16px 4px;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-faint)">${escapeHtml(group)}</div>`;
+    out += rows.join("");
+  }
+
+  return out;
+}
+
+function renderSection(state: SettingsAppState, hasPorts: boolean): string {
+  if (state.activeSection === "appearance") return renderAppearance(state, hasPorts);
+
+  return (
+    `<div style="font-size:18px;font-weight:600;color:var(--text);margin-bottom:8px">${escapeHtml(title(state.activeSection))}</div>` +
+    `<div style="color:var(--text-faint);font-size:13px">This section has no live controls yet. ` +
+    `Appearance has the real persisted theme, accent, and layout controls.</div>`
+  );
+}
+
+function renderAppearance(state: SettingsAppState, hasPorts: boolean): string {
+  const appearance = state.appearance;
+
+  const themes = SETTINGS_APP_THEMES.map((theme) =>
+    chip(SETTINGS_APP_SETTING_KEYS.theme, theme, capitalize(theme), theme === appearance.theme),
+  ).join("");
+
+  const accents = state.accentOptions.map((option) => {
+    const active = option.active;
+
+    return (
+      `<span data-vita-settings-key="${SETTINGS_APP_SETTING_KEYS.accent}" data-vita-settings-value="${escapeHtml(option.id)}" ` +
+      `role="button" tabindex="0" title="${escapeHtml(option.label)}" ` +
+      `style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;` +
+      `width:30px;height:30px;border-radius:50%;background:${escapeHtml(option.color)};` +
+      `border:2px solid ${active ? "var(--text)" : "transparent"}">` +
+      `${active ? '<span style="color:#fff;font-size:13px">✓</span>' : ""}</span>`
+    );
+  }).join("");
+
+  const layouts = SETTINGS_APP_LAYOUTS.map((layout) =>
+    chip(SETTINGS_APP_SETTING_KEYS.layout, layout, capitalize(layout), layout === appearance.layout),
+  ).join("");
+
+  const note = hasPorts
+    ? `Persisted in /var/lib/vita/settings.json — survives reboot.`
+    : `Settings backend is read-only here; controls reflect defaults.`;
+
+  return (
+    `<div style="font-size:18px;font-weight:600;color:var(--text);margin-bottom:4px">Appearance</div>` +
+    `<div style="font-size:11px;color:var(--text-faint);margin-bottom:20px">${escapeHtml(note)}</div>` +
+    group("Theme", `<div style="display:flex;gap:9px;flex-wrap:wrap">${themes}</div>`) +
+    group("Accent", `<div style="display:flex;gap:12px;align-items:center">${accents}` +
+      `<span style="font-size:12px;color:var(--text-muted);margin-left:6px">${escapeHtml(capitalize(appearance.accent))}</span></div>`) +
+    group("Layout", `<div style="display:flex;gap:9px;flex-wrap:wrap">${layouts}</div>` +
+      `<div style="margin-top:8px;font-size:12px;color:var(--text-muted)">Density: ${escapeHtml(appearance.density)}` +
+      `${appearance.tiling ? " · tiling on" : ""}</div>`)
+  );
+}
+
+function group(label: string, body: string): string {
+  return (
+    `<div style="margin-bottom:24px">` +
+    `<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">${escapeHtml(label)}</div>` +
+    body +
+    `</div>`
+  );
+}
+
+function chip(key: string, value: string, label: string, active: boolean): string {
+  const style = active
+    ? "background:var(--accent);color:#fff;border-color:var(--accent)"
+    : "background:var(--surface-raised);color:var(--text);border-color:var(--border)";
+
+  return (
+    `<span data-vita-settings-key="${escapeHtml(key)}" data-vita-settings-value="${escapeHtml(value)}" ` +
+    `role="button" tabindex="0" ` +
+    `style="cursor:pointer;padding:7px 15px;border:1px solid;border-radius:9px;font-size:13px;${style}">` +
+    `${escapeHtml(label)}</span>`
+  );
 }
 
 function emptyState(detail: string): string {
   return (
-    `<div style="padding:26px 16px;color:var(--text-faint);text-align:center">` +
+    `<div style="flex:1;padding:26px 16px;color:var(--text-faint);text-align:center">` +
     `<div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Settings unavailable</div>` +
     `<div style="font-size:12px">${escapeHtml(detail)}</div></div>`
   );
 }
 
-function readSettingTarget(event: unknown): SettingTarget | undefined {
+function title(sectionId: string): string {
+  return sectionId.length === 0 ? "Settings" : capitalize(sectionId);
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
+}
+
+function attrValue(event: unknown, attr: string): string | undefined {
   try {
     const node = (event as { target?: unknown }).target;
 
@@ -151,18 +268,13 @@ function readSettingTarget(event: unknown): SettingTarget | undefined {
 
     if (typeof closest !== "function") return undefined;
 
-    const el = closest.call(node, "[data-vita-setting-key]") as {
-      getAttribute?: (n: string) => string | null;
-    } | null;
+    const el = closest.call(node, `[${attr}]`) as { getAttribute?: (n: string) => string | null } | null;
 
     if (el === null || typeof el?.getAttribute !== "function") return undefined;
 
-    const key = el.getAttribute("data-vita-setting-key");
-    const value = el.getAttribute("data-vita-setting-value");
+    const value = el.getAttribute(attr);
 
-    if (typeof key !== "string" || typeof value !== "string" || key.length === 0) return undefined;
-
-    return Object.freeze({ key, value });
+    return typeof value === "string" ? value : undefined;
   } catch {
     return undefined;
   }
