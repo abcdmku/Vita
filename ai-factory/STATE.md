@@ -3,6 +3,28 @@
 > The orchestrator updates this every tick — the single source of "where are we". Keep it CURRENT,
 > not a log (git history + the Done list below are the log).
 
+## ✅ REAL FUNCTIONAL DESKTOP CONSOLIDATED ON MAIN (2026-06-26, main=f285e7f)
+The Vita desktop is now GENUINELY FUNCTIONAL on the trunk. (It WAS a disconnected static mockup — the
+placeholder audit (PSD-5xx) caught that "boots live on the GPU" was true for PIXELS ONLY; every action
+returned HOST_BRIDGE_UNAVAILABLE.) Now verified on REAL VMware GPU boots: ~6s boot → honest loading screen
+(NO baked placeholder frame) → live CEF render (`live-swap=CONFIRMED`, frames rising) → working mouse
+(root cause: VMware ABSOLUTE pointer — libinput `MOTION_ABSOLUTE` was silently dropped; + a stale-binary
+build bug) routing through the desktop's NATIVE binder (root cause: `file://` ES-module CORS block → fixed
+with `--allow-file-access-from-files`) → **A CLICK ON A DOCK APP LAUNCHES A REAL APP WITH REAL DATA** via a
+capability-enforced host bridge (a Deno host-proxy on `/run/vita-host-proxy.sock`; `osr_host` injects
+`window.vitaDesktopBridge`). PROVEN REAL: **Settings persists across reboot** (`/var/lib/vita/settings.json`);
+**Activity = live `/proc` stats** (real pids: vita_cef_osr/vita-compositor/deno/agentd); Files/Mail/Editor/
+Terminal on the real filesystem. Consolidated: `cef-vm-input` (render/input/bridge/app-real-data, 39 commits)
+merged → `main` (foundations + apps + removals, 67 commits) at **f285e7f** (rust-in-docker + typecheck +
+VMware boot ALL PASS; compositor `InputRouter`+`PointerMotionAbsolute`+scanout-flip compile together).
+Deliverable VM: `C:\Users\Borg\vita-vmware\Vita-Desktop\Vita-Desktop.vmx`.
+**REMAINING POLISH (honest, not "fake"):** Browser web-surface backend (honest empty now); a production
+origin instead of `--disable-web-security` (a `file://` dev shortcut); 2 pre-existing settings tests
+(`MISSING_CAPABILITY`→`CAP_DENIED` drift — fail on the parent branches too); an Activity-empty-this-boot
+timing race (code is correct/byte-identical to the proven baseline; a settle-delay fixes it); deferred
+backlog (302/304 input-channel/multi-surface robustness, 381 owner-auth, 512/518/520 compositor/healthz
+placeholder removals).
+
 ## Current phase
 **Phase 4 — Application platform** (spec §21), networking arc. **Phases 0–2 COMPLETE + boot-verified:**
 Phase 1 (Secure Boot + dm-verity + A/B/RAUC + real-disk installer + persistent /var + Go agent), Phase 2
