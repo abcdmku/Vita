@@ -396,6 +396,7 @@ struct SurfaceState<T> {
     width: u32,
     height: u32,
     texture: T,
+    generation: u64,
 }
 
 pub struct Compositor<B: RenderBackend> {
@@ -449,6 +450,7 @@ impl<B: RenderBackend> Compositor<B> {
                 width,
                 height,
                 texture,
+                generation: 0,
             },
         );
 
@@ -479,6 +481,7 @@ impl<B: RenderBackend> Compositor<B> {
                 width,
                 height,
                 texture,
+                generation: 0,
             },
         );
 
@@ -493,17 +496,32 @@ impl<B: RenderBackend> Compositor<B> {
         id: &SurfaceId,
         rgba: &[u8],
     ) -> Result<DamageReport, CompositorError> {
+        let generation = self.next_surface_generation(id)?;
+        self.update_buffer_surface_with_generation(id, rgba, generation)
+    }
+
+    pub fn update_buffer_surface_with_generation(
+        &mut self,
+        id: &SurfaceId,
+        rgba: &[u8],
+        generation: u64,
+    ) -> Result<DamageReport, CompositorError> {
         let surface = self
             .surfaces
             .get_mut(id)
             .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
         validate_rgba_buffer(surface.width, surface.height, rgba)?;
+        if generation < surface.generation {
+            return Ok(empty_damage_report());
+        }
+
         self.backend.update_texture_rgba(
             &mut surface.texture,
             surface.width,
             surface.height,
             rgba,
         )?;
+        surface.generation = generation;
 
         let mut rects = Vec::new();
         for placement in &self.placements {
@@ -562,6 +580,10 @@ impl<B: RenderBackend> Compositor<B> {
         }
 
         self.placements = placements;
+        for id in &changed_surfaces {
+            self.bump_surface_generation(id);
+        }
+
         Ok(DamageReport {
             changed_surfaces,
             rects,
@@ -569,25 +591,41 @@ impl<B: RenderBackend> Compositor<B> {
     }
 
     pub fn set_z(&mut self, id: &SurfaceId, z_index: i32) -> Result<DamageReport, CompositorError> {
+        let generation = self.next_surface_generation(id)?;
+        self.set_z_with_generation(id, z_index, generation)
+    }
+
+    pub fn set_z_with_generation(
+        &mut self,
+        id: &SurfaceId,
+        z_index: i32,
+        generation: u64,
+    ) -> Result<DamageReport, CompositorError> {
         if !self.surfaces.contains_key(id) {
             return Err(CompositorError::UnknownSurface(id.clone()));
         }
-
-        let Some(placement) = self
-            .placements
-            .iter_mut()
-            .find(|placement| &placement.surface_id == id)
-        else {
-            return Ok(empty_damage_report());
-        };
-
-        if placement.z_index == z_index {
+        if self.is_stale_surface_generation(id, generation)? {
             return Ok(empty_damage_report());
         }
 
-        let rect = placement.rect();
-        placement.z_index = z_index;
+        let Some(index) = self
+            .placements
+            .iter()
+            .position(|placement| &placement.surface_id == id)
+        else {
+            self.record_surface_generation(id, generation);
+            return Ok(empty_damage_report());
+        };
+
+        if self.placements[index].z_index == z_index {
+            self.record_surface_generation(id, generation);
+            return Ok(empty_damage_report());
+        }
+
+        let rect = self.placements[index].rect();
+        self.placements[index].z_index = z_index;
         sort_placements(&mut self.placements);
+        self.record_surface_generation(id, generation);
 
         Ok(DamageReport {
             changed_surfaces: vec![id.clone()],
@@ -596,39 +634,61 @@ impl<B: RenderBackend> Compositor<B> {
     }
 
     pub fn raise_surface(&mut self, id: &SurfaceId) -> Result<DamageReport, CompositorError> {
+        let generation = self.next_surface_generation(id)?;
+        self.raise_surface_with_generation(id, generation)
+    }
+
+    pub fn raise_surface_with_generation(
+        &mut self,
+        id: &SurfaceId,
+        generation: u64,
+    ) -> Result<DamageReport, CompositorError> {
         if !self.surfaces.contains_key(id) {
             return Err(CompositorError::UnknownSurface(id.clone()));
         }
+        if self.is_stale_surface_generation(id, generation)? {
+            return Ok(empty_damage_report());
+        }
 
-        let Some(target) = self
+        let Some(index) = self
             .placements
             .iter()
-            .find(|placement| &placement.surface_id == id)
+            .position(|placement| &placement.surface_id == id)
         else {
+            self.record_surface_generation(id, generation);
             return Ok(empty_damage_report());
         };
 
-        let Some(top) = self.placements.last() else {
-            return Ok(empty_damage_report());
-        };
-
-        if &top.surface_id == id {
+        if self
+            .placements
+            .last()
+            .map(|placement| &placement.surface_id)
+            == Some(id)
+        {
+            self.record_surface_generation(id, generation);
             return Ok(empty_damage_report());
         }
 
-        let raised_z = top.z_index.checked_add(1).ok_or_else(|| {
-            CompositorError::Protocol("cannot raise surface above i32::MAX z-index".to_owned())
-        })?;
-        let rect = target.rect();
+        let Some(top_z) = self.placements.last().map(|placement| placement.z_index) else {
+            self.record_surface_generation(id, generation);
+            return Ok(empty_damage_report());
+        };
+        let raised_z = top_z.checked_add(1);
+        let rect = self.placements[index].rect();
         let changed_surface = id.clone();
 
-        for placement in &mut self.placements {
-            if &placement.surface_id == id {
-                placement.z_index = raised_z;
-                break;
+        if let Some(raised_z) = raised_z {
+            for placement in &mut self.placements {
+                if &placement.surface_id == id {
+                    placement.z_index = raised_z;
+                    break;
+                }
             }
+            sort_placements(&mut self.placements);
+        } else {
+            raise_placement_to_top(&mut self.placements, id)?;
         }
-        sort_placements(&mut self.placements);
+        self.record_surface_generation(id, generation);
 
         Ok(DamageReport {
             changed_surfaces: vec![changed_surface],
@@ -743,6 +803,38 @@ impl<B: RenderBackend> Compositor<B> {
             .get(id)
             .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
         rgba_buffer_byte_len(surface.width, surface.height)
+    }
+
+    fn next_surface_generation(&self, id: &SurfaceId) -> Result<u64, CompositorError> {
+        let surface = self
+            .surfaces
+            .get(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
+        Ok(surface.generation.saturating_add(1))
+    }
+
+    fn is_stale_surface_generation(
+        &self,
+        id: &SurfaceId,
+        generation: u64,
+    ) -> Result<bool, CompositorError> {
+        let surface = self
+            .surfaces
+            .get(id)
+            .ok_or_else(|| CompositorError::UnknownSurface(id.clone()))?;
+        Ok(generation < surface.generation)
+    }
+
+    fn record_surface_generation(&mut self, id: &SurfaceId, generation: u64) {
+        if let Some(surface) = self.surfaces.get_mut(id) {
+            surface.generation = surface.generation.max(generation);
+        }
+    }
+
+    fn bump_surface_generation(&mut self, id: &SurfaceId) {
+        if let Some(surface) = self.surfaces.get_mut(id) {
+            surface.generation = surface.generation.saturating_add(1);
+        }
     }
 }
 
@@ -1264,6 +1356,33 @@ fn sort_placements(placements: &mut [Placement]) {
             .cmp(&right.z_index)
             .then_with(|| left.surface_id.cmp(&right.surface_id))
     });
+}
+
+fn raise_placement_to_top(
+    placements: &mut Vec<Placement>,
+    id: &SurfaceId,
+) -> Result<(), CompositorError> {
+    let Some(index) = placements
+        .iter()
+        .position(|placement| &placement.surface_id == id)
+    else {
+        return Ok(());
+    };
+
+    let z_values = (0..placements.len())
+        .map(|index| {
+            i32::try_from(index).map_err(|_| {
+                CompositorError::Protocol("too many placements to renormalize z order".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = placements.remove(index);
+    placements.push(target);
+    for (placement, z_index) in placements.iter_mut().zip(z_values) {
+        placement.z_index = z_index;
+    }
+    sort_placements(placements);
+    Ok(())
 }
 
 fn empty_damage_report() -> DamageReport {

@@ -218,6 +218,34 @@ fn raise_surface_reorders_without_repainting_source_textures() {
 }
 
 #[test]
+fn raise_surface_renormalizes_when_top_z_is_i32_max() {
+    let (mut compositor, back, middle, front) = three_surface_stack();
+    let initial = compositor
+        .update_placements(vec![
+            Placement::new(back, 0, 0, 5, 5, 0).unwrap(),
+            Placement::new(middle.clone(), 1, 1, 4, 4, 10).unwrap(),
+            Placement::new(front, 2, 2, 3, 3, i32::MAX).unwrap(),
+        ])
+        .unwrap();
+    compositor.composite(&initial).unwrap();
+    let before_repaint_count = compositor.source_repaint_count();
+
+    let damage = compositor.raise_surface(&middle).unwrap();
+
+    assert_eq!(damage.changed_surfaces, vec![middle]);
+    assert_eq!(damage.rects, vec![Rect::new(1, 1, 4, 4).unwrap()]);
+    assert_eq!(compositor.source_repaint_count(), before_repaint_count);
+
+    let report = compositor.composite(&damage).unwrap();
+    assert_eq!(report.surfaces, 3);
+    assert_eq!(report.damage_rects, 1);
+    assert_eq!(compositor.source_repaint_count(), before_repaint_count);
+
+    let output = compositor.output_readback_rgba().unwrap();
+    assert_output_pixel(&output, 6, 2, 2, [0, 150, 0, 255]);
+}
+
+#[test]
 fn remove_surface_preserves_remaining_textures_and_damages_vacated_rect() {
     let (mut compositor, back, middle, front) = three_surface_stack();
     let initial = compositor
@@ -282,21 +310,32 @@ fn out_of_order_updates_composite_from_latest_snapshot() {
         .unwrap();
     compositor.composite(&initial).unwrap();
 
-    let stale_buffer_damage = compositor
-        .update_buffer_surface(&async_surface, &solid_rgba(0, 120, 0, 255, 3, 3))
-        .unwrap();
-    let stale_z_damage = compositor.set_z(&async_surface, -5).unwrap();
     let latest_buffer_damage = compositor
-        .update_buffer_surface(&async_surface, &solid_rgba(240, 210, 0, 255, 3, 3))
+        .update_buffer_surface_with_generation(
+            &async_surface,
+            &solid_rgba(240, 210, 0, 255, 3, 3),
+            4,
+        )
         .unwrap();
-    let latest_z_damage = compositor.set_z(&async_surface, 5).unwrap();
+    let latest_z_damage = compositor
+        .set_z_with_generation(&async_surface, 5, 5)
+        .unwrap();
+    let repaint_after_latest = compositor.source_repaint_count();
 
-    assert_eq!(stale_buffer_damage.rects, vec![surface_rect]);
-    assert_eq!(stale_z_damage.rects, vec![surface_rect]);
+    let stale_buffer_damage = compositor
+        .update_buffer_surface_with_generation(&async_surface, &solid_rgba(0, 120, 0, 255, 3, 3), 2)
+        .unwrap();
+    let stale_z_damage = compositor
+        .set_z_with_generation(&async_surface, -5, 3)
+        .unwrap();
+
     assert_eq!(latest_buffer_damage.rects, vec![surface_rect]);
     assert_eq!(latest_z_damage.rects, vec![surface_rect]);
+    assert_eq!(stale_buffer_damage.rects, Vec::<Rect>::new());
+    assert_eq!(stale_z_damage.rects, Vec::<Rect>::new());
+    assert_eq!(compositor.source_repaint_count(), repaint_after_latest);
 
-    let report = compositor.composite(&stale_z_damage).unwrap();
+    let report = compositor.composite(&latest_z_damage).unwrap();
     assert_eq!(report.surfaces, 2);
     assert_eq!(report.damage_rects, 1);
 
