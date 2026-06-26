@@ -15,11 +15,11 @@ use vita_compositor_core::platform::{
     open_default_gpu_backend, open_default_gpu_backend_for_self_test, query_default_output_mode,
 };
 use vita_compositor_core::{
-    failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
-    start_desktop_demo_or_failsafe, Compositor, CompositorError, DamageReport, InputAvailability,
-    InputEvent, Placement, PointerButtonState, Rect, RenderBackend, RoutedInputEvent,
-    SelfTestReport, SelfTestStatus, SurfaceId, TestPattern, DESKTOP_DEMO_OUTPUT_HEIGHT,
-    DESKTOP_DEMO_OUTPUT_WIDTH,
+    cursor_sprite_rgba_for, failsafe_report, rgba_buffer_byte_len,
+    run_reposition_self_test_or_failsafe, start_desktop_demo_or_failsafe, Compositor,
+    CompositorError, DamageReport, InputAvailability, InputEvent, Placement, PointerButtonState,
+    Rect, RenderBackend, RoutedInputEvent, SelfTestReport, SelfTestStatus, SurfaceId, TestPattern,
+    CURSOR_SPRITE_SIZE, DESKTOP_DEMO_OUTPUT_HEIGHT, DESKTOP_DEMO_OUTPUT_WIDTH,
 };
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
@@ -466,6 +466,7 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             "updateBufferSurface" => self.update_buffer_surface(&fields),
             "updatePlacement" => self.update_placement(&fields),
             "removeSurface" => self.remove_surface(&fields),
+            "cursorShape" => self.cursor_shape(&fields),
             "present" => self.present(&fields),
             "routeInput" => self.route_input(&fields),
             _ => Err(CompositorError::Protocol(format!(
@@ -576,6 +577,45 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         self.merge_damage(damage);
         // Scene changed: invalidate the last present (see register_surface).
         self.presented = false;
+        Ok(())
+    }
+
+    // PSD-CURSOR: swap the visible cursor surface's pixels to a baked shape sprite. CEF's
+    // OnCursorChange (osr_host) emits `cursorShape <name>` whenever the page's cursor: changes
+    // (hover a resize grip / text field / link, or drag). The cursor surface (`cursor:pointer`)
+    // is registered once by the boot launch stream at CURSOR_SPRITE_SIZE; here we only re-upload
+    // its 24x24 RGBA so the SAME surface (with its existing placement/z) shows the new shape. The
+    // smooth-cursor present cadence scans it out on the next present. Fail SAFE: an unknown shape
+    // token resolves to the arrow sprite (sprite_rgba_for), and if the cursor surface is not (yet)
+    // registered or has an unexpected size, this is a no-op rather than tearing down the live
+    // desktop — a missing/odd cursor surface must never crash the persistent pipe.
+    fn cursor_shape(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
+        require_field_count(fields, 2, "cursorShape")?;
+        let shape = required_field(fields, 1, "shape")?;
+        let Some(id) = self.cursor_surface.clone() else {
+            // No visible cursor surface tracked yet (no `cursor:pointer` placement) — ignore.
+            return Ok(());
+        };
+        if !self.compositor.has_surface(&id) {
+            return Ok(());
+        }
+        // The sprite is CURSOR_SPRITE_SIZE^2 RGBA; only apply if the surface matches that size.
+        let expected = self.compositor.surface_rgba_byte_len(&id)?;
+        let sprite = cursor_sprite_rgba_for(shape);
+        if sprite.len() != expected {
+            eprintln!(
+                "VITA-CURSOR: shape={shape} skipped (sprite {} bytes != cursor surface {} bytes, size!={CURSOR_SPRITE_SIZE})",
+                sprite.len(),
+                expected
+            );
+            return Ok(());
+        }
+        let damage = self.compositor.update_buffer_surface(&id, &sprite)?;
+        self.merge_damage(damage);
+        // Scene changed: invalidate the last present (a fresh present must follow). The smooth-
+        // cursor pump already presents every tick, so the new sprite scans out immediately.
+        self.presented = false;
+        eprintln!("VITA-CURSOR: shape={shape} applied to {}", id.as_str());
         Ok(())
     }
 
@@ -1484,6 +1524,63 @@ mod tests {
         assert_eq!(
             error,
             CompositorError::Protocol("command stream ended before present".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_session_cursor_shape_swaps_cursor_sprite() {
+        // Register a 24x24 cursor surface, place it visible (so cursor_surface is tracked), then
+        // swap its shape and present. The shape swap must succeed and the stream must present OK.
+        let size = CURSOR_SPRITE_SIZE;
+        let blank = "00".repeat((size * size * 4) as usize);
+        let report = run_commands(&[
+            &format!("registerBufferSurface cursor:pointer {size} {size} {blank}"),
+            &format!("updatePlacement cursor:pointer 5 5 {size} {size} 1000 true"),
+            "present",
+            "cursorShape ew-resize",
+            "present",
+        ])
+        .expect("cursorShape on a sized cursor surface should swap pixels and present");
+        assert_eq!(report.status, SelfTestStatus::Ok);
+        assert_eq!(report.surfaces, 1);
+    }
+
+    #[test]
+    fn command_session_cursor_shape_unknown_token_fails_safe_to_arrow() {
+        // An unknown shape token must NOT error — it resolves to the arrow sprite and presents OK.
+        let size = CURSOR_SPRITE_SIZE;
+        let blank = "00".repeat((size * size * 4) as usize);
+        let report = run_commands(&[
+            &format!("registerBufferSurface cursor:pointer {size} {size} {blank}"),
+            &format!("updatePlacement cursor:pointer 0 0 {size} {size} 1000 true"),
+            "present",
+            "cursorShape totally-bogus",
+            "present",
+        ])
+        .expect("unknown cursorShape token must fail safe (arrow), not error");
+        assert_eq!(report.status, SelfTestStatus::Ok);
+    }
+
+    #[test]
+    fn command_session_cursor_shape_without_cursor_surface_is_noop() {
+        // A cursorShape before any cursor:pointer surface exists must be a harmless no-op (it must
+        // not error and tear down the persistent live pipe).
+        let report = run_commands(&[
+            "registerSurface surface:files 32 24 e6edf2ff",
+            "updatePlacement surface:files 4 5 32 24 7 true",
+            "cursorShape pointer",
+            "present",
+        ])
+        .expect("cursorShape with no cursor surface must be a no-op, not an error");
+        assert_eq!(report.status, SelfTestStatus::Ok);
+    }
+
+    #[test]
+    fn command_session_cursor_shape_requires_a_token() {
+        let error = run_commands(&["cursorShape"]).expect_err("cursorShape needs a shape token");
+        assert_eq!(
+            error,
+            CompositorError::Protocol("cursorShape expects 1 fields".to_owned())
         );
     }
 

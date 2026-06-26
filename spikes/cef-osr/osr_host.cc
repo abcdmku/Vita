@@ -63,6 +63,49 @@ bool EmitCompositorFrame();
 // PSD-500: emit a CHEAP cursor-only present (a bare `present` line) so the compositor repositions
 // the top-most cursor surface and re-composites WITHOUT a CEF repaint or a buffer re-upload.
 bool EmitCursorPresent();
+// PSD-CURSOR: emit a `cursorShape <name>` command so the compositor swaps the visible cursor
+// surface's pixels to the matching baked sprite (arrow/text/pointer/the four resize shapes/...).
+bool EmitCursorShape(const std::string& shape);
+
+// PSD-CURSOR: map CEF's cursor TYPE to the small set of shape tokens the compositor bakes. CEF
+// reports a rich cef_cursor_type_t (CT_POINTER, CT_IBEAM, CT_HAND, the directional *_RESIZE
+// variants, CT_GRAB/CT_GRABBING, ...) on every hover/drag where the page requests a different
+// `cursor:`. We collapse it to the v1 sprite set and FAIL SAFE to "arrow" for anything unmapped.
+std::string CursorTypeToShape(cef_cursor_type_t type) {
+  switch (type) {
+    case CT_IBEAM:
+    case CT_VERTICALTEXT:
+      return "text";
+    case CT_HAND:
+      return "pointer";
+    case CT_EASTWESTRESIZE:
+    case CT_EASTRESIZE:
+    case CT_WESTRESIZE:
+    case CT_COLUMNRESIZE:
+      return "ew-resize";
+    case CT_NORTHSOUTHRESIZE:
+    case CT_NORTHRESIZE:
+    case CT_SOUTHRESIZE:
+    case CT_ROWRESIZE:
+      return "ns-resize";
+    case CT_NORTHWESTSOUTHEASTRESIZE:
+    case CT_NORTHWESTRESIZE:
+    case CT_SOUTHEASTRESIZE:
+      return "nwse-resize";
+    case CT_NORTHEASTSOUTHWESTRESIZE:
+    case CT_NORTHEASTRESIZE:
+    case CT_SOUTHWESTRESIZE:
+      return "nesw-resize";
+    case CT_GRABBING:
+    case CT_GRAB:
+    case CT_MOVE:
+      return "grabbing";
+    case CT_POINTER:
+    default:
+      // Pointer (the default arrow) and every unmapped type fall back to arrow — fail safe.
+      return "arrow";
+  }
+}
 
 // --- configuration (CEF view surface) ---
 // PSD-500: the CEF view + compositor-output dimensions are RUNTIME-configurable so the live boot
@@ -189,6 +232,37 @@ class OsrClient : public CefClient,
     fprintf(stderr, "[osr] CONSOLE %s @ %s:%d\n",
             message.ToString().c_str(), source.ToString().c_str(), line);
     return false;
+  }
+
+  // PSD-CURSOR: CEF (CefDisplayHandler) calls this on the UI thread whenever the browser's cursor
+  // shape changes — i.e. when the page's effective `cursor:` under the pointer changes (hover a
+  // resize grip / text field / link, or start a drag). In windowless OSR there is no native window
+  // for CEF to set the cursor on, so the shape change is otherwise DROPPED (the symptom: a fixed
+  // baked arrow that never changes). We map the TYPE to a baked sprite token and push a
+  // `cursorShape <name>` command down the SAME osr_host->compositor command stream the live surface
+  // uses; the compositor swaps the visible cursor surface's pixels to the matching sprite. This runs
+  // on the UI thread, the same thread that drives the command sink (StreamFrameTick posts to
+  // TID_UI), so writing to the sink here is ordered with the frame/present stream. Returning true
+  // tells CEF the host handled the cursor.
+  bool OnCursorChange(CefRefPtr<CefBrowser> /*browser*/,
+                      CefCursorHandle /*cursor*/,
+                      cef_cursor_type_t type,
+                      const CefCursorInfo& /*custom_cursor_info*/) override {
+    CEF_REQUIRE_UI_THREAD();
+    std::string shape = CursorTypeToShape(type);
+    // De-dupe: only emit when the shape actually changes. CEF can fire OnCursorChange repeatedly
+    // for the same effective cursor; a redundant cursorShape would needlessly re-upload the sprite
+    // and bump the compositor's repaint count.
+    if (shape == last_cursor_shape_) return true;
+    last_cursor_shape_ = shape;
+    if (EmitCursorShape(shape)) {
+      fprintf(stderr, "[osr] cursor: shape=%s (cef-type=%d)\n", shape.c_str(),
+              static_cast<int>(type));
+    } else {
+      fprintf(stderr, "[osr] cursor: shape=%s emit deferred/failed (sink not open?)\n",
+              shape.c_str());
+    }
+    return true;
   }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
@@ -358,6 +432,7 @@ class OsrClient : public CefClient,
   CefRefPtr<CefBrowser> browser_;
   int frames_emitted_ = 0;  // M4 streaming: CONTENT frames pushed to the compositor sink
   long long cursor_tick_ = 0;  // PSD-500: fast-cadence tick counter (cursor presents + content)
+  std::string last_cursor_shape_ = "arrow";  // PSD-CURSOR: last emitted shape token (de-dupe)
 
   IMPLEMENT_REFCOUNTING(OsrClient);
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
@@ -895,6 +970,17 @@ bool EmitCursorPresent() {
   // to present cheaply (the prelude already presented the loading screen + cursor).
   if (!g_registered) return true;
   return WriteToSink("present\n");
+}
+
+// PSD-CURSOR: emit a `cursorShape <name>` command so the compositor swaps the visible cursor
+// surface's pixels to the matching baked sprite. The sink is the SAME osr_host->compositor command
+// stream the live desktop is streamed over, so the shape change is ordered with frames/presents.
+// We do NOT emit our own `present` here: the smooth-cursor pump already presents at ~60fps, so the
+// new sprite scans out on the very next present. Best-effort: a failed write means the downstream
+// pipe closed (handled by the stream pump's own write-failure path).
+bool EmitCursorShape(const std::string& shape) {
+  if (g_sink == nullptr) return false;
+  return WriteToSink("cursorShape " + shape + "\n");
 }
 
 // --- PSD-055 input wiring -----------------------------------------------------

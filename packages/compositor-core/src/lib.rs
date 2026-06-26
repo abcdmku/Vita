@@ -5,7 +5,10 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
+pub mod cursor_sprites;
 pub mod platform;
+
+pub use cursor_sprites::{sprite_rgba_for as cursor_sprite_rgba_for, CURSOR_SHAPES, CURSOR_SPRITE_SIZE};
 
 pub const VITA_COMPOSITOR_MARKER: &str = "VITA-COMPOSITOR";
 pub const VITA_INPUT_ROUTE_MARKER: &str = "VITA-INPUT-ROUTE";
