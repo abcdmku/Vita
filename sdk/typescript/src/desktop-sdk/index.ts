@@ -87,6 +87,9 @@ export {
   hasAppCapabilityGrant,
 } from "./app-package.ts";
 export {
+  createDesktopAppsBackend,
+} from "./apps-backend.ts";
+export {
   DesktopUiPackageLoader,
   KNOWN_GOOD_DESKTOP_UI_PACKAGE_ID,
   createDesktopHostForPackage,
@@ -108,6 +111,11 @@ export {
   createSurfaceHostRouter,
   routeSurfaceHostRequest,
 } from "./surface-host-router.ts";
+export {
+  isDesktopAppLaunch,
+  isDesktopAppStop,
+  isDesktopLaunchableApp,
+} from "./ui-package.ts";
 
 export type {
   EvaluatedShellConfig,
@@ -306,6 +314,13 @@ export type {
   AgentdHostTransportInit,
   AgentdHostTransportResponse,
 } from "./agentd-host-client.ts";
+export type {
+  DesktopAppCapsuleDescriptor,
+  DesktopAppCapsuleDescriptors,
+  DesktopAppsBackend,
+  DesktopAppsBackendOptions,
+  DesktopAppsBackendSnapshot,
+} from "./apps-backend.ts";
 export type {
   SurfaceHostBackend,
   SurfaceHostRouter,
