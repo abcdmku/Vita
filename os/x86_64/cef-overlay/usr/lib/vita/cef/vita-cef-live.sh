@@ -27,7 +27,14 @@ CEF_DIR=/usr/lib/vita/cef
 OSR=$CEF_DIR/vita_cef_osr
 COMPOSITOR=/usr/lib/vita/compositor/vita-compositor
 DESKTOP=/usr/lib/vita/ui_kits/desktop/index.html
-URL=file://$DESKTOP
+# PSD-502 PRODUCTION ORIGIN: boot the desktop over the REAL secure custom scheme vita://desktop
+# (registered by osr_host: STANDARD+SECURE+CORS+FETCH) instead of file://. Under a true secure
+# origin the ES-module bundle loads same-origin and the native binder hydrates WITH web security
+# ENABLED (no --disable-web-security). The scheme authorities are rooted at the ui_kits tree and
+# the offline browser content; index lives at desktop/index.html under the desktop authority.
+SCHEME_ROOT=/usr/lib/vita/ui_kits
+BROWSER_ROOT=/usr/lib/vita/ui_kits/browser
+URL=vita://desktop/desktop/index.html
 # HONEST loading screen (NOT a fake desktop): a wallpaper + a clear "starting" indicator, shown
 # UNDER the live desktop until CEF paints. We do NOT bake a snapshot of the flagship — the moment
 # the user sees something that looks like the desktop, it IS the live CEF render.
@@ -232,6 +239,7 @@ fi
   # so the live desktop fills the screen, and interleave cheap cursor-only presents
   # (--cursor-presents-per-frame) so the cursor tracks at ~60fps without a CEF repaint per move.
   LD_LIBRARY_PATH="$CEF_DIR" exec "$OSR" --url="$URL" --compositor-out=- \
+    --scheme-root="$SCHEME_ROOT" --browser-root="$BROWSER_ROOT" \
     --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO" \
     --host-proxy-sock="$HOST_PROXY_SOCK" \
     --view-width="$VIEW_W" --view-height="$VIEW_H" \
@@ -355,6 +363,24 @@ if [ "$seen_ok" -eq 1 ]; then
         xy=$(tile_cxcy vita.app.browser) && move_click $xy && \
           emit_line "$MARKER: verify clicked Browser tile @ $xy"
         sleep 2.0
+        ;;
+      browser-activity)
+        # MERGE COMBINED VERIFY (vm-ux-merge): prove BOTH features in ONE boot. First click the
+        # Browser dock tile -> the REAL local web surface over vita://browser, hold it on screen for an
+        # external capture (marker: capture=browser-ready), then click the Activity dock tile -> the
+        # REAL /proc stats window (with the settle-and-retry so it is never the empty state), and hold
+        # again (marker: capture=activity-ready). The full-resolution desktop + smooth cursor are proven
+        # by the move_click sweeps and the display-mode marker regardless of scenario.
+        bxy=$(tile_cxcy vita.app.browser) && move_click $bxy && \
+          emit_line "$MARKER: verify clicked Browser tile @ $bxy"
+        sleep 1.5
+        emit_line "$MARKER: capture=browser-ready (vita://browser web surface on screen)"
+        sleep 4
+        axy=$(tile_cxcy vita.app.activity) && move_click $axy && \
+          emit_line "$MARKER: verify clicked Activity tile @ $axy"
+        sleep 2.0
+        emit_line "$MARKER: capture=activity-ready (live /proc stats on screen)"
+        sleep 4
         ;;
       activity|*)
         xy=$(tile_cxcy vita.app.activity) && move_click $xy && \

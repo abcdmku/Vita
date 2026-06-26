@@ -381,20 +381,43 @@ async function renderSettings(host: DesktopHost): Promise<string> {
   );
 }
 
+type ActivitySample = {
+  readonly cpuPercent?: number;
+  readonly memory?: { readonly usedBytes?: number; readonly totalBytes?: number };
+  readonly processes?: readonly { readonly pid: number; readonly name: string; readonly cpuPercent: number; readonly memoryBytes: number }[];
+};
+
+// A sample is "usable" only if the real /proc backend actually returned processes. An ok-but-empty
+// result means the host-proxy round-trip raced the window's first paint (the Deno metrics service /
+// unix-socket transport wasn't ready yet at boot) — treat it like a soft failure so the retry kicks in.
+function activitySampleIsUsable(result: DesktopHostResult<unknown>): boolean {
+  if (!result.ok) return false;
+  const sample = result.value as ActivitySample;
+  return (sample.processes?.length ?? 0) > 0;
+}
+
+const ACTIVITY_RETRY_DELAY_MS = 420;
+
 async function renderActivity(host: DesktopHost): Promise<string> {
   const metrics = readMetricsPort(host);
 
   if (metrics === undefined) return emptyState("Activity", "The metrics backend is unavailable.");
 
-  const result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  // PSD-503 (merge follow-up): the two-shot /proc sampler is correct, but on some boots the FIRST
+  // sample loses a race with the Activity window's first paint — the host-proxy metrics transport
+  // isn't ready yet, so it fails closed / returns no processes and the window shows "Activity is
+  // empty". The data is real on the next try, so settle-and-retry once before falling back: re-sample
+  // ~420ms later when the first result is unusable (failed OR ok-but-empty). One retry is enough to
+  // clear the startup race without masking a genuinely-down backend (a second failure still surfaces).
+  let result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  if (!activitySampleIsUsable(result)) {
+    await new Promise((resolve) => setTimeout(resolve, ACTIVITY_RETRY_DELAY_MS));
+    result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  }
 
   if (!result.ok) return emptyState("Activity", `${result.error.code}: ${result.error.message}`);
 
-  const sample = result.value as {
-    readonly cpuPercent?: number;
-    readonly memory?: { readonly usedBytes?: number; readonly totalBytes?: number };
-    readonly processes?: readonly { readonly pid: number; readonly name: string; readonly cpuPercent: number; readonly memoryBytes: number }[];
-  };
+  const sample = result.value as ActivitySample;
   const cpu = typeof sample.cpuPercent === "number" ? sample.cpuPercent : 0;
   const used = sample.memory?.usedBytes ?? 0;
   const total = sample.memory?.totalBytes ?? 0;
