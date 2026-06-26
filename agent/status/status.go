@@ -64,12 +64,15 @@ type handler struct {
 	health       healthSource
 }
 
-func NewHandler(version string, startedAt time.Time, capabilities []string, healthConfigs ...HealthConfig) http.Handler {
-	healthConfig := HealthConfig{}
-	if len(healthConfigs) > 0 {
-		healthConfig = healthConfigs[0]
+func NewHandler(version string, startedAt time.Time, capabilities []string, healthConfig HealthConfig) http.Handler {
+	return NewHandlerWithClock(version, startedAt, capabilities, time.Now, healthConfig)
+}
+
+func NewHandlerWithClock(version string, startedAt time.Time, capabilities []string, now func() time.Time, healthConfig HealthConfig) http.Handler {
+	if now == nil {
+		now = time.Now
 	}
-	return newHandler(version, startedAt, capabilities, time.Now, defaultHealthSource(healthConfig))
+	return newHandler(version, startedAt, capabilities, clock(now), defaultHealthSource(healthConfig))
 }
 
 func newHandler(version string, startedAt time.Time, capabilities []string, now clock, health healthSource) http.Handler {

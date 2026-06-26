@@ -177,6 +177,7 @@ type handler struct {
 	now              func() time.Time
 	files            *filecap.Handler
 	auditStore       AuditStore
+	statusHandler    http.Handler
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
@@ -600,6 +601,13 @@ func NewHandler(config Config) (http.Handler, error) {
 	names := registry.Names()
 	sort.Strings(names)
 
+	statusHandler := status.NewHandlerWithClock(config.Version, startedAt, names, now, status.HealthConfig{
+		CapsuleWorkloads: capsuleWorkloads,
+		RegistryReady:    registryReadinessSource(registry, names),
+		TransportReady:   requestContextReadinessSource,
+		StorageHealth:    storageHealthSnapshot,
+	})
+
 	return &handler{
 		version:          config.Version,
 		startedAt:        startedAt.UTC(),
@@ -613,6 +621,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		now:              now,
 		files:            filesHandler,
 		auditStore:       config.AuditStore,
+		statusHandler:    statusHandler,
 		capsuleWorkloads: capsuleWorkloads,
 		storageHealth:    storageHealthSnapshot,
 	}, nil
@@ -718,25 +727,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, http.MethodGet)
+	if h.statusHandler == nil {
+		writeError(w, http.StatusServiceUnavailable, "health_unavailable", "health source is not configured")
 		return
 	}
 
-	capabilityNames := cloneStrings(h.capabilityNames)
-	now := h.now().UTC()
-	uptime := now.Sub(h.startedAt)
-	if uptime < 0 {
-		uptime = 0
-	}
-
-	writeJSON(w, http.StatusOK, status.Status{
-		Version:       h.version,
-		StartedAt:     h.startedAt,
-		UptimeSeconds: int64(uptime.Seconds()),
-		Capabilities:  capabilityNames,
-		Healthy:       true,
-	})
+	h.statusHandler.ServeHTTP(w, r)
 }
 
 func (h *handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -1167,6 +1163,33 @@ func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) (func() []caps
 		return nil, fmt.Errorf("%s capability does not expose capsule workloads", capsule.ExecuteName)
 	}
 	return source.Workloads, nil
+}
+
+func registryReadinessSource(registry *capabilities.Registry, expected []string) status.ReadinessSource {
+	expectedNames := cloneStrings(expected)
+	return func(ctx context.Context) bool {
+		if ctx.Err() != nil || registry == nil || len(expectedNames) == 0 {
+			return false
+		}
+
+		names := registry.Names()
+		if len(names) != len(expectedNames) {
+			return false
+		}
+		for i, name := range names {
+			if name != expectedNames[i] {
+				return false
+			}
+			if _, ok := registry.Lookup(name); !ok {
+				return false
+			}
+		}
+		return len(names) == len(expectedNames)
+	}
+}
+
+func requestContextReadinessSource(ctx context.Context) bool {
+	return ctx.Err() == nil
 }
 
 func normalizeCapsuleWorkloads(workloads []capsuleruntime.WorkloadStatus) []capsuleruntime.WorkloadStatus {

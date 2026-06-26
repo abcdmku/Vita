@@ -244,7 +244,7 @@ func TestNewHandlerProductionHealthSourceAggregatesLiveSubsystemState(t *testing
 
 func TestNewHandlerZeroHealthConfigFailsClosed(t *testing.T) {
 	startedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	handler := NewHandler("test-version", startedAt, []string{"test.read"})
+	handler := NewHandler("test-version", startedAt, []string{"test.read"}, HealthConfig{})
 
 	status, _, _ := requestHealthz(t, handler)
 	if status.Healthy {
@@ -278,10 +278,44 @@ func TestNewHandlerUnwiredTransportFailsClosed(t *testing.T) {
 }
 
 func TestStatusDoesNotAssignLiteralHealthyTrue(t *testing.T) {
+	assertNoLiteralHealthyTrue(t, "status.go")
+}
+
+func TestServedHealthzDoesNotAssignLiteralHealthyTrue(t *testing.T) {
+	assertNoLiteralHealthyTrue(t, "../transport/server.go")
+}
+
+func TestStatusNewHandlerRequiresHealthConfig(t *testing.T) {
 	fileSet := token.NewFileSet()
 	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse status.go: %v", err)
+	}
+
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "NewHandler" {
+			continue
+		}
+		if function.Type.Params.NumFields() != 4 {
+			t.Fatalf("NewHandler params = %d fields, want 4 explicit fields", function.Type.Params.NumFields())
+		}
+		if _, ok := function.Type.Params.List[len(function.Type.Params.List)-1].Type.(*ast.Ellipsis); ok {
+			t.Fatal("NewHandler accepts variadic HealthConfig, want explicit required HealthConfig")
+		}
+		return
+	}
+
+	t.Fatal("NewHandler declaration not found")
+}
+
+func assertNoLiteralHealthyTrue(t *testing.T, path string) {
+	t.Helper()
+
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
 
 	ast.Inspect(file, func(node ast.Node) bool {
