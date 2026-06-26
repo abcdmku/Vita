@@ -86,6 +86,11 @@ type Config struct {
 	FilesStateRoot  string
 	FilesGrants     []filecap.Grant
 	FilesPrincipals []filecap.Principal
+	// UnixPeerRoles binds authenticated unix peer principal keys to the closed
+	// role vocabulary for transport-level peer scoping. A peer whose first bound
+	// role is service is treated as the desktop host and receives the narrow
+	// desktop allowlist in desktop_host_scope.go.
+	UnixPeerRoles []UnixPeerRoleBinding
 	// AuditStore records one event per /apply and backs the read-only /audit
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
@@ -176,6 +181,7 @@ type handler struct {
 	maxBodyBytes     int64
 	now              func() time.Time
 	files            *filecap.Handler
+	desktopHostScope desktopHostScope
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 	storageHealth    func(context.Context) (storagehealth.Report, error)
@@ -248,6 +254,7 @@ type unixPeerInfo struct {
 type unixPeerPrincipalConn struct {
 	net.Conn
 	principalKeys []string
+	auditActorID  string
 }
 
 type unixPeerPrincipalProvider interface {
@@ -261,6 +268,8 @@ type unixPeerPrincipalProvider interface {
 }
 
 type unixPeerPrincipalContextKey struct{}
+
+type unixPeerAuditActorContextKey struct{}
 
 func ListenUnixSocket(path string) (net.Listener, error) {
 	return ListenUnixSocketMode(path, DefaultUnixSocketMode)
@@ -362,7 +371,11 @@ func (l *authenticatedUnixListener) Accept() (net.Conn, error) {
 
 		peer, authErr := l.readPeerInfo(conn)
 		if authErr == nil && peerAuthorizedForGroup(peer, l.groupID) {
-			return &unixPeerPrincipalConn{Conn: conn, principalKeys: l.peerPrincipalKeys(peer)}, nil
+			return &unixPeerPrincipalConn{
+				Conn:          conn,
+				principalKeys: l.peerPrincipalKeys(peer),
+				auditActorID:  peerAuditActorID(peer),
+			}, nil
 		}
 
 		l.recordPeerUnauthorized(peer)
@@ -390,12 +403,18 @@ func (c *unixPeerPrincipalConn) UnixPeerPrincipalKeys() []string {
 	return c.principalKeys
 }
 
+func (c *unixPeerPrincipalConn) UnixPeerAuditActorID() string {
+	return c.auditActorID
+}
+
 func UnixPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
-	provider, ok := conn.(unixPeerPrincipalProvider)
-	if !ok {
-		return ctx
+	if provider, ok := conn.(unixPeerPrincipalProvider); ok {
+		ctx = contextWithUnixPeerPrincipalKeys(ctx, provider.UnixPeerPrincipalKeys())
 	}
-	return contextWithUnixPeerPrincipalKeys(ctx, provider.UnixPeerPrincipalKeys())
+	if provider, ok := conn.(interface{ UnixPeerAuditActorID() string }); ok {
+		ctx = contextWithUnixPeerAuditActorID(ctx, provider.UnixPeerAuditActorID())
+	}
+	return ctx
 }
 
 func (l *authenticatedUnixListener) recordPeerUnauthorized(peer unixPeerInfo) {
@@ -477,12 +496,27 @@ func contextWithUnixPeerPrincipalKeys(ctx context.Context, principalKeys []strin
 	return context.WithValue(ctx, unixPeerPrincipalContextKey{}, cleaned)
 }
 
+func contextWithUnixPeerAuditActorID(ctx context.Context, actorID string) context.Context {
+	if actorID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, unixPeerAuditActorContextKey{}, actorID)
+}
+
 func unixPeerPrincipalKeysFromContext(ctx context.Context) ([]string, bool) {
 	principalKeys, ok := ctx.Value(unixPeerPrincipalContextKey{}).([]string)
 	if !ok || len(principalKeys) == 0 {
 		return nil, false
 	}
 	return principalKeys, true
+}
+
+func unixPeerAuditActorIDFromContext(ctx context.Context) (string, bool) {
+	actorID, ok := ctx.Value(unixPeerAuditActorContextKey{}).(string)
+	if !ok || actorID == "" {
+		return "", false
+	}
+	return actorID, true
 }
 
 func peerAuthorizedForGroup(peer unixPeerInfo, groupID uint32) bool {
@@ -597,6 +631,11 @@ func NewHandler(config Config) (http.Handler, error) {
 		return nil, fmt.Errorf("build files handler: %w", err)
 	}
 
+	desktopScope, err := newDesktopHostScope(config.UnixPeerRoles)
+	if err != nil {
+		return nil, err
+	}
+
 	names := registry.Names()
 	sort.Strings(names)
 
@@ -612,6 +651,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		maxBodyBytes:     maxBodyBytes,
 		now:              now,
 		files:            filesHandler,
+		desktopHostScope: desktopScope,
 		auditStore:       config.AuditStore,
 		capsuleWorkloads: capsuleWorkloads,
 		storageHealth:    storageHealthSnapshot,
@@ -779,6 +819,10 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), desktopHostFilesCapability, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
+		return
+	}
 
 	var request filecap.Request
 	if err := decodeBody(w, r, &request, filecap.MaxRequestBodyBytes); err != nil {
@@ -802,6 +846,10 @@ func (h *handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 func (h *handler) handleExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), desktopHostExportCapability, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
 		return
 	}
 
@@ -855,6 +903,10 @@ func (h *handler) handleOwnerChallenge(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), owner.Name, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
+		return
+	}
 
 	action := r.URL.Query().Get("action")
 	if action == "" {
@@ -890,6 +942,10 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 	}
 	if name == "" || strings.Contains(name, "/") {
 		writeError(w, http.StatusNotFound, "unknown_capability", "unknown capability")
+		return
+	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), name, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
 		return
 	}
 
@@ -966,6 +1022,10 @@ func (h *handler) readPDSRepoQuery(ctx context.Context, values url.Values) (capa
 func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), desktopHostStateCapability, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
 		return
 	}
 
@@ -1196,6 +1256,10 @@ func (h *handler) handleApply(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
+	if requestErr := h.authorizeDesktopHostApply(r.Context(), request.Operations); requestErr != nil {
+		writeRequestError(w, requestErr)
+		return
+	}
 
 	plan, requestErr := h.buildPlan(request)
 	if requestErr != nil {
@@ -1254,6 +1318,10 @@ func (h *handler) recordApply(plan transaction.Plan, result transaction.Result) 
 func (h *handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if requestErr := h.authorizeDesktopHostCapability(r.Context(), desktopHostAuditCapability, auditlog.OperationRead); requestErr != nil {
+		writeRequestError(w, requestErr)
 		return
 	}
 	if h.auditStore == nil {
