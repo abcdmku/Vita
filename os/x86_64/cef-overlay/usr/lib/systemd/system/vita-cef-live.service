@@ -1,16 +1,17 @@
-# Vita SMOKE/VM only - M4 of the CEF live-render arc (ADR-0014), PERSISTENT (spike/cef-vm).
-# Run CEF (windowless software OSR) rendering the LIVE flagship desktop, piped CONTINUOUSLY
-# into the Vita native compositor on the real VMware GPU (KMS). The compositor presents every
-# frame and HOLDS the desktop on screen indefinitely (not a few-frame flash). Emits VITA-CEF +
-# VITA-COMPOSITOR to serial. Verification-only overlay: not part of the production OS image.
+# Vita SMOKE/VM only - CEF live-render arc (ADR-0014): INSTANT + PERSISTENT + INTERACTIVE desktop.
+# Shows a BAKED first-frame snapshot of the flagship within ~2-5s of power-on, then CEF warms in
+# the background and swaps to the live interactive render on the same surface; input (PSD-055) is
+# wired through a reverse-channel FIFO + a visible cursor. Emits VITA-CEF + VITA-COMPOSITOR to
+# serial. Verification-only overlay: not part of the production OS image.
 [Unit]
-Description=Vita CEF live-render -> compositor KMS scanout (persistent live desktop)
-After=systemd-modules-load.service systemd-udev-trigger.service open-vm-tools.service
-Wants=systemd-udev-trigger.service open-vm-tools.service
-# Run after the compositor self-test so only ONE process drives /dev/dri/card0 at a time
-# (the KMS master is exclusive). The self-test is oneshot+RemainAfterExit, so After= here
-# orders us strictly after it has released the device.
-After=vita-compositor-selftest.service
+Description=Vita CEF instant+live desktop -> compositor KMS scanout (interactive)
+# FAST BOOT: start as EARLY as possible — only wait for udev (the DRM/vmwgfx + input devices) and
+# the modules. Do NOT order after open-vm-tools or the compositor self-test: the self-test now
+# yields the GPU immediately in CEF mode (no 30s hold), and open-vm-tools is only needed for the
+# verification copy-out, not for rendering. This removes the ~31s serialization that delayed the
+# desktop to ~42s; CEF now owns the GPU right after udev settles.
+After=systemd-udev-trigger.service
+Wants=systemd-udev-trigger.service
 
 [Service]
 # Long-lived: the script blocks in the foreground holding the live CEF->compositor pipe for

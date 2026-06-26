@@ -57,13 +57,16 @@ fn command_session_writes_ordered_reverse_input_lines() {
 
     assert_eq!(report.status, SelfTestStatus::Ok);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    // PSD-055: the reverse-channel line now carries the ROUTED event with the ABSOLUTE cursor
+    // position (output pixels) the router computed, so the CEF host can SendMouseMoveEvent at the
+    // right coordinates. dx=5_000_000 micropixels = 5 px, dy=6_000_000 = 6 px from origin (0,0).
     assert_eq!(
         output_lines(&output),
         vec![
-            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=5000000 dy-micropixels=6000000",
-            "inputEvent surface=surface:cef kind=pointer-button button=1 state=pressed",
+            "inputEvent surface=surface:cef kind=pointer-motion cursor-x=5 cursor-y=6",
+            "inputEvent surface=surface:cef kind=pointer-button cursor-x=5 cursor-y=6 button=1 state=pressed",
             "inputEvent surface=surface:cef kind=key key-code=30 pressed=true",
-            "inputEvent surface=surface:cef kind=pointer-button button=1 state=released",
+            "inputEvent surface=surface:cef kind=pointer-button cursor-x=5 cursor-y=6 button=1 state=released",
         ]
     );
     assert_eq!(
@@ -111,10 +114,11 @@ fn command_session_drops_reverse_input_when_queue_is_full_and_still_presents() {
 
     assert_eq!(report.status, SelfTestStatus::Ok);
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    // First motion (dx=1_000_000 = 1 px) routes to cursor (1,0); queue capacity 1 keeps only it.
     assert_eq!(
         output_lines(&output),
         vec![
-            "inputEvent surface=surface:cef kind=pointer-motion dx-micropixels=1000000 dy-micropixels=0",
+            "inputEvent surface=surface:cef kind=pointer-motion cursor-x=1 cursor-y=0",
         ]
     );
     assert_eq!(

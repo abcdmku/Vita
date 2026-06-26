@@ -24,6 +24,9 @@ use vita_compositor_core::{
 
 const DEFAULT_DEMO_HOLD_SECONDS: u64 = 30;
 const MAX_COMMAND_RGBA_BYTES: usize = 16 * 1024 * 1024;
+// PSD-055: the visible software-cursor surface id the launch stream registers; the session keeps
+// its placement tracking the router's absolute pointer position.
+const CURSOR_SURFACE_ID: &str = "cursor:pointer";
 const INPUT_EVENT_QUEUE_CAPACITY: usize = 256;
 const MAX_INPUT_EVENTS_PER_TICK: usize = 256;
 const MAX_INPUT_EVENT_LINE_BYTES: usize = 512;
@@ -137,6 +140,9 @@ fn run_command_stream(
     // is live on the GPU; the running VM is captured with vmrun captureScreen). On a clean EOF
     // (the upstream pipe closed) we exit 0 fail-closed; on error we emit the failsafe marker.
     if continuous {
+        // PSD-055: continuous = the interactive live desktop. Drain libinput + move the cursor
+        // surface every present, and relax the static no-repaint verification invariant.
+        session.set_interactive(true);
         // The closure emits the REAL VITA-COMPOSITOR OK marker (with gpu=…/present=kms — the
         // verification gate) exactly once, right after the first frame is presented on the GPU.
         let report = match session.run_continuous(stdin.lock(), |marker| {
@@ -320,6 +326,12 @@ pub(crate) struct CommandDrivenSession<B: RenderBackend> {
     reposition_no_repaint: bool,
     presented: bool,
     reverse_input: Option<ReverseInputChannel>,
+    // PSD-055: interactive (continuous) mode relaxes the strict "no repaint during placement
+    // updates" verification invariant — moving the cursor surface IS a legitimate placement
+    // change every tick — and tracks the absolute cursor so the cursor surface follows it.
+    interactive: bool,
+    cursor_pos: (u32, u32),
+    cursor_surface: Option<SurfaceId>,
 }
 
 impl<B: RenderBackend> CommandDrivenSession<B> {
@@ -341,7 +353,14 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
             presented: false,
             reposition_no_repaint: true,
             reverse_input: None,
+            interactive: false,
+            cursor_pos: (0, 0),
+            cursor_surface: None,
         })
+    }
+
+    pub(crate) fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
     }
 
     pub(crate) fn set_reverse_input_channel(&mut self, channel: ReverseInputChannel) {
@@ -495,6 +514,17 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
         let visible = parse_bool(required_field(fields, 7, "visible")?, "visible")?;
         let before_repaint_count = self.compositor.source_repaint_count();
 
+        // PSD-055: recognise the visible-cursor surface so present() can keep it tracking the
+        // router's absolute pointer position. Seed cursor_pos from its initial placement.
+        if id.as_str() == CURSOR_SURFACE_ID {
+            if visible {
+                self.cursor_surface = Some(id.clone());
+                self.cursor_pos = (x.max(0) as u32, y.max(0) as u32);
+            } else {
+                self.cursor_surface = None;
+            }
+        }
+
         if visible {
             self.placements
                 .insert(id.clone(), Placement::new(id, x, y, width, height, z)?);
@@ -526,6 +556,12 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
 
     fn present(&mut self, fields: &[&str]) -> Result<(), CompositorError> {
         require_field_count(fields, 1, "present")?;
+        // Interactive desktop: pull the latest input + move the cursor surface BEFORE compositing
+        // so the visible cursor is up to date in the frame we are about to scan out.
+        if self.interactive {
+            self.drain_reverse_input();
+            self.reposition_cursor_surface()?;
+        }
         let before_repaint_count = self.compositor.source_repaint_count();
         let report = self.compositor.composite(&self.pending_damage)?;
         if self.compositor.source_repaint_count() != before_repaint_count {
@@ -536,15 +572,50 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
                 "command stream composite did not complete".to_owned(),
             ));
         }
-        if !self.reposition_no_repaint {
+        // The no-repaint invariant is a verification guard for the static self-test/one-shot path.
+        // In interactive mode the cursor surface moves every tick (a legitimate repaint), so the
+        // invariant does not apply — skip it. The one-shot/self-test path keeps enforcing it.
+        if !self.interactive && !self.reposition_no_repaint {
             return Err(CompositorError::Verification(
                 "command stream source content changed during placement updates".to_owned(),
             ));
         }
 
         self.pending_damage = empty_damage();
-        self.drain_reverse_input();
+        if !self.interactive {
+            // Non-interactive path drains input after present (PSD-302 default cadence).
+            self.drain_reverse_input();
+        }
         self.presented = true;
+        Ok(())
+    }
+
+    // PSD-055 visible cursor: keep the top-most cursor surface placed at the router's absolute
+    // cursor position. The cursor surface is registered by the launch command stream as
+    // `cursor:pointer` with a high z-index; here we only update its placement to follow the mouse.
+    fn reposition_cursor_surface(&mut self) -> Result<(), CompositorError> {
+        let Some(id) = self.cursor_surface.clone() else {
+            return Ok(());
+        };
+        let Some(existing) = self.placements.get(&id).cloned() else {
+            return Ok(());
+        };
+        let (cx, cy) = self.cursor_pos;
+        if existing.x == cx as i32 && existing.y == cy as i32 {
+            return Ok(()); // unchanged — avoid a needless placement update
+        }
+        let updated = Placement::new(
+            id.clone(),
+            cx as i32,
+            cy as i32,
+            existing.width,
+            existing.height,
+            existing.z_index,
+        )?;
+        self.placements.insert(id, updated);
+        let placements = self.placements.values().cloned().collect::<Vec<_>>();
+        let damage = self.compositor.update_placements(placements)?;
+        self.merge_damage(damage);
         Ok(())
     }
 
@@ -586,10 +657,13 @@ impl<B: RenderBackend> CommandDrivenSession<B> {
                     continue;
                 }
             };
-            channel.enqueue(format_reverse_input_event(
-                routed_input_surface(&routed),
-                event,
-            ));
+            // PSD-055 wiring: emit the ROUTED event carrying the absolute cursor position the
+            // router computed (clamped, accumulated from libinput deltas), so the CEF host can
+            // SendMouseMoveEvent/SendMouseClickEvent at the right absolute coordinates and the
+            // visible cursor surface tracks it. The compositor owns the cursor; track it here so
+            // the cursor surface (registered by the launch stream as cursor:pointer) follows.
+            self.cursor_pos = self.compositor.cursor();
+            channel.enqueue(format_reverse_input_event(&routed));
         }
 
         channel.drain_best_effort();
@@ -1141,20 +1215,54 @@ fn format_input_event(event: &InputEvent) -> String {
     }
 }
 
-fn format_reverse_input_event(surface_id: Option<&SurfaceId>, event: &InputEvent) -> String {
-    format!(
-        "inputEvent surface={} {}",
-        surface_id.map_or("none", SurfaceId::as_str),
-        format_input_event(event)
-    )
-}
-
-fn routed_input_surface(event: &RoutedInputEvent) -> Option<&SurfaceId> {
-    match event {
-        RoutedInputEvent::PointerMotion { surface_id, .. }
-        | RoutedInputEvent::PointerButton { surface_id, .. }
-        | RoutedInputEvent::Key { surface_id, .. } => Some(surface_id),
-        RoutedInputEvent::Dropped { .. } => None,
+// PSD-055: the reverse-channel line the CEF host (osr_host) reads. It carries the ROUTED event
+// with the ABSOLUTE cursor position the router computed, so osr_host can call CEF's
+// SendMouseMoveEvent/SendMouseClickEvent at the right coordinates and SendKeyEvent to the focused
+// surface. Format (one event per line, space-separated key=value):
+//   inputEvent surface=<id|none> kind=pointer-motion cursor-x=N cursor-y=N
+//   inputEvent surface=<id|none> kind=pointer-button cursor-x=N cursor-y=N button=N state=pressed|released
+//   inputEvent surface=<id|none> kind=key key-code=N pressed=true|false
+// Dropped events still emit (surface=none) so the host/cursor can ignore them cleanly.
+fn format_reverse_input_event(routed: &RoutedInputEvent) -> String {
+    match routed {
+        RoutedInputEvent::PointerMotion {
+            surface_id,
+            cursor_x,
+            cursor_y,
+            ..
+        } => format!(
+            "inputEvent surface={} kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}",
+            surface_id.as_str()
+        ),
+        RoutedInputEvent::PointerButton {
+            surface_id,
+            cursor_x,
+            cursor_y,
+            button,
+            state,
+            ..
+        } => format!(
+            "inputEvent surface={} kind=pointer-button cursor-x={cursor_x} cursor-y={cursor_y} button={button} state={}",
+            surface_id.as_str(),
+            match state {
+                PointerButtonState::Pressed => "pressed",
+                PointerButtonState::Released => "released",
+            }
+        ),
+        RoutedInputEvent::Key {
+            surface_id,
+            key_code,
+            pressed,
+        } => format!(
+            "inputEvent surface={} kind=key key-code={key_code} pressed={}",
+            surface_id.as_str(),
+            if *pressed { "true" } else { "false" }
+        ),
+        RoutedInputEvent::Dropped {
+            cursor_x, cursor_y, ..
+        } => format!(
+            "inputEvent surface=none kind=pointer-motion cursor-x={cursor_x} cursor-y={cursor_y}"
+        ),
     }
 }
 

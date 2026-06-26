@@ -445,8 +445,13 @@ function installCefOverlay() {
     }
     // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
     // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
-    // Preserve the COMMITTED launch script across the clean (it lives in this dir, under git).
+    // Preserve the COMMITTED launch script + the baked instant-desktop assets (first-frame snapshot
+    // + cursor command streams) across the clean — they live in this dir under git (cef-vm-input).
     const launchBody = readFileSync(launchSh);
+    const snapshotPath = join(cefDst, "flagship-firstframe.commands");
+    const cursorPath = join(cefDst, "cursor.commands");
+    const snapshotBody = existsSync(snapshotPath) ? readFileSync(snapshotPath) : null;
+    const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
     rmSync(cefDst, { recursive: true, force: true });
     mkdirSync(cefDst, { recursive: true });
     cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
@@ -456,6 +461,11 @@ function installCefOverlay() {
     // Restore the committed launch script into the freshly-staged runtime dir.
     writeFileSync(launchSh, launchBody);
     chmodSync(launchSh, 0o755);
+    // Restore the baked instant-desktop assets (if present). Without the snapshot the boot still
+    // works (it just falls back to the live CEF render with no instant frame); the cursor is
+    // optional too. Both are committed so they are normally present.
+    if (snapshotBody) writeFileSync(snapshotPath, snapshotBody);
+    if (cursorBody) writeFileSync(cursorPath, cursorBody);
     // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
     // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
     rmSync(uikitsDst, { recursive: true, force: true });

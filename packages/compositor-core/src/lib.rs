@@ -828,6 +828,12 @@ impl<B: RenderBackend> Compositor<B> {
         self.backend.poll_input_events()
     }
 
+    /// PSD-055: the router's current absolute cursor position (output pixels). Used by the
+    /// command-driven session to keep the visible cursor surface tracking the pointer.
+    pub fn cursor(&self) -> (u32, u32) {
+        self.input_router.cursor()
+    }
+
     pub fn route_input_event(
         &mut self,
         event: &InputEvent,

@@ -45,6 +45,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Fast boot (cef-vm-input): when the CEF live-desktop overlay is present, the persistent CEF
+# service owns the GPU and provides the on-screen desktop (an INSTANT baked snapshot, then the
+# live interactive render) plus its own VITA-COMPOSITOR markers. This self-test must then NOT
+# take /dev/dri/card0 at all — running it first (and holding a frame for 30s) was the dominant
+# boot bottleneck AND would contend for the exclusive KMS master. Yield immediately so CEF starts
+# right away. Emit a marker so the boot log still shows the self-test ran (status=OK, skipped).
+if [ -e "$CEF_LAUNCH" ]; then
+  emit_line "$MARKER: cef-mode=yes selftest=skipped (CEF service owns the GPU; fast boot) status=OK"
+  exit 0
+fi
+
 if [ ! -x "$BIN" ]; then
   emit_failsafe "binary_missing"
   exit 0

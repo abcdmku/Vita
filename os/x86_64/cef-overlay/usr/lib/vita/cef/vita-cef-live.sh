@@ -1,20 +1,24 @@
 #!/bin/bash
-# Vita SMOKE/VM - M4 of the CEF live-render arc (ADR-0014), PERSISTENT mode (spike/cef-vm).
+# Vita SMOKE/VM - CEF live-render arc (ADR-0014), PERSISTENT + INSTANT + INTERACTIVE (cef-vm-input).
 #
-# Run CEF (windowless software OSR) rendering the LIVE flagship desktop and pipe its
-# per-frame compositor command stream CONTINUOUSLY into the Vita native compositor on the
-# REAL VMware GPU (KMS). The compositor presents EVERY frame and HOLDS the desktop on the
-# screen INDEFINITELY — so when the VM is powered on the desktop stays visible (not a
-# few-frame flash). The pipe is long-lived: CEF streams unbounded frames (--frames=0) and
-# the compositor runs in --continuous mode (emits its OK marker after the first present,
-# then keeps presenting until the upstream pipe closes).
+# Boot flow (one long-lived compositor process, on the real VMware GPU / KMS):
+#   1. INSTANT: feed a BAKED first-frame snapshot of the flagship desktop (flagship-firstframe.commands)
+#      + a visible cursor surface (cursor.commands) + present -> the REAL desktop is on screen within
+#      ~2-5s of power-on (no blank wallpaper, no 60s wait, no demo blocks).
+#   2. LIVE: CEF (windowless software OSR) warms in the BACKGROUND and streams the live flagship into
+#      the SAME cef:desktop surface (updateBufferSurface, --surface-prearmed) -> seamless swap to the
+#      interactive render. Unbounded (--frames=0) so it stays live for the life of the VM.
+#   3. INTERACTIVE (PSD-055): the compositor reads libinput, routes (PSD-300), and writes routed
+#      events (with absolute cursor coords) to a reverse-channel FIFO (--input-out); osr_host reads it
+#      (--input-in) and injects CEF SendMouseMove/Click/Key. The compositor composites a visible
+#      cursor surface that tracks the routed pointer.
 #
-#   CEF (osr_host --compositor-out=- --frames=0)  >>pipe>>  vita-compositor --commands --continuous
-#       register/updateBufferSurface + present per frame  -->  KMS scanout (held live)
+#       ( cat snapshot+cursor ; osr_host --surface-prearmed --input-in=FIFO --frames=0 )
+#            >>pipe(commands)>>  vita-compositor --commands --continuous --input-out=FIFO
+#                                  presents every frame on KMS + moves the cursor + drains input
 #
-# Emits VITA-CEF (this script) + VITA-COMPOSITOR (the compositor) to /dev/ttyS0, then stays
-# in the foreground for the life of the service. Fail-closed: any precondition miss emits a
-# FAILSAFE marker and exits 0 (the boot proceeds; the desktop is simply absent).
+# Emits VITA-CEF + VITA-COMPOSITOR to /dev/ttyS0. Fail-closed: any precondition miss emits a
+# FAILSAFE marker and exits (the boot proceeds; Restart=on-failure rebuilds the live desktop).
 set -u
 
 MARKER=VITA-CEF
@@ -22,15 +26,14 @@ TTY=/dev/ttyS0
 CEF_DIR=/usr/lib/vita/cef
 OSR=$CEF_DIR/vita_cef_osr
 COMPOSITOR=/usr/lib/vita/compositor/vita-compositor
-# The WHOLE ui_kits/ tree is staged under /usr/lib/vita/ui_kits so every relative asset
-# path in the flagship (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*,
-# runtime/bootstrap.js) resolves exactly as in the source layout.
 DESKTOP=/usr/lib/vita/ui_kits/desktop/index.html
 URL=file://$DESKTOP
-# 0 = UNBOUNDED: stream frames forever so the compositor keeps the desktop live on screen.
+SNAPSHOT=$CEF_DIR/flagship-firstframe.commands
+CURSOR=$CEF_DIR/cursor.commands
+# 0 = UNBOUNDED. A tight interval keeps the cursor + live content responsive (compositor drains
+# input + repositions the cursor every present, which is driven by this cadence).
 FRAMES=${VITA_CEF_FRAMES:-0}
-# Cadence between emitted frames (ms); the live clock + any hydrated content keep updating.
-INTERVAL_MS=${VITA_CEF_INTERVAL_MS:-500}
+INTERVAL_MS=${VITA_CEF_INTERVAL_MS:-100}
 
 emit_line() {
   printf '%s\n' "$1"
@@ -38,7 +41,6 @@ emit_line() {
     printf '%s\n' "$1" > "$TTY" 2>/dev/null || true
   fi
 }
-
 emit_failsafe() {
   emit_line "$MARKER: sink=buffer-surface present=unverified status=FAILSAFE reason=$1"
 }
@@ -57,9 +59,7 @@ while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
 done
 if [ ! -e /dev/dri/card0 ]; then emit_failsafe "dri_card0_absent"; exit 0; fi
 
-# CEF needs a WRITABLE cache + a HOME/XDG/TMPDIR or it can fail to init (process-singleton,
-# read-only default cache) — the boot service runs with a minimal env and a read-only /usr.
-# Point everything at writable /run (tmpfs, shared namespace). osr_host reads VITA_CEF_CACHE.
+# CEF needs a WRITABLE cache + HOME/XDG/TMPDIR (read-only /usr at boot). Point at /run (tmpfs).
 export VITA_CEF_CACHE=/run/vita-cef-cache
 export HOME=/run/vita-cef-home
 export XDG_CACHE_HOME=/run/vita-cef-cache
@@ -67,14 +67,34 @@ export XDG_CONFIG_HOME=/run/vita-cef-home/.config
 export TMPDIR=/run
 mkdir -p "$VITA_CEF_CACHE" "$HOME" "$XDG_CONFIG_HOME" 2>/dev/null
 
-emit_line "$MARKER: stage=start mode=persistent frames=$FRAMES interval=${INTERVAL_MS}ms url=$URL card0=present cache=$VITA_CEF_CACHE"
+# --- input reverse-channel FIFO (PSD-055) ------------------------------------
+INPUT_FIFO=/run/vita-cef-input.fifo
+rm -f "$INPUT_FIFO"
+mkfifo "$INPUT_FIFO" 2>/dev/null || true
+
+# --- instant-desktop prelude (baked snapshot + cursor) -----------------------
+# Prepend the baked flagship first-frame + the cursor surface + a present so the compositor shows
+# the REAL desktop immediately, BEFORE CEF finishes its cold start. The snapshot pre-registers
+# cef:desktop, so osr_host runs with --surface-prearmed and seamlessly updates the same surface.
+PRELUDE=/run/vita-cef-prelude.commands
+: > "$PRELUDE"
+have_snapshot=0
+if [ -s "$SNAPSHOT" ]; then
+  cat "$SNAPSHOT" >> "$PRELUDE"
+  have_snapshot=1
+fi
+if [ -s "$CURSOR" ]; then
+  cat "$CURSOR" >> "$PRELUDE"
+fi
+# One present to scan out the instant snapshot+cursor right away.
+printf 'present\n' >> "$PRELUDE"
+
+PREARM=""
+[ "$have_snapshot" -eq 1 ] && PREARM="--surface-prearmed"
+
+emit_line "$MARKER: stage=start mode=instant+persistent+interactive frames=$FRAMES interval=${INTERVAL_MS}ms snapshot=$have_snapshot url=$URL card0=present"
 
 # --- run the long-lived pipe -------------------------------------------------
-# CEF needs libcef.so + its sibling runtime libs on the loader path; co-located in
-# $CEF_DIR (osr_host also carries an rpath of '.'). Headless: no DISPLAY, no sandbox.
-# The compositor reads CEF's stdout (the command stream), composites on the GPU and keeps
-# presenting every frame. Its OWN stdout (VITA-COMPOSITOR markers) is teed to a fifo we
-# tail, so we can surface the first OK marker to serial WITHOUT terminating the pipe.
 CEF_LOG=/run/vita-cef-osr.log
 COMP_OUT=/run/vita-cef-comp.out
 : > "$CEF_LOG"
@@ -83,14 +103,21 @@ COMP_OUT=/run/vita-cef-comp.out
 cd "$CEF_DIR" || { emit_failsafe "cef_dir_cd"; exit 0; }
 set -o pipefail
 
-# Start the live pipe in the background; capture the compositor's marker stream to COMP_OUT.
-LD_LIBRARY_PATH="$CEF_DIR" \
-  "$OSR" --url="$URL" --compositor-out=- --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" 2>"$CEF_LOG" \
+# The compositor side: --input-out opens the FIFO for WRITE (routed input -> osr_host).
+# The producer side: emit the prelude FIRST (instant desktop), then exec osr_host live-streaming
+# the flagship and reading the input FIFO (--input-in). exec replaces the subshell so the pipe
+# stays a single long-lived producer.
+(
+  cat "$PRELUDE"
+  LD_LIBRARY_PATH="$CEF_DIR" exec "$OSR" --url="$URL" --compositor-out=- \
+    --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO"
+) 2>"$CEF_LOG" \
   | LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
-    "$COMPOSITOR" --commands --continuous > "$COMP_OUT" 2>&1 &
+    "$COMPOSITOR" --commands --continuous --input-out="$INPUT_FIFO" > "$COMP_OUT" 2>&1 &
 PIPE_PGID=$!
 
-# Wait (bounded) for the compositor's first OK marker, surface it + the verdict to serial.
+# Wait (bounded) for the compositor's FIRST OK marker. With the baked snapshot this is the INSTANT
+# desktop present (seconds), not the CEF cold start — that is the whole point of the fast path.
 deadline=$((SECONDS + 90))
 seen_ok=0
 while [ "$SECONDS" -lt "$deadline" ]; do
@@ -102,7 +129,6 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 1
 done
 
-# Surface the compositor's OK marker line(s) (they carry gpu=…/present=kms) to serial.
 while IFS= read -r line; do
   case "$line" in
     VITA-COMPOSITOR:*) emit_line "$line" ;;
@@ -111,23 +137,19 @@ done < "$COMP_OUT"
 
 if [ "$seen_ok" -eq 1 ]; then
   present=$(grep -m1 "^VITA-COMPOSITOR:" "$COMP_OUT" | sed -n 's/.*present=\([^ ]*\).*/\1/p')
-  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} status=OK persistent=yes"
+  emit_line "$MARKER: sink=buffer-surface present=${present:-unknown} status=OK persistent=yes instant=$have_snapshot interactive=yes"
 else
-  # The pipe died before a frame presented, or timed out — surface a CEF diagnostic.
-  cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
+  cef_tail=$(grep -aE "OnPaint #|emitted compositor|stream:|ERROR|CefInitialize|load error|input:" "$CEF_LOG" 2>/dev/null | tail -3 | tr '\n' '|')
   emit_line "$MARKER: cef_diag=${cef_tail:-none}"
   emit_failsafe "no_present_within_90s"
-  # Reap whatever is left and exit fail-closed (Restart=on-failure re-attempts the pipe).
   kill "$PIPE_PGID" 2>/dev/null || true
   wait "$PIPE_PGID" 2>/dev/null || true
   exit 1
 fi
 
-# Desktop is LIVE. Hold the service in the foreground for the life of the pipe so the
-# compositor keeps the KMS master and presents every frame. When the VM powers off (or the
-# pipe breaks) the wait returns and we exit; Restart=on-failure re-establishes it.
+# Hold the service in the foreground for the life of the pipe (KMS master + per-frame present +
+# input). On pipe break, exit non-zero so Restart=on-failure rebuilds the live desktop.
 wait "$PIPE_PGID"
 rc=$?
 emit_line "$MARKER: persistent pipe ended rc=$rc"
-# A non-zero exit lets systemd Restart=on-failure rebuild the live desktop.
 [ "$rc" -eq 0 ] && exit 0 || exit "$rc"

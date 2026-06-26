@@ -23,7 +23,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "include/base/cef_callback.h"
@@ -83,6 +87,19 @@ std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
 int g_paint_count = 0;
 
+// PSD-055 input: the reverse-channel the compositor writes routed input events to (a FIFO/path).
+// osr_host reads it on a background thread and injects the events into CEF on the UI thread.
+std::string g_input_in;   // --input-in=<path>; empty = no input wiring.
+// The live browser, published for the input thread. Guarded because the input thread reads it
+// while the UI thread sets/clears it (OnAfterCreated / OnBeforeClose).
+std::mutex g_browser_mu;
+CefRefPtr<CefBrowser> g_input_browser;
+std::atomic<bool> g_input_stop{false};
+// The compositor view is kWidth x kHeight (1280x800); the compositor OUTPUT (and the cursor
+// coordinates it reports) is kCompWidth x kCompHeight (1280x720). Pointer coords from the reverse
+// channel are in OUTPUT space; map them back into the CEF VIEW's vertical space before SendEvent.
+// (Forward decls of the compositor output constants live just below.)
+
 // RenderHandler: CEF calls OnPaint with the dirty BGRA buffer for the whole view.
 class OsrRenderHandler : public CefRenderHandler {
  public:
@@ -133,6 +150,11 @@ class OsrClient : public CefClient,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browser_ = browser;
+    // PSD-055: publish the browser so the input-reader thread can inject CEF events.
+    {
+      std::lock_guard<std::mutex> lock(g_browser_mu);
+      g_input_browser = browser;
+    }
   }
 
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
@@ -224,6 +246,10 @@ class OsrClient : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browser_ = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(g_browser_mu);
+      g_input_browser = nullptr;
+    }
     CefQuitMessageLoop();
   }
 
@@ -366,6 +392,10 @@ void WritePng() {
 // --commands` (reading the pipe) composites them as they arrive.
 std::FILE* g_sink = nullptr;  // open stream sink (stdout or fopen'd file)
 bool g_registered = false;    // M4: registerBufferSurface emitted yet?
+// Instant-desktop (spike): when the launch stream PRE-REGISTERS cef:desktop with a baked
+// first-frame snapshot, set this so CEF's first emit is updateBufferSurface (not a duplicate
+// register), seamlessly swapping the snapshot for the live render on the same surface.
+bool g_surface_prearmed = false;
 
 bool OpenSink() {
   if (g_compositor_out == "-") {
@@ -445,6 +475,149 @@ bool EmitCompositorFrame() {
   return true;
 }
 
+// --- PSD-055 input wiring -----------------------------------------------------
+// The compositor writes routed input events (one per line) to the reverse channel
+// (--input-out=<fifo>); osr_host reads them here (--input-in=<same fifo>) and injects them into
+// CEF. Line grammar (space-separated key=value), produced by format_reverse_input_event:
+//   inputEvent surface=<id|none> kind=pointer-motion cursor-x=N cursor-y=N
+//   inputEvent surface=<id|none> kind=pointer-button cursor-x=N cursor-y=N button=N state=pressed|released
+//   inputEvent surface=<id|none> kind=key key-code=N pressed=true|false
+// cursor-x/y are in compositor OUTPUT space (kCompWidth x kCompHeight). The CEF view is
+// kWidth x kHeight, so X passes through (same width) and Y is scaled output->view.
+
+std::map<std::string, std::string> ParseKv(const std::string& line) {
+  std::map<std::string, std::string> kv;
+  std::istringstream iss(line);
+  std::string tok;
+  while (iss >> tok) {
+    auto eq = tok.find('=');
+    if (eq != std::string::npos) kv[tok.substr(0, eq)] = tok.substr(eq + 1);
+  }
+  return kv;
+}
+
+int ViewX(int cursor_x) {
+  if (cursor_x < 0) return 0;
+  if (cursor_x >= kCompWidth) return kWidth - 1;
+  return cursor_x;  // same width (1280)
+}
+int ViewY(int cursor_y) {
+  // Scale compositor-output row -> CEF view row (kCompHeight -> kHeight).
+  long long y = (static_cast<long long>(cursor_y) * kHeight) / kCompHeight;
+  if (y < 0) y = 0;
+  if (y >= kHeight) y = kHeight - 1;
+  return static_cast<int>(y);
+}
+
+// Track the last pointer position so button events carry a coherent coordinate even if a click
+// line omits motion. Only touched on the UI thread (inside the posted tasks).
+int g_last_view_x = kWidth / 2;
+int g_last_view_y = kHeight / 2;
+
+// Map an X11/libinput keycode to a rough Windows VK + character for CEF. The compositor forwards
+// libinput EV_KEY codes (Linux input-event-codes.h). We only need a usable subset to PROVE keys
+// reach the flagship; unmapped keys still fire as a key event with the raw code.
+void InjectKey(CefRefPtr<CefBrowser> browser, int key_code, bool pressed) {
+  if (!browser || !browser->GetHost()) return;
+  CefKeyEvent ev;
+  ev.type = pressed ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
+  ev.native_key_code = key_code;
+  ev.windows_key_code = key_code;
+  ev.modifiers = 0;
+  browser->GetHost()->SendKeyEvent(ev);
+  // For a printable down, also send a CHAR so input fields receive text (best-effort).
+  if (pressed) {
+    CefKeyEvent ch = ev;
+    ch.type = KEYEVENT_CHAR;
+    browser->GetHost()->SendKeyEvent(ch);
+  }
+}
+
+void InjectMouseMove(CefRefPtr<CefBrowser> browser, int vx, int vy) {
+  if (!browser || !browser->GetHost()) return;
+  g_last_view_x = vx;
+  g_last_view_y = vy;
+  CefMouseEvent ev;
+  ev.x = vx;
+  ev.y = vy;
+  ev.modifiers = 0;
+  browser->GetHost()->SendMouseMoveEvent(ev, /*mouseLeave=*/false);
+}
+
+void InjectMouseButton(CefRefPtr<CefBrowser> browser, int vx, int vy, int button,
+                       bool down) {
+  if (!browser || !browser->GetHost()) return;
+  g_last_view_x = vx;
+  g_last_view_y = vy;
+  CefMouseEvent ev;
+  ev.x = vx;
+  ev.y = vy;
+  ev.modifiers = 0;
+  cef_mouse_button_type_t bt = MBT_LEFT;
+  if (button == 2 || button == 272 + 1) bt = MBT_MIDDLE;  // best-effort middle
+  if (button == 3) bt = MBT_RIGHT;
+  // libinput button codes: 272=BTN_LEFT, 273=BTN_RIGHT, 274=BTN_MIDDLE; also accept 1/2/3.
+  if (button == 272) bt = MBT_LEFT;
+  if (button == 273) bt = MBT_RIGHT;
+  if (button == 274) bt = MBT_MIDDLE;
+  browser->GetHost()->SendMouseClickEvent(ev, bt, /*mouseUp=*/!down,
+                                          /*clickCount=*/1);
+}
+
+// Apply one parsed reverse-channel line. MUST run on the CEF UI thread.
+void ApplyInputLineOnUi(std::string line) {
+  CefRefPtr<CefBrowser> browser;
+  {
+    std::lock_guard<std::mutex> lock(g_browser_mu);
+    browser = g_input_browser;
+  }
+  if (!browser) return;
+  auto kv = ParseKv(line);
+  const std::string& kind = kv["kind"];
+  if (kind == "pointer-motion") {
+    int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
+    int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
+    InjectMouseMove(browser, vx, vy);
+  } else if (kind == "pointer-button") {
+    int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
+    int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
+    int button = std::atoi(kv["button"].c_str());
+    bool down = kv["state"] == "pressed";
+    // Move first so the press lands at the right spot, then the button.
+    InjectMouseMove(browser, vx, vy);
+    InjectMouseButton(browser, vx, vy, button, down);
+  } else if (kind == "key") {
+    int code = std::atoi(kv["key-code"].c_str());
+    bool pressed = kv["pressed"] == "true";
+    InjectKey(browser, code, pressed);
+  }
+}
+
+// Background thread: read the reverse-input channel line-by-line and post each onto the UI thread.
+void InputReaderThread() {
+  fprintf(stderr, "[osr] input: reader thread starting, channel=%s\n", g_input_in.c_str());
+  // The channel is a FIFO the compositor opens for write; opening for read blocks until the
+  // writer appears, which is fine (boot ordering). Reopen on EOF so a compositor restart resumes.
+  while (!g_input_stop.load()) {
+    std::ifstream in(g_input_in);
+    if (!in.is_open()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      continue;
+    }
+    std::string line;
+    while (!g_input_stop.load() && std::getline(in, line)) {
+      if (line.empty()) continue;
+      if (line.rfind("inputEvent", 0) != 0) continue;  // ignore non-event lines
+      std::string copy = line;
+      CefPostTask(TID_UI,
+                  CefCreateClosureTask(base::BindOnce(&ApplyInputLineOnUi, copy)));
+    }
+    // EOF (writer closed): brief pause, then reopen.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  fprintf(stderr, "[osr] input: reader thread exiting\n");
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -471,7 +644,12 @@ int main(int argc, char* argv[]) {
       g_frame_interval_ms = std::atoi(a.substr(20).c_str());
       if (g_frame_interval_ms < 1) g_frame_interval_ms = 1;
     }
+    else if (a.rfind("--input-in=", 0) == 0) g_input_in = a.substr(11);  // PSD-055
+    else if (a == "--surface-prearmed") g_surface_prearmed = true;       // instant-desktop
   }
+  // If the launch stream pre-registered cef:desktop (baked snapshot), skip the register and
+  // start emitting updateBufferSurface so the swap to live is seamless on the same surface.
+  if (g_surface_prearmed) g_registered = true;
   const bool compositor_mode = !g_compositor_out.empty();
   // Streaming (long-lived pump) covers both bounded sequences (>1) and unbounded (0).
   const bool streaming = compositor_mode && (g_frames == 0 || g_frames > 1);
@@ -514,7 +692,20 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // PSD-055: start the input-reader thread if a reverse channel was given. It posts CEF events
+  // onto the UI thread for the life of the message loop.
+  std::thread input_thread;
+  if (!g_input_in.empty()) {
+    input_thread = std::thread(&InputReaderThread);
+  }
+
   CefRunMessageLoop();
+
+  // Stop the input thread before shutdown.
+  if (input_thread.joinable()) {
+    g_input_stop.store(true);
+    input_thread.detach();  // it may be blocked on a FIFO read; detach so we don't hang shutdown.
+  }
 
   bool ok = false;
   if (compositor_mode) {
