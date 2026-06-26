@@ -12,7 +12,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
 use vita_compositor_core::platform::{
-    open_default_gpu_backend, open_default_gpu_backend_for_self_test,
+    open_default_gpu_backend, open_default_gpu_backend_for_self_test, query_default_output_mode,
 };
 use vita_compositor_core::{
     failsafe_report, rgba_buffer_byte_len, run_reposition_self_test_or_failsafe,
@@ -32,6 +32,35 @@ const MAX_INPUT_EVENTS_PER_TICK: usize = 256;
 const MAX_INPUT_EVENT_LINE_BYTES: usize = 512;
 #[cfg(target_os = "linux")]
 const LINUX_O_NONBLOCK: i32 = 0o4000;
+
+// PSD-500: resolve the REAL output dimensions for the live desktop. Prefer the actual DRM/KMS
+// connector mode (the VMware virtual display size, e.g. 1920x1080) so the desktop fills the screen
+// instead of rendering in a 1280x720 corner. Fall back to the demo default (1280x720) when the mode
+// cannot be read (no card0 / headless / non-VMware). Emits a diagnostic marker either way.
+fn resolve_output_dimensions() -> (u32, u32) {
+    match query_default_output_mode() {
+        Some((w, h)) if w >= 320 && h >= 240 && w <= 16384 && h <= 16384 => {
+            emit_marker_best_effort(&format!(
+                "VITA-DISPLAY: output-mode={w}x{h} source=kms-connector"
+            ));
+            (w, h)
+        }
+        Some((w, h)) => {
+            emit_marker_best_effort(&format!(
+                "VITA-DISPLAY: output-mode={w}x{h} rejected (out-of-range) source=kms-connector \
+                 fallback={DESKTOP_DEMO_OUTPUT_WIDTH}x{DESKTOP_DEMO_OUTPUT_HEIGHT}"
+            ));
+            (DESKTOP_DEMO_OUTPUT_WIDTH, DESKTOP_DEMO_OUTPUT_HEIGHT)
+        }
+        None => {
+            emit_marker_best_effort(&format!(
+                "VITA-DISPLAY: output-mode=unknown source=fallback \
+                 {DESKTOP_DEMO_OUTPUT_WIDTH}x{DESKTOP_DEMO_OUTPUT_HEIGHT}"
+            ));
+            (DESKTOP_DEMO_OUTPUT_WIDTH, DESKTOP_DEMO_OUTPUT_HEIGHT)
+        }
+    }
+}
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -107,10 +136,10 @@ fn run_command_stream(
     let mut reverse_input = input_out_path
         .as_deref()
         .map(ReverseInputChannel::open_path);
-    let backend = match open_default_gpu_backend_for_self_test(
-        DESKTOP_DEMO_OUTPUT_WIDTH,
-        DESKTOP_DEMO_OUTPUT_HEIGHT,
-    ) {
+    // PSD-500: render at the REAL display resolution (queried from the KMS connector) so the live
+    // desktop fills the screen rather than a 1280x720 corner. Falls back to the demo default.
+    let (output_width, output_height) = resolve_output_dimensions();
+    let backend = match open_default_gpu_backend_for_self_test(output_width, output_height) {
         Ok(backend) => backend,
         Err(error) => {
             if let Some(channel) = reverse_input.as_mut() {
@@ -122,11 +151,7 @@ fn run_command_stream(
             return Ok(());
         }
     };
-    let mut session = CommandDrivenSession::new(
-        backend,
-        DESKTOP_DEMO_OUTPUT_WIDTH,
-        DESKTOP_DEMO_OUTPUT_HEIGHT,
-    )?;
+    let mut session = CommandDrivenSession::new(backend, output_width, output_height)?;
     if let Some(channel) = reverse_input.take() {
         session.set_reverse_input_channel(channel);
     }

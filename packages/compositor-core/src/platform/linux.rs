@@ -68,8 +68,10 @@ const LIBINPUT_EVENT_KEYBOARD_KEY: u32 = 300;
 const LIBINPUT_EVENT_POINTER_MOTION: u32 = 400;
 const LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: u32 = 401;
 const LIBINPUT_EVENT_POINTER_BUTTON: u32 = 402;
-// Compositor output dimensions: libinput transforms absolute-pointer coordinates into this pixel
-// space (the VMware EV_ABS device reports 0..max which libinput maps to 0..OUTPUT_*).
+// DEFAULT compositor output dimensions used only as a fallback (LibinputState::open). The live
+// boot path passes the REAL display mode (query_default_output_mode -> open_with_output), so
+// libinput maps the VMware EV_ABS absolute-pointer report (0..max) into the actual screen pixel
+// space. These constants apply only when no real mode is supplied.
 const OUTPUT_WIDTH: u32 = 1280;
 const OUTPUT_HEIGHT: u32 = 720;
 const LIBINPUT_BUTTON_STATE_PRESSED: u32 = 1;
@@ -280,6 +282,26 @@ pub fn open_default_gpu_backend_for_self_test(
     PlatformGpuBackend::open_for_self_test(width, height)
 }
 
+/// PSD-500: query the REAL display mode of the primary DRM/KMS connector (the VMware virtual
+/// display resolution, e.g. 1920x1080) WITHOUT taking DRM master or claiming the VT. The boot
+/// path calls this BEFORE opening the compositor so it can render at the actual screen size
+/// instead of a hardcoded 1280x720 that lands in a corner of a larger display. Returns the
+/// connector's current/preferred mode as (width, height), or `None` if no card0 / no connected
+/// connector / no readable mode — the caller then falls back to the default 1280x720.
+pub fn query_default_output_mode() -> Option<(u32, u32)> {
+    // Read-only open: enough to enumerate resources + read the connector mode list; it does NOT
+    // take DRM master, so it is safe to call before (and independently of) the scanout backend.
+    let drm_file = OpenOptions::new().read(true).open("/dev/dri/card0").ok()?;
+    let drm = DrmMode::open().ok()?;
+    let selection = select_kms_mode(drm_file.as_raw_fd(), &drm).ok()?;
+    let w = u32::from(selection.mode.hdisplay);
+    let h = u32::from(selection.mode.vdisplay);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum InputPolicy {
     Required,
@@ -330,7 +352,12 @@ impl PlatformGpuBackend {
         let kms = KmsState::open(drm.as_raw_fd())?;
         let gpu_name = detect_drm_driver();
         let (libinput, input_availability) = match input_policy {
-            InputPolicy::Required => (Some(LibinputState::open()?), InputAvailability::Available),
+            // PSD-500: hand libinput the REAL output dimensions so absolute-pointer mapping targets
+            // the actual screen (the same width/height the compositor + scanout use).
+            InputPolicy::Required => (
+                Some(LibinputState::open_with_output(width, height)?),
+                InputAvailability::Available,
+            ),
             InputPolicy::Optional => (None, InputAvailability::Unavailable),
         };
         let gbm = Gbm::open()?;
@@ -588,7 +615,11 @@ impl PlatformGpuBackend {
             return;
         }
 
-        if let Ok(libinput) = LibinputState::open() {
+        // PSD-500: probe libinput with the backend's REAL output dimensions (absolute-pointer
+        // mapping target) rather than the default constants.
+        if let Ok(libinput) =
+            LibinputState::open_with_output(self.output_width, self.output_height)
+        {
             self.libinput = Some(libinput);
             self.input_availability = InputAvailability::Available;
         }
@@ -2121,10 +2152,20 @@ where
 struct LibinputState {
     libinput: Libinput,
     context: *mut c_void,
+    // PSD-500: the REAL compositor output dimensions (the display mode the KMS path scans out at).
+    // libinput maps the VMware EV_ABS absolute-pointer report (0..max) into THIS pixel space via
+    // libinput_event_pointer_get_absolute_*_transformed, so it must be the actual screen size, not
+    // a hardcoded 1280x720 — otherwise the cursor compresses into the top-left on a larger display.
+    output_width: u32,
+    output_height: u32,
 }
 
 impl LibinputState {
-    fn open() -> Result<Self, CompositorError> {
+    fn open_with_output(output_width: u32, output_height: u32) -> Result<Self, CompositorError> {
+        // A zero/degenerate size would make absolute-pointer mapping collapse; floor to the
+        // default output constants so the cursor mapping is always well-defined.
+        let output_width = if output_width == 0 { OUTPUT_WIDTH } else { output_width };
+        let output_height = if output_height == 0 { OUTPUT_HEIGHT } else { output_height };
         let libinput = Libinput::open()
             .map_err(|err| input_unavailable(format!("failed to load libinput: {err}")))?;
         let context =
@@ -2145,7 +2186,12 @@ impl LibinputState {
             }
         };
 
-        Ok(Self { libinput, context })
+        Ok(Self {
+            libinput,
+            context,
+            output_width: output_width.max(1),
+            output_height: output_height.max(1),
+        })
     }
 
     fn poll_events(&mut self) -> Result<Vec<InputEvent>, CompositorError> {
@@ -2180,7 +2226,14 @@ impl LibinputState {
                     drained_any = true;
                     let event_type = (libinput.event_get_type)(event);
                     eprintln!("VITA-INPUT-DIAG: libinput event type={event_type}");
-                    Self::translate_event(libinput, event, event_type, &mut events);
+                    Self::translate_event(
+                        libinput,
+                        event,
+                        event_type,
+                        self.output_width,
+                        self.output_height,
+                        &mut events,
+                    );
                     (libinput.event_destroy)(event);
                 }
                 // Stop once the epoll fd has no more pending data AND we drained nothing this pass.
@@ -2197,6 +2250,8 @@ impl LibinputState {
         libinput: &Libinput,
         event: *mut c_void,
         event_type: u32,
+        output_width: u32,
+        output_height: u32,
         events: &mut Vec<InputEvent>,
     ) {
         unsafe {
@@ -2249,11 +2304,11 @@ impl LibinputState {
                         if !pointer_event.is_null() {
                             let x = (libinput.pointer_get_absolute_x_transformed)(
                                 pointer_event,
-                                OUTPUT_WIDTH,
+                                output_width,
                             );
                             let y = (libinput.pointer_get_absolute_y_transformed)(
                                 pointer_event,
-                                OUTPUT_HEIGHT,
+                                output_height,
                             );
                             eprintln!("VITA-INPUT-DIAG: abs-motion x={x} y={y}");
                             if x.is_finite() && y.is_finite() {
