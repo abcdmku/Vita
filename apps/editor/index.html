@@ -119,33 +119,33 @@
     </style>
   </head>
   <body>
-    <main class="editor-shell" data-view-model="editor-app">
+    <main class="editor-shell" data-vita-screen="editor-app">
       <header class="toolbar" aria-label="Document toolbar">
-        <div class="toolbar__title" data-bind="document.title">Untitled</div>
-        <button class="toolbar__button" type="button" data-action="open">Open</button>
-        <button class="toolbar__button" type="button" data-action="undo">Undo</button>
-        <button class="toolbar__button" type="button" data-action="redo">Redo</button>
-        <button class="toolbar__button" type="button" data-action="save" data-primary="true">Save</button>
+        <div class="toolbar__title" data-vita-bind-text="editor.title">Untitled</div>
+        <button class="toolbar__button" type="button" data-vita-action="editor.open">Open</button>
+        <button class="toolbar__button" type="button" data-vita-action="editor.undo">Undo</button>
+        <button class="toolbar__button" type="button" data-vita-action="editor.redo">Redo</button>
+        <button class="toolbar__button" type="button" data-vita-action="editor.save" data-primary="true">Save</button>
       </header>
 
       <section class="document" aria-label="Document editor">
-        <aside class="gutter" aria-hidden="true" data-bind="document.lineNumbers">1</aside>
+        <aside class="gutter" aria-hidden="true" data-vita-bind-text="editor.lineNumbers">1</aside>
         <textarea
           class="editor"
           aria-label="Document text"
           autocomplete="off"
           autocapitalize="off"
           spellcheck="false"
-          data-bind="document.content"
+          data-vita-bind-text="editor.content"
         ></textarea>
       </section>
 
       <footer class="status" aria-label="Document status">
-        <span data-bind="document.path">No file open</span>
+        <span data-vita-bind-text="editor.path">No file open</span>
         <span class="status__spacer"></span>
-        <span data-bind="document.language">Plain Text</span>
-        <span data-bind="document.dirty">Saved</span>
-        <span data-bind="document.cursor">Ln 1, Col 1</span>
+        <span data-vita-bind-text="editor.language">Plain Text</span>
+        <span data-vita-bind-text="editor.dirty">Saved</span>
+        <span data-vita-bind-text="editor.cursor">Ln 1, Col 1</span>
       </footer>
     </main>
   </body>
