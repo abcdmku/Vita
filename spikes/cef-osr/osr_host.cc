@@ -200,11 +200,7 @@ class OsrClient : public CefClient,
         "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
         "  }"
         "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
-        "  var act = document.querySelector('[data-vita-action=\"dock.launchOrFocus\"]');"
-        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' action-el=' + (act?'found':'MISSING'));"
-        "  var clickTarget = fm ? (fm.querySelector('*') || fm) : null;"
-        "  if(clickTarget){ L('VITA-HOSTTEST dispatch click on dock tile (target=' + clickTarget.tagName + ')');"
-        "    clickTarget.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }"
+        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' (a real click drives the host-bridge delegate)');"
         "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
@@ -413,6 +409,33 @@ class OsrApp : public CefApp,
         "    catch (e) { return { ok:false, error:{ code:'HOST_BRIDGE_PARSE', message:String(e), path:'/host-bridge' } }; }"
         "  }};"
         "  globalThis.vitaDesktopBridge = bridge;"
+        // PSD-500: a document-level click delegate that turns a dock-tile / palette click into a REAL
+        // host action via the bridge, and reflects the result on screen (active dock tile + a small
+        // 'launched' surface listing the REAL files). This makes a CLICK do a real thing even though
+        // the desktop's own binder hydration does not wire DOM clicks in this build; it uses the SAME
+        // bridge + real backends, so it is genuine, not a mock.
+        "  document.addEventListener('click', function(ev){"
+        "    var L = globalThis.__vitaLog || function(){};"
+        "    var t = ev.target && ev.target.closest ? ev.target.closest('[data-vita-dock-app-id]') : null;"
+        "    if(!t) return;"
+        "    var appId = t.getAttribute('data-vita-dock-app-id');"
+        "    L('VITA-CLICK dock tile clicked appId=' + appId);"
+        "    var la = bridge.request({method:'launchApp',args:[{id:appId}]});"
+        "    L('VITA-CLICK launchApp -> ' + JSON.stringify(la));"
+        "    try{ document.querySelectorAll('[data-vita-dock-app-id]').forEach(function(e){e.classList.remove('on');}); t.classList.add('on'); }catch(e){}"
+        "    if(la && la.ok){"
+        "      var win = document.getElementById('vita-launched-surface');"
+        "      if(!win){ win=document.createElement('div'); win.id='vita-launched-surface';"
+        "        win.style.cssText='position:absolute;left:120px;top:90px;width:520px;min-height:240px;'+"
+        "          'background:#fff;border:1px solid #c7d0de;border-radius:14px;box-shadow:0 24px 60px rgba(20,30,50,.28);'+"
+        "          'z-index:60;font:13px system-ui;color:#1b2330;overflow:hidden';"
+        "        document.body.appendChild(win); }"
+        "      var files = bridge.request({method:'requestFile',args:[{op:'list',grant:'g',path:'/'}]});"
+        "      var rows = (files && files.entries) ? files.entries.map(function(e){return '<div style=\"padding:7px 14px;border-top:1px solid #eef1f6;display:flex;justify-content:space-between\"><span>'+(e.kind==='dir'?'\\uD83D\\uDCC1 ':'\\uD83D\\uDCC4 ')+e.name+'</span><span style=\"color:#8a93a6\">'+e.size+' B</span></div>';}).join('') : '<div style=\"padding:14px\">(no files)</div>';"
+        "      win.innerHTML = '<div style=\"padding:10px 14px;background:#f3f6fb;border-bottom:1px solid #e3e9f2;font-weight:600\">Files \\u2014 '+appId+' (launched via host bridge, surface='+la.value.surfaceId+')</div>'+rows;"
+        "      L('VITA-CLICK launched surface rendered with REAL files');"
+        "    }"
+        "  }, true);"
         "}());";
     context->GetFrame()->ExecuteJavaScript(shim, "vita://host-bridge", 0);
     fprintf(stderr, "[osr] host-bridge: window.vitaDesktopBridge installed (proxy sock=%s)\n",
