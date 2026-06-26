@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Terminal</title>
+    <style>
+      :root {
+        --terminal-bg: var(--vita-color-surface, #0b0f12);
+        --terminal-fg: var(--vita-color-text, #d7e1e8);
+        --terminal-muted: var(--vita-color-muted, #8fa1ad);
+        --terminal-accent: var(--vita-color-accent, #67d39a);
+        --terminal-error: var(--vita-color-danger, #ff7373);
+        --terminal-border: var(--vita-color-border, #22303a);
+        --terminal-radius: var(--vita-radius-sm, 4px);
+        --terminal-gap: var(--vita-space-sm, 8px);
+        --terminal-pad: var(--vita-space-md, 16px);
+        --terminal-font: var(--vita-font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: var(--terminal-bg);
+        color: var(--terminal-fg);
+        font-family: var(--terminal-font);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .terminal {
+        display: grid;
+        grid-template-rows: 1fr auto;
+        height: 100%;
+        min-height: 0;
+        border: 1px solid var(--terminal-border);
+        border-radius: var(--terminal-radius);
+        background: var(--terminal-bg);
+      }
+
+      .terminal__scrollback {
+        min-height: 0;
+        overflow: auto;
+        padding: var(--terminal-pad);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .terminal__line {
+        min-height: 1.5em;
+      }
+
+      .terminal__line--input {
+        color: var(--terminal-accent);
+      }
+
+      .terminal__line--output {
+        color: var(--terminal-fg);
+      }
+
+      .terminal__line--error {
+        color: var(--terminal-error);
+      }
+
+      .terminal__prompt {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: var(--terminal-gap);
+        align-items: center;
+        border-top: 1px solid var(--terminal-border);
+        padding: var(--terminal-gap) var(--terminal-pad);
+      }
+
+      .terminal__prompt-label {
+        color: var(--terminal-accent);
+        white-space: nowrap;
+      }
+
+      .terminal__input {
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--terminal-fg);
+        font: inherit;
+      }
+
+      .terminal__input::placeholder {
+        color: var(--terminal-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="terminal" aria-label="Terminal">
+      <section class="terminal__scrollback" aria-live="polite" data-terminal-scrollback>
+        <div class="terminal__line terminal__line--output">Vita Terminal</div>
+      </section>
+      <form class="terminal__prompt" data-terminal-prompt>
+        <label class="terminal__prompt-label" for="terminal-input" data-terminal-prompt-label>vita:~$</label>
+        <input
+          class="terminal__input"
+          id="terminal-input"
+          name="command"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="type a command"
+          data-terminal-input
+        >
+      </form>
+    </main>
+  </body>
+</html>
