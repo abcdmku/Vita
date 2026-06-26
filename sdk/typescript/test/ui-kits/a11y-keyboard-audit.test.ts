@@ -158,6 +158,7 @@ test("desktop shell primary actions are keyboard reachable through view-model AP
     "dock.launch.files",
     "dock.launch.mail",
     "dock.launch.browser",
+    "dock.launch.activity",
     "dock.launch.settings",
     "dock.focus.running-terminal",
     "palette.command.run-kernel",
@@ -257,6 +258,7 @@ function createAuditDock() {
     grant("apps.launch", INDEX_DOCK_APP_IDS.files),
     grant("apps.launch", INDEX_DOCK_APP_IDS.mail),
     grant("apps.launch", INDEX_DOCK_APP_IDS.browser),
+    grant("apps.launch", INDEX_DOCK_APP_IDS.activity),
     grant("apps.launch", INDEX_DOCK_APP_IDS.settings),
   ]));
 }

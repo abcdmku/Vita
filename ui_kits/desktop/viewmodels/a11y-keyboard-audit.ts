@@ -237,9 +237,15 @@ function createDockAuditCases(
       label: "Launch Browser from dock",
     }),
     Object.freeze({
+      actionId: "dock.launch.activity",
+      appId: INDEX_DOCK_APP_IDS.activity,
+      index: 5,
+      label: "Launch Activity from dock",
+    }),
+    Object.freeze({
       actionId: "dock.launch.settings",
       appId: INDEX_DOCK_APP_IDS.settings,
-      index: 5,
+      index: 6,
       label: "Launch Settings from dock",
     }),
   ]);

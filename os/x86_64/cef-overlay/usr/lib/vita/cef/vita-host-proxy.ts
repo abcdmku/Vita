@@ -235,7 +235,7 @@ function readMemInfo(): { totalBytes: number; usedBytes: number } {
     const kv: Record<string, number> = {};
     for (const line of text.split("\n")) {
       const m = /^(\w+):\s+(\d+)\s*kB/.exec(line);
-      if (m) kv[m[1]] = Number(m[2]) * 1024;
+      if (m && m[1] !== undefined) kv[m[1]] = Number(m[2]) * 1024;
     }
     const total = kv["MemTotal"] ?? 0;
     const available = kv["MemAvailable"] ?? (kv["MemFree"] ?? 0);

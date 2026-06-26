@@ -450,6 +450,7 @@ function methodArity(method: SurfaceHostMethod): number {
     case "previewSetting":
     case "applySetting":
     case "emitLauncherIntent":
+    case "sampleActivity":
       return 1;
     case "rollbackShell":
     case "currentShell":

@@ -1,4 +1,5 @@
 import type {
+  DesktopAppLaunch,
   DesktopHost,
   DesktopLaunchableApp,
   DesktopUiPackageManifest,

@@ -54,32 +54,32 @@ interface AppSpec {
 const APP_SPECS: Readonly<Record<string, AppSpec>> = Object.freeze({
   "vita.app.file-manager": Object.freeze({
     icon: "📁",
-    render: (host) => renderFiles(host, "/", "Files"),
+    render: (host: DesktopHost) => renderFiles(host, "/", "Files"),
     title: "Files",
   }),
   "vita.app.mail": Object.freeze({
     icon: "✉️",
-    render: (host) => renderFiles(host, "/mail", "Mail"),
+    render: (host: DesktopHost) => renderFiles(host, "/mail", "Mail"),
     title: "Mail",
   }),
   "vita.app.code": Object.freeze({
     icon: "📝",
-    render: (host) => renderFiles(host, "/editor", "Editor"),
+    render: (host: DesktopHost) => renderFiles(host, "/editor", "Editor"),
     title: "Editor",
   }),
   "vita.app.settings": Object.freeze({
     icon: "⚙️",
-    render: (host) => renderSettings(host),
+    render: (host: DesktopHost) => renderSettings(host),
     title: "Settings",
   }),
   "vita.app.activity": Object.freeze({
     icon: "📊",
-    render: (host) => renderActivity(host),
+    render: (host: DesktopHost) => renderActivity(host),
     title: "Activity",
   }),
   "vita.app.terminal": Object.freeze({
     icon: "⌨️",
-    render: (host) => renderFiles(host, "/", "Terminal — workspace"),
+    render: (host: DesktopHost) => renderFiles(host, "/", "Terminal — workspace"),
     title: "Terminal",
   }),
   "vita.app.browser": Object.freeze({

@@ -70,6 +70,6 @@ while (true) {
     const line = acc.slice(0, nl).trim(); acc = acc.slice(nl + 1);
     if (line === "quit") { libc.symbols.ioctl(fd, UI_DEV_DESTROY, 0n); libc.symbols.close(fd); Deno.exit(0); }
     else if (line === "click") { click(); }
-    else if (line.startsWith("moveto ")) { const [, x, y] = line.split(/\s+/); moveto(parseInt(x), parseInt(y)); }
+    else if (line.startsWith("moveto ")) { const [, x, y] = line.split(/\s+/); moveto(parseInt(x ?? ""), parseInt(y ?? "")); }
   }
 }

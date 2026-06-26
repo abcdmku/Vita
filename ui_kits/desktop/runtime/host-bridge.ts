@@ -1585,6 +1585,10 @@ function isTrue(value: unknown): value is true {
   return value === true;
 }
 
+function isJson(value: unknown): value is HostBridgeJson {
+  return value !== undefined;
+}
+
 function jsonObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
   if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
 

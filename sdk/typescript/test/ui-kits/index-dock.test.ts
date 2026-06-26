@@ -37,6 +37,7 @@ test("index dock seeds pinned design apps deterministically", () => {
     [INDEX_DOCK_APP_IDS.files, "Files", "folder", INDEX_DOCK_APP_IDS.files, "tsx"],
     [INDEX_DOCK_APP_IDS.mail, "Mail", "mail", INDEX_DOCK_APP_IDS.mail, "tsx"],
     [INDEX_DOCK_APP_IDS.browser, "Browser", "globe", INDEX_DOCK_APP_IDS.browser, "tsx"],
+    [INDEX_DOCK_APP_IDS.activity, "Activity", "activity", INDEX_DOCK_APP_IDS.activity, "tsx"],
     [INDEX_DOCK_APP_IDS.settings, "Settings", "settings", INDEX_DOCK_APP_IDS.settings, "tsx"],
   ]);
   assert.deepEqual(snapshot.items.map((item) => [
@@ -52,6 +53,7 @@ test("index dock seeds pinned design apps deterministically", () => {
     [INDEX_DOCK_APP_IDS.files, "Files", "folder", true, false, false],
     [INDEX_DOCK_APP_IDS.mail, "Mail", "mail", true, false, false],
     [INDEX_DOCK_APP_IDS.browser, "Browser", "globe", true, false, false],
+    [INDEX_DOCK_APP_IDS.activity, "Activity", "activity", true, false, false],
     [INDEX_DOCK_APP_IDS.settings, "Settings", "settings", true, false, false],
   ]);
   assert.equal(snapshot.focusedAppId, null);
