@@ -578,6 +578,7 @@ void ApplyInputLineOnUi(std::string line) {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
     InjectMouseMove(browser, vx, vy);
+    fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
   } else if (kind == "pointer-button") {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
@@ -586,10 +587,13 @@ void ApplyInputLineOnUi(std::string line) {
     // Move first so the press lands at the right spot, then the button.
     InjectMouseMove(browser, vx, vy);
     InjectMouseButton(browser, vx, vy, button, down);
+    fprintf(stderr, "[osr] input: SendMouseClick view=(%d,%d) button=%d %s\n", vx, vy,
+            button, down ? "down" : "up");
   } else if (kind == "key") {
     int code = std::atoi(kv["key-code"].c_str());
     bool pressed = kv["pressed"] == "true";
     InjectKey(browser, code, pressed);
+    fprintf(stderr, "[osr] input: SendKey code=%d %s\n", code, pressed ? "down" : "up");
   }
 }
 
