@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -285,6 +286,45 @@ func TestServedHealthzDoesNotAssignLiteralHealthyTrue(t *testing.T) {
 	assertNoLiteralHealthyTrue(t, "../transport/server.go")
 }
 
+func TestServedProductionHealthzUsesLiveReadinessWiring(t *testing.T) {
+	serverSource := readSource(t, "../transport/server.go")
+	mainSource := readSource(t, "../cmd/agentd/main.go")
+
+	for _, forbidden := range []string{
+		"requestContextReadinessSource",
+		"registryReadinessSource(registry, names)",
+		"expectedNames",
+	} {
+		if strings.Contains(serverSource, forbidden) {
+			t.Fatalf("transport server still contains fail-open/static readiness wiring %q", forbidden)
+		}
+	}
+
+	for _, required := range []string{
+		"type TransportReadiness struct",
+		"func (r *TransportReadiness) Ready",
+		"r.active.Load() > 0",
+		"RegistryReady:    registryReadinessSource(registry)",
+		"TransportReady:   transportReady",
+	} {
+		if !strings.Contains(serverSource, required) {
+			t.Fatalf("transport server is missing measured readiness wiring %q", required)
+		}
+	}
+
+	for _, required := range []string{
+		"transport.NewTransportReadiness()",
+		"TransportReady:",
+		"transportReadiness.Ready",
+		"serveUntilStopped(tcpServer, unixServer, unixListener, transportReadiness)",
+		"transportReadiness.MarkAccepting()",
+	} {
+		if !strings.Contains(mainSource, required) {
+			t.Fatalf("agentd production path is missing served readiness wiring %q", required)
+		}
+	}
+}
+
 func TestStatusNewHandlerRequiresHealthConfig(t *testing.T) {
 	fileSet := token.NewFileSet()
 	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
@@ -337,10 +377,20 @@ func assertNoLiteralHealthyTrue(t *testing.T, path string) {
 }
 
 func TestStatusDoesNotHardcodeReadinessTrue(t *testing.T) {
+	assertNoHardcodedReadinessTrue(t, "status.go")
+}
+
+func TestServedHealthzDoesNotHardcodeReadinessTrue(t *testing.T) {
+	assertNoHardcodedReadinessTrue(t, "../transport/server.go")
+}
+
+func assertNoHardcodedReadinessTrue(t *testing.T, path string) {
+	t.Helper()
+
 	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
+	file, err := parser.ParseFile(fileSet, path, nil, 0)
 	if err != nil {
-		t.Fatalf("parse status.go: %v", err)
+		t.Fatalf("parse %s: %v", path, err)
 	}
 
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -376,6 +426,16 @@ func TestStatusDoesNotHardcodeReadinessTrue(t *testing.T) {
 		}
 		return true
 	})
+}
+
+func readSource(t *testing.T, path string) string {
+	t.Helper()
+
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(source)
 }
 
 func testHandler(health healthSource) http.Handler {

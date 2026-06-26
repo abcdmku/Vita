@@ -182,13 +182,13 @@ func defaultHealthSource(config HealthConfig) healthSource {
 		}
 
 		if config.RegistryReady != nil {
-			ready := config.RegistryReady(ctx)
-			snapshot.RegistryReady = &ready
+			registryReady := config.RegistryReady(ctx)
+			snapshot.RegistryReady = &registryReady
 		}
 
 		if config.TransportReady != nil {
-			ready := config.TransportReady(ctx)
-			snapshot.TransportReady = &ready
+			transportReady := config.TransportReady(ctx)
+			snapshot.TransportReady = &transportReady
 		}
 
 		if storageHealth == nil {

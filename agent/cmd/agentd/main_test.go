@@ -90,7 +90,7 @@ func TestDevTCPServerRejectsNonLoopbackAddress(t *testing.T) {
 func TestServeUntilStoppedAllowsNilTCPServer(t *testing.T) {
 	listenerErr := errors.New("listener failed")
 
-	err := serveUntilStopped(nil, &http.Server{}, failingListener{err: listenerErr})
+	err := serveUntilStopped(nil, &http.Server{}, failingListener{err: listenerErr}, nil)
 	if !errors.Is(err, listenerErr) {
 		t.Fatalf("serveUntilStopped() error = %v, want %v", err, listenerErr)
 	}

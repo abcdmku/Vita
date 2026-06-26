@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vita/agent/capabilities"
@@ -90,6 +91,7 @@ type Config struct {
 	// route. Optional: nil ⇒ /apply still works, /audit reports unavailable.
 	AuditStore       AuditStore
 	CapsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	TransportReady   status.ReadinessSource
 	StorageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
@@ -180,6 +182,32 @@ type handler struct {
 	statusHandler    http.Handler
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 	storageHealth    func(context.Context) (storagehealth.Report, error)
+}
+
+type TransportReadiness struct {
+	active atomic.Int64
+}
+
+func NewTransportReadiness() *TransportReadiness {
+	return &TransportReadiness{}
+}
+
+func (r *TransportReadiness) Ready(ctx context.Context) bool {
+	return r != nil && ctx.Err() == nil && r.active.Load() > 0
+}
+
+func (r *TransportReadiness) MarkAccepting() func() {
+	if r == nil {
+		return func() {}
+	}
+
+	r.active.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.active.Add(-1)
+		})
+	}
 }
 
 type applyRequest struct {
@@ -588,6 +616,7 @@ func NewHandler(config Config) (http.Handler, error) {
 			return storagehealth.Collect(ctx, storagehealth.Roots{Discoverer: discoverer})
 		}
 	}
+	transportReady := config.TransportReady
 
 	filesHandler, err := filecap.NewHandler(filecap.Options{
 		StateRoot:  config.FilesStateRoot,
@@ -603,8 +632,8 @@ func NewHandler(config Config) (http.Handler, error) {
 
 	statusHandler := status.NewHandlerWithClock(config.Version, startedAt, names, now, status.HealthConfig{
 		CapsuleWorkloads: capsuleWorkloads,
-		RegistryReady:    registryReadinessSource(registry, names),
-		TransportReady:   requestContextReadinessSource,
+		RegistryReady:    registryReadinessSource(registry),
+		TransportReady:   transportReady,
 		StorageHealth:    storageHealthSnapshot,
 	})
 
@@ -1165,31 +1194,23 @@ func capsuleWorkloadSnapshotFunc(registry *capabilities.Registry) (func() []caps
 	return source.Workloads, nil
 }
 
-func registryReadinessSource(registry *capabilities.Registry, expected []string) status.ReadinessSource {
-	expectedNames := cloneStrings(expected)
+func registryReadinessSource(registry *capabilities.Registry) status.ReadinessSource {
 	return func(ctx context.Context) bool {
-		if ctx.Err() != nil || registry == nil || len(expectedNames) == 0 {
+		if ctx.Err() != nil || registry == nil {
 			return false
 		}
 
 		names := registry.Names()
-		if len(names) != len(expectedNames) {
+		if len(names) == 0 {
 			return false
 		}
-		for i, name := range names {
-			if name != expectedNames[i] {
-				return false
-			}
+		for _, name := range names {
 			if _, ok := registry.Lookup(name); !ok {
 				return false
 			}
 		}
-		return len(names) == len(expectedNames)
+		return len(names) > 0
 	}
-}
-
-func requestContextReadinessSource(ctx context.Context) bool {
-	return ctx.Err() == nil
 }
 
 func normalizeCapsuleWorkloads(workloads []capsuleruntime.WorkloadStatus) []capsuleruntime.WorkloadStatus {
@@ -1624,10 +1645,4 @@ func encodeJSONValue(payload interface{}) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(body.Bytes(), []byte("\n")), nil
-}
-
-func cloneStrings(in []string) []string {
-	out := make([]string, len(in))
-	copy(out, in)
-	return out
 }

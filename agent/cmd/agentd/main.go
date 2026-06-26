@@ -104,6 +104,7 @@ func main() {
 		log.Fatalf("build audit log store: %v", err)
 	}
 
+	transportReadiness := transport.NewTransportReadiness()
 	handler, err := transport.NewHandler(transport.Config{
 		Version:         agentVersion,
 		StartedAt:       startedAt,
@@ -112,6 +113,7 @@ func main() {
 		FilesGrants:     runtimeFilesGrants(),
 		FilesPrincipals: runtimeFilesPrincipals(),
 		AuditStore:      auditStore,
+		TransportReady:  transportReadiness.Ready,
 	})
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)
@@ -140,7 +142,7 @@ func main() {
 
 	log.Printf("vita agent startup transports=%s", transports)
 
-	if err := serveUntilStopped(tcpServer, unixServer, unixListener); err != nil {
+	if err := serveUntilStopped(tcpServer, unixServer, unixListener, transportReadiness); err != nil {
 		log.Fatalf("serve agent: %v", err)
 	}
 }
@@ -247,15 +249,15 @@ func newDevTCPServer(addr string, handler http.Handler) (*http.Server, error) {
 	}, nil
 }
 
-func serveUntilStopped(tcpServer *http.Server, unixServer *http.Server, unixListener net.Listener) error {
+func serveUntilStopped(tcpServer *http.Server, unixServer *http.Server, unixListener net.Listener, transportReadiness *transport.TransportReadiness) error {
 	errCh := make(chan error, 2)
 	if tcpServer != nil {
-		go serveHTTP(errCh, "tcp "+tcpServer.Addr, func() error {
+		go serveHTTP(errCh, "tcp "+tcpServer.Addr, transportReadiness, func() error {
 			log.Printf("vita agent listening on %s", tcpServer.Addr)
 			return tcpServer.ListenAndServe()
 		})
 	}
-	go serveHTTP(errCh, "unix "+transport.DefaultUnixSocketPath, func() error {
+	go serveHTTP(errCh, "unix "+transport.DefaultUnixSocketPath, transportReadiness, func() error {
 		log.Printf("vita agent listening on unix socket %s", transport.DefaultUnixSocketPath)
 		return unixServer.Serve(unixListener)
 	})
@@ -278,7 +280,10 @@ func serveUntilStopped(tcpServer *http.Server, unixServer *http.Server, unixList
 	}
 }
 
-func serveHTTP(errCh chan<- error, name string, serve func() error) {
+func serveHTTP(errCh chan<- error, name string, transportReadiness *transport.TransportReadiness, serve func() error) {
+	clearReady := transportReadiness.MarkAccepting()
+	defer clearReady()
+
 	if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		errCh <- fmt.Errorf("%s: %w", name, err)
 		return

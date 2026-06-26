@@ -1938,6 +1938,7 @@ type handlerConfig struct {
 	filesPrincipals  []filecap.Principal
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	transportReady   status.ReadinessSource
 	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
@@ -1964,6 +1965,12 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 			}, nil
 		}
 	}
+	transportReady := config.transportReady
+	if transportReady == nil {
+		transportReady = func(ctx context.Context) bool {
+			return ctx.Err() == nil
+		}
+	}
 
 	handler, err := NewHandler(Config{
 		Version:          "test-version",
@@ -1978,6 +1985,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		FilesPrincipals:  config.filesPrincipals,
 		AuditStore:       config.auditStore,
 		CapsuleWorkloads: config.capsuleWorkloads,
+		TransportReady:   transportReady,
 		StorageHealth:    storageHealthSnapshot,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)
