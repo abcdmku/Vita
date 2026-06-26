@@ -196,14 +196,16 @@ class OsrClient : public CefClient,
         "    L('VITA-HOSTTEST requestFile.list -> ' + JSON.stringify(ls));"
         "    var rd = b.request({method:'requestFile',args:[{op:'read',grant:'g',path:'/proof.txt'}]});"
         "    L('VITA-HOSTTEST requestFile.read(proof.txt) -> ' + JSON.stringify(rd));"
+        "    var la = b.request({method:'launchApp',args:[{id:'vita.app.file-manager'}]});"
+        "    L('VITA-HOSTTEST launchApp(file-manager) via bridge -> ' + JSON.stringify(la));"
         "  }"
-        "  var dock = document.querySelectorAll('[data-vita-dock-app-id]');"
-        "  L('VITA-HOSTTEST dock tiles=' + dock.length);"
         "  var fm = document.querySelector('[data-vita-dock-app-id=\"vita.app.file-manager\"]');"
-        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING'));"
-        "  if(fm){ L('VITA-HOSTTEST dispatching synthetic click on file-manager tile');"
-        "          fm.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); }"
-        "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e)); } }, 1500);",
+        "  var act = document.querySelector('[data-vita-action=\"dock.launchOrFocus\"]');"
+        "  L('VITA-HOSTTEST file-manager tile=' + (fm?'found':'MISSING') + ' action-el=' + (act?'found':'MISSING'));"
+        "  var clickTarget = fm ? (fm.querySelector('*') || fm) : null;"
+        "  if(clickTarget){ L('VITA-HOSTTEST dispatch click on dock tile (target=' + clickTarget.tagName + ')');"
+        "    clickTarget.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }"
+        "}catch(e){ (globalThis.__vitaLog||function(){})('VITA-HOSTTEST error ' + String(e) + ' @ ' + (e&&e.stack||'')); } }, 1800);",
         "vita://host-bridge-selftest", 0);
 
     if (browser_ && browser_->GetHost()) {
