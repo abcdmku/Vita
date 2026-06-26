@@ -70,55 +70,32 @@ func TestHealthzReportsUnhealthySubsystem(t *testing.T) {
 		snapshot healthSnapshot
 	}{
 		{
-			name: "capsule down",
-			snapshot: healthSnapshot{
-				CapsuleKnown: true,
-				CapsuleWorkloads: []capsuleruntime.WorkloadStatus{{
-					Health: capsuleruntime.StatusDown,
-				}},
-			},
+			name:     "capsule down",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.CapsuleWorkloads[0].Health = capsuleruntime.StatusDown }),
 		},
 		{
-			name: "capsule unhealthy",
-			snapshot: healthSnapshot{
-				CapsuleKnown: true,
-				CapsuleWorkloads: []capsuleruntime.WorkloadStatus{{
-					Health: capsuleruntime.StatusUnhealthy,
-				}},
-			},
+			name:     "capsule unhealthy",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.CapsuleWorkloads[0].Health = capsuleruntime.StatusUnhealthy }),
 		},
 		{
-			name: "capsule unknown",
-			snapshot: healthSnapshot{
-				CapsuleKnown: true,
-				CapsuleWorkloads: []capsuleruntime.WorkloadStatus{{
-					Health: capsuleruntime.StatusUnknown,
-				}},
-			},
+			name:     "capsule unknown",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.CapsuleWorkloads[0].Health = capsuleruntime.StatusUnknown }),
 		},
 		{
-			name: "storage degraded",
-			snapshot: healthSnapshot{
-				StorageKnown: true,
-				StorageHealth: []storagehealth.MountHealth{{
-					Status: storagehealth.StatusDegraded,
-				}},
-			},
+			name:     "registry unready",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.RegistryReady = boolPointer(false) }),
 		},
 		{
-			name: "storage unknown",
-			snapshot: healthSnapshot{
-				StorageKnown: true,
-				StorageHealth: []storagehealth.MountHealth{{
-					Status: storagehealth.StatusUnknown,
-				}},
-			},
+			name:     "transport unready",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.TransportReady = boolPointer(false) }),
 		},
 		{
-			name: "transport unready",
-			snapshot: healthSnapshot{
-				TransportReady: boolPointer(false),
-			},
+			name:     "storage degraded",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.StorageHealth[0].Status = storagehealth.StatusDegraded }),
+		},
+		{
+			name:     "storage unknown",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) { snapshot.StorageHealth[0].Status = storagehealth.StatusUnknown }),
 		},
 	}
 
@@ -144,15 +121,29 @@ func TestHealthzFailClosedWorstOf(t *testing.T) {
 		},
 		{
 			name: "known empty capsule snapshot",
-			snapshot: healthSnapshot{
-				CapsuleKnown: true,
-			},
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) {
+				snapshot.CapsuleKnown = true
+				snapshot.CapsuleWorkloads = nil
+			}),
 		},
 		{
 			name: "known empty storage snapshot",
-			snapshot: healthSnapshot{
-				StorageKnown: true,
-			},
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) {
+				snapshot.StorageKnown = true
+				snapshot.StorageHealth = nil
+			}),
+		},
+		{
+			name: "missing registry readiness",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) {
+				snapshot.RegistryReady = nil
+			}),
+		},
+		{
+			name: "missing transport readiness",
+			snapshot: unhealthySnapshot(func(snapshot *healthSnapshot) {
+				snapshot.TransportReady = nil
+			}),
 		},
 		{
 			name: "one degraded input dominates healthy inputs",
@@ -161,6 +152,7 @@ func TestHealthzFailClosedWorstOf(t *testing.T) {
 				CapsuleWorkloads: []capsuleruntime.WorkloadStatus{{
 					Health: capsuleruntime.StatusOK,
 				}},
+				RegistryReady:  boolPointer(true),
 				TransportReady: boolPointer(true),
 				StorageKnown:   true,
 				StorageHealth: []storagehealth.MountHealth{{
@@ -250,6 +242,41 @@ func TestNewHandlerProductionHealthSourceAggregatesLiveSubsystemState(t *testing
 	}
 }
 
+func TestNewHandlerZeroHealthConfigFailsClosed(t *testing.T) {
+	startedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler("test-version", startedAt, []string{"test.read"})
+
+	status, _, _ := requestHealthz(t, handler)
+	if status.Healthy {
+		t.Fatal("Healthy = true, want false for zero HealthConfig")
+	}
+}
+
+func TestNewHandlerUnwiredTransportFailsClosed(t *testing.T) {
+	supervisor := supervisorWithStatus(t, capsuleruntime.StatusOK)
+	registry, err := capabilities.NewRegistry(capsule.NewExecuteCapabilityWithSupervisor(supervisor))
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
+	}
+
+	startedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(
+		"test-version",
+		startedAt,
+		[]string{"capsule.execute"},
+		HealthConfig{
+			Registry:      registry,
+			RegistryReady: readinessSource(true),
+			StorageHealth: healthyStorageSnapshot,
+		},
+	)
+
+	status, _, _ := requestHealthz(t, handler)
+	if status.Healthy {
+		t.Fatal("Healthy = true, want false when transport readiness is unwired")
+	}
+}
+
 func TestStatusDoesNotAssignLiteralHealthyTrue(t *testing.T) {
 	fileSet := token.NewFileSet()
 	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
@@ -275,6 +302,48 @@ func TestStatusDoesNotAssignLiteralHealthyTrue(t *testing.T) {
 	})
 }
 
+func TestStatusDoesNotHardcodeReadinessTrue(t *testing.T) {
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse status.go: %v", err)
+	}
+
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range typed.Lhs {
+				if !readinessIdentifier(lhs) {
+					continue
+				}
+				rhs := typed.Rhs[len(typed.Rhs)-1]
+				if i < len(typed.Rhs) {
+					rhs = typed.Rhs[i]
+				}
+				if isTrueLiteral(rhs) {
+					position := fileSet.Position(typed.Pos())
+					t.Fatalf("readiness assigned literal true at %s", position)
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range typed.Names {
+				if !readinessName(name.Name) || len(typed.Values) == 0 {
+					continue
+				}
+				value := typed.Values[len(typed.Values)-1]
+				if i < len(typed.Values) {
+					value = typed.Values[i]
+				}
+				if isTrueLiteral(value) {
+					position := fileSet.Position(typed.Pos())
+					t.Fatalf("readiness value assigned literal true at %s", position)
+				}
+			}
+		}
+		return true
+	})
+}
+
 func testHandler(health healthSource) http.Handler {
 	startedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	now := func() time.Time {
@@ -284,17 +353,28 @@ func testHandler(health healthSource) http.Handler {
 }
 
 func healthyHealthSource() healthSource {
-	return staticHealthSource(healthSnapshot{
+	return staticHealthSource(healthyHealthSnapshot())
+}
+
+func healthyHealthSnapshot() healthSnapshot {
+	return healthSnapshot{
 		CapsuleKnown: true,
 		CapsuleWorkloads: []capsuleruntime.WorkloadStatus{{
 			Health: capsuleruntime.StatusOK,
 		}},
+		RegistryReady:  boolPointer(true),
 		TransportReady: boolPointer(true),
 		StorageKnown:   true,
 		StorageHealth: []storagehealth.MountHealth{{
 			Status: storagehealth.StatusOK,
 		}},
-	})
+	}
+}
+
+func unhealthySnapshot(mutate func(*healthSnapshot)) healthSnapshot {
+	snapshot := healthyHealthSnapshot()
+	mutate(&snapshot)
+	return snapshot
 }
 
 func staticHealthSource(snapshot healthSnapshot) healthSource {
@@ -370,4 +450,18 @@ func requestHealthz(t *testing.T, handler http.Handler) (Status, string, *httpte
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+func readinessIdentifier(expr ast.Expr) bool {
+	identifier, ok := expr.(*ast.Ident)
+	return ok && readinessName(identifier.Name)
+}
+
+func readinessName(name string) bool {
+	return strings.Contains(strings.ToLower(name), "ready")
+}
+
+func isTrueLiteral(expr ast.Expr) bool {
+	identifier, ok := expr.(*ast.Ident)
+	return ok && identifier.Name == "true"
 }

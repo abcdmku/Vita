@@ -129,53 +129,39 @@ func (h *handler) healthy(ctx context.Context) bool {
 }
 
 func aggregateHealthy(snapshot healthSnapshot) bool {
-	consulted := false
-
-	if snapshot.CapsuleKnown || len(snapshot.CapsuleWorkloads) > 0 {
-		consulted = true
-		if len(snapshot.CapsuleWorkloads) == 0 {
-			return false
-		}
-		for _, workload := range snapshot.CapsuleWorkloads {
-			if workload.Health != capsuleruntime.StatusOK {
-				return false
-			}
-		}
+	if !snapshot.CapsuleKnown || len(snapshot.CapsuleWorkloads) == 0 {
+		return false
 	}
-
-	if snapshot.RegistryReady != nil {
-		consulted = true
-		if !*snapshot.RegistryReady {
+	for _, workload := range snapshot.CapsuleWorkloads {
+		if workload.Health != capsuleruntime.StatusOK {
 			return false
 		}
 	}
 
-	if snapshot.TransportReady != nil {
-		consulted = true
-		if !*snapshot.TransportReady {
+	if snapshot.RegistryReady == nil || !*snapshot.RegistryReady {
+		return false
+	}
+
+	if snapshot.TransportReady == nil || !*snapshot.TransportReady {
+		return false
+	}
+
+	if !snapshot.StorageKnown || len(snapshot.StorageHealth) == 0 {
+		return false
+	}
+	for _, mount := range snapshot.StorageHealth {
+		if mount.Status != storagehealth.StatusOK {
 			return false
 		}
 	}
 
-	if snapshot.StorageKnown || len(snapshot.StorageHealth) > 0 {
-		consulted = true
-		if len(snapshot.StorageHealth) == 0 {
-			return false
-		}
-		for _, mount := range snapshot.StorageHealth {
-			if mount.Status != storagehealth.StatusOK {
-				return false
-			}
-		}
-	}
-
-	return consulted
+	return true
 }
 
 func defaultHealthSource(config HealthConfig) healthSource {
 	capsuleWorkloads, capsuleKnown := capsuleWorkloadsFromConfig(config)
 	storageHealth := config.StorageHealth
-	if storageHealth == nil {
+	if storageHealth == nil && capsuleKnown && config.RegistryReady != nil && config.TransportReady != nil {
 		roots := config.StorageRoots
 		storageHealth = func(ctx context.Context) (storagehealth.Report, error) {
 			return storagehealth.Collect(ctx, roots)
@@ -195,9 +181,6 @@ func defaultHealthSource(config HealthConfig) healthSource {
 		if config.RegistryReady != nil {
 			ready := config.RegistryReady(ctx)
 			snapshot.RegistryReady = &ready
-		} else if config.Registry != nil {
-			ready := true
-			snapshot.RegistryReady = &ready
 		}
 
 		if config.TransportReady != nil {
@@ -205,6 +188,9 @@ func defaultHealthSource(config HealthConfig) healthSource {
 			snapshot.TransportReady = &ready
 		}
 
+		if storageHealth == nil {
+			return snapshot
+		}
 		report, err := storageHealth(ctx)
 		if err != nil {
 			snapshot.StorageKnown = true
