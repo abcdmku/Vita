@@ -205,6 +205,9 @@ const OWNER_AUTH_ASSERTION_FIELDS = Object.freeze([
 const OWNER_AUTH_USER_FIELDS = Object.freeze(["displayName", "id", "initials"]);
 const OWNER_AUTH_SESSION_REQUIRED_FIELDS = Object.freeze(["user"]);
 const OWNER_AUTH_SESSION_OPTIONAL_FIELDS = Object.freeze(["authenticatedAtMs", "sessionId"]);
+const OWNER_AUTH_HOST_RESULT_REQUIRED_FIELDS = Object.freeze(["ok"]);
+const OWNER_AUTH_HOST_RESULT_OPTIONAL_FIELDS = Object.freeze(["error", "value"]);
+const OWNER_AUTH_HOST_ERROR_FIELDS = Object.freeze(["code", "message", "path"]);
 
 export function createOwnerAuthPort(
   host: Pick<DesktopHost, "authenticateOwner">,
@@ -222,7 +225,7 @@ export function createOwnerAuthPort(
         return lockReject("AUTH_PORT_UNAVAILABLE", "owner authentication port is unavailable.", "/auth");
       }
 
-      let result: DesktopHostResult<OwnerAuthSession>;
+      let result: unknown;
 
       try {
         result = await authenticateOwner(ownerRequest.value);
@@ -230,17 +233,7 @@ export function createOwnerAuthPort(
         return lockReject("AUTH_PORT_FAILED", "owner authentication port failed closed.", "/auth");
       }
 
-      if (!result.ok) {
-        return lockReject(
-          hostErrorCodeToLockCode(result.error.code),
-          "owner authentication was rejected.",
-          result.error.path,
-        );
-      }
-
-      const session = normalizeOwnerAuthSession(result.value, "/auth/result/value");
-
-      return session.ok ? hostAccept(session.value) : session;
+      return normalizeOwnerAuthHostResult(result, "/auth/result");
     },
   });
 }
@@ -289,13 +282,12 @@ function ownerAuthRequestFromLockRequest(
 
   return hostAccept(Object.freeze({
     assertion: parsed.value.assertion,
-    user: optionUser?.value ?? parsed.value.user ?? lockUserFromId(userId),
+    user: optionUser?.value ?? lockUserFromId(userId),
   }));
 }
 
 function parseOwnerAuthCredential(credential: string): DesktopHostResult<{
   readonly assertion: OwnerAuthAssertion;
-  readonly user?: OwnerAuthUser;
 }> {
   let parsed: unknown;
 
@@ -317,22 +309,12 @@ function parseOwnerAuthCredential(credential: string): DesktopHostResult<{
     if (!fields.ok) return lockReject("AUTH_PORT_MALFORMED", fields.error.message, fields.error.path);
 
     const assertion = normalizeOwnerAuthAssertion(field(normalized.value, "assertion"), "/credential/assertion");
-    const userValue = field(normalized.value, "user");
-    const user = userValue === undefined ? undefined : normalizeOwnerAuthUser(userValue, "/credential/user");
 
     if (!assertion.ok) return assertion;
-    if (user !== undefined && !user.ok) return user;
 
-    const output: {
-      assertion: OwnerAuthAssertion;
-      user?: OwnerAuthUser;
-    } = {
+    return hostAccept(Object.freeze({
       assertion: assertion.value,
-    };
-
-    if (user !== undefined) output.user = user.value;
-
-    return hostAccept(Object.freeze(output));
+    }));
   }
 
   const assertion = normalizeOwnerAuthAssertion(normalized.value, "/credential");
@@ -341,6 +323,77 @@ function parseOwnerAuthCredential(credential: string): DesktopHostResult<{
 
   return hostAccept(Object.freeze({
     assertion: assertion.value,
+  }));
+}
+
+function normalizeOwnerAuthHostResult(input: unknown, path: string): DesktopHostResult<LockAuthSession> {
+  const normalized = safeNormalize(input);
+
+  if (!normalized.ok || !isPlainObject(normalized.value)) {
+    return malformedOwnerAuthHostResult(path);
+  }
+
+  const fields = expectFields(
+    normalized.value,
+    OWNER_AUTH_HOST_RESULT_REQUIRED_FIELDS,
+    OWNER_AUTH_HOST_RESULT_OPTIONAL_FIELDS,
+    path,
+  );
+
+  if (!fields.ok) return malformedOwnerAuthHostResult(fields.error.path);
+
+  const ok = field(normalized.value, "ok");
+
+  if (ok === true) {
+    if (Object.hasOwn(normalized.value, "error")) {
+      return malformedOwnerAuthHostResult(path);
+    }
+
+    const session = normalizeOwnerAuthSession(field(normalized.value, "value"), `${path}/value`);
+
+    return session.ok ? hostAccept(session.value) : session;
+  }
+
+  if (ok === false) {
+    if (Object.hasOwn(normalized.value, "value")) {
+      return malformedOwnerAuthHostResult(path);
+    }
+
+    const error = normalizeOwnerAuthHostError(field(normalized.value, "error"), `${path}/error`);
+
+    if (!error.ok) return error;
+
+    return lockReject(
+      hostErrorCodeToLockCode(error.value.code),
+      "owner authentication was rejected.",
+      error.value.path,
+    );
+  }
+
+  return malformedOwnerAuthHostResult(`${path}/ok`);
+}
+
+function normalizeOwnerAuthHostError(input: PlainJson | undefined, path: string): DesktopHostResult<DesktopHostError> {
+  if (!isPlainObject(input)) {
+    return malformedOwnerAuthHostResult(path);
+  }
+
+  const fields = expectFields(input, OWNER_AUTH_HOST_ERROR_FIELDS, Object.freeze([]), path);
+
+  if (!fields.ok) return malformedOwnerAuthHostResult(fields.error.path);
+
+  const code = field(input, "code");
+  const message = field(input, "message");
+  const errorPath = field(input, "path");
+
+  if (typeof code !== "string" || typeof message !== "string" || typeof errorPath !== "string") {
+    return malformedOwnerAuthHostResult(path);
+  }
+
+  return hostAccept(Object.freeze({
+    code,
+    message,
+    path: errorPath,
   }));
 }
 
@@ -464,6 +517,14 @@ function hostErrorCodeToLockCode(code: string): LockViewModelErrorCode {
   }
 
   return "AUTHENTICATION_REJECTED";
+}
+
+function malformedOwnerAuthHostResult<T>(path: string): DesktopHostResult<T> {
+  return lockReject(
+    "AUTH_PORT_MALFORMED",
+    "owner authentication port returned malformed result.",
+    path,
+  );
 }
 
 function expectFields(

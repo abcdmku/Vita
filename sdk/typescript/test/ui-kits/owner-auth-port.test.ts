@@ -28,6 +28,12 @@ const OWNER_USER = Object.freeze({
   initials: "VO",
 }) satisfies OwnerAuthUser;
 
+const FORGED_USER = Object.freeze({
+  displayName: "Forged Owner",
+  id: "forged-owner",
+  initials: "FO",
+}) satisfies OwnerAuthUser;
+
 const OWNER_ASSERTION = Object.freeze({
   action: "unlock",
   authenticatorData: "authenticator-data-base64url",
@@ -132,10 +138,89 @@ test("authenticateOwner missing owner.auth grant fails closed before invoking ag
   assert.equal(agentd.calls.length, 0);
 });
 
+test("Lock adapter ignores a forged user inside the submitted credential", async () => {
+  const requests: OwnerAuthRequest[] = [];
+  const auth = createOwnerAuthPort(Object.freeze({
+    authenticateOwner(request: OwnerAuthRequest): DesktopHostResult<OwnerAuthSession> {
+      requests.push(request);
+
+      return {
+        ok: true,
+        value: Object.freeze({
+          sessionId: `owner:${request.user.id}:unlock`,
+          user: request.user,
+        }),
+      };
+    },
+  }));
+  const lock = createLockViewModel({
+    auth,
+    user: OWNER_USER,
+  });
+  const unlocked = await lock.submit(JSON.stringify({
+    assertion: OWNER_ASSERTION,
+    user: FORGED_USER,
+  }));
+
+  assert.equal(unlocked.ok, true);
+  if (!unlocked.ok) assert.fail("expected forged credential user to be ignored");
+  assert.equal(requests.length, 1);
+
+  const request = requests[0];
+
+  if (request === undefined) assert.fail("expected adapter to call authenticateOwner");
+  assert.equal(request.user.id, OWNER_USER.id);
+  assert.notEqual(request.user.id, FORGED_USER.id);
+  assert.equal(unlocked.state.user.id, OWNER_USER.id);
+  assert.notEqual(unlocked.state.user.id, FORGED_USER.id);
+});
+
+test("Lock adapter normalizes malformed and throwing host results fail closed", async () => {
+  const malformedAuth = createOwnerAuthPort(Object.freeze({
+    authenticateOwner(): DesktopHostResult<OwnerAuthSession> {
+      return JSON.parse("{\"ok\":false}");
+    },
+  }));
+  const malformed = await malformedAuth.authenticate(lockAuthenticateRequest());
+
+  assert.deepEqual(malformed, {
+    error: {
+      code: "AUTH_PORT_MALFORMED",
+      message: "owner authentication port returned malformed result.",
+      path: "/auth/result/error",
+    },
+    ok: false,
+  });
+
+  const throwingAuth = createOwnerAuthPort(Object.freeze({
+    authenticateOwner(): never {
+      throw new Error("host auth failed");
+    },
+  }));
+  const thrown = await throwingAuth.authenticate(lockAuthenticateRequest());
+
+  assert.deepEqual(thrown, {
+    error: {
+      code: "AUTH_PORT_FAILED",
+      message: "owner authentication port failed closed.",
+      path: "/auth",
+    },
+    ok: false,
+  });
+});
+
 function ownerAuthRequest(): OwnerAuthRequest {
   return Object.freeze({
     assertion: OWNER_ASSERTION,
     user: OWNER_USER,
+  });
+}
+
+function lockAuthenticateRequest() {
+  return Object.freeze({
+    attemptNumber: 1,
+    credential: JSON.stringify(OWNER_ASSERTION),
+    userId: OWNER_USER.id,
   });
 }
 
