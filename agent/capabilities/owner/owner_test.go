@@ -219,6 +219,9 @@ func TestChallengeMintsFreshRandomServerSideChallenges(t *testing.T) {
 	if first.Action != testAction || second.Action != testAction {
 		t.Fatalf("Challenge actions = %q/%q, want %q", first.Action, second.Action, testAction)
 	}
+	if first.Ceremony != challengeCeremonyGet || second.Ceremony != challengeCeremonyGet {
+		t.Fatalf("Challenge ceremonies = %q/%q, want %q", first.Ceremony, second.Ceremony, challengeCeremonyGet)
+	}
 	if first.Challenge == second.Challenge {
 		t.Fatalf("Challenge minted duplicate nonce %q", first.Challenge)
 	}
@@ -234,6 +237,91 @@ func TestChallengeMintsFreshRandomServerSideChallenges(t *testing.T) {
 			t.Fatalf("Challenge ExpiresAt = %s, want future expiry", ticket.ExpiresAt)
 		}
 	}
+}
+
+func TestRegistrationCeremonyChallengeIsActionBound(t *testing.T) {
+	capability := newCapability(newMemoryFileSystem(nil))
+
+	ticket := mustRegistrationChallenge(t, capability)
+	if ticket.Action != ownerEnrollAction {
+		t.Fatalf("registration challenge action = %q, want %q", ticket.Action, ownerEnrollAction)
+	}
+	if ticket.Ceremony != challengeCeremonyCreate {
+		t.Fatalf("registration challenge ceremony = %q, want %q", ticket.Ceremony, challengeCeremonyCreate)
+	}
+	assertDenyError(t, capability.ConsumeRegistrationChallenge(ticket.Challenge, testAction), denyActionMismatch)
+
+	ticket = mustRegistrationChallenge(t, capability)
+	assertDenyError(t, capability.Consume(ticket.Challenge, ownerEnrollAction), denyActionMismatch)
+}
+
+func TestRegistrationCeremonyChallengeIsSingleUse(t *testing.T) {
+	capability := newCapability(newMemoryFileSystem(nil))
+	ticket := mustRegistrationChallenge(t, capability)
+
+	if err := capability.ConsumeRegistrationChallenge(ticket.Challenge, ownerEnrollAction); err != nil {
+		t.Fatalf("ConsumeRegistrationChallenge returned error: %v", err)
+	}
+	assertDenyError(t, capability.ConsumeRegistrationChallenge(ticket.Challenge, ownerEnrollAction), denyChallengeReplayed)
+}
+
+func TestRegistrationCeremonyChallengeExpires(t *testing.T) {
+	capability := newCapability(newMemoryFileSystem(nil))
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	capability.now = func() time.Time { return now }
+	ticket := mustRegistrationChallenge(t, capability)
+
+	capability.now = func() time.Time { return now.Add(defaultChallengeTTL + time.Second) }
+	assertDenyError(t, capability.ConsumeRegistrationChallenge(ticket.Challenge, ownerEnrollAction), denyChallengeExpired)
+}
+
+func TestRegistrationCeremonyCrossCeremonyReplayRejected(t *testing.T) {
+	ctx := context.Background()
+	fixture := newES256Fixture(t, 0)
+	fs := newMemoryFileSystem(renderCredential(fixture.credential))
+	capability := newCapability(fs)
+
+	createTicket := mustRegistrationChallenge(t, capability)
+	createAssertion := fixture.assertion(t, createTicket, assertionOptions{action: ownerEnrollAction, counter: 1})
+	response := mustVerify(t, capability, ctx, createAssertion)
+	if response.Verified {
+		t.Fatal("VerifyResponse.Verified = true for create ceremony challenge on get path")
+	}
+	if response.Reason != denyActionMismatch {
+		t.Fatalf("VerifyResponse.Reason = %q, want %q", response.Reason, denyActionMismatch)
+	}
+
+	getTicket := mustChallenge(t, capability, ownerEnrollAction)
+	assertDenyError(t, capability.ConsumeRegistrationChallenge(getTicket.Challenge, ownerEnrollAction), denyActionMismatch)
+}
+
+func TestRegistrationCeremonyHTTPSelectorMintsDistinctCreateAndDefaultGet(t *testing.T) {
+	capability := newCapability(newMemoryFileSystem(nil))
+
+	getTicket, err := capability.ChallengeForCeremony("", ownerEnrollAction)
+	if err != nil {
+		t.Fatalf("ChallengeForCeremony default get returned error: %v", err)
+	}
+	createTicket, err := capability.ChallengeForCeremony(challengeCeremonyCreate, "")
+	if err != nil {
+		t.Fatalf("ChallengeForCeremony create returned error: %v", err)
+	}
+
+	if getTicket.Ceremony != challengeCeremonyGet {
+		t.Fatalf("default challenge ceremony = %q, want %q", getTicket.Ceremony, challengeCeremonyGet)
+	}
+	if createTicket.Ceremony != challengeCeremonyCreate {
+		t.Fatalf("create challenge ceremony = %q, want %q", createTicket.Ceremony, challengeCeremonyCreate)
+	}
+	if createTicket.Action != ownerEnrollAction {
+		t.Fatalf("create challenge action = %q, want %q", createTicket.Action, ownerEnrollAction)
+	}
+	if createTicket.Challenge == getTicket.Challenge {
+		t.Fatalf("create/default get challenges both minted nonce %q", createTicket.Challenge)
+	}
+
+	assertDenyError(t, capability.Consume(createTicket.Challenge, createTicket.Action), denyActionMismatch)
+	assertDenyError(t, capability.ConsumeRegistrationChallenge(getTicket.Challenge, getTicket.Action), denyActionMismatch)
 }
 
 func TestVerifyAssertionRejectsCallerSuppliedUnmintedChallenge(t *testing.T) {
@@ -891,6 +979,15 @@ func mustChallenge(t *testing.T, capability *Capability, action string) Challeng
 	return ticket
 }
 
+func mustRegistrationChallenge(t *testing.T, capability *Capability) ChallengeTicket {
+	t.Helper()
+	ticket, err := capability.RegistrationChallenge()
+	if err != nil {
+		t.Fatalf("RegistrationChallenge returned error: %v", err)
+	}
+	return ticket
+}
+
 func mustVerify(t *testing.T, capability *Capability, ctx context.Context, assertion OwnerAssertion) VerifyResponse {
 	t.Helper()
 	response, err := capability.Handle(ctx, VerifyRequest{Assertion: assertion})
@@ -911,6 +1008,17 @@ func mustReadCredential(t *testing.T, fs *memoryFileSystem) OwnerCredential {
 		t.Fatalf("parseCredential returned error: %v", err)
 	}
 	return credential
+}
+
+func assertDenyError(t *testing.T, err error, wantReason string) {
+	t.Helper()
+	var denied *DenyError
+	if !errors.As(err, &denied) {
+		t.Fatalf("error = %T %v, want DenyError", err, err)
+	}
+	if denied.Reason != wantReason {
+		t.Fatalf("DenyError.Reason = %q, want %q", denied.Reason, wantReason)
+	}
 }
 
 func assertNoPrivateMaterial(t *testing.T, content []byte) {

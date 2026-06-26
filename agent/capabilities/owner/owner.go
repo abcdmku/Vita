@@ -34,6 +34,10 @@ const (
 	defaultChallengeTTL = 5 * time.Minute
 
 	ownerChallengeBytes = 32
+	ownerEnrollAction   = "owner.enroll"
+
+	challengeCeremonyGet    = "get"
+	challengeCeremonyCreate = "create"
 
 	maxCredentialIDBytes      = 1024
 	maxPublicKeyCOSEBytes     = 4096
@@ -250,6 +254,7 @@ func (VerifyResponse) CapabilityResponse() {}
 type ChallengeTicket struct {
 	Challenge string    `json:"challenge"`
 	Action    string    `json:"action"`
+	Ceremony  string    `json:"ceremony"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
@@ -275,6 +280,7 @@ type ownerFileSystem interface {
 
 type challengeRecord struct {
 	action    string
+	ceremony  string
 	expiresAt time.Time
 }
 
@@ -354,7 +360,38 @@ func (c *Capability) Apply(ctx context.Context, req capabilities.TypedRequest) (
 }
 
 func (c *Capability) Challenge(action string) (ChallengeTicket, error) {
+	return c.challenge(action, challengeCeremonyGet)
+}
+
+func (c *Capability) RegistrationChallenge() (ChallengeTicket, error) {
+	return c.challenge(ownerEnrollAction, challengeCeremonyCreate)
+}
+
+func (c *Capability) ChallengeForCeremony(ceremony, action string) (ChallengeTicket, error) {
+	switch normalizeChallengeCeremony(ceremony) {
+	case challengeCeremonyGet:
+		return c.Challenge(action)
+	case challengeCeremonyCreate:
+		if action != "" {
+			if err := validateAction(action); err != nil {
+				return ChallengeTicket{}, err
+			}
+			if action != ownerEnrollAction {
+				return ChallengeTicket{}, &InvalidRequestError{Reason: "registration ceremony action must be owner.enroll"}
+			}
+		}
+		return c.RegistrationChallenge()
+	default:
+		return ChallengeTicket{}, &InvalidRequestError{Reason: "ceremony must be get or create"}
+	}
+}
+
+func (c *Capability) challenge(action, ceremony string) (ChallengeTicket, error) {
 	if err := validateAction(action); err != nil {
+		return ChallengeTicket{}, err
+	}
+	ceremony = normalizeChallengeCeremony(ceremony)
+	if err := validateChallengeCeremony(ceremony); err != nil {
 		return ChallengeTicket{}, err
 	}
 	if c == nil {
@@ -378,17 +415,27 @@ func (c *Capability) Challenge(action string) (ChallengeTicket, error) {
 	expiresAt := now.Add(c.challengeTTL)
 	c.challenges[challenge] = challengeRecord{
 		action:    action,
+		ceremony:  ceremony,
 		expiresAt: expiresAt,
 	}
 
 	return ChallengeTicket{
 		Challenge: challenge,
 		Action:    action,
+		Ceremony:  ceremony,
 		ExpiresAt: expiresAt,
 	}, nil
 }
 
 func (c *Capability) Consume(challenge, action string) error {
+	return c.ConsumeForCeremony(challenge, action, challengeCeremonyGet)
+}
+
+func (c *Capability) ConsumeRegistrationChallenge(challenge, action string) error {
+	return c.ConsumeForCeremony(challenge, action, challengeCeremonyCreate)
+}
+
+func (c *Capability) ConsumeForCeremony(challenge, action, ceremony string) error {
 	if c == nil {
 		return &InvalidRequestError{Reason: "missing owner capability"}
 	}
@@ -398,10 +445,14 @@ func (c *Capability) Consume(challenge, action string) error {
 	if err := validateAction(action); err != nil {
 		return err
 	}
+	ceremony = normalizeChallengeCeremony(ceremony)
+	if err := validateChallengeCeremony(ceremony); err != nil {
+		return err
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.consumeChallengeLocked(challenge, action, c.nowUTC())
+	return c.consumeChallengeLocked(challenge, action, ceremony, c.nowUTC())
 }
 
 func DecodeRequest(raw json.RawMessage) (capabilities.TypedRequest, error) {
@@ -540,7 +591,7 @@ func (c *Capability) verifyAssertion(ctx context.Context, assertion OwnerAsserti
 		return deny(denyUnknownCredential), prior, false, nil
 	}
 
-	if err := c.consumeChallengeLocked(clientData.Challenge, assertion.Action, c.nowUTC()); err != nil {
+	if err := c.consumeChallengeLocked(clientData.Challenge, assertion.Action, challengeCeremonyGet, c.nowUTC()); err != nil {
 		var denied *DenyError
 		if errors.As(err, &denied) {
 			return deny(denied.Reason), prior, false, nil
@@ -595,7 +646,7 @@ func (c *Capability) atomicWriteOrRestore(ctx context.Context, content []byte, p
 	return err
 }
 
-func (c *Capability) consumeChallengeLocked(challenge, action string, now time.Time) error {
+func (c *Capability) consumeChallengeLocked(challenge, action, ceremony string, now time.Time) error {
 	if c.challenges == nil {
 		return &DenyError{Reason: denyChallengeReplayed}
 	}
@@ -610,7 +661,7 @@ func (c *Capability) consumeChallengeLocked(challenge, action string, now time.T
 	if now.After(record.expiresAt) {
 		return &DenyError{Reason: denyChallengeExpired}
 	}
-	if record.action != action {
+	if record.action != action || normalizeChallengeCeremony(record.ceremony) != normalizeChallengeCeremony(ceremony) {
 		return &DenyError{Reason: denyActionMismatch}
 	}
 	return nil
@@ -879,6 +930,22 @@ func validateAction(action string) error {
 		return &InvalidRequestError{Reason: "action must be a bounded public action token"}
 	}
 	return nil
+}
+
+func validateChallengeCeremony(ceremony string) error {
+	switch normalizeChallengeCeremony(ceremony) {
+	case challengeCeremonyGet, challengeCeremonyCreate:
+		return nil
+	default:
+		return &InvalidRequestError{Reason: "ceremony must be get or create"}
+	}
+}
+
+func normalizeChallengeCeremony(ceremony string) string {
+	if ceremony == "" {
+		return challengeCeremonyGet
+	}
+	return ceremony
 }
 
 func renderCredential(credential OwnerCredential) []byte {
