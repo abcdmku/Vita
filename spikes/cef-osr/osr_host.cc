@@ -34,6 +34,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 
 #include "include/base/cef_callback.h"
@@ -42,10 +43,14 @@
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_resource_handler.h"
+#include "include/cef_scheme.h"
+#include "include/cef_stream.h"
 #include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_stream_resource_handler.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -55,14 +60,24 @@ namespace {
 // Forward decl: the M4 streaming pump (OsrClient::StreamFrameTick, a method defined
 // inside the class below) emits frames via this free function, which is defined later.
 bool EmitCompositorFrame();
+// PSD-500: emit a CHEAP cursor-only present (a bare `present` line) so the compositor repositions
+// the top-most cursor surface and re-composites WITHOUT a CEF repaint or a buffer re-upload.
+bool EmitCursorPresent();
 
-// --- configuration (fixed CEF view surface) ---
-constexpr int kWidth = 1280;
-constexpr int kHeight = 800;
-// Compositor output is 1280x720 (DESKTOP_DEMO_OUTPUT_*). The M1 buffer surface is
-// downscaled to this so it fills the output exactly (no clip / no letterbox bars).
-constexpr int kCompWidth = 1280;
-constexpr int kCompHeight = 720;
+// --- configuration (CEF view surface) ---
+// PSD-500: the CEF view + compositor-output dimensions are RUNTIME-configurable so the live boot
+// can render at the REAL display resolution (e.g. 1920x1080) instead of a fixed 1280x720 that
+// lands in a corner of a larger VMware virtual display. They default to the historical values and
+// are overridden by --view-width/--view-height/--comp-width/--comp-height (set by the boot script
+// from the KMS connector mode). Named kWidth/etc. (not constexpr) so the rest of the file is
+// unchanged; they are assigned ONCE in main() before CefInitialize and read-only thereafter.
+int kWidth = 1280;
+int kHeight = 800;
+// Compositor output (DESKTOP_DEMO_OUTPUT_*). The CEF view frame is downscaled to this so it fills
+// the output exactly (no clip / no letterbox bars). kHeight may exceed kCompHeight (the dock strip);
+// the vertical box-filter maps the view rows onto the output rows.
+int kCompWidth = 1280;
+int kCompHeight = 720;
 // How long to keep pumping after main-frame load so lucide.min.js can replace the
 // <i data-lucide> placeholders with inlined SVGs and OnPaint can deliver it.
 constexpr int kSettleMs = 2500;
@@ -89,6 +104,14 @@ int g_frames = 1;
 // --frame-interval-ms (the persistent service runs a steady cadence so the live clock
 // and any hydrated content keep updating on screen).
 int g_frame_interval_ms = 350;
+// PSD-500 smooth cursor: how many CHEAP cursor-only presents to interleave per real CONTENT frame.
+// A content frame = Invalidate(CEF repaint) + downscale + updateBufferSurface (expensive). A cursor
+// present = a bare `present` line: the compositor drains input + repositions the top-most cursor
+// surface and re-composites the SAME textures (a GPU blit, no texture re-upload, no CEF repaint), so
+// source_repaint_count stays flat while the cursor tracks every move. With the default 100ms content
+// interval, 6 cursor presents/frame yields a ~16ms (~60fps) cursor cadence. Overridable via
+// --cursor-presents-per-frame.
+int g_cursor_presents_per_frame = 6;
 
 std::atomic<bool> g_have_frame{false};
 std::vector<unsigned char> g_last_frame;  // BGRA, kWidth*kHeight*4
@@ -267,34 +290,57 @@ class OsrClient : public CefClient,
     }
   }
 
-  // M4 streaming pump: emit the current frame to the compositor sink, then either
-  // schedule the next tick or close the browser once g_frames have been emitted.
+  // M4 streaming pump (PSD-500 smooth-cursor cadence): runs at the FAST cursor interval
+  // (content interval / cursor-presents-per-frame). Most ticks emit a CHEAP cursor-only present so
+  // the compositor repositions the top-most cursor surface at ~60fps with NO CEF repaint and NO
+  // full-desktop buffer re-upload. Every Nth tick emits a real CONTENT frame (Invalidate + downscale
+  // + updateBufferSurface) at the content interval — that is the only thing that bumps
+  // source_repaint_count, so moving the mouse alone leaves the repaint count flat.
   void StreamFrameTick() {
     CEF_REQUIRE_UI_THREAD();
-    if (browser_ && browser_->GetHost()) {
-      browser_->GetHost()->Invalidate(PET_VIEW);
+    const int presents_per_frame = g_cursor_presents_per_frame > 0 ? g_cursor_presents_per_frame : 1;
+    int cursor_interval = g_frame_interval_ms / presents_per_frame;
+    if (cursor_interval < 1) cursor_interval = 1;
+
+    // A content frame is due on the first tick and then every `presents_per_frame` ticks.
+    const bool content_due = (cursor_tick_ % presents_per_frame) == 0;
+    cursor_tick_++;
+
+    bool ok = true;
+    if (content_due) {
+      if (browser_ && browser_->GetHost()) {
+        browser_->GetHost()->Invalidate(PET_VIEW);  // ask CEF to repaint -> OnPaint -> new frame
+      }
+      ok = EmitCompositorFrame();
+      if (ok) {
+        frames_emitted_++;
+        // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the pump
+        // reschedules itself forever, so the compositor keeps presenting the live desktop.
+        if (g_frames != 0 && frames_emitted_ >= g_frames) {
+          fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
+          if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
+          return;
+        }
+      }
+    } else {
+      // CHEAP cursor present: no Invalidate, no updateBufferSurface — just move the cursor surface.
+      ok = EmitCursorPresent();
     }
-    if (!EmitCompositorFrame()) {
-      // A write failure means the downstream compositor pipe closed (it exited). In
-      // unbounded mode that is the only stop path: close the browser and let the
-      // process exit so the service can restart the whole pipe fail-closed.
-      fprintf(stderr, "[osr] stream: frame emit failed at #%d (frames=%d) — closing\n",
-              frames_emitted_ + 1, g_frames);
+
+    if (!ok) {
+      // A write failure means the downstream compositor pipe closed (it exited). In unbounded mode
+      // that is the only stop path: close the browser and let the process exit so the service can
+      // restart the whole pipe fail-closed.
+      fprintf(stderr, "[osr] stream: %s emit failed at frame #%d (frames=%d) — closing\n",
+              content_due ? "content" : "cursor", frames_emitted_ + 1, g_frames);
       if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
       return;
     }
-    frames_emitted_++;
-    // Unbounded (persistent) mode: g_frames == 0 never reaches the close condition — the
-    // pump reschedules itself forever, so the compositor keeps presenting the live desktop.
-    if (g_frames != 0 && frames_emitted_ >= g_frames) {
-      fprintf(stderr, "[osr] stream: emitted %d frames — closing\n", frames_emitted_);
-      if (browser_ && browser_->GetHost()) browser_->GetHost()->CloseBrowser(true);
-      return;
-    }
+
     CefPostDelayedTask(
         TID_UI,
         CefCreateClosureTask(base::BindOnce(&OsrClient::StreamFrameTick, this)),
-        g_frame_interval_ms);
+        cursor_interval);
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -310,7 +356,8 @@ class OsrClient : public CefClient,
  private:
   CefRefPtr<OsrRenderHandler> render_handler_;
   CefRefPtr<CefBrowser> browser_;
-  int frames_emitted_ = 0;  // M4 streaming: frames pushed to the compositor sink
+  int frames_emitted_ = 0;  // M4 streaming: CONTENT frames pushed to the compositor sink
+  long long cursor_tick_ = 0;  // PSD-500: fast-cadence tick counter (cursor presents + content)
 
   IMPLEMENT_REFCOUNTING(OsrClient);
   DISALLOW_COPY_AND_ASSIGN(OsrClient);
@@ -321,6 +368,19 @@ class OsrClient : public CefClient,
 // the response JSON. Single-process CEF runs the renderer in the browser process, so this V8 native
 // function can do a blocking unix-socket round-trip and return synchronously.
 std::string g_host_proxy_sock = "/run/vita-host-proxy.sock";
+
+// PSD-502 PRODUCTION ORIGIN: the desktop is served over a REAL, SECURE custom scheme
+// (vita://desktop/...) instead of file:// — so ES modules load under a true origin and the
+// native binder hydrates WITHOUT --disable-web-security. A CefSchemeHandlerFactory serves files
+// from a doc-root on disk. Two authorities, each its own secure origin:
+//   vita://desktop/  -> g_scheme_root  (the WHOLE ui_kits tree, so index at desktop/index.html
+//                       and its ../styles.css / ../_vendor/* relatives all resolve same-origin)
+//   vita://browser/  -> g_browser_root (the bundled, OFFLINE local browser start page — Feature 1)
+std::string g_scheme_root = "/usr/lib/vita/ui_kits";          // --scheme-root=
+std::string g_browser_root = "/usr/lib/vita/ui_kits/browser"; // --browser-root=
+constexpr const char* kVitaScheme = "vita";
+constexpr const char* kDesktopAuthority = "desktop";
+constexpr const char* kBrowserAuthority = "browser";
 
 // One blocking request/response round-trip to the host proxy. Returns the response JSON, or a
 // fail-closed host-error JSON if the proxy is unreachable (the desktop's guards consume it).
@@ -394,6 +454,148 @@ class HostBridgeV8Handler : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(HostBridgeV8Handler);
 };
 
+// --- PSD-502 production-origin scheme handler ----------------------------------------------------
+// Serves the desktop bundle (and the offline browser start page) over a REAL secure custom scheme.
+// This replaces the file:// dev origin + --disable-web-security: under a STANDARD+SECURE scheme the
+// page is a secure context, ES-module fetch is allowed same-origin (CORS-clean), and the native
+// binder hydrates with web security ENABLED. Strictly local/offline — these factories only ever read
+// files from g_scheme_root / g_browser_root; there is no network fetch path.
+
+// Map a file extension to a MIME type (the small set the bundle actually serves).
+static std::string MimeForPath(const std::string& path) {
+  auto ends = [&](const char* ext) {
+    size_t n = std::strlen(ext);
+    return path.size() >= n && path.compare(path.size() - n, n, ext) == 0;
+  };
+  if (ends(".html") || ends(".htm")) return "text/html";
+  if (ends(".js") || ends(".mjs")) return "text/javascript";
+  if (ends(".css")) return "text/css";
+  if (ends(".json")) return "application/json";
+  if (ends(".svg")) return "image/svg+xml";
+  if (ends(".png")) return "image/png";
+  if (ends(".jpg") || ends(".jpeg")) return "image/jpeg";
+  if (ends(".gif")) return "image/gif";
+  if (ends(".webp")) return "image/webp";
+  if (ends(".woff2")) return "font/woff2";
+  if (ends(".woff")) return "font/woff";
+  if (ends(".ttf")) return "font/ttf";
+  if (ends(".ico")) return "image/x-icon";
+  if (ends(".map")) return "application/json";
+  if (ends(".wasm")) return "application/wasm";
+  return "application/octet-stream";
+}
+
+// Resolve "<authority>/<path>" under a doc-root, REJECTING any path that escapes the root.
+// Returns the absolute on-disk path on success, or "" if the request path is unsafe.
+static std::string ResolveUnderRoot(const std::string& root, const std::string& rel_in) {
+  std::string rel = rel_in;
+  // Strip a query/fragment (defensive; CEF usually pre-strips for standard schemes).
+  size_t q = rel.find_first_of("?#");
+  if (q != std::string::npos) rel.erase(q);
+  // Decode a minimal set of percent-escapes (%20 etc.) so on-disk names with spaces resolve.
+  std::string dec;
+  dec.reserve(rel.size());
+  for (size_t i = 0; i < rel.size(); ++i) {
+    if (rel[i] == '%' && i + 2 < rel.size()) {
+      auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      int hi = hex(rel[i + 1]), lo = hex(rel[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        dec.push_back(static_cast<char>(hi * 16 + lo));
+        i += 2;
+        continue;
+      }
+    }
+    dec.push_back(rel[i]);
+  }
+  rel = dec;
+  // Reject NUL and any traversal component. We split on '/' and forbid "" leading double-slash,
+  // "." and "..": only plain forward segments are allowed, so the result can never leave root.
+  if (rel.find('\0') != std::string::npos) return "";
+  std::string out = root;
+  size_t i = 0;
+  while (i < rel.size()) {
+    size_t slash = rel.find('/', i);
+    std::string seg = rel.substr(i, slash == std::string::npos ? std::string::npos : slash - i);
+    i = (slash == std::string::npos) ? rel.size() : slash + 1;
+    if (seg.empty() || seg == ".") continue;       // collapse // and ./
+    if (seg == "..") return "";                      // traversal -> reject (fail closed)
+    out.push_back('/');
+    out += seg;
+  }
+  // Canonicalize and re-check containment: realpath collapses any residual symlink/.. so a symlink
+  // inside the tree cannot point outside it. Missing files (realpath fails) fall through to a 404.
+  char buf[4096];
+  if (realpath(out.c_str(), buf) != nullptr) {
+    std::string canon(buf);
+    std::string canon_root;
+    char rbuf[4096];
+    if (realpath(root.c_str(), rbuf) != nullptr) canon_root = rbuf; else canon_root = root;
+    if (canon != canon_root &&
+        canon.compare(0, canon_root.size() + 1, canon_root + "/") != 0) {
+      return "";  // escaped the root
+    }
+    return canon;
+  }
+  return out;  // does not exist yet: caller stat()s and 404s if absent
+}
+
+// A resource handler that streams a single on-disk file (or a 404) for a scheme request.
+class VitaFileSchemeFactory : public CefSchemeHandlerFactory {
+ public:
+  explicit VitaFileSchemeFactory(std::string authority, std::string root)
+      : authority_(std::move(authority)), root_(std::move(root)) {}
+
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser> /*browser*/,
+                                       CefRefPtr<CefFrame> /*frame*/,
+                                       const CefString& /*scheme_name*/,
+                                       CefRefPtr<CefRequest> request) override {
+    // request URL: vita://<authority>/<path>. Extract the path after the authority.
+    std::string url = request->GetURL().ToString();
+    std::string prefix = std::string(kVitaScheme) + "://" + authority_ + "/";
+    std::string rel;
+    if (url.compare(0, prefix.size(), prefix) == 0) {
+      rel = url.substr(prefix.size());
+    } else {
+      // vita://<authority>  (no trailing slash) -> serve the directory index.
+      rel = "";
+    }
+    if (rel.empty()) rel = "index.html";
+
+    std::string disk = ResolveUnderRoot(root_, rel);
+    if (disk.empty()) {
+      return Make404("forbidden");
+    }
+    struct stat st;
+    if (stat(disk.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+      return Make404("not found");
+    }
+    CefRefPtr<CefStreamReader> reader = CefStreamReader::CreateForFile(disk);
+    if (!reader) {
+      return Make404("unreadable");
+    }
+    fprintf(stderr, "[osr] scheme: %s://%s/%s -> %s (%s)\n", kVitaScheme,
+            authority_.c_str(), rel.c_str(), disk.c_str(), MimeForPath(disk).c_str());
+    return new CefStreamResourceHandler(MimeForPath(disk), reader);
+  }
+
+ private:
+  static CefRefPtr<CefResourceHandler> Make404(const char* why) {
+    std::string body = std::string("vita scheme: ") + why;
+    CefRefPtr<CefStreamReader> r = CefStreamReader::CreateForData(
+        const_cast<char*>(body.data()), body.size());
+    return new CefStreamResourceHandler(404, "Not Found", "text/plain",
+                                        CefResponse::HeaderMap(), r);
+  }
+  std::string authority_;
+  std::string root_;
+  IMPLEMENT_REFCOUNTING(VitaFileSchemeFactory);
+};
+
 // App: configures command-line switches before CEF init, AND (render side) installs the host bridge.
 class OsrApp : public CefApp,
                public CefBrowserProcessHandler,
@@ -407,6 +609,17 @@ class OsrApp : public CefApp,
 
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
+  }
+
+  // PSD-502: register the production-origin custom scheme. Called in EVERY process (browser +
+  // renderer) before init. STANDARD => has an origin + supports relative URLs / ES modules; SECURE
+  // => the page is a secure context (so it is treated like https for powerful-feature / CORS gating);
+  // CORS_ENABLED + FETCH_ENABLED => same-origin module + fetch loads succeed. This is what lets the
+  // ES-module bundle load and the native binder hydrate WITHOUT --disable-web-security.
+  void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
+    const int options = CEF_SCHEME_OPTION_STANDARD | CEF_SCHEME_OPTION_SECURE |
+                        CEF_SCHEME_OPTION_CORS_ENABLED | CEF_SCHEME_OPTION_FETCH_ENABLED;
+    registrar->AddCustomScheme(kVitaScheme, options);
   }
 
   // Install window.vitaDesktopBridge BEFORE the desktop bootstrap runs (OnContextCreated fires when
@@ -464,13 +677,11 @@ class OsrApp : public CefApp,
     // when run from the OS boot service (no DISPLAY in the env). This is the fix for the M4
     // VMware-boot 0.3s early-exit. ANGLE swiftshader keeps GL software so no GPU process is needed.
     command_line->AppendSwitchWithValue("ozone-platform", "headless");
-    // KEYSTONE (PSD-501): the desktop loads from file:// and bootstrap.js is an ES module. Chromium
-    // blocks ES-module fetch from a file:// origin ("null") under CORS, so the bundle never executes
-    // and the NATIVE binder never hydrates (this is why the prior build needed a C++ click delegate).
-    // Allow file access from files + relax web security so the module loads and the desktop hydrates
-    // its own DOM click/action handlers (ADR-0013). Local trusted boot asset only; no network origin.
-    command_line->AppendSwitch("allow-file-access-from-files");
-    command_line->AppendSwitch("disable-web-security");
+    // PSD-502 PRODUCTION ORIGIN: the desktop is served over the vita:// custom scheme (STANDARD +
+    // SECURE + CORS + FETCH, registered in OnRegisterCustomSchemes), NOT file://. Under a real secure
+    // origin the ES-module bundle loads same-origin and the NATIVE binder hydrates with WEB SECURITY
+    // ENABLED — so the file:// dev shortcuts --allow-file-access-from-files + --disable-web-security
+    // are GONE. Nothing here weakens the renderer's same-origin policy anymore.
   }
 
   void OnContextInitialized() override {
@@ -483,6 +694,17 @@ class OsrApp : public CefApp,
     CefBrowserSettings browser_settings;
     browser_settings.windowless_frame_rate = 30;
     browser_settings.background_color = CefColorSetARGB(255, 255, 255, 255);
+
+    // PSD-502: wire the production-origin scheme factories (IO-thread file serving). The desktop
+    // authority serves the whole ui_kits tree; the browser authority serves the OFFLINE local
+    // browser start page (Feature 1). Both are strictly local file reads — no network path.
+    CefRegisterSchemeHandlerFactory(kVitaScheme, kDesktopAuthority,
+                                    new VitaFileSchemeFactory(kDesktopAuthority, g_scheme_root));
+    CefRegisterSchemeHandlerFactory(kVitaScheme, kBrowserAuthority,
+                                    new VitaFileSchemeFactory(kBrowserAuthority, g_browser_root));
+    fprintf(stderr, "[osr] scheme: registered %s://%s (root=%s) + %s://%s (root=%s)\n",
+            kVitaScheme, kDesktopAuthority, g_scheme_root.c_str(),
+            kVitaScheme, kBrowserAuthority, g_browser_root.c_str());
 
     CefBrowserHost::CreateBrowser(window_info, client, g_url, browser_settings,
                                   nullptr, nullptr);
@@ -664,6 +886,17 @@ bool EmitCompositorFrame() {
   return true;
 }
 
+// PSD-500 smooth cursor: emit a bare `present` so the compositor drains the latest input, moves the
+// cheap top-most cursor surface to the new pointer position, and re-composites the SAME textures.
+// No updateBufferSurface (no full-desktop re-upload) and no CEF Invalidate (no repaint), so
+// source_repaint_count stays flat while the cursor tracks every move at the cursor-present cadence.
+bool EmitCursorPresent() {
+  // Only meaningful once the desktop surface exists; before the first content frame there is nothing
+  // to present cheaply (the prelude already presented the loading screen + cursor).
+  if (!g_registered) return true;
+  return WriteToSink("present\n");
+}
+
 // --- PSD-055 input wiring -----------------------------------------------------
 // The compositor writes routed input events (one per line) to the reverse channel
 // (--input-out=<fifo>); osr_host reads them here (--input-in=<same fifo>) and injects them into
@@ -766,8 +999,15 @@ void ApplyInputLineOnUi(std::string line) {
   if (kind == "pointer-motion") {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
-    InjectMouseMove(browser, vx, vy);
-    fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
+    // PSD-500: COALESCE moves forwarded to CEF. The VISIBLE cursor is the compositor's cheap
+    // top-most cursor surface (it already tracks every move); CEF only needs a SendMouseMove when
+    // the VIEW-space position actually changes (hover/:hover state, host-bridge hit-testing). Many
+    // micro-moves map to the same view pixel (esp. after the output->view scale) — skipping the
+    // redundant ones avoids needless renderer work without losing any cursor fidelity.
+    if (vx != g_last_view_x || vy != g_last_view_y) {
+      InjectMouseMove(browser, vx, vy);
+      fprintf(stderr, "[osr] input: SendMouseMove view=(%d,%d)\n", vx, vy);
+    }
   } else if (kind == "pointer-button") {
     int vx = ViewX(std::atoi(kv["cursor-x"].c_str()));
     int vy = ViewY(std::atoi(kv["cursor-y"].c_str()));
@@ -878,11 +1118,16 @@ int main(int argc, char* argv[]) {
   int exit_code = CefExecuteProcess(main_args, app, nullptr);
   if (exit_code >= 0) return exit_code;
 
-  g_url = "file:///home/borg/Vita/ui_kits/desktop/index.html";
+  // PSD-502: default to the PRODUCTION ORIGIN (vita://desktop/...), not file://. The desktop
+  // authority is rooted at the ui_kits tree, so index.html lives at desktop/index.html and its
+  // ../styles.css + ../_vendor/* relatives resolve same-origin under vita://desktop/.
+  g_url = "vita://desktop/desktop/index.html";
   g_out_png = "/home/borg/Vita/spikes/cef-osr/out/cef-m0.png";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a.rfind("--url=", 0) == 0) g_url = a.substr(6);
+    else if (a.rfind("--scheme-root=", 0) == 0) g_scheme_root = a.substr(14);
+    else if (a.rfind("--browser-root=", 0) == 0) g_browser_root = a.substr(15);
     else if (a.rfind("--out=", 0) == 0) g_out_png = a.substr(6);
     else if (a.rfind("--compositor-out=", 0) == 0) g_compositor_out = a.substr(17);
     else if (a.rfind("--surface-id=", 0) == 0) g_surface_id = a.substr(13);
@@ -898,7 +1143,22 @@ int main(int argc, char* argv[]) {
     else if (a.rfind("--input-in=", 0) == 0) g_input_in = a.substr(11);  // PSD-055
     else if (a.rfind("--host-proxy-sock=", 0) == 0) g_host_proxy_sock = a.substr(18);  // PSD-500
     else if (a == "--surface-prearmed") g_surface_prearmed = true;       // instant-desktop
+    // PSD-500: real-resolution overrides. The CEF view is rendered at view-w x view-h; the
+    // compositor output (and the buffer surface streamed to it) is comp-w x comp-h. The boot
+    // script passes the REAL KMS connector mode so the desktop fills the display. view-w should
+    // equal comp-w (the vertical downscale preserves width); view-h may be >= comp-h.
+    else if (a.rfind("--view-width=", 0) == 0)  { int v = std::atoi(a.substr(13).c_str()); if (v > 0) kWidth = v; }
+    else if (a.rfind("--view-height=", 0) == 0) { int v = std::atoi(a.substr(14).c_str()); if (v > 0) kHeight = v; }
+    else if (a.rfind("--comp-width=", 0) == 0)  { int v = std::atoi(a.substr(13).c_str()); if (v > 0) kCompWidth = v; }
+    else if (a.rfind("--comp-height=", 0) == 0) { int v = std::atoi(a.substr(14).c_str()); if (v > 0) kCompHeight = v; }
+    // PSD-500: cursor-present cadence. The compositor repositions the cheap top-most cursor surface
+    // every `present`; emitting bare presents between content frames lets the cursor track at ~60fps
+    // WITHOUT a CEF repaint or a full-desktop buffer re-upload. <=1 disables cursor-only presents.
+    else if (a.rfind("--cursor-presents-per-frame=", 0) == 0) { int v = std::atoi(a.substr(28).c_str()); if (v >= 1) g_cursor_presents_per_frame = v; }
   }
+  // Keep the input-mapping last-position defaults centred on the (possibly overridden) view.
+  g_last_view_x = kWidth / 2;
+  g_last_view_y = kHeight / 2;
   // If the launch stream pre-registered cef:desktop (baked snapshot), skip the register and
   // start emitting updateBufferSurface so the swap to live is seamless on the same surface.
   if (g_surface_prearmed) g_registered = true;

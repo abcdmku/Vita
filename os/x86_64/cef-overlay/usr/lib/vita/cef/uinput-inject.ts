@@ -20,7 +20,22 @@ const UI_SET_EVBIT = 0x40045564n, UI_SET_KEYBIT = 0x40045565n, UI_SET_ABSBIT = 0
 const UI_SET_PROPBIT = 0x4004556en;
 const INPUT_PROP_POINTER = 0x00;  // mark this absolute device as a POINTER (mouse-like), not a joystick
 
-const MAXX = 1280, MAXY = 720;
+// PSD-500: the device's absolute coordinate range. libinput maps device 0..MAX{X,Y} onto the
+// compositor OUTPUT 0..{w,h} via *_transformed, so setting MAX{X,Y} to the REAL output resolution
+// makes "moveto X Y" (in output pixels) an identity mapping at any display size. Source priority:
+// argv[2]xargv[3] > $VITA_INJECT_MAXX/$VITA_INJECT_MAXY > 1280x720 default.
+function envInt(name: string, dflt: number): number {
+  const v = Deno.env.get(name);
+  const n = v ? parseInt(v) : NaN;
+  return Number.isFinite(n) && n >= 16 && n <= 16384 ? n : dflt;
+}
+let MAXX = envInt("VITA_INJECT_MAXX", 1280);
+let MAXY = envInt("VITA_INJECT_MAXY", 720);
+{
+  const ax = parseInt(Deno.args[1] ?? ""), ay = parseInt(Deno.args[2] ?? "");
+  if (Number.isFinite(ax) && ax >= 16 && ax <= 16384) MAXX = ax;
+  if (Number.isFinite(ay) && ay >= 16 && ay <= 16384) MAXY = ay;
+}
 
 const fd = libc.symbols.open(cstr("/dev/uinput"), O_WRONLY | O_NONBLOCK, 0);
 if (fd < 0) { console.error("open /dev/uinput failed"); Deno.exit(1); }

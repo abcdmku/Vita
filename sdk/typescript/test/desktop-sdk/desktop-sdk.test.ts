@@ -283,7 +283,7 @@ test("scoped host denies stopApp without an app-scoped stop grant", async () => 
   if (denied.ok) {
     assert.fail("expected stopApp to fail closed without apps.stop");
   }
-  assert.equal(denied.error.code, "MISSING_CAPABILITY");
+  assert.equal(denied.error.code, "CAP_DENIED");
   assert.deepEqual(events, []);
 
   const validatedStopGrant = validateDesktopUiPackageManifest(manifest("ui.stopper", {

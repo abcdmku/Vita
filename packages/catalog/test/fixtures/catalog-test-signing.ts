@@ -32,14 +32,18 @@ export function signCatalog(
   catalog: CatalogPayload,
   keyId = TEST_CATALOG_KEY_ID,
 ): SignedCatalogManifest {
-  const signature = signEd25519(null, canonicalizeCatalogBytes(catalog), TEST_CATALOG_PRIVATE_KEY_PEM);
+  const signature = signCatalogBytes(canonicalizeCatalogBytes(catalog));
 
   return {
     catalog,
     signature: {
       algorithm: "ed25519",
       keyId,
-      value: signature.toString("base64"),
+      value: Buffer.from(signature).toString("base64"),
     },
   };
+}
+
+export function signCatalogBytes(bytes: Uint8Array): Uint8Array {
+  return signEd25519(null, bytes, TEST_CATALOG_PRIVATE_KEY_PEM);
 }

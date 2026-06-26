@@ -53,22 +53,22 @@
 
 /* ===== DARK THEME ===== */
 .theme-dark {
-  --surface-base:#0e1116;
-  --surface:#161a21;
-  --surface-raised:#1c222b;
-  --surface-sunken:#11151b;
-  --surface-inset:#1b212b;
-  --surface-translucent:rgba(16,20,27,.55);
-  --surface-overlay:rgba(28,34,43,.80);
+  --surface-base:#0a0c0f;
+  --surface:#13161b;
+  --surface-raised:#181c22;
+  --surface-sunken:#0e1115;
+  --surface-inset:#171b21;
+  --surface-translucent:rgba(13,16,20,.62);
+  --surface-overlay:rgba(22,26,32,.85);
 
-  --border:rgba(255,255,255,.07);
-  --border-strong:rgba(255,255,255,.12);
-  --hairline:rgba(255,255,255,.06);
+  --border:rgba(255,255,255,.08);
+  --border-strong:rgba(255,255,255,.15);
+  --hairline:rgba(255,255,255,.055);
 
-  --text:#e6e9ef;
-  --text-secondary:#aeb8c6;
-  --text-muted:#8b97a6;
-  --text-faint:#6b7787;
+  --text:#edf0f4;
+  --text-secondary:#b3bcc8;
+  --text-muted:#828d9c;
+  --text-faint:#5e6979;
 
   --accent:#4f9dff;
   --accent-hover:#6fb0ff;

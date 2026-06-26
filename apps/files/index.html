@@ -210,7 +210,7 @@
     </style>
   </head>
   <body>
-    <main class="files-app" data-vita-app="vita.app.files">
+    <main class="files-app" data-vita-app="vita.app.files" data-vita-bind-attr-0="data-vita-status:files.status" data-vita-bind-attr-1="data-vita-error-code:files.errorCode">
       <header class="titlebar">
         <span class="traffic" aria-hidden="true"><span></span><span></span><span></span></span>
         <span class="title">Files</span>
@@ -218,6 +218,7 @@
           <button class="tool" type="button" data-vita-action="files.up" aria-label="Up">‹</button>
           <button class="tool" type="button" data-vita-action="files.refresh" aria-label="Refresh">↻</button>
           <span class="path" data-vita-bind-text="files.path">/</span>
+          <span class="muted" data-vita-bind-text="files.notice" aria-live="polite"></span>
         </nav>
         <div class="search" aria-hidden="true">
           <span>⌕</span>
@@ -232,7 +233,7 @@
         <div class="side-heading">Drives</div>
         <button class="side-item" type="button" data-vita-action="files.navigate" data-vita-path="/">▤ vita-disk</button>
       </aside>
-      <section class="content" aria-label="Directory entries" data-vita-bind-list="files.entries">
+      <section class="content" aria-label="Directory entries">
         <div class="row header" aria-hidden="true">
           <span></span>
           <span>Name</span>
@@ -240,21 +241,17 @@
           <span>Size</span>
           <span>Modified</span>
         </div>
-        <button class="row" type="button" data-vita-action="files.select" data-vita-entry-name="apps" data-vita-selected="false">
-          <span aria-hidden="true">▣</span>
-          <span class="mono">apps</span>
-          <span class="muted">Folder</span>
-          <span class="muted mono">-</span>
-          <span class="muted">Today</span>
-        </button>
-        <button class="row" type="button" data-vita-action="files.select" data-vita-entry-name="readme.md" data-vita-selected="false">
-          <span aria-hidden="true">□</span>
-          <span class="mono">readme.md</span>
-          <span class="muted">File</span>
-          <span class="muted mono">2 KB</span>
-          <span class="muted">Today</span>
-        </button>
+        <div data-vita-bind-list="files.entries">
+          <button class="row" type="button" data-vita-key="entry:template" data-vita-action="files.select" data-vita-entry-name="" data-vita-path="" data-vita-selected="false" data-vita-bind-attr-0="data-vita-action:files.entry.action" data-vita-bind-attr-1="data-vita-entry-name:files.entry.name" data-vita-bind-attr-2="data-vita-path:files.entry.path" data-vita-bind-attr-3="data-vita-selected:files.entry.selected">
+            <span aria-hidden="true" data-vita-bind-text="files.entry.icon"></span>
+            <span class="mono" data-vita-bind-text="files.entry.name"></span>
+            <span class="muted" data-vita-bind-text="files.entry.kind"></span>
+            <span class="muted mono" data-vita-bind-text="files.entry.size"></span>
+            <span class="muted" data-vita-bind-text="files.entry.modified"></span>
+          </button>
+        </div>
       </section>
     </main>
+    <script type="module" src="runtime/bootstrap.js"></script>
   </body>
 </html>

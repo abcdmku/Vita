@@ -84,7 +84,12 @@ const APP_SPECS: Readonly<Record<string, AppSpec>> = Object.freeze({
   }),
   "vita.app.browser": Object.freeze({
     icon: "🌐",
-    render: () => Promise.resolve(emptyState("Browser", "No web surface backend is connected yet.")),
+    // FEATURE 1 — REAL LOCAL WEB SURFACE: render a genuine CEF web view (an <iframe>) that loads the
+    // bundled, OFFLINE start page over the SAME production origin family (vita://browser/...). It is a
+    // real, navigable web surface scoped to local/offline content (allowed_network:false, strict CSP);
+    // it is NOT an honest-empty placeholder. Same-origin desktop/browser assets load; the open internet
+    // does not. The window chrome shows the current local address.
+    render: () => Promise.resolve(renderBrowser()),
     title: "Browser",
   }),
 });
@@ -264,6 +269,37 @@ function emptyState(title: string, detail: string): string {
   );
 }
 
+// FEATURE 1: the Browser app's window body — a real, offline-scoped web surface.
+//
+// The desktop renderer is itself loaded over the secure custom scheme (vita://desktop, see osr_host
+// OnRegisterCustomSchemes), so it can embed an <iframe> that loads the bundled local start page from
+// the sibling vita://browser origin. CEF renders that iframe as a genuine nested web document — a
+// second web surface inside the desktop — wired through the SAME app-window-host pattern as every
+// other app (no one-off path). It is OFFLINE by construction: the start page's CSP forbids every
+// network origin (connect-src 'none'), so this is a working LOCAL browser, not an internet browser.
+const BROWSER_START_URL = "vita://browser/index.html";
+
+function renderBrowser(): string {
+  const url = BROWSER_START_URL;
+  // A slim local address bar (honest: it shows the bundled start origin) + the live web-view iframe.
+  // sandbox allows scripts + same-origin so the local start page's navigation works, but the iframe
+  // can never escape the vita://browser origin (no allow-top-navigation, and the scheme has no
+  // network path). Height is sized to the app window's content area.
+  return (
+    `<div style="display:flex;flex-direction:column;height:430px;background:#fff">` +
+    `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;` +
+    `border-bottom:1px solid #e3e9f2;background:#f7f9fc">` +
+    `<span style="color:#1a7f4b;font-size:12px" title="secure local origin">🔒</span>` +
+    `<span style="flex:1;font:12px ui-monospace,monospace;color:#5b6577;` +
+    `white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(url)}</span>` +
+    `<span style="font-size:11px;color:#8a93a6">offline · local</span></div>` +
+    `<iframe data-vita-browser-surface title="Vita local web surface" src="${escapeHtml(url)}" ` +
+    `sandbox="allow-scripts allow-same-origin allow-forms" ` +
+    `style="flex:1;width:100%;border:0;background:#fff"></iframe>` +
+    `</div>`
+  );
+}
+
 async function renderFiles(host: DesktopHost, path: string, label: string): Promise<string> {
   const requestFile = host.requestFile;
 
@@ -345,20 +381,43 @@ async function renderSettings(host: DesktopHost): Promise<string> {
   );
 }
 
+type ActivitySample = {
+  readonly cpuPercent?: number;
+  readonly memory?: { readonly usedBytes?: number; readonly totalBytes?: number };
+  readonly processes?: readonly { readonly pid: number; readonly name: string; readonly cpuPercent: number; readonly memoryBytes: number }[];
+};
+
+// A sample is "usable" only if the real /proc backend actually returned processes. An ok-but-empty
+// result means the host-proxy round-trip raced the window's first paint (the Deno metrics service /
+// unix-socket transport wasn't ready yet at boot) — treat it like a soft failure so the retry kicks in.
+function activitySampleIsUsable(result: DesktopHostResult<unknown>): boolean {
+  if (!result.ok) return false;
+  const sample = result.value as ActivitySample;
+  return (sample.processes?.length ?? 0) > 0;
+}
+
+const ACTIVITY_RETRY_DELAY_MS = 420;
+
 async function renderActivity(host: DesktopHost): Promise<string> {
   const metrics = readMetricsPort(host);
 
   if (metrics === undefined) return emptyState("Activity", "The metrics backend is unavailable.");
 
-  const result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  // PSD-503 (merge follow-up): the two-shot /proc sampler is correct, but on some boots the FIRST
+  // sample loses a race with the Activity window's first paint — the host-proxy metrics transport
+  // isn't ready yet, so it fails closed / returns no processes and the window shows "Activity is
+  // empty". The data is real on the next try, so settle-and-retry once before falling back: re-sample
+  // ~420ms later when the first result is unusable (failed OR ok-but-empty). One retry is enough to
+  // clear the startup race without masking a genuinely-down backend (a second failure still surfaces).
+  let result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  if (!activitySampleIsUsable(result)) {
+    await new Promise((resolve) => setTimeout(resolve, ACTIVITY_RETRY_DELAY_MS));
+    result = await metrics.sample(Object.freeze({ capability: "metrics.read" }));
+  }
 
   if (!result.ok) return emptyState("Activity", `${result.error.code}: ${result.error.message}`);
 
-  const sample = result.value as {
-    readonly cpuPercent?: number;
-    readonly memory?: { readonly usedBytes?: number; readonly totalBytes?: number };
-    readonly processes?: readonly { readonly pid: number; readonly name: string; readonly cpuPercent: number; readonly memoryBytes: number }[];
-  };
+  const sample = result.value as ActivitySample;
   const cpu = typeof sample.cpuPercent === "number" ? sample.cpuPercent : 0;
   const used = sample.memory?.usedBytes ?? 0;
   const total = sample.memory?.totalBytes ?? 0;

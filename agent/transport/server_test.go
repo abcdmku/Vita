@@ -98,8 +98,8 @@ func TestReadRoutesReturnExpectedJSON(t *testing.T) {
 	if health.UptimeSeconds != 90 {
 		t.Fatalf("health UptimeSeconds = %d, want 90", health.UptimeSeconds)
 	}
-	if !health.Healthy {
-		t.Fatal("health Healthy = false, want true")
+	if health.Healthy {
+		t.Fatal("health Healthy = true, want false without live health sources")
 	}
 	if !reflect.DeepEqual(health.Capabilities, []string{"test.apply"}) {
 		t.Fatalf("health Capabilities = %v, want [test.apply]", health.Capabilities)
@@ -440,6 +440,87 @@ func TestStateIncludesCapsuleWorkloadsFromRegistryDefaultPath(t *testing.T) {
 	}
 	if _, ok := got.Capabilities[capsule.ExecuteName]; !ok {
 		t.Fatalf("state missing %q capability entry; body=%s", capsule.ExecuteName, response.Body.String())
+	}
+}
+
+func TestHealthzUsesServedProductionHealthSources(t *testing.T) {
+	tests := []struct {
+		name          string
+		capsuleHealth capsuleruntime.Status
+		cancelContext bool
+		wantHealthy   bool
+	}{
+		{
+			name:          "all live sources healthy",
+			capsuleHealth: capsuleruntime.StatusOK,
+			wantHealthy:   true,
+		},
+		{
+			name:          "capsule down fails closed",
+			capsuleHealth: capsuleruntime.StatusDown,
+			wantHealthy:   false,
+		},
+		{
+			name:          "transport context canceled fails closed",
+			capsuleHealth: capsuleruntime.StatusOK,
+			cancelContext: true,
+			wantHealthy:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unit := "vita-capsule-healthz.service"
+			supervisor := capsuleruntime.NewSupervisor(capsuleruntime.Options{
+				Prober: capsuleruntime.ProbeFunc(func(context.Context, capsuleruntime.Check) (capsuleruntime.Status, error) {
+					return tt.capsuleHealth, nil
+				}),
+				Jitter: func(capsuleruntime.WorkloadSpec, capsuleruntime.Check) time.Duration {
+					return 0
+				},
+			})
+			supervisor.StartWorkload(capsuleruntime.WorkloadSpec{
+				ID:   "local.healthz.capsule",
+				Unit: unit,
+				Checks: []capsuleruntime.Check{
+					{
+						Name:            "lifecycle",
+						Type:            capsuleruntime.CheckTypeLifecycle,
+						Target:          "self",
+						IntervalSeconds: 60,
+						TimeoutSeconds:  1,
+					},
+				},
+			})
+			t.Cleanup(func() {
+				supervisor.StopWorkload(unit)
+			})
+
+			handler := mustHandler(t, handlerConfig{
+				registry: mustRegistry(t, capsule.NewExecuteCapabilityWithSupervisor(supervisor)),
+				storageHealth: func(context.Context) (storagehealth.Report, error) {
+					return storagehealth.Report{
+						StorageHealth: []storagehealth.MountHealth{{Status: storagehealth.StatusOK}},
+					}, nil
+				},
+			})
+
+			ctx := context.Background()
+			if tt.cancelContext {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = canceled
+			}
+			response := performWithContext(handler, ctx, http.MethodGet, "/healthz", "")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status code = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+			}
+			var health status.Status
+			decodeResponse(t, response, &health)
+			if health.Healthy != tt.wantHealthy {
+				t.Fatalf("Healthy = %v, want %v; body=%s", health.Healthy, tt.wantHealthy, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -1857,6 +1938,7 @@ type handlerConfig struct {
 	filesPrincipals  []filecap.Principal
 	auditStore       AuditStore
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
+	transportReady   status.ReadinessSource
 	storageHealth    func(context.Context) (storagehealth.Report, error)
 }
 
@@ -1883,6 +1965,12 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 			}, nil
 		}
 	}
+	transportReady := config.transportReady
+	if transportReady == nil {
+		transportReady = func(ctx context.Context) bool {
+			return ctx.Err() == nil
+		}
+	}
 
 	handler, err := NewHandler(Config{
 		Version:          "test-version",
@@ -1897,6 +1985,7 @@ func mustHandler(t *testing.T, config handlerConfig) http.Handler {
 		FilesPrincipals:  config.filesPrincipals,
 		AuditStore:       config.auditStore,
 		CapsuleWorkloads: config.capsuleWorkloads,
+		TransportReady:   transportReady,
 		StorageHealth:    storageHealthSnapshot,
 		Now: func() time.Time {
 			return transportStartedAt.Add(90 * time.Second)

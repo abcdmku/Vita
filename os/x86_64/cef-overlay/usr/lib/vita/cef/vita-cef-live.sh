@@ -27,7 +27,14 @@ CEF_DIR=/usr/lib/vita/cef
 OSR=$CEF_DIR/vita_cef_osr
 COMPOSITOR=/usr/lib/vita/compositor/vita-compositor
 DESKTOP=/usr/lib/vita/ui_kits/desktop/index.html
-URL=file://$DESKTOP
+# PSD-502 PRODUCTION ORIGIN: boot the desktop over the REAL secure custom scheme vita://desktop
+# (registered by osr_host: STANDARD+SECURE+CORS+FETCH) instead of file://. Under a true secure
+# origin the ES-module bundle loads same-origin and the native binder hydrates WITH web security
+# ENABLED (no --disable-web-security). The scheme authorities are rooted at the ui_kits tree and
+# the offline browser content; index lives at desktop/index.html under the desktop authority.
+SCHEME_ROOT=/usr/lib/vita/ui_kits
+BROWSER_ROOT=/usr/lib/vita/ui_kits/browser
+URL=vita://desktop/desktop/index.html
 # HONEST loading screen (NOT a fake desktop): a wallpaper + a clear "starting" indicator, shown
 # UNDER the live desktop until CEF paints. We do NOT bake a snapshot of the flagship — the moment
 # the user sees something that looks like the desktop, it IS the live CEF render.
@@ -62,6 +69,34 @@ while [ ! -e /dev/dri/card0 ] && [ "$tries" -gt 0 ]; do
 done
 if [ ! -e /dev/dri/card0 ]; then emit_failsafe "dri_card0_absent"; exit 0; fi
 
+# --- PSD-500: detect the REAL display resolution -----------------------------
+# Read the primary DRM/KMS connector's PREFERRED mode (the VMware virtual display size, e.g.
+# 1920x1080) so the desktop renders full-size instead of a hardcoded 1280x720 corner. The
+# compositor independently reads the SAME connector mode (query_default_output_mode); we read it
+# here too so the upstream CEF view + buffer surface match. Source: /sys/class/drm/<conn>/modes
+# (first non-empty line = current/preferred mode). Fall back to 1280x720 if it cannot be read.
+DISP_W=1280
+DISP_H=720
+for mp in /sys/class/drm/card0-*/modes; do
+  [ -r "$mp" ] || continue
+  # The connected connector's modes file is non-empty; its first line is the preferred mode.
+  first=$(grep -aoE '^[0-9]{3,5}x[0-9]{3,5}' "$mp" 2>/dev/null | head -1)
+  if [ -n "$first" ]; then
+    w=${first%x*}; h=${first#*x}
+    if [ "$w" -ge 320 ] && [ "$h" -ge 240 ] && [ "$w" -le 16384 ] && [ "$h" -le 16384 ]; then
+      DISP_W=$w; DISP_H=$h
+      break
+    fi
+  fi
+done
+# CEF view height: render the flagship at the real height so 1:1 vertical mapping (no upscaling).
+# View width == output width (the vertical box-filter downscale preserves width). The historical
+# build rendered a slightly TALLER CEF view (800 vs 720 output) for the dock strip; keep that ratio
+# by rendering the view at the output height (the desktop CSS is responsive to the viewport).
+VIEW_W=$DISP_W
+VIEW_H=$DISP_H
+emit_line "$MARKER: display-mode=${DISP_W}x${DISP_H} view=${VIEW_W}x${VIEW_H} source=drm-connector"
+
 # CEF needs a WRITABLE cache + HOME/XDG/TMPDIR (read-only /usr at boot). Point at /run (tmpfs).
 export VITA_CEF_CACHE=/run/vita-cef-cache
 export HOME=/run/vita-cef-home
@@ -92,9 +127,17 @@ have_loading=0
 if [ -s "$LOADING" ]; then
   cat "$LOADING" >> "$PRELUDE"
   have_loading=1
+  # PSD-500: the committed loading surface is registered at 1280x720; STRETCH its placement to fill
+  # the REAL output so the honest loading screen covers the whole display (the compositor scales the
+  # texture to the placement rect). Last placement for a surface wins, so this overrides the baked
+  # 0 0 1280 720 line. It is visible only until CEF's first full-size frame covers it.
+  printf 'updatePlacement vita:loading 0 0 %s %s 0 true\n' "$DISP_W" "$DISP_H" >> "$PRELUDE"
 fi
 if [ -s "$CURSOR" ]; then
   cat "$CURSOR" >> "$PRELUDE"
+  # PSD-500: re-center the 24x24 cursor on the REAL output (keeps it on-screen + seeds the
+  # compositor's cursor_pos at the center). z=1000 keeps it top-most above the live desktop (z=10).
+  printf 'updatePlacement cursor:pointer %s %s 24 24 1000 true\n' "$((DISP_W/2))" "$((DISP_H/2))" >> "$PRELUDE"
 fi
 # One present to scan out the honest loading screen + cursor right away.
 printf 'present\n' >> "$PRELUDE"
@@ -165,7 +208,9 @@ grep -qw "vita.input_selftest=1" /proc/cmdline 2>/dev/null && selftest=1
 if [ "$selftest" = "1" ] && [ -x /usr/lib/vita/deno ] && [ -e "$CEF_DIR/uinput-inject.ts" ]; then
   before=$(ls /dev/input/event* 2>/dev/null | wc -l)
   rm -f /run/vita-inj.cmd; mkfifo /run/vita-inj.cmd 2>/dev/null || true
-  setsid bash -c "/usr/lib/vita/deno run -A $CEF_DIR/uinput-inject.ts create < /run/vita-inj.cmd > /run/vita-inj.log 2>&1" &
+  # PSD-500: pass the REAL output resolution so the injector's absolute device range maps 1:1 to
+  # compositor-output pixels (moveto X Y is then in output space at any display size).
+  setsid bash -c "/usr/lib/vita/deno run -A $CEF_DIR/uinput-inject.ts create $DISP_W $DISP_H < /run/vita-inj.cmd > /run/vita-inj.log 2>&1" &
   exec 6<>/run/vita-inj.cmd
   INJ_FD=6
   # CRITICAL: the compositor enumerates /dev/input/event* ONCE at startup (path-based, not udev-
@@ -190,9 +235,16 @@ fi
   # the process a second FIFO fd that interfered with its reader so routed events never reached CEF.
   exec 3>&-
   cat "$PRELUDE"
+  # PSD-500: render at the REAL display resolution (--view-* / --comp-* from the DRM connector mode)
+  # so the live desktop fills the screen, and interleave cheap cursor-only presents
+  # (--cursor-presents-per-frame) so the cursor tracks at ~60fps without a CEF repaint per move.
   LD_LIBRARY_PATH="$CEF_DIR" exec "$OSR" --url="$URL" --compositor-out=- \
+    --scheme-root="$SCHEME_ROOT" --browser-root="$BROWSER_ROOT" \
     --frames="$FRAMES" --frame-interval-ms="$INTERVAL_MS" $PREARM --input-in="$INPUT_FIFO" \
-    --host-proxy-sock="$HOST_PROXY_SOCK"
+    --host-proxy-sock="$HOST_PROXY_SOCK" \
+    --view-width="$VIEW_W" --view-height="$VIEW_H" \
+    --comp-width="$DISP_W" --comp-height="$DISP_H" \
+    --cursor-presents-per-frame="${VITA_CEF_CURSOR_PRESENTS:-6}"
 ) 2>"$CEF_LOG" \
   | { exec 3>&-; LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
       "$COMPOSITOR" --commands --continuous --input-out="$INPUT_FIFO" > "$COMP_OUT" 2>&1; } &
@@ -260,18 +312,20 @@ if [ "$seen_ok" -eq 1 ]; then
     [ -z "$VERIFY" ] && VERIFY="activity"
     emit_line "$MARKER: verify-scenario=$VERIFY persisted-settings=$(cat /var/lib/vita/settings.json 2>/dev/null | tr -d '\n' | head -c 200)"
 
-    # tile_cxcy <app-id> -> echoes "CX CY_comp" (CY scaled from CEF view 800 to compositor 720).
+    # tile_cxcy <app-id> -> echoes "CX CY_comp" (CY scaled from CEF VIEW height to OUTPUT height).
+    # PSD-500: view==output now (both = the real display mode), so the ratio is normally 1; the
+    # general form keeps it correct if the view height ever differs from the output height.
     tile_cxcy() {
       local id="$1" line cx cy
       line=$(grep -aE "VITA-DOCK tile $id " "$CEF_LOG" 2>/dev/null | tail -1)
       cx=$(printf '%s' "$line" | sed -n 's/.* cx=\([0-9]*\).*/\1/p')
       cy=$(printf '%s' "$line" | sed -n 's/.* cy=\([0-9]*\).*/\1/p')
       [ -z "$cx" ] && return 1
-      cy=$(( cy * 720 / 800 ))
+      cy=$(( cy * DISP_H / VIEW_H ))
       printf '%s %s' "$cx" "$cy"
     }
-    move_click() {  # move in steps to <cx> <cy_comp>, then click
-      local tx="$1" ty="$2" sx=640 sy=360
+    move_click() {  # move in steps to <cx> <cy_comp>, then click (start from screen center)
+      local tx="$1" ty="$2" sx=$(( DISP_W / 2 )) sy=$(( DISP_H / 2 ))
       for f in 25 50 75 100; do
         local mx=$(( sx + (tx - sx) * f / 100 )) my=$(( sy + (ty - sy) * f / 100 ))
         echo "moveto $mx $my" >&6 2>/dev/null; sleep 0.15
@@ -292,7 +346,7 @@ if [ "$seen_ok" -eq 1 ]; then
         chip=$(grep -aE "VITA-CHIP light " "$CEF_LOG" 2>/dev/null | tail -1)
         olx=$(printf '%s' "$chip" | sed -n 's/.* cx=\([0-9]*\).*/\1/p')
         ocy=$(printf '%s' "$chip" | sed -n 's/.* cy=\([0-9]*\).*/\1/p')
-        if [ -n "$olx" ] && [ -n "$ocy" ]; then oly=$(( ocy * 720 / 800 )); else olx=180; oly=$(( 170 * 720 / 800 )); fi
+        if [ -n "$olx" ] && [ -n "$ocy" ]; then oly=$(( ocy * DISP_H / VIEW_H )); else olx=180; oly=$(( 170 * DISP_H / VIEW_H )); fi
         move_click $olx $oly && emit_line "$MARKER: verify clicked theme option @ $olx $oly (applySetting light)"
         sleep 1.5
         mkdir -p /var/lib/vita 2>/dev/null || true
@@ -302,6 +356,31 @@ if [ "$seen_ok" -eq 1 ]; then
         xy=$(tile_cxcy vita.app.settings) && move_click $xy && \
           emit_line "$MARKER: verify clicked Settings tile @ $xy (read persisted)"
         sleep 1.5
+        ;;
+      browser)
+        # FEATURE 1 verify: click the Browser dock tile -> the desktop binder launches the Browser
+        # app, whose window renders a REAL local web surface (an <iframe> loading vita://browser/).
+        xy=$(tile_cxcy vita.app.browser) && move_click $xy && \
+          emit_line "$MARKER: verify clicked Browser tile @ $xy"
+        sleep 2.0
+        ;;
+      browser-activity)
+        # MERGE COMBINED VERIFY (vm-ux-merge): prove BOTH features in ONE boot. First click the
+        # Browser dock tile -> the REAL local web surface over vita://browser, hold it on screen for an
+        # external capture (marker: capture=browser-ready), then click the Activity dock tile -> the
+        # REAL /proc stats window (with the settle-and-retry so it is never the empty state), and hold
+        # again (marker: capture=activity-ready). The full-resolution desktop + smooth cursor are proven
+        # by the move_click sweeps and the display-mode marker regardless of scenario.
+        bxy=$(tile_cxcy vita.app.browser) && move_click $bxy && \
+          emit_line "$MARKER: verify clicked Browser tile @ $bxy"
+        sleep 1.5
+        emit_line "$MARKER: capture=browser-ready (vita://browser web surface on screen)"
+        sleep 4
+        axy=$(tile_cxcy vita.app.activity) && move_click $axy && \
+          emit_line "$MARKER: verify clicked Activity tile @ $axy"
+        sleep 2.0
+        emit_line "$MARKER: capture=activity-ready (live /proc stats on screen)"
+        sleep 4
         ;;
       activity|*)
         xy=$(tile_cxcy vita.app.activity) && move_click $xy && \

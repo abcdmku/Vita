@@ -2,7 +2,7 @@
 *{box-sizing:border-box}
 .v-screen{position:relative;width:1280px;height:800px;overflow:hidden;font-family:var(--font-sans);color:var(--text);background:var(--surface-base)}
 .v-wall-light{background:radial-gradient(820px 520px at 18% 4%,rgba(49,120,198,.13),transparent 60%),radial-gradient(700px 480px at 92% 98%,rgba(20,160,140,.07),transparent 60%),linear-gradient(165deg,#eef1f6,#e5eaf1 55%,#e9eef5)}
-.v-wall-dark{background:radial-gradient(900px 600px at 74% 4%,rgba(59,130,246,.20),transparent 56%),radial-gradient(720px 520px at 6% 98%,rgba(124,92,246,.12),transparent 58%),linear-gradient(160deg,#11151c,#0a0d12)}
+.v-wall-dark{background:radial-gradient(1150px 760px at 82% -12%,rgba(79,157,255,.10),transparent 60%),radial-gradient(860px 620px at -6% 112%,rgba(124,92,246,.05),transparent 62%),linear-gradient(165deg,#0c0f13,#08090c)}
 .v-grid-bg{background-image:linear-gradient(rgba(255,255,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px);background-size:30px 30px}
 .mono{font-family:var(--font-mono)}
 /* icon (Lucide) */
@@ -32,9 +32,9 @@
 .v-toolbar{height:44px;flex-shrink:0;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--hairline)}
 
 /* tokens & bits */
-.v-tok{width:26px;height:26px;flex-shrink:0;border-radius:7px;background:var(--surface-sunken);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-secondary)}
+.v-tok{width:26px;height:26px;flex-shrink:0;border-radius:var(--radius-control);background:var(--surface-sunken);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-secondary)}
 .v-tok.acc{color:var(--accent);background:var(--accent-subtle);border-color:transparent}
-.v-chip{font-family:var(--font-mono);font-size:11px;color:var(--text-faint);border:1px solid var(--border);border-radius:5px;padding:3px 7px}
+.v-chip{font-family:var(--font-mono);font-size:11px;color:var(--text-faint);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 7px}
 .v-row{display:flex;align-items:center;gap:11px;padding:8px 13px}
 .v-row+.v-row{border-top:1px solid var(--hairline)}
 .v-sw{width:36px;height:21px;border-radius:var(--radius-pill);padding:2px;display:inline-flex;align-items:center;flex-shrink:0}
@@ -47,7 +47,7 @@
 
 /* dock */
 .v-dock{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;align-items:flex-end;gap:9px;padding:8px 11px;background:var(--surface-translucent);backdrop-filter:var(--blur-thick);-webkit-backdrop-filter:var(--blur-thick);border:1px solid var(--border);border-radius:var(--radius-2xl);box-shadow:var(--shadow-3);z-index:40}
-.v-dtile{width:46px;height:46px;border-radius:13px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow-1);display:flex;align-items:center;justify-content:center;color:var(--text-secondary);position:relative}
+.v-dtile{width:46px;height:46px;border-radius:var(--radius-tile);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow-1);display:flex;align-items:center;justify-content:center;color:var(--text-secondary);position:relative}
 .v-dtile.on{border-color:var(--accent);color:var(--accent);box-shadow:var(--glow-accent),var(--shadow-1)}
 .v-dtile.on::after{content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--accent)}
 .v-dsep{width:1px;height:36px;background:var(--hairline);margin:0 2px}

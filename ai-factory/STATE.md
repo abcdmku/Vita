@@ -651,3 +651,30 @@ the live desktop. Build: `VITA_CEF=1 node os/x86_64/build-and-boot.mjs --mode=sm
 `node tools/vmware-verify.mjs` from WINDOWS (vmrun ENOENTs from WSL). FUTURE (not M4): interactivity (input/resizeâ†’CEF,
 PSD-055), accelerated/zero-copy (M2/M3, PSD-052/053), production CEF capsule + hardening (PSD-056). Deferred: a11y announce
 port 224C (R2 review churn; built+verified, needs more edge-case tests) + 225C/228C (dep 224C). Lesson [[vita-vacuous-acceptance-hole]].
+
+## 2026-06-26 — incomplete-work drive (orchestrator)
+
+MERGED to main:
+- PSD-504 (Files) + PSD-505 (Mail) app hydration — main=217b803. Root blocker was the emitted
+  deno bundle never being regenerated (workers can't run deno on Windows, same class as go/rust).
+  Orchestrator regenerated bundles + grep-proved the fix is in the emitted JS; independently verified
+  (typecheck + 7/7 each). The deno-bundle regen is now an ORCHESTRATOR integration step.
+
+CONVERGING in R2/R3 review rounds (each round fixes prior finding + surfaces next — gate working):
+- PSD-348 app-lifecycle: intent guard FIXED; now single-flighting concurrent launch/stop.
+- PSD-352 desktop-host scope: real impl built; now making it truly DEFAULT-DENY (was opt-in/allow-all zero-value).
+- PSD-510 app hydration: re-dispatched with 4 real defects (one corrupted the Mail composer via shared binder.ts — correctly NOT merged).
+- PSD-512 buffer surfaces: pointed at the REAL smoke path (smoke-layout.ts), worker had fixed index.ts.
+- PSD-518 healthz: real readiness signals required (was tautological ctx.Err()==nil / static snapshot).
+- PSD-304 rust stacking: scope revert (touched forbidden platform/*) + real staleness test.
+
+SYSTEMIC: native contracts (rust/go/deno) FAIL acceptance on the Windows builder even when sound —
+real gate is Codex diff-review + a docker re-verify before merge (see memory vita-verification-pipeline,
+vita-rust-docker-pwd-trap). 'FAIL' on these != worker failure.
+
+INTEGRITY (vacuous-acceptance audit): 3 fake 'done' contracts found — PSD-013/018/020 were intentionally
+deferred/abandoned (CEF-renders-everything) but filed in done/ with acceptance that can't fail (zero-match
+test globs; tsc on a Rust crate). Batch-2 audit of the other 63 running. Reconcile done/ ledger after.
+
+HARD / focused-effort next: PSD-381 (auth identity — worker mapped a fabricated agentd field twice),
+PSD-650/670/690 (storage/identity R3, fail their own acceptance).
