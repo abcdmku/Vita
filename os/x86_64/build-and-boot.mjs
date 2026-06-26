@@ -426,6 +426,13 @@ function compileOsrHost() {
   const spikeDir = join(REPO, "spikes", "cef-osr");
   const buildDir = join(spikeDir, "build");
   const osrBin = join(buildDir, "Release", "vita_cef_osr");
+  // SET_CEF_TARGET_OUT_DIR() only lands the binary under build/Release/ when the CEF cmake sets
+  // GEN_NINJA; with this vendored CEF + single-config Ninja, GEN_NINJA is unset so ninja writes the
+  // binary to build/vita_cef_osr (the $<CONFIGURATION> branch resolves empty). Accept EITHER path —
+  // installCefOverlay() already prefers whichever is newer (osrBin vs osrBinAlt), so this only
+  // corrects compileOsrHost()'s output-path check; the recompile-from-source guarantee is unchanged.
+  const osrBinAlt = join(buildDir, "vita_cef_osr");
+  const osrBinExists = () => existsSync(osrBin) || existsSync(osrBinAlt);
   if (DRY) {
     log("\n── 1d-pre · (re)compile osr_host from source (cmake -G Ninja + ninja -C build)");
     log(`   $ cmake -S ${spikeDir} -B ${buildDir} -G Ninja -DCMAKE_BUILD_TYPE=Release`);
@@ -434,8 +441,8 @@ function compileOsrHost() {
   }
   if (process.env.VITA_CEF_SKIP_BUILD === "1") {
     log("\n── 1d-pre · osr_host recompile SKIPPED (VITA_CEF_SKIP_BUILD=1) — staging the pre-built binary as-is");
-    if (!existsSync(osrBin)) {
-      fail(`VITA_CEF_SKIP_BUILD=1 but no pre-built osr_host at ${osrBin} — unset it to compile from source, ` +
+    if (!osrBinExists()) {
+      fail(`VITA_CEF_SKIP_BUILD=1 but no pre-built osr_host at ${osrBin} (or ${osrBinAlt}) — unset it to compile from source, ` +
            "or build it: (cd spikes/cef-osr && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build)");
     }
     return;
@@ -453,11 +460,11 @@ function compileOsrHost() {
         ["-S", spikeDir, "-B", buildDir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]);
   }
   run("1d-pre · compile osr_host (ninja -C build) — recompiles when osr_host.cc changed", "ninja", ["-C", buildDir]);
-  if (!existsSync(osrBin)) {
-    fail(`1d-pre · ninja did not produce ${osrBin} — check the cmake/ninja output above ` +
-         "(SET_CEF_TARGET_OUT_DIR places the binary under build/Release/).");
+  if (!osrBinExists()) {
+    fail(`1d-pre · ninja did not produce ${osrBin} (or ${osrBinAlt}) — check the cmake/ninja output above ` +
+         "(SET_CEF_TARGET_OUT_DIR places the binary under build/Release/ only when GEN_NINJA is set).");
   }
-  log(`   recompiled osr_host → ${osrBin}`);
+  log(`   recompiled osr_host → ${existsSync(osrBin) ? osrBin : osrBinAlt}`);
 }
 
 function installCefOverlay() {
