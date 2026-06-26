@@ -2,9 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync, statSync } from "node:fs";
 import { test } from "node:test";
 
-import {
-  bootstrapFilesApp,
-} from "../../../../apps/files/runtime/bootstrap.ts";
 import type {
   FilesAppBootstrapRuntime,
   FilesAppRuntime,
@@ -34,26 +31,37 @@ import type {
   FilesResponse,
 } from "../../src/desktop-sdk/index.ts";
 
+type FilesAppBootstrapModule = Pick<
+  typeof import("../../../../apps/files/runtime/bootstrap.ts"),
+  "bootstrapFilesApp"
+>;
+
 test("Files app HTML removes the baked seed rows and keeps a keyed binder template", () => {
   const html = readFilesHtml();
+  const section = filesEntriesSection(html);
   const listBody = filesEntriesListBody(html);
 
   assert.equal(html.includes('data-vita-entry-name="apps"'), false);
   assert.equal(html.includes('data-vita-entry-name="readme.md"'), false);
   assert.equal(listBody.includes(">Folder<"), false);
   assert.equal(listBody.includes(">2 KB<"), false);
+  assert.equal(listBody.includes('class="row header"'), false);
+  assert.notEqual(section.indexOf('class="row header"'), -1);
+  assert.ok(section.indexOf('class="row header"') < section.indexOf('data-vita-bind-list="files.entries"'));
   assert.equal(listBody.includes('data-vita-bind-list="files.entries"'), true);
   assert.equal(listBody.includes('data-vita-key="entry:template"'), true);
   assert.equal(listBody.includes('data-vita-bind-text="files.entry.name"'), true);
   assert.equal(html.includes('<script type="module" src="runtime/bootstrap.js"></script>'), true);
 });
 
-test("Files app emitted bootstrap bundle exists for the HTML-loaded runtime", () => {
+test("Files app emitted bootstrap bundle exists for the HTML-loaded runtime", async () => {
   const bundleUrl = new URL("../../../../apps/files/runtime/bootstrap.js", import.meta.url);
   const stat = statSync(bundleUrl);
   const code = readFileSync(bundleUrl, "utf8");
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
 
   assert.ok(stat.size > 5_000);
+  assert.equal(typeof bootstrapFilesApp, "function");
   assert.match(code, /bootstrapFilesApp/u);
   assert.match(code, /requestFile/u);
   assert.doesNotMatch(code, /\bfrom\s*["']/u);
@@ -62,6 +70,7 @@ test("Files app emitted bootstrap bundle exists for the HTML-loaded runtime", ()
 });
 
 test("Files app bootstrap hydrates entries and path from the injected host bridge files port", async () => {
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
   const calls: FilesRequest[] = [];
   const dom = filesDom();
   const runtime = expectActive(await bootstrapFilesApp({
@@ -91,6 +100,7 @@ test("Files app bootstrap hydrates entries and path from the injected host bridg
   assert.equal(dom.root.getAttribute("data-vita-status"), "ready");
   assert.equal(dom.root.getAttribute("data-vita-error-code"), "");
   assert.equal(dom.notice.textContent, "");
+  assertHeaderSurvived(dom);
   assert.deepEqual(runtime.snapshot().entries, [
     {
       kind: "dir",
@@ -121,6 +131,7 @@ test("Files app bootstrap hydrates entries and path from the injected host bridg
 });
 
 test("Files app bootstrap fails closed honestly when grant or port injection is missing", async () => {
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
   const grantlessCalls: FilesRequest[] = [];
   const grantlessDom = filesDom();
   const grantless = expectActive(await bootstrapFilesApp({
@@ -137,6 +148,7 @@ test("Files app bootstrap fails closed honestly when grant or port injection is 
   assert.equal(grantlessDom.root.getAttribute("data-vita-status"), "forbidden");
   assert.equal(grantlessDom.root.getAttribute("data-vita-error-code"), "MissingFilesGrant");
   assert.match(grantlessDom.notice.textContent ?? "", /MissingFilesGrant/u);
+  assertHeaderSurvived(grantlessDom);
   assert.deepEqual(entryRows(grantlessDom.list), []);
 
   const portlessDom = filesDom();
@@ -154,10 +166,12 @@ test("Files app bootstrap fails closed honestly when grant or port injection is 
   assert.equal(portlessDom.root.getAttribute("data-vita-status"), "error");
   assert.equal(portlessDom.root.getAttribute("data-vita-error-code"), "MissingFilesPort");
   assert.match(portlessDom.notice.textContent ?? "", /MissingFilesPort/u);
+  assertHeaderSurvived(portlessDom);
   assert.deepEqual(entryRows(portlessDom.list), []);
 });
 
 test("Files app bootstrap fails closed when transport exists without an injected grant package", async () => {
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
   const calls: FilesRequest[] = [];
   const dom = filesDom();
   const runtime = expectActive(await bootstrapFilesApp({
@@ -182,10 +196,12 @@ test("Files app bootstrap fails closed when transport exists without an injected
   assert.equal(dom.root.getAttribute("data-vita-status"), "forbidden");
   assert.equal(dom.root.getAttribute("data-vita-error-code"), "MissingFilesGrant");
   assert.match(dom.notice.textContent ?? "", /MissingFilesGrant/u);
+  assertHeaderSurvived(dom);
   assert.deepEqual(entryRows(dom.list), []);
 });
 
 test("Files app select and open actions update state through the injected files port", async () => {
+  const bootstrapFilesApp = await loadBootstrapFilesApp();
   const calls: FilesRequest[] = [];
   const dom = filesDom();
   const runtime = expectActive(await bootstrapFilesApp({
@@ -241,6 +257,8 @@ test("Files app select and open actions update state through the injected files 
 });
 
 interface FilesDom {
+  readonly content: StubElement;
+  readonly header: StubElement;
   readonly root: StubElement;
   readonly path: StubElement;
   readonly notice: StubElement;
@@ -256,7 +274,7 @@ function readFilesHtml(): string {
   return readFileSync(new URL("../../../../apps/files/index.html", import.meta.url), "utf8");
 }
 
-function filesEntriesListBody(html: string): string {
+function filesEntriesSection(html: string): string {
   const marker = 'data-vita-bind-list="files.entries"';
   const markerIndex = html.indexOf(marker);
 
@@ -269,6 +287,33 @@ function filesEntriesListBody(html: string): string {
   assert.notEqual(sectionEnd, -1);
 
   return html.slice(sectionStart, sectionEnd);
+}
+
+function filesEntriesListBody(html: string): string {
+  const marker = 'data-vita-bind-list="files.entries"';
+  const markerIndex = html.indexOf(marker);
+
+  assert.notEqual(markerIndex, -1);
+
+  const listStart = html.lastIndexOf("<div", markerIndex);
+  const listEnd = html.indexOf("</div>", markerIndex);
+
+  assert.notEqual(listStart, -1);
+  assert.notEqual(listEnd, -1);
+
+  return html.slice(listStart, listEnd);
+}
+
+async function loadBootstrapFilesApp(): Promise<FilesAppBootstrapModule["bootstrapFilesApp"]> {
+  const moduleValue: unknown = await import(new URL("../../../../apps/files/runtime/bootstrap.js", import.meta.url).href);
+
+  if (!isObjectRecord(moduleValue)) assert.fail("expected bootstrap bundle module object");
+
+  const bootstrapFilesApp = readOwnData(moduleValue, "bootstrapFilesApp");
+
+  if (typeof bootstrapFilesApp !== "function") assert.fail("expected bootstrapFilesApp export");
+
+  return bootstrapFilesApp as FilesAppBootstrapModule["bootstrapFilesApp"];
 }
 
 function filesDom(): FilesDom {
@@ -289,10 +334,11 @@ function filesDom(): FilesDom {
   const notice = element({
     "data-vita-bind-text": "files.notice",
   });
+  const content = element();
+  const header = element({}, "header");
   const list = element({
     "data-vita-bind-list": "files.entries",
   });
-  const header = element({}, "header");
   const template = element({
     "data-vita-action": "files.select",
     "data-vita-bind-attr-0": "data-vita-action:files.entry.action",
@@ -320,20 +366,29 @@ function filesDom(): FilesDom {
   template.appendChild(element({
     "data-vita-bind-text": "files.entry.modified",
   }));
-  list.appendChild(header);
   list.appendChild(template);
   root.appendChild(refresh);
   root.appendChild(up);
   root.appendChild(path);
   root.appendChild(notice);
-  root.appendChild(list);
+  content.appendChild(header);
+  content.appendChild(list);
+  root.appendChild(content);
 
   return Object.freeze({
+    content,
+    header,
     list,
     notice,
     path,
     root,
   });
+}
+
+function assertHeaderSurvived(dom: FilesDom): void {
+  assert.equal(childIndex(dom.content, dom.header), 0);
+  assert.equal(childIndex(dom.list, dom.header), -1);
+  assert.equal(dom.header.textContent, "header");
 }
 
 function filesBridge(
@@ -516,6 +571,14 @@ function requiredElement(elementValue: StubElement | undefined): StubElement {
   if (elementValue === undefined) assert.fail("expected element to exist");
 
   return elementValue;
+}
+
+function childIndex(parent: StubElement, child: StubElement): number {
+  for (let index = 0; index < parent.children.length; index += 1) {
+    if (parent.children[index] === child) return index;
+  }
+
+  return -1;
 }
 
 async function flush(): Promise<void> {
