@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/capsule"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/storagehealth"
 )
@@ -181,6 +183,73 @@ func TestHealthzFailClosedWorstOf(t *testing.T) {
 	}
 }
 
+func TestNewHandlerProductionHealthSourceAggregatesLiveSubsystemState(t *testing.T) {
+	tests := []struct {
+		name           string
+		capsuleHealth  capsuleruntime.Status
+		registryReady  bool
+		transportReady bool
+		wantHealthy    bool
+	}{
+		{
+			name:           "all production sources ready",
+			capsuleHealth:  capsuleruntime.StatusOK,
+			registryReady:  true,
+			transportReady: true,
+			wantHealthy:    true,
+		},
+		{
+			name:           "registry backed capsule supervisor down",
+			capsuleHealth:  capsuleruntime.StatusDown,
+			registryReady:  true,
+			transportReady: true,
+			wantHealthy:    false,
+		},
+		{
+			name:           "registry unready",
+			capsuleHealth:  capsuleruntime.StatusOK,
+			registryReady:  false,
+			transportReady: true,
+			wantHealthy:    false,
+		},
+		{
+			name:           "transport unready",
+			capsuleHealth:  capsuleruntime.StatusOK,
+			registryReady:  true,
+			transportReady: false,
+			wantHealthy:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			supervisor := supervisorWithStatus(t, tt.capsuleHealth)
+			registry, err := capabilities.NewRegistry(capsule.NewExecuteCapabilityWithSupervisor(supervisor))
+			if err != nil {
+				t.Fatalf("NewRegistry returned error: %v", err)
+			}
+
+			startedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+			handler := NewHandler(
+				"test-version",
+				startedAt,
+				[]string{"capsule.execute"},
+				HealthConfig{
+					Registry:       registry,
+					RegistryReady:  readinessSource(tt.registryReady),
+					TransportReady: readinessSource(tt.transportReady),
+					StorageHealth:  healthyStorageSnapshot,
+				},
+			)
+
+			status, _, _ := requestHealthz(t, handler)
+			if status.Healthy != tt.wantHealthy {
+				t.Fatalf("Healthy = %v, want %v", status.Healthy, tt.wantHealthy)
+			}
+		})
+	}
+}
+
 func TestStatusDoesNotAssignLiteralHealthyTrue(t *testing.T) {
 	fileSet := token.NewFileSet()
 	file, err := parser.ParseFile(fileSet, "status.go", nil, 0)
@@ -232,6 +301,56 @@ func staticHealthSource(snapshot healthSnapshot) healthSource {
 	return func(context.Context) healthSnapshot {
 		return snapshot
 	}
+}
+
+func readinessSource(value bool) ReadinessSource {
+	return func(context.Context) bool {
+		return value
+	}
+}
+
+func healthyStorageSnapshot(context.Context) (storagehealth.Report, error) {
+	return storagehealth.Report{
+		StorageHealth: []storagehealth.MountHealth{{
+			Status: storagehealth.StatusOK,
+		}},
+	}, nil
+}
+
+func supervisorWithStatus(t *testing.T, status capsuleruntime.Status) *capsuleruntime.Supervisor {
+	t.Helper()
+
+	const unit = "test-capsule.service"
+	supervisor := capsuleruntime.NewSupervisor(capsuleruntime.Options{
+		Prober: staticCapsuleProber{status: status},
+	})
+	supervisor.StartWorkload(capsuleruntime.WorkloadSpec{
+		ID:   "dev.vita.test",
+		Unit: unit,
+		Checks: []capsuleruntime.Check{{
+			Name:            "ready",
+			Type:            capsuleruntime.CheckTypeHTTP,
+			Target:          "http://127.0.0.1/healthz",
+			IntervalSeconds: 3600,
+			TimeoutSeconds:  1,
+		}},
+	})
+	t.Cleanup(func() {
+		supervisor.StopWorkload(unit)
+	})
+	return supervisor
+}
+
+type staticCapsuleProber struct {
+	status capsuleruntime.Status
+}
+
+func (p staticCapsuleProber) PollHealth(context.Context, capsuleruntime.Check) (capsuleruntime.Status, error) {
+	return p.status, nil
+}
+
+func (p staticCapsuleProber) Restarts(context.Context, string) (int, error) {
+	return 0, nil
 }
 
 func requestHealthz(t *testing.T, handler http.Handler) (Status, string, *httptest.ResponseRecorder) {

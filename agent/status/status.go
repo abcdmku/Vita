@@ -7,6 +7,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/vita/agent/capabilities"
+	"github.com/vita/agent/capabilities/capsule"
 	capsuleruntime "github.com/vita/agent/internal/capsule-runtime"
 	"github.com/vita/agent/internal/storagehealth"
 )
@@ -21,14 +23,37 @@ type Status struct {
 
 type clock func() time.Time
 
+type ReadinessSource func(context.Context) bool
+
+type StorageHealthSource func(context.Context) (storagehealth.Report, error)
+
+type CapsuleSupervisor interface {
+	Snapshot() []capsuleruntime.WorkloadStatus
+}
+
+type HealthConfig struct {
+	CapsuleSupervisor CapsuleSupervisor
+	CapsuleWorkloads  func() []capsuleruntime.WorkloadStatus
+	Registry          *capabilities.Registry
+	RegistryReady     ReadinessSource
+	TransportReady    ReadinessSource
+	StorageHealth     StorageHealthSource
+	StorageRoots      storagehealth.Roots
+}
+
 type healthSource func(context.Context) healthSnapshot
 
 type healthSnapshot struct {
 	CapsuleKnown     bool
 	CapsuleWorkloads []capsuleruntime.WorkloadStatus
+	RegistryReady    *bool
 	TransportReady   *bool
 	StorageKnown     bool
 	StorageHealth    []storagehealth.MountHealth
+}
+
+type capsuleWorkloadSource interface {
+	Workloads() []capsuleruntime.WorkloadStatus
 }
 
 type handler struct {
@@ -39,8 +64,12 @@ type handler struct {
 	health       healthSource
 }
 
-func NewHandler(version string, startedAt time.Time, capabilities []string) http.Handler {
-	return newHandler(version, startedAt, capabilities, time.Now, defaultHealthSource())
+func NewHandler(version string, startedAt time.Time, capabilities []string, healthConfigs ...HealthConfig) http.Handler {
+	healthConfig := HealthConfig{}
+	if len(healthConfigs) > 0 {
+		healthConfig = healthConfigs[0]
+	}
+	return newHandler(version, startedAt, capabilities, time.Now, defaultHealthSource(healthConfig))
 }
 
 func newHandler(version string, startedAt time.Time, capabilities []string, now clock, health healthSource) http.Handler {
@@ -114,6 +143,13 @@ func aggregateHealthy(snapshot healthSnapshot) bool {
 		}
 	}
 
+	if snapshot.RegistryReady != nil {
+		consulted = true
+		if !*snapshot.RegistryReady {
+			return false
+		}
+	}
+
 	if snapshot.TransportReady != nil {
 		consulted = true
 		if !*snapshot.TransportReady {
@@ -136,15 +172,74 @@ func aggregateHealthy(snapshot healthSnapshot) bool {
 	return consulted
 }
 
-func defaultHealthSource() healthSource {
-	return func(ctx context.Context) healthSnapshot {
-		report, err := storagehealth.Collect(ctx, storagehealth.Roots{})
-		if err != nil {
-			return healthSnapshot{StorageKnown: true}
-		}
-		return healthSnapshot{
-			StorageKnown:  true,
-			StorageHealth: report.StorageHealth,
+func defaultHealthSource(config HealthConfig) healthSource {
+	capsuleWorkloads, capsuleKnown := capsuleWorkloadsFromConfig(config)
+	storageHealth := config.StorageHealth
+	if storageHealth == nil {
+		roots := config.StorageRoots
+		storageHealth = func(ctx context.Context) (storagehealth.Report, error) {
+			return storagehealth.Collect(ctx, roots)
 		}
 	}
+
+	return func(ctx context.Context) healthSnapshot {
+		snapshot := healthSnapshot{}
+
+		if capsuleKnown {
+			snapshot.CapsuleKnown = true
+			if capsuleWorkloads != nil {
+				snapshot.CapsuleWorkloads = cloneWorkloads(capsuleWorkloads())
+			}
+		}
+
+		if config.RegistryReady != nil {
+			ready := config.RegistryReady(ctx)
+			snapshot.RegistryReady = &ready
+		} else if config.Registry != nil {
+			ready := true
+			snapshot.RegistryReady = &ready
+		}
+
+		if config.TransportReady != nil {
+			ready := config.TransportReady(ctx)
+			snapshot.TransportReady = &ready
+		}
+
+		report, err := storageHealth(ctx)
+		if err != nil {
+			snapshot.StorageKnown = true
+			return snapshot
+		}
+		snapshot.StorageKnown = true
+		snapshot.StorageHealth = report.StorageHealth
+		return snapshot
+	}
+}
+
+func capsuleWorkloadsFromConfig(config HealthConfig) (func() []capsuleruntime.WorkloadStatus, bool) {
+	if config.CapsuleWorkloads != nil {
+		return config.CapsuleWorkloads, true
+	}
+	if config.CapsuleSupervisor != nil {
+		return config.CapsuleSupervisor.Snapshot, true
+	}
+	if config.Registry == nil {
+		return nil, false
+	}
+
+	capability, ok := config.Registry.Lookup(capsule.ExecuteName)
+	if !ok {
+		return nil, false
+	}
+	source, ok := capability.(capsuleWorkloadSource)
+	if !ok {
+		return nil, true
+	}
+	return source.Workloads, true
+}
+
+func cloneWorkloads(in []capsuleruntime.WorkloadStatus) []capsuleruntime.WorkloadStatus {
+	out := make([]capsuleruntime.WorkloadStatus, len(in))
+	copy(out, in)
+	return out
 }
