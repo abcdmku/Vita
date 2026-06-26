@@ -30,6 +30,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -435,10 +436,17 @@ function installCefOverlay() {
 
   if (!DRY) {
     // Ensure a freshly built osr_host is staged into the spike Release dir (next to libcef.so),
-    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there.
-    if (!existsSync(osrBin) && existsSync(osrBinAlt)) {
-      mkdirSync(dirname(osrBin), { recursive: true });
-      copyFileSync(osrBinAlt, osrBin);
+    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there. Prefer the
+    // FRESHER of build/vita_cef_osr (ninja output) vs build/Release/vita_cef_osr — using a stale
+    // Release copy silently shipped an old osr_host (this caused the input/render osr changes to be
+    // ignored across rebuilds).
+    if (existsSync(osrBinAlt)) {
+      const altNewer = !existsSync(osrBin) ||
+        statSync(osrBinAlt).mtimeMs > statSync(osrBin).mtimeMs;
+      if (altNewer) {
+        mkdirSync(dirname(osrBin), { recursive: true });
+        copyFileSync(osrBinAlt, osrBin);
+      }
     }
     if (!existsSync(osrBin)) {
       fail("1d0 · osr_host binary missing — build it: (cd spikes/cef-osr && ninja -C build)");
