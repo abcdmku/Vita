@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mail</title>
+    <style>
+      :root {
+        --vita-mail-bg: var(--vita-color-surface, #f6f7f9);
+        --vita-mail-panel: var(--vita-color-panel, #ffffff);
+        --vita-mail-panel-alt: var(--vita-color-panel-muted, #eef2f6);
+        --vita-mail-border: var(--vita-color-border, #cfd7e3);
+        --vita-mail-text: var(--vita-color-text, #17202a);
+        --vita-mail-muted: var(--vita-color-text-muted, #647184);
+        --vita-mail-accent: var(--vita-color-accent, #2563eb);
+        --vita-mail-unread: var(--vita-color-strong, #0f172a);
+        --vita-mail-focus: var(--vita-focus-ring, #7aa7ff);
+        --vita-mail-radius: var(--vita-radius-sm, 6px);
+        --vita-mail-gap: var(--vita-space-sm, 8px);
+        --vita-mail-font: var(--vita-font-body, system-ui, sans-serif);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 760px;
+        min-height: 560px;
+        background: var(--vita-mail-bg);
+        color: var(--vita-mail-text);
+        font: 14px/1.45 var(--vita-mail-font);
+      }
+
+      .mail-shell {
+        display: grid;
+        grid-template-columns: 184px minmax(260px, 34vw) minmax(320px, 1fr);
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .folders,
+      .messages,
+      .reader {
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .folders {
+        border-right: 1px solid var(--vita-mail-border);
+        background: var(--vita-mail-panel-alt);
+        padding: 16px 10px;
+      }
+
+      .app-title {
+        margin: 0 8px 18px;
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .folder-list,
+      .message-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .folder {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--vita-mail-gap);
+        min-height: 34px;
+        padding: 7px 9px;
+        border-radius: var(--vita-mail-radius);
+        color: var(--vita-mail-muted);
+      }
+
+      .folder[aria-current="page"] {
+        background: var(--vita-mail-panel);
+        color: var(--vita-mail-text);
+        font-weight: 650;
+      }
+
+      .count {
+        min-width: 24px;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: var(--vita-mail-border);
+        color: var(--vita-mail-text);
+        text-align: center;
+        font-size: 12px;
+      }
+
+      .messages {
+        border-right: 1px solid var(--vita-mail-border);
+        background: var(--vita-mail-panel);
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 56px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--vita-mail-border);
+      }
+
+      .toolbar h2 {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      .compose-button {
+        border: 1px solid var(--vita-mail-accent);
+        border-radius: var(--vita-mail-radius);
+        background: var(--vita-mail-accent);
+        color: #ffffff;
+        font: inherit;
+        font-weight: 650;
+        padding: 7px 10px;
+      }
+
+      .message {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 3px 12px;
+        min-height: 88px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--vita-mail-border);
+      }
+
+      .message[aria-selected="true"] {
+        box-shadow: inset 3px 0 0 var(--vita-mail-accent);
+        background: #f1f6ff;
+      }
+
+      .message.unread .sender,
+      .message.unread .subject {
+        color: var(--vita-mail-unread);
+        font-weight: 720;
+      }
+
+      .sender,
+      .subject,
+      .preview,
+      .date {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sender {
+        font-weight: 650;
+      }
+
+      .date {
+        color: var(--vita-mail-muted);
+        font-size: 12px;
+      }
+
+      .subject,
+      .preview {
+        grid-column: 1 / -1;
+      }
+
+      .preview {
+        color: var(--vita-mail-muted);
+      }
+
+      .reader {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        background: var(--vita-mail-panel);
+      }
+
+      .reader-header {
+        padding: 22px 26px 18px;
+        border-bottom: 1px solid var(--vita-mail-border);
+      }
+
+      .reader-header h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        line-height: 1.2;
+      }
+
+      .metadata {
+        color: var(--vita-mail-muted);
+      }
+
+      .body {
+        overflow: auto;
+        padding: 22px 26px;
+        max-width: 760px;
+      }
+
+      .composer {
+        display: grid;
+        gap: 8px;
+        padding: 14px 16px;
+        border-top: 1px solid var(--vita-mail-border);
+        background: var(--vita-mail-panel-alt);
+      }
+
+      .composer input,
+      .composer textarea {
+        width: 100%;
+        border: 1px solid var(--vita-mail-border);
+        border-radius: var(--vita-mail-radius);
+        background: var(--vita-mail-panel);
+        color: var(--vita-mail-text);
+        font: inherit;
+        padding: 8px 10px;
+      }
+
+      .composer textarea {
+        min-height: 72px;
+        resize: vertical;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--vita-mail-focus);
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mail-shell" data-vita-viewmodel="mail-app">
+      <aside class="folders" aria-label="Mail folders">
+        <h1 class="app-title">Mail</h1>
+        <ul class="folder-list" data-bind="folders">
+          <li class="folder" aria-current="page">
+            <span>Inbox</span>
+            <span class="count">2</span>
+          </li>
+          <li class="folder">
+            <span>Sent</span>
+            <span class="count">0</span>
+          </li>
+          <li class="folder">
+            <span>Outbox</span>
+            <span class="count">1</span>
+          </li>
+          <li class="folder">
+            <span>Archive</span>
+            <span class="count">0</span>
+          </li>
+        </ul>
+      </aside>
+
+      <section class="messages" aria-label="Messages">
+        <div class="toolbar">
+          <h2 data-bind="activeFolderLabel">Inbox</h2>
+          <button class="compose-button" type="button" data-action="compose">Compose</button>
+        </div>
+        <ul class="message-list" data-bind="messages">
+          <li class="message unread" aria-selected="true">
+            <span class="sender">Local System</span>
+            <time class="date" datetime="2026-06-25T09:30:00Z">09:30</time>
+            <span class="subject">Welcome to offline Mail</span>
+            <span class="preview">Your local mailbox is available without network access.</span>
+          </li>
+          <li class="message unread">
+            <span class="sender">Desk</span>
+            <time class="date" datetime="2026-06-24T18:10:00Z">Jun 24</time>
+            <span class="subject">Queued compose flow</span>
+            <span class="preview">Drafts are stored locally and move to Outbox.</span>
+          </li>
+        </ul>
+      </section>
+
+      <article class="reader" aria-label="Reading pane">
+        <header class="reader-header">
+          <h1 data-bind="selectedMessage.subject">Welcome to offline Mail</h1>
+          <div class="metadata" data-bind="selectedMessage.meta">Local System to You</div>
+        </header>
+        <section class="body" data-bind="selectedMessage.body">
+          <p>This mail surface is static. Runtime behavior is supplied by the headless Mail view-model and the desktop binder.</p>
+          <p>Mailbox reads come from the injected local mailbox port. Compose queues to Outbox and no network send path is exposed.</p>
+        </section>
+        <form class="composer" data-bind="composeDraft">
+          <input type="text" name="to" placeholder="To">
+          <input type="text" name="subject" placeholder="Subject">
+          <textarea name="body" placeholder="Message"></textarea>
+        </form>
+      </article>
+    </main>
+  </body>
+</html>
