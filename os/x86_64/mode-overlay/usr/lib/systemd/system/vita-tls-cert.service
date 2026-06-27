@@ -1,0 +1,48 @@
+# Vita owner TLS cert delivery — validate (NOT generate) the owner-provided network-face cert.
+#
+# Ordered Before=vita-platform.service so the disposition is logged (and a mismatched owner cert is
+# flagged LOUD) before the server reads VITA_TLS_CERT/KEY. Non-fatal: self-signed is the documented
+# fallback, so an absent or even broken owner cert never blocks the platform unit (the server self-signs
+# and prints its fingerprint). The owner DELIVERS net.crt + net.key onto /var/lib/vita/tls out-of-band;
+# this unit only reads + match-checks them and normalizes the key group/mode for the DynamicUser reader.
+# See /usr/lib/vita/tls-cert/vita-tls-cert.sh for the rationale (the owner alone holds the private key,
+# spec §16 — this never generates or transmits key material).
+[Unit]
+Description=Vita owner TLS cert delivery (validate the owner-provided network-face cert)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Needs the persistent /var partition mounted (the cert lives there). Bind exactly the tls subtree so
+# on a VITA_VERITY build the data partition is mounted before we read it.
+After=local-fs.target
+RequiresMountsFor=/var/lib/vita/tls
+Before=vita-platform.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vita/tls-cert/vita-tls-cert.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# Reads the owner cert + normalizes the key group/mode for the platform DynamicUser; needs no host
+# mutation. Tight sandbox; ReadWritePaths opens exactly the tls subtree (for the chgrp/chmod). Runs as
+# root so it can chgrp the owner-delivered key to vita-agent.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vita/tls
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+# Allow the chown family back: the script chgrp's the owner-delivered key to vita-agent so the platform
+# DynamicUser can read it. fchownat lives in @privileged, denied above; re-allow exactly the chown
+# family (this unit is the legitimate normalizer of that file's group).
+SystemCallFilter=@chown
+
+[Install]
+WantedBy=multi-user.target
