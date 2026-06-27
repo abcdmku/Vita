@@ -1,0 +1,17 @@
+{
+  "//": "Strict typecheck lane for the puter-compat harness + preview + server modules that are NOT in the repo typecheck include (they are node-only / side-effecting / browser-bundle entries). The core puter/* modules are covered by the repo lane via sdk/typescript/test/ui-kits/puter-*.test.ts; this covers the rest. Run: node node_modules/typescript/lib/tsc.js --noEmit -p ui_kits/desktop/runtime/puter/tsconfig.spike.json",
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": [
+    "server.ts",
+    "spike/preview-entry.ts",
+    "spike/headless-spike.ts",
+    "spike/serve-spike.ts",
+    "spike/node-fs-adapter.ts"
+  ]
+}
