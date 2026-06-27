@@ -26,11 +26,16 @@
                               styled "running off-device" state, NEVER an infinite spinner)
     A bounded PROBE timeout guarantees we always leave `connecting` (no forever spin).
 -->
-<html lang="en">
+<html lang="en" class="theme-dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Vita Console</title>
+    <!-- Shared Vita OS design system: canonical tokens + the --vita-* bridge the styles below read.
+         Linked first so the console's existing var(--vita-color-*) references resolve to the system
+         palette/typography instead of its local fallbacks — making it cohesive with the shell. -->
+    <link rel="stylesheet" href="/ui_kits/styles.css" />
+    <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
     <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
     <script src="/_vendor/puter/v2.js"></script>
     <style>
@@ -312,7 +317,7 @@
       }
     </style>
   </head>
-  <body>
+  <body class="vita-surface">
     <main class="console" data-vita-app="vita.app.deploy-console">
       <header class="bar">
         <div class="brand">

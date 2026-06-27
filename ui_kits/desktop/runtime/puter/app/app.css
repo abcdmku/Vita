@@ -1,42 +1,51 @@
 /* ============================================================================================
    Vita Desk — styles. Vita's own (AGPL-clean). Themeable via [data-theme] + [data-accent] on <html>.
    No external fonts/CDNs: a tuned system stack so the kiosk renders offline. 8px spacing rhythm.
+
+   Vita Desk sources its palette/typography from the SHARED Vita OS design system: its local
+   variable names are kept (so app.js + selectors below are untouched) but each one now resolves to
+   a canonical token via the --vita-* bridge (ui_kits/vita-app-theme.css, linked before this file),
+   with the previous hardcoded values as offline fallbacks. This is what makes Vita Desk look like
+   one product with the shell + Deploy Console instead of its own slightly-off blue.
    ============================================================================================ */
 
 :root {
-  /* base (dark) palette */
-  --bg:        #0c0d11;
+  /* base (dark) palette — each routes through the --vita-* token bridge with the tuned polish
+     value as the offline fallback */
+  --bg:        var(--vita-color-surface,  #0c0d11);
   --bg-1:      #101218;
-  --bg-2:      #15171f;
-  --bg-3:      #1b1e27;
-  --panel:     #0f1117;
+  --bg-2:      var(--vita-color-raised,   #15171f);
+  --bg-3:      var(--vita-color-elevated, #1b1e27);
+  --panel:     var(--vita-color-panel,    #0f1117);
   --panel-2:   #131620;
-  --line:      #232733;
+  --line:      var(--vita-color-border,   #232733);
   --line-2:    #2c313f;
-  --fg:        #e8eaf0;
-  --fg-dim:    #9097a6;
+  --fg:        var(--vita-color-text,     #e8eaf0);
+  --fg-dim:    var(--vita-color-muted,    #9097a6);
   --fg-faint:  #646b7b;
-  --accent:    #5b8cff;
-  --accent-2:  #3d6ae0;
+  --accent:    var(--vita-color-accent,        #5b8cff);
+  --accent-2:  var(--vita-color-accent-active, #3d6ae0);
   --accent-ink:#ffffff;
-  --ok:        #4ade80;
+  --ok:        var(--vita-color-success,  #4ade80);
   --warn:      #fbbf24;
-  --err:       #f87171;
+  --err:       var(--vita-color-danger,   #f87171);
   --sel:       color-mix(in srgb, var(--accent) 18%, transparent);
   --sel-line:  color-mix(in srgb, var(--accent) 55%, transparent);
 
   /* type */
-  --font-ui:   "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-ui:   var(--vita-font-ui, "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif);
   --font-mono: ui-monospace, "Cascadia Code", "SF Mono", "JetBrains Mono", Consolas, Menlo, monospace;
 
   /* shape + depth */
   --r-sm: 7px;
-  --r:    10px;
+  --r:    var(--vita-radius-card, 10px);
+  --radius: var(--vita-radius-card, 10px);
   --r-lg: 14px;
   --r-xl: 18px;
   --shadow-1: 0 1px 2px rgba(0,0,0,.4);
   --shadow-2: 0 10px 34px -8px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.35);
-  --shadow-pop: 0 24px 60px -16px rgba(0,0,0,.7), 0 4px 14px rgba(0,0,0,.4);
+  --shadow-pop: var(--vita-shadow-popover, 0 24px 60px -16px rgba(0,0,0,.7), 0 4px 14px rgba(0,0,0,.4));
+  --shadow:     var(--vita-shadow-popover, 0 8px 30px rgba(0, 0, 0, 0.45));
 }
 
 /* accent overrides */
@@ -45,10 +54,11 @@ html[data-accent="emerald"] { --accent:#34d399; --accent-2:#10b981; --accent-ink
 html[data-accent="amber"]   { --accent:#fbbf24; --accent-2:#f59e0b; --accent-ink:#1a1304; }
 html[data-accent="rose"]    { --accent:#fb7185; --accent-2:#f43f5e; }
 
-/* theme overrides */
+/* theme overrides — layer ON TOP of the shared dark surfaces so they stay cohesive with the OS */
 html[data-theme="midnight"] {
   --bg:#070a14; --bg-1:#0a0e1c; --bg-2:#0e1326; --bg-3:#141b34;
   --panel:#090d1a; --panel-2:#0d1426; --line:#1a2342; --line-2:#26315a; --fg-faint:#5b6688;
+  --accent: color-mix(in srgb, var(--vita-color-accent, #7aa2ff) 80%, #ffffff 20%);
 }
 html[data-theme="slate"] {
   --bg:#11141a; --bg-1:#161a22; --bg-2:#1b212b; --bg-3:#222a36;
@@ -67,7 +77,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 13.5px/1.5 var(--font-ui);
+  font: var(--fs-body, 13.5px)/1.5 var(--font-ui);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }

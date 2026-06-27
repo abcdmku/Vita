@@ -22,6 +22,9 @@
   <title>Vita Desktop</title>
   <link rel="stylesheet" href="/ui_kits/styles.css" />
   <link rel="stylesheet" href="/ui_kits/desktop/kit.css" />
+  <!-- Shared design-system bridge: maps canonical tokens onto the --vita-* namespace the apps read,
+       plus the shared first-party component look. Linked LAST so it can resolve the tokens above. -->
+  <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
   <style>
     /* ---------------------------------------------------------------------------------------------
@@ -36,7 +39,7 @@
        menu context left, live status + clock right), a macOS/Windows-quality dock with pinned apps,
        and polished window chrome. All of it is Vita's own code — no AGPL Puter desktop is shipped.
        --------------------------------------------------------------------------------------------- */
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #06070a; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: var(--surface-base, #06070a); }
     html, body { height: 100dvh; }
     .v-desktop-shell, .v-desktop-shell * { -webkit-font-smoothing: antialiased; }
 
@@ -192,6 +195,8 @@
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 12px 22px rgba(0, 0, 0, 0.5);
     }
     .v-desktop-shell .v-dtile:active { transform: translateY(-3px) scale(0.99); }
+    /* Token-driven active state from the design system (additive to the polish running/focused dots). */
+    .v-desktop-shell .v-dtile.on { border-color: var(--accent); color: var(--accent); }
     /* Tooltip label that floats above a tile on hover. */
     .v-desktop-shell .v-dtile .v-dtip {
       position: absolute; bottom: calc(100% + 12px); left: 50%; transform: translateX(-50%) translateY(4px);
