@@ -1,0 +1,10 @@
+{
+  "name": "@vita/echo-cli",
+  "version": "2.1.0",
+  "description": "Echo its arguments — a packaged command-line tool.",
+  "bin": "./bin/echo.js",
+  "vita": {
+    "icon": "📣",
+    "title": "Echo CLI"
+  }
+}
