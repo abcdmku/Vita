@@ -25,6 +25,9 @@ import { createCapabilityRegistry } from "../capability.ts";
 import type { PuterCapabilityRegistry } from "../capability.ts";
 import { createUiBroker } from "../ui-broker.ts";
 import type { BrokerNotificationInput, BrokerSinks, BrokerWindow } from "../ui-broker.ts";
+import { createPickerSinks } from "../picker-windows.ts";
+import { createHttpPickerFsClient } from "../picker-fs-http.ts";
+import { createDomPickerUi } from "../picker-ui-dom.ts";
 import { createWebAppWindowHost, setWebAppWindowTitle } from "../web-app-window.ts";
 import type { WebAppWindowHost } from "../web-app-window.ts";
 import { createWindowManager } from "../../window-manager.ts";
@@ -58,6 +61,9 @@ export interface ShellController {
   readonly wm: WindowManager;
   readonly host: WebAppWindowHost;
   readonly apps: readonly ShellAppEntry[];
+  // The capability registry the broker + pickers gate against (exposed for the verification driver to
+  // assert capability gating — e.g. that an app without fs.read is denied a file picker).
+  readonly capabilities: PuterCapabilityRegistry;
   // Open (or focus) a registry app's window. Returns the appId, or undefined if unknown.
   launch(appId: string): string | undefined;
   // Re-render the dock/taskbar (open-window tiles + active highlight). Called on every WM change.
@@ -88,7 +94,17 @@ export function bootShell(deps: ShellDeps): ShellController {
   // instance id → WM appId, so ui.setWindowTitle / notifications target the right window.
   const instanceToAppId = new Map<string, string>();
 
+  // The puter.ui.* PICKERS: real browse/save/font/color windows. The fs browse goes over the SAME
+  // api_origin the apps use, with the requesting app's OWN token (so the picker inherits that app's fs
+  // grants — it can never read beyond what the app may). The DOM ui renders the windows in `.v-screen`.
+  const pickerSinks = createPickerSinks({
+    apiOrigin,
+    fs: createHttpPickerFsClient({ apiOrigin }),
+    ui: createDomPickerUi({ doc }),
+  });
+
   const sinks: BrokerSinks = {
+    ...pickerSinks,
     async alert(instanceId, message, buttons): Promise<string> {
       return showAlert(doc, instanceToAppId.get(instanceId) ?? instanceId, message, buttons);
     },
@@ -193,6 +209,7 @@ export function bootShell(deps: ShellDeps): ShellController {
 
   const controller: ShellController = Object.freeze({
     apps,
+    capabilities,
     host,
     launch,
     refreshDock,

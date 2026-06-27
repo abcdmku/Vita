@@ -21,8 +21,23 @@ export interface LaunchUrlParams {
   // The parent (gui) origin the SDK should post ui messages to, e.g. "http://localhost:8137".
   readonly guiOrigin?: string;
   readonly appId?: string;
+  // A launch ITEM the app should receive via `puter.ui.onLaunchedWithItems` on boot. The SDK reads
+  // `puter.item.name` / `puter.item.uid` / `puter.item.read_url` (+ path/write_url/size/…) from the
+  // launch URL query and feeds them to the registered callback. Provide these to open an app WITH a
+  // file selected. (For an already-running app, use broker.pushLaunchItems instead.)
+  readonly launchItem?: LaunchItem;
   // Extra params (rarely needed) merged in last.
   readonly extra?: Readonly<Record<string, string>>;
+}
+
+export interface LaunchItem {
+  readonly name: string;
+  readonly uid: string;
+  readonly path: string;
+  readonly readUrl: string;
+  readonly writeUrl?: string;
+  readonly metadataUrl?: string;
+  readonly size?: number;
 }
 
 // Build the full iframe URL. The appUrl may be absolute or relative; params are appended to its query.
@@ -48,6 +63,20 @@ export function buildLaunchSearch(params: LaunchUrlParams): string {
 
   if (params.guiOrigin !== undefined) entries.push(["puter.origin", params.guiOrigin]);
   if (params.appId !== undefined) entries.push(["puter.app.name", params.appId]);
+
+  // The launch item the SDK's onLaunchedWithItems reads on boot. It GATES on name+uid+read_url all
+  // being present, so emit those three (and the rest) only when a launch item is supplied.
+  const item = params.launchItem;
+
+  if (item !== undefined) {
+    entries.push(["puter.item.name", item.name]);
+    entries.push(["puter.item.uid", item.uid]);
+    entries.push(["puter.item.path", item.path]);
+    entries.push(["puter.item.read_url", item.readUrl]);
+    if (item.writeUrl !== undefined) entries.push(["puter.item.write_url", item.writeUrl]);
+    if (item.metadataUrl !== undefined) entries.push(["puter.item.metadata_url", item.metadataUrl]);
+    if (item.size !== undefined) entries.push(["puter.item.size", String(item.size)]);
+  }
 
   for (const [k, v] of Object.entries(params.extra ?? {})) entries.push([k, v]);
 

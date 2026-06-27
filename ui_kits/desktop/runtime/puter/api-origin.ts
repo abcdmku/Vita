@@ -232,7 +232,13 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
 
       if (result === undefined) return errorResponse(404, "subject_does_not_exist", `no such file: ${path}`);
 
-      return raw(200, result.bytes, result.entry.type ?? "application/octet-stream");
+      // Serve file reads as application/octet-stream. The genuine puter.js SDK reads with
+      // responseType="blob" and (M() in the bundle) ONLY returns the raw Blob — which apps call
+      // `.text()`/`.arrayBuffer()` on, e.g. Notepad's `(await file.read()).text()` — when the
+      // content-type is application/octet-stream (or application/json, which it parses). For any OTHER
+      // content-type it wraps the body in `{success, result}`, which has no `.text()`. So a text/* mime
+      // here would BREAK file reads. Octet-stream is also what the real Puter file-read endpoint returns.
+      return raw(200, result.bytes, "application/octet-stream");
     } catch (err) {
       return mapStoreError(err);
     }
