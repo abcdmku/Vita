@@ -33,7 +33,14 @@ export type PuterCapability =
   // a process on the node. Default-deny, fail-closed — only an app explicitly granted `exec` (the
   // Terminal) may open a /pty session; everything else is 401/403. NEVER granted by default to ordinary
   // Puter apps (the local kiosk session does NOT carry it unless the owner opts the Terminal in).
-  | "exec";
+  | "exec"
+  // The PACKAGE-MANAGER meta plane (read a package's raw source + read/alter its per-package grants +
+  // read its audit log) — gates /meta/* on the api_origin. This is the CONTROL PLANE FOR PERMISSIONS:
+  // the owner-held meta-capability that can read another package's source and change another package's
+  // grants. It is held ONLY by the Package Manager app and is NEVER granted to an ordinary app
+  // (default-deny by construction: the platform declares `meta` for exactly the pkg-manager appId, and
+  // a granted-meta app cannot grant `meta` to anyone — the meta endpoint refuses to write a `meta` grant).
+  | "meta";
 
 // A launched-app session: the opaque token, the app it belongs to, the instance id the iframe carries,
 // the owner identity, and the granted capability set. Minted by `mintAppSession` at launch.
@@ -114,6 +121,21 @@ export function createSessionGrantModel(): PuterPermissionModel {
   });
 }
 
+// An audit sink the registry calls on EVERY authorize() outcome (allow + deny), so capability activity
+// is visible to the owner (the Package Manager's activity view + the meta-API audit endpoint). Kept as a
+// minimal structural interface (not an import) so capability.ts carries no dependency on the pkgmgr
+// audit log — any sink with this shape works, and the default registry has no sink (zero overhead).
+export interface CapabilityAuditSink {
+  record(input: {
+    readonly appId: string;
+    readonly capability: PuterCapability;
+    readonly operation?: string;
+    readonly outcome: "allow" | "deny";
+    readonly code?: string;
+    readonly reason?: string;
+  }): unknown;
+}
+
 export interface CapabilityRegistryOptions {
   // The authorization authority the registry delegates every `authorize` call to. Default: the
   // session-grant model. Pass a broker-backed model for REAL on-device enforcement.
@@ -127,6 +149,9 @@ export interface CapabilityRegistryOptions {
   // explicit per-mint override is given (and a per-mint override may only NARROW within the same
   // owner — it can never name a different owner; see mintAppSession).
   readonly ownerIdentity?: PuterOwner;
+  // Optional audit sink — records every authorize() decision (allow + deny) for the owner-facing
+  // activity view / meta-API audit log. Absent by default (no recording, no overhead).
+  readonly audit?: CapabilityAuditSink;
 }
 
 export interface MintInput {
@@ -181,6 +206,7 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
   // The node's trusted owner identity (validated once at construction). Every minted session is
   // bound to THIS owner. A per-mint override may not name a different owner uuid (see mintAppSession).
   const trustedOwner = resolveTrustedOwner(options.ownerIdentity);
+  const audit = options.audit;
 
   function denial(code: GateDenialCode, message: string, status: number): GateResult {
     return Object.freeze({ code, message, ok: false, status });
@@ -204,7 +230,27 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
       }
 
       if (!allowed) {
+        // Record the DENIAL so the owner can SEE that this app tried to exceed its grant (the thing the
+        // activity view flags as unexpected/malicious). Best-effort: a sink error never affects the gate.
+        try {
+          audit?.record({
+            appId: session.appId,
+            capability,
+            code: "CAP_DENIED",
+            outcome: "deny",
+            reason: `app '${session.appId}' lacks capability '${capability}'`,
+          });
+        } catch {
+          // ignore sink errors — auditing must never break enforcement
+        }
+
         return denial("CAP_DENIED", `app '${session.appId}' lacks capability '${capability}'`, 403);
+      }
+
+      try {
+        audit?.record({ appId: session.appId, capability, outcome: "allow" });
+      } catch {
+        // ignore sink errors
       }
 
       return Object.freeze({ ok: true, session });

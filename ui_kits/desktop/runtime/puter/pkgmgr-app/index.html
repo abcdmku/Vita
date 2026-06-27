@@ -1,0 +1,153 @@
+<!doctype html>
+<!--
+  Vita Package Manager — the interactive surface for Vita's core differentiator.
+
+  Every installed package is OPEN raw TS/JS, built + run ON the machine (no compiled blob): what runs IS
+  the source. This app lets the owner INSPECT + EDIT a package's actual source AND view + ALTER its
+  permissions, with the capability model protecting against malicious behavior.
+
+  It talks to the capability-gated META-API (/meta/*) on the local api_origin. Only this app holds the
+  `meta` capability (default-deny for every other app), so only the owner's Package Manager can read a
+  package's source or change a package's grants. The app authenticates via /session.js (the minted
+  vita.pkgmgr app-session token) exactly like the kiosk app.
+
+  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) is third-party. This app is Vita's own
+  code (AGPL-clean). No AGPL Puter desktop bundle is shipped or fetched.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita Package Manager</title>
+  <link rel="stylesheet" href="/pkgmgr-app/app.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%237c5cff'/&gt;&lt;/svg&gt;" />
+  <!-- PRE-SDK origin pin: target our same-origin /api from the SDK's first call (never the cloud). -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- Vendored, offline, Apache-2.0 puter.js client SDK. Same-origin on the local face. -->
+  <script src="/_vendor/puter/v2.js"></script>
+  <!-- LOCAL-FACE session bootstrap: points puter.js at /api + injects the vita.pkgmgr app-session token. -->
+  <script src="/session.js"></script>
+</head>
+<body>
+  <div id="app" class="app" data-state="booting">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <div class="brand-text">
+          <span class="brand-name">Package Manager</span>
+          <span class="brand-sub">open source · on device · capability-gated</span>
+        </div>
+      </div>
+      <div class="who">
+        <span id="who-name" class="who-name">…</span>
+        <span id="conn" class="conn" title="meta-api connectivity">connecting…</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- LEFT: the installed-package list (requirement 1). -->
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <h2>Installed</h2>
+          <button id="btn-refresh" class="btn btn-ghost" title="Reload package list">↻</button>
+        </div>
+        <ul id="pkg-list" class="pkg-list" role="listbox" aria-label="Installed packages"></ul>
+      </aside>
+
+      <!-- RIGHT: the selected package's detail (source / permissions / activity). -->
+      <section class="detail" id="detail" hidden>
+        <div class="detail-head">
+          <div class="detail-title">
+            <h1 id="d-name">—</h1>
+            <span id="d-version" class="pill">v—</span>
+            <span id="d-state" class="pill pill-state">installed</span>
+          </div>
+          <div class="detail-actions">
+            <button id="btn-disable" class="btn btn-danger">Disable</button>
+            <button id="btn-enable" class="btn btn-ok" hidden>Enable</button>
+          </div>
+        </div>
+        <p id="d-desc" class="detail-desc">—</p>
+
+        <!-- Open-source-on-device banner: emphasizes NO compiled blob. -->
+        <div class="source-banner">
+          <span class="src-dot" aria-hidden="true"></span>
+          <span>Runs directly from source — no compiled artifact.
+            <code id="d-source-dir">—</code></span>
+        </div>
+
+        <nav class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="source" role="tab">Source</button>
+          <button class="tab" data-tab="perms" role="tab">Permissions</button>
+          <button class="tab" data-tab="activity" role="tab">Activity</button>
+        </nav>
+
+        <!-- SOURCE TAB (requirement 2): browse the raw tree, open + edit a file, save → rebuild. -->
+        <div class="panel panel-source is-active" data-tab="source">
+          <div class="source-grid">
+            <div class="tree-col">
+              <div class="tree-head"><span id="tree-path">/</span></div>
+              <ul id="tree" class="tree" aria-label="Source tree"></ul>
+            </div>
+            <div class="editor-col">
+              <div class="editor-head">
+                <span id="editor-path" class="editor-path">select a file</span>
+                <div class="editor-actions">
+                  <span id="editor-status" class="editor-status"></span>
+                  <button id="btn-save" class="btn btn-ok" disabled>Save &amp; rebuild</button>
+                </div>
+              </div>
+              <textarea id="editor" class="editor" spellcheck="false"
+                placeholder="Select a source file from the tree to inspect and edit its raw TS/JS."></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- PERMISSIONS TAB (requirement 3): requested vs granted; grant/revoke/restrict. -->
+        <div class="panel panel-perms" data-tab="perms">
+          <p class="panel-hint">Requested vs granted. Revoking a capability is enforced immediately —
+            the package's next call to it is denied (CAP_DENIED&nbsp;403).</p>
+          <table class="perm-table">
+            <thead><tr><th>Capability</th><th>Requested</th><th>Granted</th><th>Action</th></tr></thead>
+            <tbody id="perm-body"></tbody>
+          </table>
+          <div id="perm-status" class="perm-status"></div>
+        </div>
+
+        <!-- ACTIVITY TAB (requirement 4): the audit log — invocations + DENIALS. -->
+        <div class="panel panel-activity" data-tab="activity">
+          <div class="activity-head">
+            <p class="panel-hint">What this package actually did — capability invocations and
+              <strong>denials</strong>. Unexpected denials flag malicious behavior.</p>
+            <div class="activity-meta">
+              <span id="denial-badge" class="denial-badge" hidden>0 denials</span>
+              <button id="btn-reload-audit" class="btn btn-ghost">↻ Reload</button>
+            </div>
+          </div>
+          <ul id="audit" class="audit" aria-label="Capability activity"></ul>
+        </div>
+      </section>
+
+      <section class="detail detail-empty" id="detail-empty">
+        <div class="empty">
+          <span class="empty-glyph" aria-hidden="true"></span>
+          <p>Select a package to inspect its source, permissions, and activity.</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Tiny in-app prompt modal (no native dialogs). -->
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card">
+        <h3 id="modal-title">Confirm</h3>
+        <p id="modal-msg"></p>
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn btn-ghost">Cancel</button>
+          <button id="modal-ok" class="btn btn-ok">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/pkgmgr-app/app.js"></script>
+</body>
+</html>

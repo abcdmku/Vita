@@ -18,6 +18,7 @@
 import { createApiOrigin, type ApiOrigin, type ApiRequest } from "./api-origin.ts";
 import { parseBearer, type PuterCapabilityRegistry } from "./capability.ts";
 import type { AgentControlPlane } from "./control-plane.ts";
+import type { MetaPlane } from "./pkgmgr/meta-plane.ts";
 import { startHarnessServer, type FaceGate, type HarnessServer } from "./server.ts";
 import type { PuterStore } from "./store.ts";
 
@@ -53,6 +54,9 @@ export interface DualFaceDeps {
   // trust-on-host secret and must not be served to a remote client (the network face gates on the
   // separate owner token). Returns the current token, or undefined before it is minted.
   readonly localSessionToken?: () => string | undefined;
+  // The PACKAGE-MANAGER meta plane (/meta/*). When present, mounted on the shared api_origin and gated on
+  // the `meta` capability (Package Manager only). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
+  readonly metaPlane?: MetaPlane;
 }
 
 export interface DualFaceBackend {
@@ -84,11 +88,13 @@ export function ownerTokenFaceGate(ownerToken: string): FaceGate {
 export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFaceBackend> {
   // ONE handler instance — both listeners route /api/* to it, so there is genuinely one backend. When a
   // control plane is supplied it is mounted on this single api_origin (so /control/* is served on both
-  // faces, gated on the `control` capability exactly like fs/kv).
+  // faces, gated on the `control` capability exactly like fs/kv). The meta plane (/meta/*) is mounted the
+  // same way and gated on `meta` (Package Manager only).
   const apiOrigin: ApiOrigin = createApiOrigin({
     capabilities: deps.capabilities,
     store: deps.store,
     ...(deps.controlPlane !== undefined ? { controlPlane: deps.controlPlane } : {}),
+    ...(deps.metaPlane !== undefined ? { metaPlane: deps.metaPlane } : {}),
   });
   const apiPrefix = deps.apiPrefix ?? "/api";
   const aliases = deps.staticAliases;
