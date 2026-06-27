@@ -520,6 +520,10 @@ function installPuterOverlay() {
   const shellCssFiles = [
     ["ui_kits", "styles.css"],
     ["ui_kits", "desktop", "kit.css"],
+    // The shared design-system token bridge (--vita-* → canonical tokens). shell.html, kiosk-entry.html,
+    // and the deploy console all <link> /ui_kits/vita-app-theme.css; without it on-device the bridge 404s
+    // and the shell + first-party apps fall back to their hardcoded values (the cohesive theme is lost).
+    ["ui_kits", "vita-app-theme.css"],
   ];
   for (const parts of shellCssFiles) {
     const from = join(REPO, ...parts);
