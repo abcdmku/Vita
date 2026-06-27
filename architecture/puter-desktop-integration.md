@@ -37,8 +37,11 @@ REBRANDED to Vita, backed by Vita's REAL storage. Branch: **`feat/vita-puter-des
   rootfs before sealing.
 - **WSL quoting:** do NOT use `wsl -d Ubuntu bash -c "...nested quotes/parens..."` (mangled through
   PowerShell→wsl→bash). Write a `.sh` file and run it, or run commands directly: `wsl -d Ubuntu <cmd> <args>`.
-- **Agents dying with 0-byte transcripts** = session resource exhaustion (17+ node procs). Fresh session
-  fixes it. Do NOT `SendMessage` an agent immediately after spawning it — it corrupts the spawn (killed one).
+- **Agents dying mid-run** = Anthropic API **`529 Overloaded`** (TRANSIENT server-side overload on long heavy
+  agent runs) — NOT local resource exhaustion (an earlier misdiagnosis). They do real work then get killed by
+  the 529. Mitigate: retry when the API is healthier; prefer SHORTER agent runs (one stage each) over one giant
+  multi-stage agent, so a 529 loses less; the main loop survives (only the heavy subagents 529). Do NOT
+  `SendMessage` an agent right after spawning — it corrupts the spawn (killed one separately).
 
 ## Remaining plan (staged — resume here)
 1. **Finish the rebrand:** rebuild the GUI bundle so the source patches land; verify Vita branding shows +
