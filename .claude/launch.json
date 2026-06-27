@@ -6,6 +6,17 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["--yes", "http-server", "ui_kits", "-p", "8137", "-c-1"],
       "port": 8137
+    },
+    {
+      "name": "puter-spike",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--experimental-strip-types",
+        "ui_kits/desktop/runtime/puter/spike/serve-spike.ts",
+        "--port",
+        "8188"
+      ],
+      "port": 8188
     }
   ]
 }

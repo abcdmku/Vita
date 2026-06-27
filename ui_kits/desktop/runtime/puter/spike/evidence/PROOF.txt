@@ -1,0 +1,49 @@
+=== Vita Puter on-device backend — proof evidence ===
+Captured: 2026-06-27T02:18:45Z
+Node: v22.16.0
+
+########## (1) dual-face-harness.ts (persistence/enforcement/dual-face/breadth) ##########
+[dual-face] apps root: C:\Users\Borg\AppData\Local\Temp/vita-puter-dualface-6vG7qz
+[dual-face] local  face: http://127.0.0.1:58738 (trust-on-host)
+[dual-face] network face: http://127.0.0.1:58739 (owner-token)
+[dual-face] PASS network face: no owner token → 401 — status 401
+[dual-face] PASS network face: owner token + app token → whoami owner — status 200, user "owner"
+[dual-face] PASS breadth fs.write (/batch) — status 200
+[dual-face] PASS breadth fs.read (GET /read?file=) — => "alpha"
+[dual-face] PASS breadth fs.stat (/stat, body token) — name "a.txt"
+[dual-face] PASS breadth fs.mkdir (/mkdir, bearer) — status 200
+[dual-face] PASS breadth fs.readdir (/readdir, body token) — entries => notes, sub
+[dual-face] PASS breadth fs.rename (/rename) — status 200
+[dual-face] PASS breadth fs.delete (/delete) — delete 200, stat 404
+[dual-face] PASS breadth kv get/set/del/list (/drivers/call) — keys => k1
+[dual-face] PASS dual-face: local-written file read via network face — => "from-local-face"
+[dual-face] PASS dual-face: network-written file read via local face — write 200, read => "from-network-face"
+[dual-face] PASS enforcement: ungranted fs.write → 403 CAP_DENIED — status 403, code "CAP_DENIED"
+[dual-face] PASS enforcement: granted fs.read passes — status 200
+[dual-face] PASS enforcement: bad token → 401 UNAUTHENTICATED — status 401
+[dual-face] PASS persistence: value survives a full backend restart (re-read from disk) — => "from-local-face"
+[dual-face] PASS persistence: kv value survives restart — k1 => "v1"
+[dual-face] === 17/17 checks passed ===
+[dual-face] SUMMARY {"passed":17,"total":17}
+
+########## (2) headless-spike.ts (regression — original 9 checks) ##########
+[headless-spike] PASS fs.write (/batch) — status 200
+[headless-spike] PASS fs.read (/read) — => "hello from Vita"
+[headless-spike] PASS fs.readdir (/readdir) — entries => spike.txt
+[headless-spike] PASS kv.set+get (/drivers/call) — get => "spike_val"
+[headless-spike] PASS kv.list (/drivers/call) — keys => spike_key
+[headless-spike] PASS auth.whoami (/whoami) — user => "owner"
+[headless-spike] PASS capability gate (bad token → 401) — status 401
+[headless-spike] PASS P2 shared store (native reads web-written file + kv) — fs => "hello from Vita", kv => "spike_val"
+[headless-spike] PASS P2 shared store (HTTP reads native-written file) — http read => "written by native VitaApp"
+[headless-spike] === 9/9 checks passed ===
+
+########## (3) unit/integration tests (puter-ondevice.test.ts) ##########
+# tests 16
+# pass 16
+# fail 0
+
+########## (4) FULL puter test suite ##########
+# tests 58
+# pass 58
+# fail 0

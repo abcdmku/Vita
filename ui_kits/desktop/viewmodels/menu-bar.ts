@@ -855,3 +855,351 @@ function pathToken(value: string): string {
 
   return token;
 }
+
+/* ===========================================================================
+ * Desktop menu view-model
+ *
+ * A higher-level controller that turns the pure menu tree above into something
+ * the desktop shell's index screen can bind and act on with NO ambient I/O:
+ *
+ *   - tracks which top-level menu is open (one at a time),
+ *   - exposes per-menu `open` flags + the flat item list of the open menu (so
+ *     the binder renders a single anchored dropdown),
+ *   - appends the live window list to the Window menu (focus a window),
+ *   - resolves a selected item id to a typed `DesktopMenuEffect` the screen can
+ *     execute against the live desktop (open palette, toggle theme, launch app,
+ *     focus / close / minimize a window, surface About/Help).
+ *
+ * It does not touch the DOM and performs no effects itself: `select` returns the
+ * effect, the screen applies it. Fail-closed: unknown items yield `{ kind: "none" }`.
+ * ======================================================================== */
+
+/** A live desktop window the Window menu can target. Discovered from the DOM by the screen. */
+export interface DesktopMenuWindow {
+  readonly id: string;
+  readonly appId: string;
+  readonly title: string;
+  readonly focused: boolean;
+  readonly minimized: boolean;
+}
+
+/** A typed effect the shell applies after a menu item is chosen. */
+export type DesktopMenuEffect =
+  | { readonly kind: "none" }
+  | { readonly kind: "openPalette" }
+  | { readonly kind: "openSettings" }
+  | { readonly kind: "toggleTheme" }
+  | { readonly kind: "launchApp"; readonly appId: string }
+  | { readonly kind: "focusWindow"; readonly windowId: string }
+  | { readonly kind: "closeFocusedWindow" }
+  | { readonly kind: "minimizeFocusedWindow" }
+  | { readonly kind: "maximizeFocusedWindow" }
+  | { readonly kind: "cycleWindow" }
+  | { readonly kind: "showAbout" }
+  | { readonly kind: "showHelp" };
+
+/** A rendered menu-bar dropdown item (flat). */
+export interface DesktopMenuRenderItem {
+  readonly id: string;
+  readonly label: string;
+  readonly accelerator: string;
+  readonly disabled: boolean;
+  readonly checked: boolean;
+}
+
+export interface DesktopMenuSnapshot {
+  /** The open menu id, or null when the bar is closed. */
+  readonly openMenuId: MenuBarMenuId | null;
+  /** Items of the open menu (empty when closed). */
+  readonly items: readonly DesktopMenuRenderItem[];
+  /** Pixel x-offset for the anchored dropdown (left of the open menu title). */
+  readonly dropdownLeft: number;
+}
+
+export interface DesktopMenuViewModel {
+  snapshot(): DesktopMenuSnapshot;
+  isOpen(menuId: string): boolean;
+  anyOpen(): boolean;
+  /** Open `menuId`; closes any other. */
+  open(menuId: string): DesktopMenuSnapshot;
+  /** Toggle `menuId` (open if closed/other, close if already open). */
+  toggle(menuId: string): DesktopMenuSnapshot;
+  close(): DesktopMenuSnapshot;
+  /** Replace the live window list (Window menu source). */
+  setWindows(windows: readonly DesktopMenuWindow[]): DesktopMenuSnapshot;
+  /** Resolve a chosen item id to a typed effect (does not mutate open state). */
+  resolve(itemId: string): DesktopMenuEffect;
+}
+
+const WINDOW_FOCUS_ITEM_PREFIX = "menubar.window.focus.";
+
+// Approx pixel offset of each top-level title from the menu container's left edge. The dropdown is
+// absolutely positioned within the .v-menubar row; these are deliberately coarse (the titles are
+// short) and only used to anchor the single shared dropdown roughly under the chosen menu.
+const MENU_TITLE_OFFSETS: Readonly<Record<MenuBarMenuId, number>> = Object.freeze({
+  file: 14,
+  edit: 52,
+  view: 92,
+  go: 132,
+  window: 162,
+  help: 224,
+});
+
+/** Curated desktop commands so the static File/Edit/View/Go/Window/Help items are enabled + actionable. */
+export function desktopMenuCommands(): readonly CommandDefinition[] {
+  const noop = (): CommandAction => Object.freeze({ kind: "noop" });
+
+  return Object.freeze([
+    command(MENU_BAR_COMMAND_IDS.newWindow, "New Window", "file", noop),
+    command(MENU_BAR_COMMAND_IDS.open, "Open…", "file", noop),
+    command(MENU_BAR_COMMAND_IDS.settings, "Settings…", "file", noop),
+    command(MENU_BAR_COMMAND_IDS.closeWindow, "Close Window", "file", noop),
+    command(MENU_BAR_COMMAND_IDS.undo, "Undo", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.redo, "Redo", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.cut, "Cut", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.copy, "Copy", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.paste, "Paste", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.selectAll, "Select All", "edit", noop),
+    command(MENU_BAR_COMMAND_IDS.reload, "Reload", "view", noop),
+    command(MENU_BAR_COMMAND_IDS.zoomIn, "Zoom In", "view", noop),
+    command(MENU_BAR_COMMAND_IDS.zoomOut, "Zoom Out", "view", noop),
+    command(MENU_BAR_COMMAND_IDS.viewActualSize, "Actual Size", "view", noop),
+    command(MENU_BAR_COMMAND_IDS.toggleFullscreen, "Toggle Full Screen", "view", noop),
+    command(MENU_BAR_COMMAND_IDS.goBack, "Back", "go", noop),
+    command(MENU_BAR_COMMAND_IDS.goForward, "Forward", "go", noop),
+    command(MENU_BAR_COMMAND_IDS.goHome, "Home", "go", noop),
+    command(MENU_BAR_COMMAND_IDS.minimizeWindow, "Minimize", "window", noop),
+    command(MENU_BAR_COMMAND_IDS.maximizeWindow, "Maximize", "window", noop),
+    command(MENU_BAR_COMMAND_IDS.nextWindow, "Next Window", "window", noop),
+    command(MENU_BAR_COMMAND_IDS.helpSearch, "Search", "help", noop),
+    command(MENU_BAR_COMMAND_IDS.documentation, "Documentation", "help", noop),
+    command(MENU_BAR_COMMAND_IDS.about, "About Vita.ts", "help", noop),
+  ]);
+}
+
+export interface DesktopMenuViewModelInput {
+  readonly windows?: readonly DesktopMenuWindow[];
+}
+
+export function createDesktopMenuViewModel(
+  input: DesktopMenuViewModelInput = Object.freeze({}),
+): DesktopMenuViewModel {
+  return new DesktopMenuController(input);
+}
+
+class DesktopMenuController implements DesktopMenuViewModel {
+  readonly #menu: MenuBarViewModel;
+  #openMenuId: MenuBarMenuId | null = null;
+  #windows: readonly DesktopMenuWindow[];
+
+  constructor(input: DesktopMenuViewModelInput) {
+    this.#menu = createMenuBarViewModel({ commands: desktopMenuCommands() });
+    this.#windows = normalizeWindows(input.windows);
+  }
+
+  snapshot(): DesktopMenuSnapshot {
+    return this.#snapshot();
+  }
+
+  isOpen(menuId: string): boolean {
+    return this.#openMenuId !== null && this.#openMenuId === normalizeMenuId(menuId);
+  }
+
+  anyOpen(): boolean {
+    return this.#openMenuId !== null;
+  }
+
+  open(menuId: string): DesktopMenuSnapshot {
+    this.#openMenuId = normalizeMenuId(menuId);
+
+    return this.#snapshot();
+  }
+
+  toggle(menuId: string): DesktopMenuSnapshot {
+    const normalized = normalizeMenuId(menuId);
+
+    this.#openMenuId = normalized !== null && normalized === this.#openMenuId ? null : normalized;
+
+    return this.#snapshot();
+  }
+
+  close(): DesktopMenuSnapshot {
+    this.#openMenuId = null;
+
+    return this.#snapshot();
+  }
+
+  setWindows(windows: readonly DesktopMenuWindow[]): DesktopMenuSnapshot {
+    this.#windows = normalizeWindows(windows);
+
+    return this.#snapshot();
+  }
+
+  resolve(itemId: string): DesktopMenuEffect {
+    if (typeof itemId !== "string" || itemId.length === 0) return Object.freeze({ kind: "none" });
+
+    if (itemId.startsWith(WINDOW_FOCUS_ITEM_PREFIX)) {
+      const windowId = this.#windowIdForItem(itemId);
+
+      return windowId === null
+        ? Object.freeze({ kind: "none" })
+        : Object.freeze({ kind: "focusWindow", windowId });
+    }
+
+    return effectForItemId(itemId);
+  }
+
+  #snapshot(): DesktopMenuSnapshot {
+    const openMenuId = this.#openMenuId;
+
+    if (openMenuId === null) {
+      return Object.freeze({ dropdownLeft: MENU_TITLE_OFFSETS.file, items: Object.freeze([]), openMenuId: null });
+    }
+
+    const base = this.#menu.snapshot();
+    const baseMenu = findMenu(base.menus, openMenuId);
+    const items: DesktopMenuRenderItem[] = [];
+
+    if (baseMenu !== null) {
+      for (let index = 0; index < baseMenu.items.length; index += 1) {
+        const item = baseMenu.items[index];
+
+        if (item !== undefined) items.push(renderItem(item));
+      }
+    }
+
+    if (openMenuId === MENU_BAR_MENU_IDS.window) {
+      appendWindowItems(items, this.#windows);
+    }
+
+    return Object.freeze({
+      dropdownLeft: MENU_TITLE_OFFSETS[openMenuId],
+      items: Object.freeze(items),
+      openMenuId,
+    });
+  }
+
+  #windowIdForItem(itemId: string): string | null {
+    for (let index = 0; index < this.#windows.length; index += 1) {
+      const window = this.#windows[index];
+
+      if (window !== undefined && windowFocusItemId(window.id) === itemId) return window.id;
+    }
+
+    return null;
+  }
+}
+
+function command(
+  id: string,
+  title: string,
+  category: string,
+  execute: (context: CommandContext) => CommandAction,
+): CommandDefinition {
+  return Object.freeze({ category, execute, id, title });
+}
+
+function renderItem(item: MenuBarItem): DesktopMenuRenderItem {
+  return Object.freeze({
+    accelerator: item.accelerator ?? "",
+    checked: false,
+    disabled: item.disabled,
+    id: item.id,
+    label: item.label,
+  });
+}
+
+function appendWindowItems(
+  items: DesktopMenuRenderItem[],
+  windows: readonly DesktopMenuWindow[],
+): void {
+  if (windows.length === 0) {
+    items.push(Object.freeze({
+      accelerator: "",
+      checked: false,
+      disabled: true,
+      id: "menubar.window.none",
+      label: "No Windows",
+    }));
+
+    return;
+  }
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+
+    if (window === undefined) continue;
+
+    items.push(Object.freeze({
+      accelerator: window.minimized ? "—" : "",
+      checked: window.focused,
+      disabled: false,
+      id: windowFocusItemId(window.id),
+      label: window.title,
+    }));
+  }
+}
+
+function effectForItemId(itemId: string): DesktopMenuEffect {
+  switch (itemId) {
+    case MENU_BAR_ITEM_IDS.fileNewWindow:
+      return Object.freeze({ kind: "openPalette" });
+    case MENU_BAR_ITEM_IDS.fileOpen:
+      return Object.freeze({ kind: "openPalette" });
+    case MENU_BAR_ITEM_IDS.fileSettings:
+      return Object.freeze({ kind: "openSettings" });
+    case MENU_BAR_ITEM_IDS.fileCloseWindow:
+    case MENU_BAR_ITEM_IDS.windowClose:
+      return Object.freeze({ kind: "closeFocusedWindow" });
+    case MENU_BAR_ITEM_IDS.windowMinimize:
+      return Object.freeze({ kind: "minimizeFocusedWindow" });
+    case MENU_BAR_ITEM_IDS.windowMaximize:
+      return Object.freeze({ kind: "maximizeFocusedWindow" });
+    case MENU_BAR_ITEM_IDS.windowNext:
+      return Object.freeze({ kind: "cycleWindow" });
+    case MENU_BAR_ITEM_IDS.helpAbout:
+      return Object.freeze({ kind: "showAbout" });
+    case MENU_BAR_ITEM_IDS.helpDocumentation:
+    case MENU_BAR_ITEM_IDS.helpSearch:
+      return Object.freeze({ kind: "showHelp" });
+    case MENU_BAR_ITEM_IDS.viewToggleFullscreen:
+      return Object.freeze({ kind: "toggleTheme" });
+    default:
+      return Object.freeze({ kind: "none" });
+  }
+}
+
+function windowFocusItemId(windowId: string): string {
+  return `${WINDOW_FOCUS_ITEM_PREFIX}${pathToken(windowId)}`;
+}
+
+function normalizeWindows(windows: readonly DesktopMenuWindow[] | undefined): readonly DesktopMenuWindow[] {
+  if (windows === undefined) return Object.freeze([]);
+
+  const output: DesktopMenuWindow[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < windows.length; index += 1) {
+    const window = windows[index];
+
+    if (
+      window === undefined ||
+      typeof window.id !== "string" ||
+      window.id.length === 0 ||
+      seen.has(window.id)
+    ) {
+      continue;
+    }
+
+    seen.add(window.id);
+    output.push(Object.freeze({
+      appId: typeof window.appId === "string" ? window.appId : "",
+      focused: window.focused === true,
+      id: window.id,
+      minimized: window.minimized === true,
+      title: typeof window.title === "string" && window.title.length > 0 ? window.title : window.id,
+    }));
+  }
+
+  return Object.freeze(output);
+}

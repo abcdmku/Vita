@@ -1,0 +1,62 @@
+<!doctype html>
+<!--
+  Vita kiosk entry page — the minimal page the LOCAL (kiosk) face serves at `/`.
+
+  A stock kiosk browser (cage + chromium --kiosk, see KIOSK.md) loads this from
+  http://127.0.0.1:<localPort>/. It is intentionally minimal: it confirms the local face is reachable,
+  loads the vendored Apache-2.0 puter.js SDK (offline, same-origin), and is the mount point for the
+  desktop launcher that opens Puter apps in sandboxed iframes pointed at the SAME-ORIGIN /api.
+
+  The network (remote) face serves the SAME page, but the backend's owner-token gate (backend.ts)
+  requires the owner token before this page is served to a remote client.
+
+  No custom compositor. All data + capability enforcement is in the backend.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0e0f13; color: #e6e8ee; font: 14px system-ui, sans-serif; }
+    .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
+    .badge { font-size: 13px; color: #8b8f9c; }
+    .ok { color: #4ade80; } .err { color: #f87171; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: 0.5px; }
+    code { background: #1a1c22; padding: 2px 6px; border-radius: 4px; }
+  </style>
+  <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). Same-origin on the local face. -->
+  <script src="/_vendor/puter/v2.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Vita</h1>
+    <div class="badge" id="face">local kiosk face</div>
+    <div class="badge" id="sdk">checking puter.js…</div>
+    <div class="badge" id="api">checking api_origin…</div>
+  </div>
+  <script>
+    (function () {
+      var sdkEl = document.getElementById("sdk");
+      var apiEl = document.getElementById("api");
+
+      var hasSdk = typeof window.puter === "object" && window.puter !== null;
+      sdkEl.textContent = hasSdk ? "puter.js loaded" : "puter.js MISSING";
+      sdkEl.className = "badge " + (hasSdk ? "ok" : "err");
+
+      // Probe the same-origin api_origin liveness (whoami over the trust-on-host local face). On the
+      // kiosk face no owner token is needed; this just confirms the backend is reachable.
+      fetch("/api/whoami", { headers: { "x-vita-probe": "1" } })
+        .then(function (r) {
+          // 401/403 still means the api_origin is up (it answered) — only a network error is a failure.
+          apiEl.textContent = "api_origin reachable (HTTP " + r.status + ")";
+          apiEl.className = "badge ok";
+        })
+        .catch(function (e) {
+          apiEl.textContent = "api_origin unreachable: " + (e && e.message);
+          apiEl.className = "badge err";
+        });
+    })();
+  </script>
+</body>
+</html>
