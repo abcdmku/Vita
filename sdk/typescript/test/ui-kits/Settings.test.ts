@@ -169,7 +169,11 @@ test("settings view-model fails closed without settings read grants", async () =
     assert.fail("expected Settings view-model to fail closed");
   }
 
-  assert.equal(loaded.error.code, "MISSING_CAPABILITY");
+  // Host-boundary denial: a package with no settings grant is refused by the SDK
+  // host boundary (createDesktopHostForPackage) with CAP_DENIED before the view-model's
+  // own MISSING_CAPABILITY self-check runs. Both codes are intentional (see memory
+  // vita-capability-denial-codes); the boundary code is the one observed here.
+  assert.equal(loaded.error.code, "CAP_DENIED");
   assert.deepEqual(fixture.events, ["theme:read"]);
 });
 
@@ -199,7 +203,9 @@ test("settings writes fail closed without write grants and preserve state", asyn
   if (changed.ok) {
     assert.fail("expected write to fail closed");
   }
-  assert.equal(changed.error.code, "MISSING_CAPABILITY");
+  // Write without a settings.write grant is refused at the SDK host boundary (CAP_DENIED)
+  // before the view-model's own MISSING_CAPABILITY self-check; see vita-capability-denial-codes.
+  assert.equal(changed.error.code, "CAP_DENIED");
   assert.equal(changed.state, before);
   assert.equal(loaded.value.state, before);
   assert.deepEqual(fixture.events, []);

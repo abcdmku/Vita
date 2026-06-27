@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readlink } from "node:fs/promises";
 import test from "node:test";
 
 type AgentImagePlanInput = {
@@ -348,7 +348,9 @@ test("the systemd unit content is enabled and binds loopback through ambient cap
   assert.match(unitText, /^WantedBy=multi-user\.target$/mu);
 
   // The enable-at-boot symlink is committed and points at the sibling unit (verbatim, no newline).
-  const wantsTarget = await readFile(wantsSymlinkUrl, "utf8");
+  // Read the symlink's LINK TARGET (readlink) rather than its content: on Linux readFile() follows
+  // the symlink and would return the target unit's body, not the relative target we are asserting.
+  const wantsTarget = await readlink(wantsSymlinkUrl);
   assert.equal(wantsTarget, "../vita-agentd.service");
 });
 

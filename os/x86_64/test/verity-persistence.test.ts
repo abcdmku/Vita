@@ -102,8 +102,13 @@ test("tmpfiles creates apps, owner, and tls under /var/lib/vita on the data part
   // DynamicUser write via the group while the tree is not world-writable.
   assert.match(text, /^d \/var\/lib\/vita 0750 root vita-agent -$/mu);
   assert.match(text, /^d \/var\/lib\/vita\/apps 0770 root vita-agent -$/mu);
-  assert.match(text, /^d \/var\/lib\/vita\/owner 0750 root vita-agent -$/mu);
-  assert.match(text, /^d \/var\/lib\/vita\/tls 0750 root vita-agent -$/mu);
+  // owner/ and tls/ carry the SETGID bit (2750, not 0750): vita-owner-token.service runs as root
+  // and the setgid dir forces the minted token's group = vita-agent at create time, so the platform
+  // DynamicUser (group vita-agent) can read it. Without setgid the token would be root:root and the
+  // server would mint a fresh random owner token every boot (network face never authenticates).
+  // This is the security-critical fix from feat/vita-network-mode — the 2750 is load-bearing.
+  assert.match(text, /^d \/var\/lib\/vita\/owner 2750 root vita-agent -$/mu);
+  assert.match(text, /^d \/var\/lib\/vita\/tls 2750 root vita-agent -$/mu);
 });
 
 test("platform unit binds var.mount for ALL THREE persistence subtrees and reads them from /var", async () => {
