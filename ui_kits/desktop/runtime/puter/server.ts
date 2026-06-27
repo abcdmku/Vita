@@ -192,7 +192,7 @@ async function handleRequest(
       }
     }
 
-    const response = apiOrigin.handle(request);
+    const response = await apiOrigin.handleAsync(request);
 
     res.statusCode = response.status;
     for (const [k, v] of Object.entries(response.headers)) res.setHeader(k, v);

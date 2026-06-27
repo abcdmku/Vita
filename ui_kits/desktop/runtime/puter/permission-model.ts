@@ -89,6 +89,10 @@ interface CapMapping {
 // Distinct scope-per-class keeps fs (user-content) and kv (app-state) independently grantable.
 const CAP_MAP: Readonly<Record<PuterCapability, CapMapping>> = Object.freeze({
   auth: { access: "read-only", class: "configuration" },
+  // The control plane (list/start/stop/status/logs) MUTATES node configuration (it applies capsule
+  // lifecycle ops), so it is a read-write configuration-class capability. Only the management console
+  // is ever granted it.
+  control: { access: "read-write", class: "configuration" },
   "fs.read": { access: "read-only", class: "user-content" },
   "fs.write": { access: "read-write", class: "user-content" },
   "kv.read": { access: "read-only", class: "app-state" },

@@ -25,6 +25,7 @@ import {
   type PuterCapabilityRegistry,
   parseBearer,
 } from "./capability.ts";
+import type { AgentControlPlane } from "./control-plane.ts";
 import {
   type FsEntry,
   type PuterStore,
@@ -60,7 +61,14 @@ export interface ApiResponse {
 }
 
 export interface ApiOrigin {
+  // The SYNCHRONOUS data-plane surface (fs / kv / auth — pure, file-backed). Unchanged contract: every
+  // existing caller + the SDK protocol tests use this. Control-plane paths (/control/*) return a 404
+  // here (they are async — use `handleAsync`).
   handle(request: ApiRequest): ApiResponse;
+  // The FULL surface including the async control plane (/control/*). Awaits agentd / the stub for
+  // /control/*, and delegates everything else to the synchronous `handle`. The node:http server adapter
+  // calls this so both planes are served on one origin.
+  handleAsync(request: ApiRequest): Promise<ApiResponse>;
 }
 
 export interface ApiOriginDeps {
@@ -70,6 +78,10 @@ export interface ApiOriginDeps {
   // spike the harness is same-origin, but the SDK sets Origin: https://puter.work on app requests, so
   // we reflect a permissive ACAO + allow the bearer header. Tighten on-device.
   readonly allowOrigin?: string;
+  // The CONTROL-PLANE bridge the deploy/management console talks to (/control/*). Optional: when absent
+  // the api_origin is data-plane-only (the original spike surface) and /control/* answers 404. When
+  // present, /control/* is mounted and gated on the `control` capability. See control-plane.ts.
+  readonly controlPlane?: AgentControlPlane;
 }
 
 const TEXT = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -77,6 +89,7 @@ const JSON_CT = "application/json";
 
 export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
   const { capabilities, store } = deps;
+  const controlPlane = deps.controlPlane;
   const allowOrigin = deps.allowOrigin ?? "*";
 
   function baseHeaders(contentType: string): Record<string, string> {
@@ -453,36 +466,131 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     return json(200, { signedBatchUnavailable: true });
   }
 
+  // ----- control-plane handlers (/control/*) — the deploy/management console surface -----
+  //
+  // Every call is gated on the `control` capability (only the console app is granted it). The bridge
+  // (control-plane.ts) projects agentd's capsule registry + execute status + lifecycle + logs into a
+  // browser-friendly shape. These are async (the real agentd client awaits the socket/host-proxy).
+
+  // Match /control/apps/:id/(status|start|stop|logs). Returns the id + leaf, or undefined.
+  function matchAppRoute(path: string): { id: string; leaf: string } | undefined {
+    const m = /^\/control\/apps\/([^/]+)(?:\/([^/]+))?$/u.exec(path);
+
+    if (m === null) return undefined;
+
+    return { id: decodeURIComponent(m[1] ?? ""), leaf: m[2] ?? "" };
+  }
+
+  async function handleControl(req: ApiRequest, method: string, path: string): Promise<ApiResponse> {
+    if (controlPlane === undefined) {
+      return errorResponse(404, "control_plane_unavailable", "this api_origin has no control plane mounted");
+    }
+
+    const gated = gate(req, "control");
+
+    if (!gated.ok) return gated.response;
+
+    try {
+      // GET /control/status — node STATE / VITA-EVAL projection (header summary).
+      if (method === "GET" && path === "/control/status") {
+        return json(200, await controlPlane.status());
+      }
+
+      // GET /control/apps — list installed/running capsules.
+      if (method === "GET" && path === "/control/apps") {
+        return json(200, { apps: await controlPlane.listApps() });
+      }
+
+      const route = matchAppRoute(path);
+
+      if (route !== undefined) {
+        // GET /control/apps/:id — one app's view.
+        if (method === "GET" && route.leaf === "") {
+          const app = await controlPlane.getApp(route.id);
+
+          if (app === undefined) return errorResponse(404, "no_such_app", `no such app: ${route.id}`);
+
+          return json(200, app);
+        }
+
+        // GET /control/apps/:id/logs?limit=N — capsule journal tail.
+        if (method === "GET" && route.leaf === "logs") {
+          const limit = clampLimit(req.query["limit"]);
+
+          return json(200, { id: route.id, lines: await controlPlane.logs(route.id, limit) });
+        }
+
+        // POST /control/apps/:id/start — start the capsule (capsule.execute apply).
+        if (method === "POST" && route.leaf === "start") {
+          return json(200, await controlPlane.start(route.id));
+        }
+
+        // POST /control/apps/:id/stop — stop the capsule (capsule.lifecycle stop apply).
+        if (method === "POST" && route.leaf === "stop") {
+          return json(200, await controlPlane.stop(route.id));
+        }
+      }
+
+      return errorResponse(404, "endpoint_not_found", `no such control endpoint: ${method} ${path}`);
+    } catch (err) {
+      return errorResponse(502, "control_plane_error", err instanceof Error ? err.message : "control plane error");
+    }
+  }
+
+  function isControlPath(path: string): boolean {
+    return path === "/control/status" || path === "/control/apps" || path.startsWith("/control/apps/");
+  }
+
+  function handleSync(request: ApiRequest): ApiResponse {
+    const method = request.method.toUpperCase();
+
+    if (method === "OPTIONS") return raw(204, new Uint8Array(0), "text/plain");
+
+    const path = request.path.split("?")[0] ?? request.path;
+
+    try {
+      if (method === "POST" && path === "/batch") return handleBatch(request);
+      if ((method === "POST" || method === "GET") && path === "/read") return handleRead(request);
+      if (method === "POST" && path === "/readdir") return handleReaddir(request);
+      if (method === "POST" && path === "/stat") return handleStat(request);
+      if (method === "POST" && path === "/mkdir") return handleMkdir(request);
+      if (method === "POST" && path === "/delete") return handleDelete(request);
+      if (method === "POST" && path === "/rename") return handleRename(request);
+      if (method === "POST" && path === "/move") return handleMove(request);
+      if (method === "POST" && path === "/drivers/call") return handleDriversCall(request);
+      // Steer the SDK's cloud "signed batch" upload onto the local /batch fallback (see the handler).
+      if (method === "POST" && path === "/fs/startBatchWrite") return handleSignedBatchUnavailable(request);
+      if (path === "/df") return handleDf(request);
+      if (path === "/whoami") return handleWhoami(request);
+      if (path === "/rao") return handleRao(request);
+
+      return errorResponse(404, "endpoint_not_found", `no such endpoint: ${method} ${path}`);
+    } catch (err) {
+      return mapStoreError(err);
+    }
+  }
+
   return Object.freeze({
-    handle(request: ApiRequest): ApiResponse {
+    handle: handleSync,
+    async handleAsync(request: ApiRequest): Promise<ApiResponse> {
       const method = request.method.toUpperCase();
-
-      if (method === "OPTIONS") return raw(204, new Uint8Array(0), "text/plain");
-
       const path = request.path.split("?")[0] ?? request.path;
 
-      try {
-        if (method === "POST" && path === "/batch") return handleBatch(request);
-        if ((method === "POST" || method === "GET") && path === "/read") return handleRead(request);
-        if (method === "POST" && path === "/readdir") return handleReaddir(request);
-        if (method === "POST" && path === "/stat") return handleStat(request);
-        if (method === "POST" && path === "/mkdir") return handleMkdir(request);
-        if (method === "POST" && path === "/delete") return handleDelete(request);
-        if (method === "POST" && path === "/rename") return handleRename(request);
-        if (method === "POST" && path === "/move") return handleMove(request);
-        if (method === "POST" && path === "/drivers/call") return handleDriversCall(request);
-        // Steer the SDK's cloud "signed batch" upload onto the local /batch fallback (see the handler).
-        if (method === "POST" && path === "/fs/startBatchWrite") return handleSignedBatchUnavailable(request);
-        if (path === "/df") return handleDf(request);
-        if (path === "/whoami") return handleWhoami(request);
-        if (path === "/rao") return handleRao(request);
+      // Control plane is async; everything else delegates to the synchronous data-plane dispatch.
+      if (method !== "OPTIONS" && isControlPath(path)) return handleControl(request, method, path);
 
-        return errorResponse(404, "endpoint_not_found", `no such endpoint: ${method} ${path}`);
-      } catch (err) {
-        return mapStoreError(err);
-      }
+      return handleSync(request);
     },
   });
+}
+
+// Clamp a `limit` query param to a sane log-tail size (default 200, max 1000).
+function clampLimit(raw: string | undefined): number {
+  const n = Number(raw);
+
+  if (!Number.isFinite(n) || n <= 0) return 200;
+
+  return Math.min(1000, Math.floor(n));
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -13,6 +13,8 @@
     "backend.ts",
     "fs-store.ts",
     "permission-model.ts",
+    "api-origin.ts",
+    "control-plane.ts",
     "server/index.ts",
     "server/service.ts",
     "server/tls.ts",
