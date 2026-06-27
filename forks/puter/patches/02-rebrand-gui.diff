@@ -1,0 +1,102 @@
+diff --git a/src/gui/src/UI/Dashboard/UIDashboard.js b/src/gui/src/UI/Dashboard/UIDashboard.js
+index 74de988..376c1ca 100644
+--- a/src/gui/src/UI/Dashboard/UIDashboard.js
++++ b/src/gui/src/UI/Dashboard/UIDashboard.js
+@@ -82,7 +82,7 @@ async function UIDashboard (options) {
+         h += '<div class="dashboard-sidebar hide-scrollbar">';
+             // Sidebar header with logo and collapse toggle
+             h += '<div class="dashboard-sidebar-header">';
+-                h += `<div class="dashboard-sidebar-logo"><img class="dashboard-sidebar-logo-light" src="${window.icons['logo.svg']}" alt="Puter"><img class="dashboard-sidebar-logo-dark" src="${window.icons['logo-white.svg']}" alt="Puter"><span>Puter</span></div>`;
++                h += `<div class="dashboard-sidebar-logo"><img class="dashboard-sidebar-logo-light" src="${window.icons['logo.svg']}" alt="Vita"><img class="dashboard-sidebar-logo-dark" src="${window.icons['logo-white.svg']}" alt="Vita"><span>Vita</span></div>`;
+                 h += '<button class="dashboard-sidebar-collapse-toggle">';
+                     h += `<img class="sidebar-toggle-close" src="${window.icons['sidebar-close.svg']}">`;
+                     h += `<img class="sidebar-toggle-open" src="${window.icons['sidebar-open.svg']}">`;
+diff --git a/src/gui/src/UI/UIDesktop.js b/src/gui/src/UI/UIDesktop.js
+index d463164..bc27a65 100644
+--- a/src/gui/src/UI/UIDesktop.js
++++ b/src/gui/src/UI/UIDesktop.js
+@@ -1208,7 +1208,7 @@ async function UIDesktop (options) {
+ 
+     ht += `<div class="toolbar hide-scrollbar ${class_name}" style="${style}">`;
+     // logo
+-    ht += `<div class="toolbar-btn toolbar-puter-logo" title="Puter" style="margin-left: 10px;"><img src="${window.icons['logo-white.svg']}" draggable="false" style="display:block; width:17px; height:17px"></div>`;
++    ht += `<div class="toolbar-btn toolbar-puter-logo" title="Vita" style="margin-left: 10px;"><img src="${window.icons['logo-white.svg']}" draggable="false" style="display:block; width:17px; height:17px"></div>`;
+ 
+     // spacer to push items to the right
+     ht += '<div class="toolbar-spacer"></div>';
+diff --git a/src/gui/src/definitions.js b/src/gui/src/definitions.js
+index 65e653a..b80a653 100644
+--- a/src/gui/src/definitions.js
++++ b/src/gui/src/definitions.js
+@@ -125,7 +125,7 @@ export class InitProcess extends Process {
+     }
+ 
+     _construct () {
+-        this.name = 'Puter';
++        this.name = 'Vita';
+ 
+         this.type_ = 'init'; // thanks minify
+ 
+diff --git a/src/gui/src/globals.js b/src/gui/src/globals.js
+index be493dc..e5d39db 100644
+--- a/src/gui/src/globals.js
++++ b/src/gui/src/globals.js
+@@ -94,7 +94,7 @@ if ( window.user !== undefined && window.user !== null ) {
+     window.public_path = `/${ window.user.username }/Public`;
+     window.home_path = `/${ window.user.username}`;
+ }
+-window.root_dirname = 'Puter';
++window.root_dirname = 'Vita';
+ 
+ // user preferences, persisted across sessions, cached in localStorage
+ try {
+diff --git a/src/gui/src/i18n/translations/en.js b/src/gui/src/i18n/translations/en.js
+index 6d33007..d759206 100644
+--- a/src/gui/src/i18n/translations/en.js
++++ b/src/gui/src/i18n/translations/en.js
+@@ -520,8 +520,8 @@ const en = {
+ 
+         // Welcome Window
+         'welcome': 'Welcome',
+-        'your_personal_internet_computer': 'To your personal internet computer',
+-        'welcome_title': 'Welcome to your Personal Internet Computer',
++        'your_personal_internet_computer': 'To your Vita desktop',
++        'welcome_title': 'Welcome to Vita',
+         'welcome_description': 'Store files, play games, find awesome apps, and much more! All in one place, accessible from anywhere at any time.',
+         'welcome_get_started': 'Get Started',
+         'welcome_terms': 'Terms',
+diff --git a/src/gui/src/initgui.js b/src/gui/src/initgui.js
+index db867ed..eec33c6 100644
+--- a/src/gui/src/initgui.js
++++ b/src/gui/src/initgui.js
+@@ -205,7 +205,7 @@ window.showTurnstileChallenge = function (options) {
+                 <div class="modal-content">
+                     <div class="modal-header" style="margin-bottom: 20px;">
+                         <img src="${window.icons['logo-white.svg']}" class="captcha-logo">
+-                        <h2 class="captcha-title">Welcome to Puter!</h2>
++                        <h2 class="captcha-title">Welcome to Vita!</h2>
+                     </div>
+                     
+                     <div class="captcha-container">
+@@ -1973,7 +1973,7 @@ window.initgui = async function (options) {
+                 update_title_based_on_uploads();
+             }
+         } else if ( window.active_uploads ) {
+-            document.title = window.doc_title_before_blur ?? 'Puter';
++            document.title = window.doc_title_before_blur ?? 'Vita';
+         }
+     });
+ 
+diff --git a/src/gui/src/manifest.json b/src/gui/src/manifest.json
+index c73a9d6..b1299a3 100644
+--- a/src/gui/src/manifest.json
++++ b/src/gui/src/manifest.json
+@@ -1,6 +1,6 @@
+ {
+-    "name": "Puter",
+-    "short_name": "Puter",
++    "name": "Vita",
++    "short_name": "Vita",
+     "display": "standalone",
+     "start_url": "/",
+     "id": "puter",

@@ -1,0 +1,26 @@
+diff --git a/src/backend/controllers/static/StaticPagesController.ts b/src/backend/controllers/static/StaticPagesController.ts
+index a53e84d..fa3be16 100644
+--- a/src/backend/controllers/static/StaticPagesController.ts
++++ b/src/backend/controllers/static/StaticPagesController.ts
+@@ -53,7 +53,7 @@ export class StaticPagesController extends PuterController {
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+-<title>${title} — Puter</title>
++<title>${title} — Vita</title>
+ <style>
+   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+   body {
+diff --git a/src/backend/services/homepage/PuterHomepageService.ts b/src/backend/services/homepage/PuterHomepageService.ts
+index 8ee836f..683bc4c 100644
+--- a/src/backend/services/homepage/PuterHomepageService.ts
++++ b/src/backend/services/homepage/PuterHomepageService.ts
+@@ -302,7 +302,7 @@ export class PuterHomepageService extends PuterService {
+     <meta name="theme-color" content="#ffffff">
+     ${bundled ? `<link rel="stylesheet" href="${guiCss}">` : ''}
+ 
+-    <link rel="preload" as="image" href="https://puter-assets.b-cdn.net/wallpaper.webp">
++    <!-- [VITA PATCH] offline: external wallpaper preload removed -->
+ 
+     <script>
+         if ( ! window.service_script ) {

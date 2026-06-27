@@ -1,0 +1,23 @@
+diff --git a/src/gui/src/index.js b/src/gui/src/index.js
+index c6290f6..49125db 100644
+--- a/src/gui/src/index.js
++++ b/src/gui/src/index.js
+@@ -75,13 +75,15 @@ window.gui = async (options) => {
+     else if ( window.gui_env === 'prod' ) {
+         // This stuff is now handled in the backend in PuterHomepageService
+ 
+-        await window.loadScript('https://js.puter.com/v2/');
++        await window.loadScript('/puter.js/v2/'); // [VITA PATCH] serve puter.js locally (offline)
+         // Load the minified bundles
+         // await window.loadCSS('/dist/bundle.min.css');
+     }
+ 
+-    // Load Cloudflare Turnstile script
+-    await window.loadScript('https://challenges.cloudflare.com/turnstile/v0/api.js', { defer: true });
++    // [VITA PATCH] Turnstile only needed for signup/temp-user; make non-blocking + offline-safe
++    if ( window.gui_params?.turnstileSiteKey ) {
++        try { await window.loadScript('https://challenges.cloudflare.com/turnstile/v0/api.js', { defer: true }); } catch (e) { console.warn('turnstile load skipped (offline)', e); }
++    }
+ 
+     // 🚀 Launch the GUI 🚀
+     window.initgui(options);

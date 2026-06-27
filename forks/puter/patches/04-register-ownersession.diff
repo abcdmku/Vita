@@ -1,0 +1,34 @@
+diff --git a/src/backend/services/index.ts b/src/backend/services/index.ts
+index 5545e4a..5a985d0 100644
+--- a/src/backend/services/index.ts
++++ b/src/backend/services/index.ts
+@@ -25,7 +25,8 @@ import { AuthService } from './auth/AuthService';
+ import { BroadcastService } from './broadcast/BroadcastService';
+ import { NotificationService } from './notification/NotificationService';
+ import { AppIconService } from './appIcon/AppIconService';
+-import { DefaultUserService } from './selfhosted/DefaultUserService';
++
++import { OwnerSessionService } from './selfhosted/OwnerSessionService';
+ import { PuterHomepageService } from './homepage/PuterHomepageService';
+ import { OIDCService } from './auth/OIDCService';
+ import { TokenService } from './auth/TokenService';
+@@ -61,7 +62,8 @@ declare module './types' {
+         broadcast: BroadcastService;
+         oidc: OIDCService;
+         appIcon: AppIconService;
+-        defaultUser: DefaultUserService;
++
++        ownerSession: OwnerSessionService;
+         homepage: PuterHomepageService;
+         health: ServerHealthService;
+     }
+@@ -95,7 +97,8 @@ export const puterServices = {
+     broadcast: BroadcastService,
+     oidc: OIDCService,
+     appIcon: AppIconService,
+-    defaultUser: DefaultUserService,
++
++    ownerSession: OwnerSessionService,
+     homepage: PuterHomepageService,
+     // Health comes after socket so its default `socket-initialized`
+     // check can reference the peer.
