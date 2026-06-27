@@ -46,9 +46,16 @@ RequiresMountsFor=/var/lib/vita/apps /var/lib/vita/owner /var/lib/vita/tls
 # needs --allow-net scoped to the bind addresses and --allow-read of the served static dir + TLS material.
 Type=notify
 NotifyAccess=all
+# The server ALSO dials agentd over its unix socket for BOTH the host-proxy control plane (the deploy
+# Console's /control/*) and capsule-exec (the on-device Terminal): /run/vita-agent/agentd.sock (ADR-0008,
+# group vita-agent — granted at the OS level by SupplementaryGroups=vita-agent + RestrictAddressFamilies=
+# AF_UNIX below). Deno ALSO sandboxes filesystem access to the socket path, so /run/vita-agent must be in
+# BOTH --allow-read AND --allow-write (a unix-socket connect() needs read+write on the path). Without it
+# Deno throws "Requires read access to /run/vita-agent/agentd.sock, run again with the --allow-read flag"
+# and the Terminal + Console control plane fail closed.
 ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
-  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita \
-  --allow-write=/var/lib/vita/apps,/run/vita \
+  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita,/run/vita-agent \
+  --allow-write=/var/lib/vita/apps,/run/vita,/run/vita-agent \
   --allow-net \
   --allow-run=systemd-notify \
   --allow-env \
