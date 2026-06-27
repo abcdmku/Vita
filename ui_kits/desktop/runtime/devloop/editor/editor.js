@@ -214,6 +214,9 @@ async function boot() {
     try { await puter.fs.mkdir(HOME, { createMissingParents: true }); } catch (_) {}
     els.app.setAttribute("data-state", "ready");
     setStatus("Ready", "ok");
+    // Explicitly remove the boot overlay from layout once ready (belt-and-suspenders over the CSS fade) so
+    // its spinner can never flash back or sit (invisible) atop the editor.
+    try { const b = document.getElementById("boot"); if (b) { b.hidden = true; b.style.display = "none"; } } catch (_) {}
     // Expose a readiness flag + a thin handle for the verification harness.
     window.__vitaCodeReady = true;
     window.__vitaCode = {

@@ -172,8 +172,11 @@ code { background: var(--bg-3); padding: 1px 5px; border-radius: 4px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 /* Boot overlay */
-.boot { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 100; transition: opacity .25s; }
-.app[data-state="ready"] .boot { opacity: 0; pointer-events: none; }
+.boot { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); z-index: 100; transition: opacity .25s, visibility 0s linear .25s; }
+/* When ready, fade out AND remove from the compositing/visibility tree so the spinner animation stops
+   and the overlay can never flash back or swallow a click. visibility flips after the opacity fade. */
+.app[data-state="ready"] .boot { opacity: 0; pointer-events: none; visibility: hidden; }
+.app[data-state="ready"] .boot-spinner { animation: none; }
 .boot-inner { display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .boot-spinner { width: 30px; height: 30px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
