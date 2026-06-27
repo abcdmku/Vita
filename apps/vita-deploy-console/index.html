@@ -19,6 +19,12 @@
                                               agentd), authenticated with the SAME owner bearer token the
                                               SDK carries (read from puter.authToken)
     - ui plane    (puter.ui.*)             → postMessage to the Vita shell (window title, alerts)
+
+  CONNECTION LIFECYCLE (the whole UI is driven by one state machine):
+    connecting → connected  (control plane reachable: real data, start/stop live)
+    connecting → offline     (control plane NOT reachable — browser/dev context, no agentd: a clean,
+                              styled "running off-device" state, NEVER an infinite spinner)
+    A bounded PROBE timeout guarantees we always leave `connecting` (no forever spin).
 -->
 <html lang="en">
   <head>
@@ -56,6 +62,7 @@
         background: var(--c-bg);
         color: var(--c-text);
         font: 13px/1.45 var(--c-font);
+        -webkit-font-smoothing: antialiased;
       }
 
       .console {
@@ -93,25 +100,42 @@
         background: var(--c-sunken);
         font-size: 12px;
         color: var(--c-text-soft);
+        transition: border-color 0.2s, color 0.2s;
       }
-      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-muted); }
+      .node-pill[data-conn="offline"] { border-color: color-mix(in srgb, var(--c-warn) 45%, var(--c-border)); color: var(--c-warn); }
+      .node-pill[data-conn="connected"] { border-color: color-mix(in srgb, var(--c-ok) 40%, var(--c-border)); }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-muted); flex: none; }
       .dot.ok { background: var(--c-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-ok) 22%, transparent); }
+      .dot.warn { background: var(--c-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-warn) 22%, transparent); }
       .dot.bad { background: var(--c-err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-err) 22%, transparent); }
+      /* a soft pulse while we're still probing the control plane */
+      .dot.pulsing { animation: dot-pulse 1.1s ease-in-out infinite; }
+      @keyframes dot-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 
       button.btn {
         font: inherit; cursor: pointer;
+        display: inline-flex; align-items: center; gap: 7px;
         border: 1px solid var(--c-border);
         background: var(--c-sunken);
         color: var(--c-text-soft);
         border-radius: var(--c-radius-sm);
         padding: 7px 12px;
-        transition: background 0.12s, border-color 0.12s, color 0.12s;
+        transition: background 0.12s, border-color 0.12s, color 0.12s, opacity 0.12s;
       }
-      button.btn:hover { background: var(--c-panel); border-color: var(--c-accent); color: var(--c-text); }
-      button.btn:disabled { opacity: 0.45; cursor: default; }
+      button.btn:hover:not(:disabled) { background: var(--c-panel); border-color: var(--c-accent); color: var(--c-text); }
+      button.btn:disabled { opacity: 0.4; cursor: default; }
       button.btn.primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; }
-      button.btn.primary:hover { background: color-mix(in srgb, var(--c-accent) 88%, #fff); }
-      button.btn.danger:hover { border-color: var(--c-err); color: var(--c-err); }
+      button.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--c-accent) 88%, #fff); border-color: var(--c-accent); color: #fff; }
+      button.btn.danger:hover:not(:disabled) { border-color: var(--c-err); color: var(--c-err); }
+      /* a button that's mid-action shows a spinner + locks out */
+      button.btn.busy { pointer-events: none; opacity: 0.7; }
+      button.btn.busy .spin { display: inline-block; }
+      .spin {
+        display: none; width: 11px; height: 11px; flex: none;
+        border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
 
       /* ---- stat strip ---- */
       .stats {
@@ -122,14 +146,29 @@
         border-bottom: 1px solid var(--c-hairline);
       }
       .stat {
+        position: relative;
         padding: 11px 14px;
         border: 1px solid var(--c-hairline);
         border-radius: var(--c-radius);
         background: var(--c-panel);
+        overflow: hidden;
       }
       .stat .k { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-muted); }
-      .stat .v { font-size: 20px; font-weight: 700; margin-top: 4px; }
+      .stat .v { font-size: 20px; font-weight: 700; margin-top: 4px; min-height: 24px; }
       .stat .v small { font-size: 12px; font-weight: 500; color: var(--c-muted); }
+      .stat .v .accent { color: var(--c-accent); }
+      .stat .v .ok { color: var(--c-ok); }
+
+      /* skeleton shimmer for the connecting state — no raw "—" ever shown */
+      .skel {
+        display: inline-block; height: 15px; width: 56px; border-radius: 5px; vertical-align: middle;
+        background: linear-gradient(90deg, var(--c-sunken) 25%, var(--c-border) 50%, var(--c-sunken) 75%);
+        background-size: 200% 100%;
+        animation: shimmer 1.3s ease-in-out infinite;
+      }
+      .skel.sm { width: 40px; }
+      .skel.lg { width: 92px; }
+      @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
       /* ---- body: list + detail ---- */
       .body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); min-height: 0; }
@@ -165,20 +204,30 @@
       .mono { font-family: var(--c-mono); }
       .muted { color: var(--c-muted); }
 
+      /* skeleton rows while loading the list */
+      .skel-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 1.6fr) 96px 84px 100px 132px;
+        align-items: center; gap: 8px; padding: 0 18px;
+        min-height: 52px; border-bottom: 1px solid var(--c-hairline);
+      }
+
       .badge {
         display: inline-flex; align-items: center; gap: 6px;
         padding: 3px 9px; border-radius: 999px;
         font-size: 11px; font-weight: 600;
         border: 1px solid var(--c-border); background: var(--c-sunken); color: var(--c-text-soft);
+        white-space: nowrap;
       }
-      .badge .d { width: 7px; height: 7px; border-radius: 50%; background: var(--c-muted); }
+      .badge .d { width: 7px; height: 7px; border-radius: 50%; background: var(--c-muted); flex: none; }
       .badge.running { color: var(--c-ok); border-color: color-mix(in srgb, var(--c-ok) 40%, var(--c-border)); }
-      .badge.running .d { background: var(--c-ok); }
+      .badge.running .d { background: var(--c-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-ok) 18%, transparent); }
       .badge.stopped { color: var(--c-muted); }
       .badge.disabled { color: var(--c-warn); border-color: color-mix(in srgb, var(--c-warn) 40%, var(--c-border)); }
       .badge.disabled .d { background: var(--c-warn); }
 
-      .health { font-size: 11px; font-weight: 600; }
+      .health { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; }
+      .health::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
       .health.ok { color: var(--c-ok); }
       .health.unhealthy { color: var(--c-err); }
       .health.unknown { color: var(--c-muted); }
@@ -189,10 +238,12 @@
       /* ---- detail pane ---- */
       .detail { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
       .detail-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--c-hairline); }
-      .detail-head h2 { margin: 0; font-size: 16px; }
-      .detail-head .meta { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--c-muted); }
-      .detail-head .meta b { color: var(--c-text-soft); font-weight: 600; }
-      .detail-actions { display: flex; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--c-hairline); }
+      .detail-head h2 { margin: 0; font-size: 16px; word-break: break-all; }
+      .detail-head .meta { margin-top: 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; font-size: 12px; color: var(--c-muted); }
+      .detail-head .meta > span { display: flex; gap: 7px; min-width: 0; }
+      .detail-head .meta b { color: var(--c-muted); font-weight: 600; flex: none; }
+      .detail-head .meta .val { color: var(--c-text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .detail-actions { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--c-hairline); }
 
       .logs-wrap { display: flex; flex-direction: column; min-height: 0; flex: 1; }
       .logs-head { display: flex; align-items: center; gap: 10px; padding: 10px 18px; }
@@ -209,25 +260,55 @@
       .logs .l.info .m { color: var(--c-text-soft); }
       .logs .l.warn .m { color: var(--c-warn); }
       .logs .l.error .m { color: var(--c-err); }
+      .logs .logs-state { color: var(--c-muted); display: flex; align-items: center; gap: 8px; }
+      .logs .logs-state .spin { display: inline-block; color: var(--c-muted); }
 
-      .empty { padding: 40px 18px; text-align: center; color: var(--c-muted); }
+      /* ---- empty / state panels ---- */
+      .empty { padding: 40px 22px; text-align: center; color: var(--c-muted); }
+      .empty .em-title { color: var(--c-text-soft); font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+      .empty .em-sub { font-size: 12px; line-height: 1.5; max-width: 320px; margin: 0 auto; }
+
+      /* the big "running off-device" / error takeover, shown in place of the list+detail body */
+      .state-panel {
+        grid-column: 1 / -1;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; padding: 48px 28px; text-align: center;
+      }
+      .state-panel .ic {
+        width: 56px; height: 56px; border-radius: 16px;
+        display: grid; place-items: center;
+        border: 1px solid var(--c-border); background: var(--c-panel);
+      }
+      .state-panel .ic svg { width: 28px; height: 28px; }
+      .state-panel.offline .ic { border-color: color-mix(in srgb, var(--c-warn) 45%, var(--c-border)); color: var(--c-warn); }
+      .state-panel.error .ic { border-color: color-mix(in srgb, var(--c-err) 45%, var(--c-border)); color: var(--c-err); }
+      .state-panel h2 { margin: 0; font-size: 16px; font-weight: 700; color: var(--c-text); }
+      .state-panel p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--c-text-soft); max-width: 430px; }
+      .state-panel .hint { font-size: 12px; color: var(--c-muted); max-width: 430px; }
+      .state-panel .acts { margin-top: 6px; display: flex; gap: 10px; }
 
       .toast {
-        position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+        position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(8px);
+        display: flex; align-items: center; gap: 9px;
         background: var(--c-panel); border: 1px solid var(--c-border); border-radius: var(--c-radius);
         padding: 10px 16px; font-size: 13px; color: var(--c-text);
         box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         opacity: 0; pointer-events: none; transition: opacity 0.18s, transform 0.18s;
+        z-index: 50;
       }
+      .toast::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c-ok); flex: none; }
       .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
-      .toast.err { border-color: var(--c-err); }
+      .toast.err::before { background: var(--c-err); }
+      .toast.err { border-color: color-mix(in srgb, var(--c-err) 55%, var(--c-border)); }
 
       @media (max-width: 880px) {
         .stats { grid-template-columns: repeat(2, 1fr); }
+        .detail-head .meta { grid-template-columns: 1fr; }
         .body { grid-template-columns: 1fr; }
         .detail { display: none; }
         .body.detail-open .list-pane { display: none; }
         .body.detail-open .detail { display: flex; }
+        .body.detail-open .state-panel { display: flex; }
       }
     </style>
   </head>
@@ -241,50 +322,57 @@
             <div class="sub">Deploy &amp; manage the node</div>
           </div>
         </div>
-        <span class="node-pill" id="node-pill" title="agentd / control-plane reachability">
-          <span class="dot" id="node-dot"></span>
-          <span id="node-label">connecting…</span>
+        <span class="node-pill" id="node-pill" data-conn="connecting" title="agentd / control-plane reachability">
+          <span class="dot pulsing" id="node-dot"></span>
+          <span id="node-label">Connecting…</span>
         </span>
-        <button class="btn" id="refresh-btn" type="button">Refresh</button>
+        <button class="btn" id="refresh-btn" type="button" title="Refresh node state">
+          <span class="spin"></span><span>Refresh</span>
+        </button>
       </header>
 
       <section class="stats" aria-label="Node summary">
-        <div class="stat"><div class="k">Installed</div><div class="v" id="stat-installed">—</div></div>
-        <div class="stat"><div class="k">Running</div><div class="v" id="stat-running">—</div></div>
-        <div class="stat"><div class="k">Mode</div><div class="v" id="stat-mode" style="font-size:15px">—</div></div>
-        <div class="stat"><div class="k">VITA-EVAL</div><div class="v" id="stat-eval" style="font-size:12px;font-weight:500;color:var(--c-text-soft)">—</div></div>
+        <div class="stat"><div class="k">Installed</div><div class="v" id="stat-installed"><span class="skel"></span></div></div>
+        <div class="stat"><div class="k">Running</div><div class="v" id="stat-running"><span class="skel"></span></div></div>
+        <div class="stat"><div class="k">Mode</div><div class="v" id="stat-mode" style="font-size:15px"><span class="skel lg"></span></div></div>
+        <div class="stat"><div class="k">VITA-EVAL</div><div class="v" id="stat-eval" style="font-size:12px;font-weight:500;color:var(--c-text-soft)"><span class="skel lg"></span></div></div>
       </section>
 
       <div class="body" id="body">
-        <div class="list-pane">
+        <div class="list-pane" id="list-pane">
           <div class="list-head" aria-hidden="true">
             <span>App / Capsule</span><span>Runtime</span><span>Health</span><span>Status</span><span style="text-align:right">Actions</span>
           </div>
-          <div id="app-list"><div class="empty">Loading apps…</div></div>
+          <div id="app-list"></div>
         </div>
 
         <aside class="detail" id="detail">
-          <div class="empty" id="detail-empty">Select an app to view status and logs.</div>
+          <div class="empty" id="detail-empty">
+            <div class="em-title">No capsule selected</div>
+            <div class="em-sub">Select an app on the left to view its unit, integrity, and live logs.</div>
+          </div>
           <div id="detail-body" hidden>
             <div class="detail-head">
-              <h2 id="d-name">—</h2>
+              <h2 id="d-name"></h2>
               <div class="meta">
-                <span><b>Version</b> <span id="d-version" class="mono">—</span></span>
-                <span><b>Runtime</b> <span id="d-runtime">—</span></span>
-                <span><b>Unit</b> <span id="d-unit" class="mono">—</span></span>
-                <span><b>UID</b> <span id="d-uid" class="mono">—</span></span>
-                <span><b>Integrity</b> <span id="d-integrity" class="mono">—</span></span>
+                <span><b>Version</b> <span id="d-version" class="val mono"></span></span>
+                <span><b>Runtime</b> <span id="d-runtime" class="val"></span></span>
+                <span><b>Unit</b> <span id="d-unit" class="val mono"></span></span>
+                <span><b>UID</b> <span id="d-uid" class="val mono"></span></span>
+                <span style="grid-column: 1 / -1"><b>Integrity</b> <span id="d-integrity" class="val mono"></span></span>
               </div>
             </div>
             <div class="detail-actions">
-              <button class="btn primary" id="d-start" type="button">Start</button>
-              <button class="btn danger" id="d-stop" type="button">Stop</button>
+              <button class="btn primary" id="d-start" type="button"><span class="spin"></span><span>Start</span></button>
+              <button class="btn danger" id="d-stop" type="button"><span class="spin"></span><span>Stop</span></button>
               <span style="margin-left:auto;align-self:center" id="d-status-badge"></span>
             </div>
             <div class="logs-wrap">
               <div class="logs-head">
                 <span class="t">Logs</span>
-                <button class="btn" id="d-logs-refresh" type="button" style="margin-left:auto;padding:4px 9px;font-size:11px">Reload logs</button>
+                <button class="btn" id="d-logs-refresh" type="button" style="margin-left:auto;padding:4px 9px;font-size:11px">
+                  <span class="spin"></span><span>Reload logs</span>
+                </button>
               </div>
               <div class="logs" id="d-logs"></div>
             </div>
@@ -293,7 +381,7 @@
       </div>
     </main>
 
-    <div class="toast" id="toast"></div>
+    <div class="toast" id="toast"><span id="toast-msg"></span></div>
 
     <script type="module">
       // ---- launch params: the SDK reads puter.api_origin / puter.authToken from the URL ----
@@ -310,49 +398,100 @@
         params.get("puter.auth.token") ||
         "";
 
+      // How long we'll sit in "connecting" before declaring the control plane unreachable. A hard
+      // ceiling so the UI can NEVER spin forever — overridable for fast headless tests via the URL.
+      const PROBE_TIMEOUT_MS = Number(params.get("vita.probe_timeout_ms")) || 8000;
+
       const $ = (id) => document.getElementById(id);
-      const state = { apps: [], selectedId: null, owner: null };
+
+      // ---- the one connection state machine that drives the whole UI ----
+      // conn: "connecting" | "connected" | "offline"
+      const state = { conn: "connecting", apps: [], selectedId: null, owner: null, status: null, lastError: null };
 
       // ---- self-report channel for the headless verification harness ----
       window.__CONSOLE__ = { ready: false, ops: [], state, error: null };
       function report(op, detail) {
         window.__CONSOLE__.ops.push({ op, detail, at: Date.now() });
-        console.log("[console] " + op + (detail ? " — " + (typeof detail === "string" ? detail : JSON.stringify(detail)) : ""));
+        try {
+          console.log("[console] " + op + (detail !== undefined ? " — " + (typeof detail === "string" ? detail : JSON.stringify(detail)) : ""));
+        } catch { /* circular detail — skip */ }
       }
 
       // ---- toast ----
       let toastTimer = null;
       function toast(msg, isErr) {
         const t = $("toast");
-        t.textContent = msg;
+        $("toast-msg").textContent = msg;
         t.className = "toast show" + (isErr ? " err" : "");
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => { t.className = "toast"; }, 2600);
+        toastTimer = setTimeout(() => { t.className = "toast" + (isErr ? " err" : ""); }, 2800);
+      }
+
+      // ---- a button "busy" helper: spinner + disable while an async op runs ----
+      async function withBusy(btn, fn) {
+        if (!btn) return fn();
+        const wasDisabled = btn.disabled;
+        btn.classList.add("busy");
+        btn.disabled = true;
+        try { return await fn(); }
+        finally { btn.classList.remove("busy"); btn.disabled = wasDisabled; }
       }
 
       // ---- control-plane client: direct HTTP to api_origin /control/*, owner-bearer auth ----
-      async function control(method, path, body) {
-        const res = await fetch(apiOrigin + path, {
-          method,
-          headers: {
-            "authorization": "Bearer " + authToken,
-            ...(body ? { "content-type": "application/json" } : {}),
-          },
-          ...(body ? { body: JSON.stringify(body) } : {}),
-        });
+      // Classifies failures so the lifecycle can distinguish "control plane simply not here"
+      // (offline / off-device) from a real transport/HTTP error once connected.
+      class ControlError extends Error {
+        constructor(message, kind, status) { super(message); this.kind = kind; this.status = status; }
+      }
+      async function control(method, path, body, timeoutMs) {
+        const ctl = new AbortController();
+        const timer = timeoutMs ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+        let res;
+        try {
+          res = await fetch(apiOrigin + path, {
+            method,
+            signal: ctl.signal,
+            headers: {
+              "authorization": "Bearer " + authToken,
+              ...(body ? { "content-type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          });
+        } catch (e) {
+          // Network failure / abort → the control plane is not reachable from here (off-device).
+          throw new ControlError(
+            ctl.signal.aborted ? "timed out" : (e && e.message) || "network error",
+            "unreachable",
+            0,
+          );
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
         const text = await res.text();
         let json = {};
         try { json = text ? JSON.parse(text) : {}; } catch { /* non-json */ }
         if (!res.ok) {
+          const code = json && (json.code || (json.error && json.error.code));
           const msg = (json && (json.message || (json.error && json.error.message))) || ("HTTP " + res.status);
-          throw new Error(msg);
+          // A 404 "no control plane mounted" (or 403 control denied) means this api_origin can't reach
+          // agentd from here — treat it as off-device, not a transient error.
+          const kind = (code === "control_plane_unavailable" || res.status === 404 || res.status === 403)
+            ? "unreachable"
+            : "error";
+          throw new ControlError(msg, kind, res.status);
         }
         return json;
       }
 
-      // ---- rendering ----
+      // ---- rendering helpers ----
       function healthClass(h) { return h === "OK" ? "ok" : (h === "unhealthy" ? "unhealthy" : "unknown"); }
-      function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+      function healthLabel(h) { return h === "OK" ? "OK" : (h === "unhealthy" ? "unhealthy" : "unknown"); }
+      function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+      function shortIntegrity(s) {
+        const v = String(s == null ? "" : s);
+        if (v === "" || v === "sha256:0") return "—";
+        return v.length > 27 ? v.slice(0, 27) + "…" : v;
+      }
 
       function statusBadge(app) {
         if (app.installState === "disabled") return '<span class="badge disabled"><span class="d"></span>disabled</span>';
@@ -360,9 +499,93 @@
         return '<span class="badge stopped"><span class="d"></span>stopped</span>';
       }
 
+      // ---- the BIG state panels: offline (off-device) + error takeovers, shown instead of list+detail ----
+      const ICON_OFFLINE =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>' +
+        '<line x1="12" y1="20" x2="12.01" y2="20"/><line x1="2" y1="2" x2="22" y2="22"/></svg>';
+      const ICON_ERROR =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>' +
+        '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+
+      function showStatePanel(kind) {
+        // kind: "offline" | "error". Replaces the list+detail with a single clean explanatory panel.
+        const offline = kind === "offline";
+        const panel =
+          '<div class="state-panel ' + kind + '">' +
+            '<div class="ic">' + (offline ? ICON_OFFLINE : ICON_ERROR) + '</div>' +
+            '<h2>' + (offline ? "Control plane unavailable" : "Couldn’t reach the control plane") + '</h2>' +
+            '<p>' + (offline
+              ? "This console is running <b>off-device</b> — the node control plane (agentd) isn’t reachable from here. Capsule management is paused until the console is opened on a live Vita node."
+              : ("The control plane returned an error" + (state.lastError ? ": " + esc(state.lastError) : "") + ".")) + '</p>' +
+            '<div class="hint">' + (offline
+              ? "Data-plane features (files, settings) still work. Open this app on the node’s desktop to install, start, and stop capsules."
+              : "This is usually transient. Retry, or check the node’s agentd is running.") + '</div>' +
+            '<div class="acts"><button class="btn primary" id="state-retry" type="button"><span class="spin"></span><span>Retry connection</span></button></div>' +
+          '</div>';
+        $("body").innerHTML = panel;
+        $("state-retry").addEventListener("click", () => withBusy($("state-retry"), connect));
+      }
+
+      // Restore the normal list+detail scaffold (after we leave the offline/error takeover).
+      function ensureMainLayout() {
+        if ($("list-pane")) return; // already present
+        $("body").innerHTML =
+          '<div class="list-pane" id="list-pane">' +
+            '<div class="list-head" aria-hidden="true"><span>App / Capsule</span><span>Runtime</span><span>Health</span><span>Status</span><span style="text-align:right">Actions</span></div>' +
+            '<div id="app-list"></div>' +
+          '</div>' +
+          '<aside class="detail" id="detail">' +
+            '<div class="empty" id="detail-empty"><div class="em-title">No capsule selected</div><div class="em-sub">Select an app on the left to view its unit, integrity, and live logs.</div></div>' +
+            '<div id="detail-body" hidden>' +
+              '<div class="detail-head"><h2 id="d-name"></h2>' +
+                '<div class="meta">' +
+                  '<span><b>Version</b> <span id="d-version" class="val mono"></span></span>' +
+                  '<span><b>Runtime</b> <span id="d-runtime" class="val"></span></span>' +
+                  '<span><b>Unit</b> <span id="d-unit" class="val mono"></span></span>' +
+                  '<span><b>UID</b> <span id="d-uid" class="val mono"></span></span>' +
+                  '<span style="grid-column: 1 / -1"><b>Integrity</b> <span id="d-integrity" class="val mono"></span></span>' +
+                '</div></div>' +
+              '<div class="detail-actions">' +
+                '<button class="btn primary" id="d-start" type="button"><span class="spin"></span><span>Start</span></button>' +
+                '<button class="btn danger" id="d-stop" type="button"><span class="spin"></span><span>Stop</span></button>' +
+                '<span style="margin-left:auto;align-self:center" id="d-status-badge"></span>' +
+              '</div>' +
+              '<div class="logs-wrap"><div class="logs-head"><span class="t">Logs</span>' +
+                '<button class="btn" id="d-logs-refresh" type="button" style="margin-left:auto;padding:4px 9px;font-size:11px"><span class="spin"></span><span>Reload logs</span></button>' +
+              '</div><div class="logs" id="d-logs"></div></div>' +
+            '</div>' +
+          '</aside>';
+        wireDetailButtons();
+      }
+
+      // Loading skeleton rows for the list (connecting state).
+      function renderListSkeleton() {
+        const host = $("app-list");
+        if (!host) return;
+        let html = "";
+        for (let i = 0; i < 3; i++) {
+          html +=
+            '<div class="skel-row">' +
+              '<span><span class="skel lg"></span></span>' +
+              '<span><span class="skel sm"></span></span>' +
+              '<span><span class="skel sm"></span></span>' +
+              '<span><span class="skel"></span></span>' +
+              '<span style="text-align:right"><span class="skel"></span></span>' +
+            '</div>';
+        }
+        host.innerHTML = html;
+      }
+
       function renderList() {
         const host = $("app-list");
-        if (!state.apps.length) { host.innerHTML = '<div class="empty">No apps installed.</div>'; return; }
+        if (!host) return;
+        if (!state.apps.length) {
+          host.innerHTML = '<div class="empty"><div class="em-title">No capsules installed</div>' +
+            '<div class="em-sub">This node has no apps in its registry yet. Install one to manage it here.</div></div>';
+          return;
+        }
         host.innerHTML = "";
         for (const app of state.apps) {
           const row = document.createElement("button");
@@ -375,11 +598,11 @@
           row.innerHTML =
             '<span class="app-name"><span class="n">' + esc(app.id) + '</span><span class="r">v' + esc(app.version) + '</span></span>' +
             '<span class="mono muted">' + esc(app.runtime) + '</span>' +
-            '<span class="health ' + healthClass(app.health) + '">' + esc(app.health) + '</span>' +
+            '<span class="health ' + healthClass(app.health) + '">' + esc(healthLabel(app.health)) + '</span>' +
             '<span>' + statusBadge(app) + '</span>' +
             '<span class="row-actions">' +
-              '<button class="btn primary" data-act="start" data-id="' + esc(app.id) + '"' + (canStart ? "" : " disabled") + '>Start</button>' +
-              '<button class="btn danger" data-act="stop" data-id="' + esc(app.id) + '"' + (canStop ? "" : " disabled") + '>Stop</button>' +
+              '<button class="btn primary" data-act="start" data-id="' + esc(app.id) + '"' + (canStart ? "" : " disabled") + '><span class="spin"></span><span>Start</span></button>' +
+              '<button class="btn danger" data-act="stop" data-id="' + esc(app.id) + '"' + (canStop ? "" : " disabled") + '><span class="spin"></span><span>Stop</span></button>' +
             '</span>';
           host.appendChild(row);
         }
@@ -389,6 +612,7 @@
         const app = state.apps.find((a) => a.id === state.selectedId);
         const body = $("detail-body");
         const empty = $("detail-empty");
+        if (!body || !empty) return;
         if (!app) { body.hidden = true; empty.hidden = false; return; }
         empty.hidden = true; body.hidden = false;
         $("d-name").textContent = app.id;
@@ -396,27 +620,47 @@
         $("d-runtime").textContent = app.runtime;
         $("d-unit").textContent = app.unit || "—";
         $("d-uid").textContent = app.dynamicUid || "—";
-        $("d-integrity").textContent = (app.integrity || "—").slice(0, 23) + (app.integrity.length > 23 ? "…" : "");
+        $("d-integrity").textContent = shortIntegrity(app.integrity);
         $("d-status-badge").innerHTML = statusBadge(app) +
-          ' <span class="health ' + healthClass(app.health) + '" style="margin-left:8px">' + esc(app.health) + "</span>";
+          ' <span class="health ' + healthClass(app.health) + '" style="margin-left:8px">' + esc(healthLabel(app.health)) + "</span>";
         $("d-start").disabled = !(app.installState === "installed" && !app.running);
         $("d-stop").disabled = !app.running;
       }
 
-      function renderStats(status) {
-        $("stat-installed").innerHTML = status.installedCount + ' <small>capsules</small>';
-        $("stat-running").innerHTML = status.runningCount + ' <small>active</small>';
-        $("stat-mode").textContent = status.mode;
-        $("stat-eval").textContent = status.evalSummary;
-        const dot = $("node-dot"), label = $("node-label");
-        dot.className = "dot " + (status.ready ? "ok" : "bad");
-        label.textContent = status.ready ? "agentd ready" : "agentd unreachable";
+      function renderStats() {
+        const s = state.status;
+        const setConn = (conn, label, dotClass) => {
+          const pill = $("node-pill"), dot = $("node-dot"), lab = $("node-label");
+          pill.setAttribute("data-conn", conn);
+          dot.className = "dot " + dotClass;
+          lab.textContent = label;
+        };
+        if (state.conn === "connecting") {
+          setConn("connecting", "Connecting…", "pulsing");
+          return;
+        }
+        if (state.conn === "offline") {
+          setConn("offline", "Off-device", "warn");
+          $("stat-installed").innerHTML = '<span class="muted" style="font-size:14px;font-weight:500">—</span>';
+          $("stat-running").innerHTML = '<span class="muted" style="font-size:14px;font-weight:500">—</span>';
+          $("stat-mode").innerHTML = '<span class="muted" style="font-size:13px;font-weight:500">off-device</span>';
+          $("stat-eval").innerHTML = '<span class="muted">control plane unavailable</span>';
+          return;
+        }
+        // connected
+        setConn("connected", "agentd ready", "ok");
+        if (!s) return;
+        $("stat-installed").innerHTML = '<span class="accent">' + esc(s.installedCount) + '</span> <small>capsules</small>';
+        $("stat-running").innerHTML = '<span class="ok">' + esc(s.runningCount) + '</span> <small>active</small>';
+        $("stat-mode").textContent = s.mode;
+        $("stat-eval").textContent = s.evalSummary;
       }
 
-      // ---- data loads ----
+      // ---- data loads (only valid once connected) ----
       async function loadStatus() {
         const status = await control("GET", "/control/status");
-        renderStats(status);
+        state.status = status;
+        renderStats();
         report("status", { running: status.runningCount, installed: status.installedCount, ready: status.ready });
         return status;
       }
@@ -429,82 +673,150 @@
       }
       async function loadLogs(id) {
         const out = $("d-logs");
-        out.textContent = "loading…";
+        if (out) out.innerHTML = '<div class="logs-state"><span class="spin"></span>loading…</div>';
         const { lines } = await control("GET", "/control/apps/" + encodeURIComponent(id) + "/logs?limit=200");
+        if (!out) return;
         out.innerHTML = (lines || []).map((l) =>
           '<div class="l ' + esc(l.level) + '"><span class="ts">' + esc((l.ts || "").replace("T", " ").replace("Z", "").slice(5, 19)) +
           '</span><span class="m">' + esc(l.message) + "</span></div>"
-        ).join("") || '<span class="muted">no log lines</span>';
+        ).join("") || '<div class="logs-state">no log lines yet</div>';
         report("logs", { id, count: (lines || []).length });
       }
 
-      async function refreshAll() {
-        try {
-          await Promise.all([loadStatus(), loadApps()]);
-          if (state.selectedId) await loadLogs(state.selectedId);
-        } catch (e) {
-          window.__CONSOLE__.error = e.message;
-          report("error", e.message);
-          toast("Control plane error: " + e.message, true);
-        }
+      async function refreshData() {
+        await Promise.all([loadStatus(), loadApps()]);
+        if (state.selectedId && $("d-logs")) await loadLogs(state.selectedId);
       }
 
       async function selectApp(id) {
         state.selectedId = id;
         if (document.body.clientWidth <= 880) $("body").classList.add("detail-open");
         renderList(); renderDetail();
-        try { await loadLogs(id); } catch (e) { $("d-logs").textContent = "log error: " + e.message; }
+        try { await loadLogs(id); }
+        catch (e) { const out = $("d-logs"); if (out) out.innerHTML = '<div class="logs-state" style="color:var(--c-err)">log error: ' + esc(e.message) + "</div>"; }
       }
 
       // ---- lifecycle actions ----
-      async function doStart(id) {
+      async function doStart(id, btn) {
         report("start.click", id);
-        try {
-          const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/start");
-          report("start.result", { id, outcome: r.outcome });
-          if (r.outcome === "rejected") toast("Start rejected: " + (r.reason || "denied"), true);
-          else toast("Started " + id);
-          await loadStatus(); await loadApps();
-          if (state.selectedId === id) await loadLogs(id);
-        } catch (e) { report("start.error", e.message); toast("Start failed: " + e.message, true); }
+        await withBusy(btn, async () => {
+          try {
+            const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/start");
+            report("start.result", { id, outcome: r.outcome });
+            if (r.outcome === "rejected") toast("Start rejected: " + (r.reason || "denied"), true);
+            else if (r.outcome === "noop") toast(id + " is already running");
+            else toast("Started " + id);
+            await loadStatus(); await loadApps();
+            if (state.selectedId === id && $("d-logs")) await loadLogs(id);
+          } catch (e) { report("start.error", e.message); toast("Start failed: " + e.message, true); }
+        });
       }
-      async function doStop(id) {
+      async function doStop(id, btn) {
         report("stop.click", id);
-        try {
-          const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/stop");
-          report("stop.result", { id, outcome: r.outcome });
-          toast(r.outcome === "noop" ? (id + " was not running") : ("Stopped " + id));
-          await loadStatus(); await loadApps();
-          if (state.selectedId === id) await loadLogs(id);
-        } catch (e) { report("stop.error", e.message); toast("Stop failed: " + e.message, true); }
+        await withBusy(btn, async () => {
+          try {
+            const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/stop");
+            report("stop.result", { id, outcome: r.outcome });
+            toast(r.outcome === "noop" ? (id + " was not running") : ("Stopped " + id));
+            await loadStatus(); await loadApps();
+            if (state.selectedId === id && $("d-logs")) await loadLogs(id);
+          } catch (e) { report("stop.error", e.message); toast("Stop failed: " + e.message, true); }
+        });
       }
 
-      // ---- event wiring (delegated) ----
-      $("app-list").addEventListener("click", (e) => {
+      // ---- event wiring (delegated on the persistent #body container) ----
+      $("body").addEventListener("click", (e) => {
         const actBtn = e.target.closest("button[data-act]");
         if (actBtn) {
           e.stopPropagation();
           const id = actBtn.getAttribute("data-id");
-          if (actBtn.getAttribute("data-act") === "start") doStart(id); else doStop(id);
+          if (actBtn.getAttribute("data-act") === "start") doStart(id, actBtn); else doStop(id, actBtn);
           return;
         }
         const row = e.target.closest(".app-row");
         if (row) selectApp(row.getAttribute("data-app-id"));
       });
-      $("d-start").addEventListener("click", () => state.selectedId && doStart(state.selectedId));
-      $("d-stop").addEventListener("click", () => state.selectedId && doStop(state.selectedId));
-      $("d-logs-refresh").addEventListener("click", () => state.selectedId && loadLogs(state.selectedId));
-      $("refresh-btn").addEventListener("click", () => { report("refresh.click"); refreshAll(); });
+
+      function wireDetailButtons() {
+        const start = $("d-start"), stop = $("d-stop"), reload = $("d-logs-refresh");
+        if (start) start.addEventListener("click", () => state.selectedId && doStart(state.selectedId, start));
+        if (stop) stop.addEventListener("click", () => state.selectedId && doStop(state.selectedId, stop));
+        if (reload) reload.addEventListener("click", () => state.selectedId && withBusy(reload, () => loadLogs(state.selectedId)));
+      }
+      wireDetailButtons();
+
+      $("refresh-btn").addEventListener("click", () => {
+        report("refresh.click");
+        // Refresh re-runs the full connect lifecycle, so it recovers from offline → connected too.
+        withBusy($("refresh-btn"), connect);
+      });
+
+      // ---- the CONNECT lifecycle: connecting → connected | offline ----
+      // One bounded probe (GET /control/status) decides the terminal state. A timeout guarantees we
+      // never hang in "connecting". On success → connected + populate; on "unreachable" → offline
+      // takeover; on a real error → error takeover.
+      async function connect() {
+        state.conn = "connecting";
+        state.lastError = null;
+        renderStats();
+        ensureMainLayout();
+        renderListSkeleton();
+        // reset stat skeletons
+        $("stat-installed").innerHTML = '<span class="skel"></span>';
+        $("stat-running").innerHTML = '<span class="skel"></span>';
+        $("stat-mode").innerHTML = '<span class="skel lg"></span>';
+        $("stat-eval").innerHTML = '<span class="skel lg"></span>';
+
+        try {
+          // Probe with a hard timeout. This is the single connectivity gate.
+          await control("GET", "/control/status", undefined, PROBE_TIMEOUT_MS);
+        } catch (e) {
+          state.lastError = e.message;
+          if (e.kind === "unreachable") {
+            state.conn = "offline";
+            report("offline", e.message);
+            renderStats();
+            showStatePanel("offline");
+            return;
+          }
+          state.conn = "error";
+          report("connect.error", e.message);
+          renderStats(); // pill shows an error tone via the offline branch fallback
+          // For a transport error we still surface a panel; treat the pill as not-ready.
+          $("node-pill").setAttribute("data-conn", "offline");
+          $("node-dot").className = "dot bad";
+          $("node-label").textContent = "agentd error";
+          showStatePanel("error");
+          return;
+        }
+
+        // Reachable → connected. Bring back the layout + load real data.
+        state.conn = "connected";
+        ensureMainLayout();
+        renderListSkeleton();
+        renderStats();
+        try {
+          await refreshData();
+          if (!state.selectedId && state.apps.length) await selectApp(state.apps[0].id);
+        } catch (e) {
+          // We were reachable a moment ago; a follow-up failure is a real error, surface it.
+          state.lastError = e.message;
+          report("refresh.error", e.message);
+          toast("Control plane error: " + e.message, true);
+        }
+        report("connected", { apps: state.apps.length });
+      }
 
       // ---- expose imperative hooks for the headless harness (no reliance on synthetic DOM events) ----
-      window.__CONSOLE__.api = { refreshAll, loadApps, loadStatus, selectApp, doStart, doStop, loadLogs };
+      window.__CONSOLE__.api = { connect, refreshData, loadApps, loadStatus, selectApp, doStart, doStop, loadLogs };
 
       // ---- boot ----
       (async () => {
-        report("boot", { apiOrigin, hasToken: Boolean(authToken) });
+        report("boot", { apiOrigin, hasToken: Boolean(authToken), probeTimeoutMs: PROBE_TIMEOUT_MS });
 
         // Data plane (real puter.js): identify the owner + persist a "last opened" marker via kv. This
-        // proves the SAME app uses BOTH planes — fs/kv data plane AND the control plane.
+        // proves the SAME app uses BOTH planes — fs/kv data plane AND the control plane. These are
+        // best-effort and bounded by their own try/catch so they can never block the connect lifecycle.
         try {
           if (window.puter && puter.auth && puter.auth.getUser) {
             state.owner = await puter.auth.getUser();
@@ -524,15 +836,18 @@
         // UI plane (postMessage broker) — title the window in the Vita shell. No-op outside the shell.
         try { if (window.puter && puter.ui && puter.ui.setWindowTitle) puter.ui.setWindowTitle("Vita Console"); } catch {}
 
-        await refreshAll();
-        // Auto-select the first app so logs are visible on first paint.
-        if (!state.selectedId && state.apps.length) await selectApp(state.apps[0].id);
+        await connect();
 
         window.__CONSOLE__.ready = true;
-        report("ready", { apps: state.apps.length });
+        report("ready", { conn: state.conn, apps: state.apps.length });
       })().catch((e) => {
+        // Last-resort: never leave the UI mid-spin. Fall to the error takeover.
         window.__CONSOLE__.error = e && e.message;
+        state.conn = "offline";
+        state.lastError = e && e.message;
         report("fatal", e && e.message);
+        try { renderStats(); showStatePanel("error"); } catch { /* ignore */ }
+        window.__CONSOLE__.ready = true;
       });
     </script>
   </body>
