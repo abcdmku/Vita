@@ -23,7 +23,10 @@ export type PuterCapability =
   | "kv.read"
   | "kv.write"
   | "ui"
-  | "auth";
+  | "auth"
+  // The control plane (list/start/stop capsules, node status/health, logs) — gates /control/* on the
+  // api_origin. Held by the deploy/management console; NOT granted to ordinary apps (default-deny).
+  | "control";
 
 // A launched-app session: the opaque token, the app it belongs to, the instance id the iframe carries,
 // the owner identity, and the granted capability set. Minted by `mintAppSession` at launch.
