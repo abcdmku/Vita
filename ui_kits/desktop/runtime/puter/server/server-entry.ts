@@ -18,15 +18,14 @@
 //
 // NEVER import from the browser bundle. node-only modules + Deno-only globals (Deno.env / Deno.Command).
 
-import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createAgentExecBackend,
+  createAgentdPtyStream,
   createAuditLog,
-  createDevExecBackend,
   createMetaPlane,
   createOnDeviceControlPlane,
   createPackageRegistry,
@@ -37,8 +36,8 @@ import {
   randomOpaqueToken,
   startPuterPlatformService,
   type AgentControlPlane,
+  type AgentdPtyStream,
   type CapabilityAuditSink,
-  type ChildProcessLike,
   type ExecBackend,
   type InstalledPackage,
   type PuterOwner,
@@ -260,37 +259,17 @@ function writeRunFile(path: string, contents: string): void {
   }
 }
 
-// Adapt node:child_process.spawn to the exec-plane's ChildProcessLike port (the dev exec backend spawns
-// allow-listed commands with NO shell, a scrubbed env, and a private cwd — see exec-plane.ts). The on-
-// device Terminal runs here over loopback (trust-on-host); the capability gate already restricted /pty to
-// the exec-granted Terminal before any process is spawned.
-const nodeChildProcess: ChildProcessLike = {
-  spawn(command, args, options) {
-    const child = nodeSpawn(command, [...args], {
-      cwd: options.cwd,
-      env: { ...options.env },
-      shell: false,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    return {
-      stderr: { on: (_e, cb) => child.stderr?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
-      stdout: { on: (_e, cb) => child.stdout?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
-      stdin: { write: (d: string) => child.stdin?.write(d), end: () => child.stdin?.end() },
-      on: (event, cb) => { child.on(event, cb as never); },
-      kill: (signal?: string) => { child.kill((signal ?? "SIGTERM") as NodeJS.Signals); },
-    };
-  },
-};
-
-// Build the EXEC backend for the on-device Terminal: the hardened dev-sandbox backend (allow-list,
-// no-shell, scrubbed env, private throwaway cwd per session, wall-clock + output caps). The /pty gate
-// (exec capability) is enforced by the platform BEFORE this backend ever opens a session.
-function buildExecBackend(): ExecBackend {
-  return createDevExecBackend({
-    childProcess: nodeChildProcess,
-    makeCwd: () => mkdtempSync(join(tmpdir(), "vita-term-")),
-    pathEnv: env("PATH") ?? "/usr/bin:/bin",
+// Build the PRODUCTION EXEC backend for the on-device Terminal: the agentd `capsule.exec` backend.
+// Each /pty websocket session is forwarded over agentd's streaming /pty unix-socket endpoint to a REAL
+// hardened, PTY-backed, cgroup-gated capsule (DynamicUser, NoNewPrivileges, ProtectSystem=strict,
+// read-only rootfs, seccomp, AF_UNIX-only / NO network, MemoryMax/CPUQuota/TasksMax). The /pty gate
+// (exec capability) is enforced by the platform BEFORE this backend ever opens a session, and agentd's
+// SO_PEERCRED unix-socket gate authenticates the platform process before the capsule starts. The dev
+// sandbox (createDevExecBackend) is NOT used in service — it is a build-host-only spike harness.
+function buildExecBackend(agentdSocket: string): ExecBackend {
+  return createAgentExecBackend({
+    openStream: (geom): Promise<AgentdPtyStream> =>
+      createAgentdPtyStream({ socketPath: agentdSocket, cols: geom.cols, rows: geom.rows }),
   });
 }
 
@@ -448,9 +427,11 @@ async function main(): Promise<void> {
     return createMetaPlane({ audit: auditLog, capabilities, grants, packages });
   };
 
-  // EXEC BACKEND (finding #7): the on-device Terminal's /pty process plane (hardened dev sandbox). Mounted
-  // on the LOCAL face only, gated on `exec` (the Terminal only). Safe now that exec is a distinct cap.
-  const execBackend = buildExecBackend();
+  // EXEC BACKEND: the on-device Terminal's /pty process plane — the PRODUCTION agentd `capsule.exec`
+  // backend (a REAL hardened, PTY-backed, cgroup-gated capsule per session, forwarded over agentd's
+  // streaming /pty unix socket). Mounted on the LOCAL face only, gated on `exec` (the Terminal only). The
+  // dev sandbox is NOT wired in service — it is a build-host-only spike harness.
+  const execBackend = buildExecBackend(agentdSocket);
 
   const options: ServiceOptions = {
     appsRoot,

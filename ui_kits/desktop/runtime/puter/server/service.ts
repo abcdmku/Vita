@@ -95,7 +95,8 @@ export interface ServiceOptions {
   // The EXEC backend powering the /pty websocket (the Terminal). When present, the LOCAL (kiosk) face
   // mounts /pty, gated on the `exec` capability via the shared registry (only the exec-granted Terminal
   // can open it). NEVER mounted on the network face. Absent → /pty is not mounted (default-deny). On-device
-  // the boot entry builds this as createDevExecBackend(...) over node:child_process. See exec-plane.ts.
+  // the boot entry builds this as createAgentExecBackend(...) forwarding to agentd's hardened capsule.exec
+  // over the streaming /pty unix socket (the dev sandbox is a build-host-only spike). See CAPSULE-EXEC.md.
   readonly execBackend?: ExecBackend;
   // The MULTI-WINDOW SHELL config. When present the LOCAL (kiosk) face serves the shell page at `/` +
   // `/shell.html` plus `/shell-session.js` (a per-app capability-session map), instead of the single-app

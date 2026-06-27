@@ -93,6 +93,10 @@ type Config struct {
 	CapsuleWorkloads func() []capsuleruntime.WorkloadStatus
 	TransportReady   status.ReadinessSource
 	StorageHealth    func(context.Context) (storagehealth.Report, error)
+	// ExecOpener powers the streaming /pty endpoint (the on-device Terminal's hardened, PTY-backed
+	// capsule.exec session). Optional: nil ⇒ /pty is NOT mounted (404) — default-deny by omission.
+	// *capsule.ExecCapability satisfies it. Only reachable over the SO_PEERCRED-authenticated unix socket.
+	ExecOpener ExecSessionOpener
 }
 
 type ErrorResponse struct {
@@ -182,6 +186,7 @@ type handler struct {
 	statusHandler    http.Handler
 	capsuleWorkloads func() []capsuleruntime.WorkloadStatus
 	storageHealth    func(context.Context) (storagehealth.Report, error)
+	execOpener       ExecSessionOpener
 }
 
 type TransportReadiness struct {
@@ -653,6 +658,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		statusHandler:    statusHandler,
 		capsuleWorkloads: capsuleWorkloads,
 		storageHealth:    storageHealthSnapshot,
+		execOpener:       config.ExecOpener,
 	}, nil
 }
 
@@ -686,6 +692,7 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		backup.ArchiveName:    func() capabilities.TypedRequest { return backup.ArchiveReadRequest{} },
 		backup.Name:           func() capabilities.TypedRequest { return backup.ReadRequest{} },
 		capsule.ExecuteName:   func() capabilities.TypedRequest { return capsule.ExecuteReadRequest{} },
+		capsule.ExecName:      func() capabilities.TypedRequest { return capsule.ExecReadRequest{} },
 		capsule.FetchName:     func() capabilities.TypedRequest { return capsule.FetchReadRequest{} },
 		capsule.LifecycleName: func() capabilities.TypedRequest { return capsule.LifecycleReadRequest{} },
 		// capsule.logs is a QUERY-parameterized read (?id=&limit=): the bare factory
@@ -742,6 +749,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleState(w, r)
 	case "/apply":
 		h.handleApply(w, r)
+	case "/pty":
+		h.handlePTY(w, r)
 	case "/files":
 		h.handleFiles(w, r)
 	case "/export":

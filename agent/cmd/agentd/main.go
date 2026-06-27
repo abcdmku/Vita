@@ -73,6 +73,7 @@ func main() {
 	startedAt := time.Now().UTC()
 	archiveCapability := backup.NewArchiveCapability()
 	executeCapability := capsule.NewExecuteCapability()
+	execCapability := capsule.NewExecCapability()
 	lifecycleCapability := capsule.NewLifecycleCapability(executeCapability, archiveCapability)
 	ownerCapability := owner.NewCapability()
 	networkCapability := network.NewCapability()
@@ -82,6 +83,7 @@ func main() {
 		backup.NewCapability(),
 		archiveCapability,
 		executeCapability,
+		execCapability,
 		lifecycleCapability,
 		capsule.NewFetchCapability(),
 		capsule.NewLogsCapability(),
@@ -136,6 +138,9 @@ func main() {
 		FilesPrincipals: runtimeFilesPrincipals(),
 		AuditStore:      auditStore,
 		TransportReady:  transportReadiness.Ready,
+		// The streaming /pty endpoint (the on-device Terminal). Reachable ONLY over the SO_PEERCRED-
+		// authenticated unix socket; never the dev TCP face. Opens a hardened, cgroup-gated PTY capsule.
+		ExecOpener: execCapability,
 	})
 	if err != nil {
 		log.Fatalf("build control transport: %v", err)
