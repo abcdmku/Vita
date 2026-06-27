@@ -79,6 +79,8 @@ const archConfigUrl = new URL("../mkosi.conf", import.meta.url);
 const expectedPackageAllowlist = [
   "bash",
   "ca-certificates",
+  "cage",
+  "chromium",
   "coreutils",
   "cryptsetup-bin",
   "dbus",

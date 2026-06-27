@@ -64,21 +64,29 @@ test("rust-in-docker builds the compositor as a locked linux x86_64 release bina
   assertContains(helper, "chmodSync(destination, 0o755)");
 });
 
-test("smoke build stages the compositor before mkosi consumes smoke-overlay", async () => {
+test("smoke build de-wires the bespoke renderer and wires the three-mode overlay", async () => {
+  // feat/os-three-modes: the custom Rust compositor + CEF/osr renderer is ARCHIVED. The smoke build
+  // must NOT build packages/compositor-core or ship the bespoke renderer; it stages a FILTERED smoke
+  // overlay (boot markers only) plus the new mode-overlay (platform server + cage/chromium kiosk +
+  // vita-mode generator). This test guards the de-wiring so the renderer cannot silently come back.
   const buildAndBoot = await readText(buildAndBootUrl);
 
-  assertContains(buildAndBoot, "function installCompositorOverlay()");
-  assertContains(buildAndBoot, '"compositor-smoke-layout.mjs"');
-  assertContains(buildAndBoot, '"--experimental-strip-types"');
-  assertContains(buildAndBoot, '"vita-compositor-smoke.commands"');
-  assertContains(buildAndBoot, '"tools/build/rust-in-docker.mjs"');
-  assertContains(buildAndBoot, '"packages/compositor-core"');
-  assertContains(buildAndBoot, '"os/x86_64/smoke-overlay/usr/lib/vita/compositor/vita-compositor"');
+  // The renderer build path is gone: no rust-in-docker compositor build, no CEF overlay install.
+  assert.doesNotMatch(buildAndBoot, /run\([^)]*rust-in-docker/u);
+  assert.doesNotMatch(buildAndBoot, /const cefOverlay = /u);
+  assert.doesNotMatch(buildAndBoot, /function installCefOverlay\(\)/u);
+  assert.doesNotMatch(buildAndBoot, /\bCEF_RUNTIME_PACKAGES\b/u);
+
+  // The filtered smoke overlay (markers only) + the mode overlay are staged and consumed by mkosi.
+  assertContains(buildAndBoot, "function installSmokeOverlayWithoutRenderer()");
+  assertContains(buildAndBoot, "function installModeOverlay()");
   assertContains(buildAndBoot, 'const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools"];');
   assert.match(
     buildAndBoot,
-    /const agentOverlay = installAgentOverlay\(\);[\s\S]+const smokeOverlay = installCompositorOverlay\(\);[\s\S]+`--extra-tree=\$\{smokeOverlay\}`/u,
+    /const smokeOverlay = installSmokeOverlayWithoutRenderer\(\);[\s\S]+const modeOverlay = installModeOverlay\(\);[\s\S]+`--extra-tree=\$\{smokeOverlay\}`[\s\S]+`--extra-tree=\$\{modeOverlay\}`/u,
   );
+  // The three-mode selector is baked onto the kernel cmdline.
+  assertContains(buildAndBoot, "vita.mode=${MODE_SELECT}");
   assertContains(buildAndBoot, "console=ttyS0,115200");
   assert.doesNotMatch(buildAndBoot, /console=tty0/u);
   assertContains(buildAndBoot, "systemd.mask=getty@tty1.service");

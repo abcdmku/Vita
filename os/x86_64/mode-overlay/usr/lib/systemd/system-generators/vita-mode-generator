@@ -1,0 +1,73 @@
+#!/bin/sh
+# Vita three-mode generator — selects HEADLESS / LOCAL DESKTOP / NETWORK DESKTOP from the kernel
+# cmdline at boot, by enabling or masking the display/kiosk units. This is the runtime arm of the
+# mode mechanism: one image, the cmdline param `vita.mode=` chooses behavior.
+#
+#   vita.mode=headless   (default) → server only. The kiosk + display units are MASKED (symlinked to
+#                                    /dev/null), so NO display stack is pulled in. graphical.target is
+#                                    NOT the default target.
+#   vita.mode=desktop              → server + cage/chromium kiosk on the local display. The kiosk unit
+#                                    is left enabled and graphical.target is made the default so the
+#                                    seat/display path activates. (Network face still available.)
+#   vita.mode=network              → server with the TLS network face exposed; NO local kiosk required.
+#                                    Same masking as headless for the local kiosk; the server itself
+#                                    exposes the network face (driven by VITA_MODE below).
+#
+# systemd runs every generator early (before units are loaded) and reads the symlinks it drops under
+# the "early" generator dir ($1). Masking via a /dev/null symlink there overrides the shipped unit.
+# This generator is intentionally tiny + dependency-free (POSIX sh) and fail-open to HEADLESS (the
+# safe, no-display default) on any parse trouble.
+set -u
+
+# systemd passes three dirs; the EARLY dir ($1) wins over /usr/lib/systemd/system, which is what we
+# want for masking. Fall back sanely if invoked oddly.
+EARLY_DIR="${1:-/run/systemd/generator.early}"
+
+# --- read vita.mode= from the kernel cmdline ---------------------------------
+mode="headless"
+if [ -r /proc/cmdline ]; then
+  for tok in $(cat /proc/cmdline); do
+    case "$tok" in
+      vita.mode=*) mode="${tok#vita.mode=}" ;;
+    esac
+  done
+fi
+case "$mode" in
+  desktop|network|headless) : ;;
+  *) mode="headless" ;;   # fail-open to the safe no-display default
+esac
+
+mkdir -p "$EARLY_DIR" 2>/dev/null || true
+
+mask_unit() {
+  # Override the shipped unit with a /dev/null symlink in the early dir (= masked).
+  ln -sf /dev/null "$EARLY_DIR/$1" 2>/dev/null || true
+}
+
+# --- publish the resolved mode for the platform server -----------------------
+# vita-platform.service reads /run/vita/platform.env (EnvironmentFile=-). Writing it here means the
+# server learns the mode (which faces to expose) from the SAME cmdline param, with no duplication.
+mkdir -p /run/vita 2>/dev/null || true
+{
+  printf 'VITA_MODE=%s\n' "$mode"
+} > /run/vita/platform.env 2>/dev/null || true
+
+# --- enable/mask the local kiosk + display path by mode ----------------------
+# In headless and network modes there is no on-device kiosk: mask the kiosk unit so it never starts
+# and pulls in no display stack. In desktop mode leave it enabled (its [Install] WantedBy=graphical
+# .target plus the default-target switch below activate it).
+if [ "$mode" != "desktop" ]; then
+  mask_unit vita-kiosk.service
+fi
+
+# --- default boot target -----------------------------------------------------
+# Desktop mode boots graphical.target (activates the kiosk's WantedBy=graphical.target). Headless and
+# network modes boot multi-user.target (no display stack). We set default.target via the early-dir
+# symlink so it overrides the image default without editing the rootfs.
+if [ "$mode" = "desktop" ]; then
+  ln -sf /usr/lib/systemd/system/graphical.target "$EARLY_DIR/default.target" 2>/dev/null || true
+else
+  ln -sf /usr/lib/systemd/system/multi-user.target "$EARLY_DIR/default.target" 2>/dev/null || true
+fi
+
+exit 0

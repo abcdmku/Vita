@@ -1,0 +1,85 @@
+# Vita Platform server (the Puter-compatible HTTP service) — three-mode OS.
+#
+# This is the ONE backend behind every install mode. It serves:
+#   • a LOCAL face on http://localhost:${VITA_PLATFORM_PORT} (default 7681) — what the on-device
+#     kiosk browser (cage + chromium, desktop mode) and a same-machine browser hit; offline, loopback.
+#   • a NETWORK face (TLS) on the routable interface — what a browser on another machine hits over
+#     HTTPS (owner-auth). Whether the network face actually binds is the server's own decision, driven
+#     by vita.mode= (passed through as VITA_MODE below) — see architecture/puter-compat-layer.md
+#     "Access faces". The kiosk and network faces are independent and may both be active.
+#
+# APPS_ROOT=/var/lib/vita/apps is the persisted per-app store (fs+kv backing). It lives on the
+# persistent data partition (mounted at /var by var.mount) and is created by tmpfiles.d/vita-apps.conf,
+# so it is present in EVERY mode (headless included) before this unit starts.
+#
+# Health: the unit is considered healthy once the local face answers on the loopback port. The kiosk
+# unit orders After= a readiness gate (vita-platform-ready.target / sd_notify) so chromium never points
+# at a dead port. Type=notify + sd_notify(READY=1) is the intended contract once the real binary lands.
+[Unit]
+Description=Vita platform server (Puter-compatible host: local + network faces)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Loopback + (optionally) the routable NIC. Deliberately NOT ordered after network-online.target:
+# the local face is loopback-only and waiting on network-online hangs headless/no-NIC boots ~120s
+# (same rationale as vita-agentd / vita-ts). The network face binds lazily when an address appears.
+After=vita-agentd.service
+Wants=vita-agentd.service
+
+[Service]
+# TODO(integration): the REAL platform server binary is built in parallel (the Puter-compatible HTTP
+# service — see SERVER INTERFACE in the task + architecture/puter-compat-layer.md). When it lands,
+# replace the ExecStart below with the real launcher and switch Type=simple → Type=notify so the
+# readiness gate is driven by the server's own sd_notify(READY=1) instead of the placeholder probe.
+# Contract the real ExecStart must honor (so the units around it do not change):
+#   • read VITA_MODE / VITA_PLATFORM_PORT / VITA_APPS_ROOT from the environment below;
+#   • serve the local face on http://127.0.0.1:${VITA_PLATFORM_PORT};
+#   • expose the TLS network face on the routable interface when VITA_MODE permits (desktop/network);
+#   • back fs+kv at ${VITA_APPS_ROOT}; sd_notify READY=1 once the local face accepts connections.
+Type=simple
+ExecStart=/usr/lib/vita/platform/vita-platform.sh
+Restart=on-failure
+RestartSec=2s
+StandardOutput=journal+console
+StandardError=journal+console
+
+# Mode + wiring passed to the server. VITA_MODE is rewritten at boot from vita.mode= by the
+# vita-platform-env.service drop-in generator; the default here keeps a hand-started unit sane.
+Environment=VITA_MODE=headless
+Environment=VITA_PLATFORM_PORT=7681
+Environment=VITA_APPS_ROOT=/var/lib/vita/apps
+EnvironmentFile=-/run/vita/platform.env
+
+# ── Least privilege (spec §9.3): the server is an unprivileged network service ───────────────────
+# Privileged host mutation stays in agentd; this serves HTTP and reads/writes the apps store only.
+DynamicUser=yes
+SupplementaryGroups=vita-agent
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Persisted store lives under /var/lib/vita/apps. StateDirectory= would create /var/lib/<name> owned by
+# the DynamicUser; we point at the shared vita tree and let tmpfiles own the parent. ReadWritePaths
+# grants write to the apps store while ProtectSystem=strict keeps the rest of the rootfs read-only.
+StateDirectory=vita
+ReadWritePaths=/var/lib/vita/apps
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# Local face = loopback; network face = TCP/TLS over the routable NIC. Allow the inet families plus
+# AF_UNIX (agentd socket). No raw sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target
