@@ -1,9 +1,10 @@
 import React from 'react';
 
 // Vita uses the Lucide icon library. This component renders one icon and, if the
-// Lucide UMD runtime is not already on the page, loads it once from the CDN — so
-// <Icon> (and every component built on it) works in a consuming project with no setup.
-const LUCIDE_SRC = 'https://unpkg.com/lucide@latest/dist/umd/lucide.min.js';
+// Lucide UMD runtime is not already on the page, loads it once from the local
+// vendored copy — so <Icon> (and every component built on it) works fully offline.
+// Path is relative to the DS-gallery base (DIRECTIONS.html lives at ui_kits/).
+const LUCIDE_SRC = './_vendor/lucide.min.js';
 let _loader = null;
 
 function ensureLucide() {
