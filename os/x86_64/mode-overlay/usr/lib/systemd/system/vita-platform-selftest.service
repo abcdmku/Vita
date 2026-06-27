@@ -12,6 +12,11 @@ Documentation=file:///usr/share/doc/vita/three-modes.md
 After=vita-platform.service
 Wants=vita-platform.service
 Requires=vita-platform.service
+# It writes the persistence bootmark directly under /var/lib/vita/apps, so on a VITA_VERITY build it must
+# wait for the vita-data partition to mount at /var (skipped/no-op on a non-verity smoke image, where the
+# path is on the rw root). vita-platform.service already binds the same mount; this makes the dependency
+# explicit for the unit that touches the filesystem path directly rather than only through the gated api.
+RequiresMountsFor=/var/lib/vita/apps
 
 [Service]
 Type=oneshot
