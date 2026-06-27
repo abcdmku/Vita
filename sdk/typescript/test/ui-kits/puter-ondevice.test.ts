@@ -295,6 +295,21 @@ test("ownerTokenFaceGate: allows the owner token (header/bearer/query), denies o
   assert.equal(gate(r({ "x-vita-owner": "wrong" }))?.status, 401); // wrong → 401
   // a per-APP bearer that is not the owner token must NOT pass the owner gate.
   assert.equal(gate(r({ authorization: "Bearer some-app-token" }))?.status, 401);
+
+  // CONSTANT-TIME compare (MED-HIGH finding): the token comparison must be exact, not a prefix/length
+  // match. These cases prove correctness is preserved by the timingSafeEqual-over-digest implementation
+  // (the timing property itself is not observable in a unit test, but the functional contract is):
+  //   - a correct PREFIX of the token is denied (the classic timing-oracle target),
+  //   - a token with extra trailing bytes is denied,
+  //   - an empty presented token is denied.
+  assert.equal(gate(r({ "x-vita-owner": "OWNER-SECRE" }))?.status, 401, "prefix of owner token denied");
+  assert.equal(gate(r({ "x-vita-owner": "OWNER-SECRET-extra" }))?.status, 401, "owner token + suffix denied");
+  assert.equal(gate(r({ "x-vita-owner": "" }))?.status, 401, "empty presented token denied");
+  assert.equal(gate(r({}, { vita_owner: "OWNER-SECRE" }))?.status, 401, "prefix via query denied");
+  // An empty configured owner token can never authenticate anything (fail-closed).
+  const emptyGate = ownerTokenFaceGate("");
+  assert.equal(emptyGate(r({ "x-vita-owner": "" }))?.status, 401, "empty owner token never authenticates");
+  assert.equal(emptyGate(r({}))?.status, 401);
 });
 
 // ===================================== DUAL-FACE integration (loopback + network, one store, restart) =====================================

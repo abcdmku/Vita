@@ -123,6 +123,7 @@ export {
   randomOpaqueToken,
 } from "../capability.ts";
 export type {
+  CapabilityAuditSink,
   CapabilityRegistryOptions,
   GateDenialCode,
   GateResult,
@@ -133,6 +134,16 @@ export type {
   PuterOwner,
   PuterPermissionModel,
 } from "../capability.ts";
+
+// ── the EXEC/PTY backend (the Terminal's process plane; node:child_process-backed dev sandbox) ──
+export {
+  createDevExecBackend,
+} from "../exec-plane.ts";
+export type {
+  ChildProcessLike,
+  DevExecBackendOptions,
+  ExecBackend,
+} from "../exec-plane.ts";
 
 // ── REAL enforcement: delegate to the platform permission-broker ──
 export {

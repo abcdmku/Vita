@@ -330,22 +330,25 @@ export function parseBearer(header: string | undefined | null): string | undefin
   return match?.[1];
 }
 
-// The default opaque-token source: 32 bytes of CSPRNG hex when crypto is available, else a
-// time+counter fallback (still unguessable enough for a single-owner host spike; the real on-device
-// minting uses the platform's token service).
-let fallbackCounter = 0;
-
+// The default opaque-token source: 32 bytes of CSPRNG hex. This token is a TRUST ANCHOR — it is the
+// app-session bearer the api_origin honors and (for the owner token) the sole remote-authn secret — so
+// it MUST be cryptographically random. If `crypto.getRandomValues` is unavailable we HARD-FAIL rather
+// than fall back to Date.now()/Math.random(): a predictable token would let an attacker forge a session.
+// Fail-closed: a missing CSPRNG is a fatal environment defect, never silently downgraded. (On-device the
+// pinned Deno/Node runtime always provides WebCrypto; this throw only fires in a broken/hostile runtime.)
 export function randomOpaqueToken(): string {
   const g = globalThis as { crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array } };
   const getRandomValues = g.crypto?.getRandomValues;
 
-  if (typeof getRandomValues === "function") {
-    const bytes = new Uint8Array(32);
-
-    getRandomValues.call(g.crypto, bytes);
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (typeof getRandomValues !== "function") {
+    throw new Error(
+      "randomOpaqueToken: crypto.getRandomValues is unavailable — refusing to mint a trust-anchor token " +
+        "without a CSPRNG (no Date.now()/Math.random() fallback). This is a fatal runtime defect.",
+    );
   }
 
-  fallbackCounter += 1;
-  return `tok-${Date.now().toString(16)}-${fallbackCounter.toString(16)}-${Math.random().toString(16).slice(2)}`;
+  const bytes = new Uint8Array(32);
+
+  getRandomValues.call(g.crypto, bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

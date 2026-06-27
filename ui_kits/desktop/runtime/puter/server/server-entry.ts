@@ -18,20 +18,32 @@
 //
 // NEVER import from the browser bundle. node-only modules + Deno-only globals (Deno.env / Deno.Command).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { spawn as nodeSpawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createAuditLog,
+  createDevExecBackend,
+  createMetaPlane,
   createOnDeviceControlPlane,
+  createPackageRegistry,
   DEFAULT_AGENTD_SOCKET,
   DEFAULT_SHELL_APPS,
   KIOSK_ENTRY_PATH,
+  nodeSourceFs,
   randomOpaqueToken,
   startPuterPlatformService,
   type AgentControlPlane,
+  type CapabilityAuditSink,
+  type ChildProcessLike,
+  type ExecBackend,
+  type InstalledPackage,
   type PuterOwner,
   type ServiceOptions,
+  type ShellAppEntry,
   type VitaMode,
 } from "./index.ts";
 
@@ -248,6 +260,60 @@ function writeRunFile(path: string, contents: string): void {
   }
 }
 
+// Adapt node:child_process.spawn to the exec-plane's ChildProcessLike port (the dev exec backend spawns
+// allow-listed commands with NO shell, a scrubbed env, and a private cwd — see exec-plane.ts). The on-
+// device Terminal runs here over loopback (trust-on-host); the capability gate already restricted /pty to
+// the exec-granted Terminal before any process is spawned.
+const nodeChildProcess: ChildProcessLike = {
+  spawn(command, args, options) {
+    const child = nodeSpawn(command, [...args], {
+      cwd: options.cwd,
+      env: { ...options.env },
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    return {
+      stderr: { on: (_e, cb) => child.stderr?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stdout: { on: (_e, cb) => child.stdout?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stdin: { write: (d: string) => child.stdin?.write(d), end: () => child.stdin?.end() },
+      on: (event, cb) => { child.on(event, cb as never); },
+      kill: (signal?: string) => { child.kill((signal ?? "SIGTERM") as NodeJS.Signals); },
+    };
+  },
+};
+
+// Build the EXEC backend for the on-device Terminal: the hardened dev-sandbox backend (allow-list,
+// no-shell, scrubbed env, private throwaway cwd per session, wall-clock + output caps). The /pty gate
+// (exec capability) is enforced by the platform BEFORE this backend ever opens a session.
+function buildExecBackend(): ExecBackend {
+  return createDevExecBackend({
+    childProcess: nodeChildProcess,
+    makeCwd: () => mkdtempSync(join(tmpdir(), "vita-term-")),
+    pathEnv: env("PATH") ?? "/usr/bin:/bin",
+  });
+}
+
+// Project the shell catalog into InstalledPackage records so the Package Manager's /meta surface lists
+// the REAL apps (id/name/version/kind/source/requested). The grants in the shell registry are the
+// REQUESTED set the owner has granted; the meta plane reads the LIVE grant store for the granted set.
+function shellAppsAsPackages(apps: readonly ShellAppEntry[], appsRoot: string): InstalledPackage[] {
+  return apps.map((app) => ({
+    id: app.id,
+    name: app.title,
+    version: "1.0.0",
+    kind: "web-app" as const,
+    sourceDir: resolve(appsRoot, app.id),
+    entry: app.entry,
+    // The meta plane only surfaces the GRANTABLE data caps (fs/kv/ui/auth) as "requested"; privileged
+    // planes (control/exec/meta) are not owner-grantable through the meta UI.
+    requested: app.grants.filter((g): g is "fs.read" | "fs.write" | "kv.read" | "kv.write" | "ui" | "auth" =>
+      g === "fs.read" || g === "fs.write" || g === "kv.read" || g === "kv.write" || g === "ui" || g === "auth"),
+    state: "installed" as const,
+    description: app.description,
+  }));
+}
+
 async function main(): Promise<void> {
   const serverMode = resolveServerMode();
 
@@ -363,9 +429,35 @@ async function main(): Promise<void> {
     emit(`${MARKER}: SHELL disabled (VITA_SHELL=0) — local face serves the single-app kiosk-entry`);
   }
 
+  // AUDIT SINK (finding #5): wire ONE capability audit log into the shared registry so EVERY gate
+  // decision (allow + deny) is recorded. The SAME log is the meta-plane's audit source below, so the
+  // Package Manager's activity view + the /meta audit endpoint surface what each app actually did
+  // (especially DENIALS — the owner's signal that an app tried to exceed its grant). Without this the
+  // gate recorded nothing.
+  const auditLog = createAuditLog();
+  const audit: CapabilityAuditSink = auditLog;
+
+  // META PLANE (finding #7): the Package Manager's /meta/* control-plane-for-permissions, gated on the
+  // `meta` capability (the Package Manager app only — now SAFE because control/exec/meta are distinct
+  // broker scopes after finding #1). Built against the SHARED grant + capability registry, so a
+  // grant change it writes is the grant store the broker reads on the next gated call (live revoke). The
+  // package registry is seeded from the real shell catalog so /meta lists the installed apps.
+  const metaPlaneFactory: ServiceOptions["metaPlaneFactory"] = ({ capabilities, grants }) => {
+    const packages = createPackageRegistry({ fs: nodeSourceFs, seed: shellAppsAsPackages(DEFAULT_SHELL_APPS, appsRoot) });
+
+    return createMetaPlane({ audit: auditLog, capabilities, grants, packages });
+  };
+
+  // EXEC BACKEND (finding #7): the on-device Terminal's /pty process plane (hardened dev sandbox). Mounted
+  // on the LOCAL face only, gated on `exec` (the Terminal only). Safe now that exec is a distinct cap.
+  const execBackend = buildExecBackend();
+
   const options: ServiceOptions = {
     appsRoot,
+    audit,
+    execBackend,
     faces: { localHost, localPort, networkHost, networkPort },
+    metaPlaneFactory,
     mode: serverMode,
     ownerToken,
     ...(controlPlane !== undefined ? { controlPlane } : {}),
@@ -454,6 +546,14 @@ async function main(): Promise<void> {
   // The owner token is the network-face bearer secret; keep it 0640 under /run for the owner/probe to
   // read out-of-band. (The durable copy lives on /var via the first-boot mint script.)
   writeRunFile(`${runDir}/owner-token`, `${ownerToken}\n`);
+
+  // Witness the newly-wired planes so the on-device boot confirm can assert them (findings #5 + #7):
+  // the capability audit sink records every gate decision; the meta plane (/meta/*) + the exec plane
+  // (/pty) are mounted on the local face (gated on `meta` / `exec`, which are now DISTINCT broker scopes
+  // after finding #1, so the Package Manager + Terminal work without capability confusion).
+  emit(`${MARKER}: AUDIT sink wired (capability allow/deny recorded) status=OK`);
+  emit(`${MARKER}: META plane wired (/meta/* gated on meta — Package Manager) status=OK`);
+  emit(`${MARKER}: EXEC plane wired (/pty gated on exec — Terminal, local face) status=OK`);
 
   if (service.localUrl !== undefined) emit(`${MARKER}: LOCAL face up ${service.localUrl} (kiosk ${service.kioskUrl})`);
   if (service.networkUrl !== undefined) emit(`${MARKER}: NETWORK face up ${service.networkUrl} (owner-token${service.tls ? " + TLS" : " PLAINTEXT"})`);

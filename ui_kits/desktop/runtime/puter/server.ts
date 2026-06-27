@@ -84,6 +84,22 @@ export interface HarnessServer {
   close(): Promise<void>;
 }
 
+// ---- /pty DoS bounds (MEDIUM finding) ----
+// xterm control frames are tiny (a keystroke, a resize, a signal). A hostile client could otherwise
+// (a) announce a huge frame length to force a large allocation, (b) stream bytes without ever completing
+// a frame to grow the reassembly buffer unbounded, or (c) open many /pty sessions to exhaust the node.
+// We cap all three. These are deliberately generous for legitimate terminals yet hard ceilings.
+const PTY_MAX_FRAME_BYTES = 1 << 20; // 1 MiB: a single ws frame payload may never exceed this.
+const PTY_MAX_REASSEMBLY_BYTES = 1 << 21; // 2 MiB: the inbound reassembly buffer (header + partial frame).
+const PTY_MAX_CONCURRENT_SESSIONS = 8; // per face: at most this many live /pty bridges at once.
+
+// Per-face /pty session state: the live-session count (DoS cap) + the set of upgraded sockets (so
+// close() can forcibly destroy them — server.close() does not touch upgraded sockets).
+interface PtySessionState {
+  count: number;
+  readonly live: Set<import("node:net").Socket>;
+}
+
 const MIME: Readonly<Record<string, string>> = Object.freeze({
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -131,6 +147,10 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
   const ptyPath = deps.ptyPath ?? "/pty";
   const execBackend = deps.execBackend;
   const capabilities = deps.capabilities;
+  // Per-face live-/pty-session counter (DoS cap). A box so the bridge can decrement on close. `live`
+  // tracks the upgraded sockets so close() can forcibly destroy them — node's server.close() does NOT
+  // close already-upgraded sockets, so without this an open pty would keep the server alive forever.
+  const ptySessions: PtySessionState = { count: 0, live: new Set() };
 
   server.on("upgrade", (req: IncomingMessage, socket: import("node:net").Socket) => {
     const [path, queryString] = splitQuery(req.url ?? "");
@@ -142,6 +162,14 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     if (path === ptyPath) {
       if (execBackend === undefined || capabilities === undefined) {
         refuseUpgrade(socket, 404, "pty not available");
+        return;
+      }
+
+      // DoS cap: refuse a new pty when the face already holds the max concurrent sessions (503). This is
+      // checked BEFORE auth so an attacker cannot exhaust sessions even with a valid token, and the
+      // counter is only incremented once the bridge actually starts (acceptPtyUpgrade).
+      if (ptySessions.count >= PTY_MAX_CONCURRENT_SESSIONS) {
+        refuseUpgrade(socket, 503, "too many pty sessions");
         return;
       }
 
@@ -160,7 +188,7 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
         if (denied !== undefined) { refuseUpgrade(socket, denied.status, "forbidden"); return; }
       }
 
-      acceptPtyUpgrade(req, socket, path, queryString, execBackend, capabilities);
+      acceptPtyUpgrade(req, socket, path, queryString, execBackend, capabilities, ptySessions);
       return;
     }
 
@@ -175,6 +203,12 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
 
   return Object.freeze({
     async close(): Promise<void> {
+      // Forcibly drop any still-open /pty sockets first — server.close() ignores upgraded sockets, so
+      // they would otherwise keep the listener (and the process) alive indefinitely.
+      for (const socket of [...ptySessions.live]) {
+        try { socket.destroy(); } catch { /* ignore */ }
+      }
+      ptySessions.live.clear();
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     },
     host,
@@ -426,6 +460,7 @@ function acceptPtyUpgrade(
   queryString: string,
   execBackend: ExecBackend,
   capabilities: PuterCapabilityRegistry,
+  ptySessions: PtySessionState,
 ): void {
   const query = parseQuery(queryString);
   // A browser WebSocket can't set headers, so the token rides the query string. Still accept a bearer
@@ -454,7 +489,7 @@ function acceptPtyUpgrade(
   );
 
   void path;
-  bridgePty(socket, execBackend, resolved.session);
+  bridgePty(socket, execBackend, resolved.session, ptySessions);
 }
 
 // Bridge a now-upgraded websocket to an ExecBackend session: decode inbound frames → client messages →
@@ -464,10 +499,16 @@ function bridgePty(
   socket: import("node:net").Socket,
   execBackend: ExecBackend,
   session: import("./capability.ts").PuterAppSession,
+  ptySessions: PtySessionState,
 ): void {
   const emit = (message: ExecServerMessage): void => {
     try { socket.write(encodeTextFrame(JSON.stringify(message))); } catch { /* socket gone */ }
   };
+
+  // Count this live session (DoS cap) + track the socket so close() can destroy it (server.close()
+  // ignores upgraded sockets). Both are undone exactly once on finish.
+  ptySessions.count += 1;
+  ptySessions.live.add(socket);
 
   const exec = execBackend.open(emit, {
     appId: session.appId,
@@ -480,18 +521,34 @@ function bridgePty(
   const finish = (): void => {
     if (done) return;
     done = true;
+    ptySessions.count = Math.max(0, ptySessions.count - 1);
+    ptySessions.live.delete(socket);
     try { exec.close(); } catch { /* ignore */ }
     try { socket.end(); } catch { /* ignore */ }
   };
+  // Forcibly drop a misbehaving client (oversized frame / overgrown buffer): destroy the socket so no
+  // more data arrives, then run the normal teardown.
+  const abort = (reason: string): void => {
+    try { socket.destroy(new Error(`pty: ${reason}`)); } catch { /* ignore */ }
+    finish();
+  };
 
   socket.on("data", (chunk: Buffer) => {
+    if (done) return;
+
     buffer = Buffer.concat([buffer, chunk]);
+
+    // Bound the reassembly buffer: a client that streams bytes without ever completing a frame must not
+    // grow this without limit. (decodeFrame also rejects an announced frame length > PTY_MAX_FRAME_BYTES
+    // up front, so this guards the header + partial-payload accumulation.)
+    if (buffer.byteLength > PTY_MAX_REASSEMBLY_BYTES) { abort("reassembly buffer exceeded"); return; }
 
     // Drain as many complete frames as the buffer holds.
     for (;;) {
       const frame = decodeFrame(buffer);
 
       if (frame === undefined) break; // need more bytes
+      if (frame === OVERSIZED_FRAME) { abort("frame too large"); return; } // length cap exceeded
 
       buffer = frame.rest;
 
@@ -555,9 +612,15 @@ interface DecodedFrame {
   readonly rest: Buffer<ArrayBufferLike>;
 }
 
+// Sentinel returned by decodeFrame when a frame announces a payload length above PTY_MAX_FRAME_BYTES.
+// The caller aborts the connection — we reject on the ANNOUNCED length, before allocating or waiting for
+// the bytes, so a hostile "huge length" header can never force a large allocation or buffer growth.
+const OVERSIZED_FRAME = Symbol("pty-oversized-frame");
+
 // Decode ONE client frame from `buf`. Browser→server frames are ALWAYS masked (RFC 6455 §5.3); we apply
-// the mask. Returns undefined when the buffer doesn't yet hold a full frame (caller waits for more).
-function decodeFrame(buf: Buffer): DecodedFrame | undefined {
+// the mask. Returns undefined when the buffer doesn't yet hold a full frame (caller waits for more), or
+// the OVERSIZED_FRAME sentinel when the announced length exceeds the cap (caller aborts).
+function decodeFrame(buf: Buffer): DecodedFrame | typeof OVERSIZED_FRAME | undefined {
   if (buf.byteLength < 2) return undefined;
 
   const b0 = buf[0] ?? 0;
@@ -573,10 +636,18 @@ function decodeFrame(buf: Buffer): DecodedFrame | undefined {
     offset = 4;
   } else if (len === 127) {
     if (buf.byteLength < 10) return undefined;
-    // Only the low 32 bits matter for our sizes.
-    len = buf.readUInt32BE(6);
+    // A 64-bit length: read the high word too so a frame > 2^32 is recognized as oversized (not
+    // silently truncated to its low 32 bits, which could bypass the cap).
+    const high = buf.readUInt32BE(2);
+    const low = buf.readUInt32BE(6);
+
+    if (high !== 0) return OVERSIZED_FRAME; // > 4 GiB announced → reject outright
+    len = low;
     offset = 10;
   }
+
+  // Reject on the ANNOUNCED length before allocating / waiting for the payload bytes.
+  if (len > PTY_MAX_FRAME_BYTES) return OVERSIZED_FRAME;
 
   const maskBytes = masked ? 4 : 0;
 

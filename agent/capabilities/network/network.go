@@ -161,6 +161,32 @@ func (c *Capability) Handle(ctx context.Context, req capabilities.TypedRequest) 
 	}, nil
 }
 
+// CurrentPolicy reads the node's persisted inbound allow-list policy. When no policy has been applied
+// yet (first boot) it returns an EMPTY policy (Allow = empty list) — the node-face firewall then opens
+// ONLY the owner-token TLS ingress + loopback + established/related (the safe default-deny base). Used by
+// the boot firewall apply path (ProvisionNodeFirewall) to render the node firewall from the live policy.
+// Fail-closed: a present-but-corrupt policy file is an error (the caller must not apply a guessed policy).
+func (c *Capability) CurrentPolicy(ctx context.Context) (Policy, error) {
+	if c == nil || c.fs == nil {
+		return Policy{}, &InvalidRequestError{Reason: "missing policy filesystem"}
+	}
+
+	snapshot, err := c.fs.Read(ctx)
+	if err != nil {
+		return Policy{}, err
+	}
+	if !snapshot.exists {
+		empty := make([]Rule, 0)
+		return Policy{Allow: &empty}, nil
+	}
+
+	parsed, err := parsePolicy(snapshot.bytes)
+	if err != nil {
+		return Policy{}, err
+	}
+	return clonePolicy(parsed), nil
+}
+
 func (c *Capability) Apply(ctx context.Context, req capabilities.TypedRequest) (transaction.Undo, error) {
 	applyReq, ok := req.(ApplyRequest)
 	if !ok {

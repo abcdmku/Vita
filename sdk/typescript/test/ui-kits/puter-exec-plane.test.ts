@@ -10,6 +10,10 @@ import { test } from "node:test";
 
 import { createCapabilityRegistry } from "../../../../ui_kits/desktop/runtime/puter/capability.ts";
 import {
+  createAppGrantRegistry,
+  createBrokerPermissionModel,
+} from "../../../../ui_kits/desktop/runtime/puter/permission-model.ts";
+import {
   type ChildProcessLike,
   type ExecServerMessage,
   type SpawnedChild,
@@ -163,22 +167,48 @@ test("dev backend: SIGINT with no running command clears the line + re-prompts (
   session.close();
 });
 
-// ---- capability gate: exec is default-deny ----
+// ---- capability gate: exec is default-deny, enforced by the PRODUCTION broker model ----
 
-test("capability: only an exec-granted session authorizes exec; others are CAP_DENIED (403)", () => {
-  const caps = createCapabilityRegistry();
-  const term = caps.mintAppSession({ appId: "vita.terminal", appInstanceId: "t", grants: ["exec", "auth"], token: "T" });
-  const note = caps.mintAppSession({ appId: "vita.notepad", appInstanceId: "n", grants: ["fs.read", "fs.write", "ui", "auth"], token: "N" });
+// NOTE: this replaces an earlier test that gated `exec` with the DEFAULT session-grant model
+// (createCapabilityRegistry() with no permissionModel), which merely checked set-membership of the
+// session's own grants. That is NOT the production enforcement path and would have passed even with the
+// capability-confusion bug. This version wires the REAL `createBrokerPermissionModel` (the on-device
+// enforcement) and additionally proves `exec` is DISTINCT from control/meta at the gate.
+test("capability (broker model): only an exec-granted app authorizes exec; control/meta-only apps are CAP_DENIED (403)", () => {
+  const grants = createAppGrantRegistry({
+    "vita.terminal": ["exec", "auth"],
+    "vita.notepad": ["fs.read", "fs.write", "ui", "auth"],
+    "vita.console": ["control", "auth"],
+    "vita.pkgmgr": ["meta", "auth"],
+  });
+  const caps = createCapabilityRegistry({ permissionModel: createBrokerPermissionModel({ grants }) });
 
-  const grantedOk = caps.authorize(term, "exec");
-  assert.equal(grantedOk.ok, true);
+  // The session's baked grant set is IRRELEVANT under the broker model — the broker decides from the
+  // per-app declared policy keyed by appId. Mint each session with a deliberately over-broad grant set
+  // to prove the broker (not the session) is the authority.
+  const term = caps.mintAppSession({ appId: "vita.terminal", appInstanceId: "t", grants: ["exec", "control", "meta", "auth"], token: "T" });
+  const note = caps.mintAppSession({ appId: "vita.notepad", appInstanceId: "n", grants: ["exec", "control", "meta", "auth"], token: "N" });
+  const consoleApp = caps.mintAppSession({ appId: "vita.console", appInstanceId: "c", grants: ["exec", "control", "meta", "auth"], token: "C" });
+  const pkg = caps.mintAppSession({ appId: "vita.pkgmgr", appInstanceId: "p", grants: ["exec", "control", "meta", "auth"], token: "P" });
 
-  const denied = caps.authorize(note, "exec");
-  assert.equal(denied.ok, false);
-  if (!denied.ok) {
-    assert.equal(denied.code, "CAP_DENIED");
-    assert.equal(denied.status, 403);
+  // Terminal: exec ALLOW.
+  assert.equal(caps.authorize(term, "exec").ok, true, "terminal may exec");
+
+  // Notepad (no privileged grant): exec DENIED 403 (default-deny).
+  const noteDenied = caps.authorize(note, "exec");
+  assert.equal(noteDenied.ok, false);
+  if (!noteDenied.ok) {
+    assert.equal(noteDenied.code, "CAP_DENIED");
+    assert.equal(noteDenied.status, 403);
   }
+
+  // CAPABILITY SEPARATION: a control-only app and a meta-only app are BOTH denied exec, even though all
+  // three privileged caps share the `configuration` class. The distinct broker scope keeps them apart.
+  assert.equal(caps.authorize(consoleApp, "exec").ok, false, "control-only app must NOT exec");
+  assert.equal(caps.authorize(pkg, "exec").ok, false, "meta-only app must NOT exec");
+  // And the converse: the exec-granted Terminal is denied control + meta.
+  assert.equal(caps.authorize(term, "control").ok, false, "exec-only Terminal must NOT control");
+  assert.equal(caps.authorize(term, "meta").ok, false, "exec-only Terminal must NOT meta");
 
   // unknown token → UNAUTHENTICATED 401 (the /pty upgrade refuses before any session opens).
   const unauth = caps.resolveToken("nope");

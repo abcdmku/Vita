@@ -3,6 +3,10 @@ package owner
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -77,6 +81,95 @@ func (c *Capability) ResolveOwnerIdentity(ctx context.Context) (OwnerIdentityRes
 		Enrolled: true,
 		Identity: ownerIdentityFromCredential(credential),
 	}, nil
+}
+
+// DefaultOwnerIdentityFile is the conventional path the platform server reads the public
+// owner identity from (VITA_OWNER_IDENTITY_FILE in server-entry.ts). The identity bridge
+// writes the resolved public identity here so the TS owner-auth path (/whoami, minted
+// sessions) and the Go agentd owner-auth path agree on ONE owner. Lives on the persistent
+// /var partition; carries NO key material (only the public uuid/username/emailConfirmed).
+const DefaultOwnerIdentityFile = "/var/lib/vita/owner/owner-identity.json"
+
+// ownerIdentityFileMode is 0640: owner-readable, group-readable (the platform DynamicUser
+// reads it via the shared group), world-unreadable. The file holds only the PUBLIC owner
+// identity, but we keep it tight regardless.
+const ownerIdentityFileMode = 0o640
+
+// WriteOwnerIdentityFile is the IDENTITY BRIDGE: it projects a resolved OwnerIdentityResult
+// into the platform's owner-identity record (the JSON server-entry.ts::readOwnerIdentity
+// consumes). This is what makes the live owner-auth path use the REAL enrolled owner rather
+// than the trust-on-host default. It writes ONLY the public identity (uuid, username,
+// emailConfirmed) — never any key material.
+//
+// Fail-closed semantics:
+//   - When the result is NOT enrolled (first boot, no owner credential), the bridge writes
+//     NOTHING and returns (false, nil): the platform then keeps its trust-on-host default
+//     rather than being handed a fabricated owner.
+//   - When enrolled, the file is written ATOMICALLY (temp + rename) under `path` (its parent
+//     dir is created 0700). A partial/torn file can never be read by the platform.
+//
+// Returns (wrote, err): wrote is true iff an identity file was written.
+func WriteOwnerIdentityFile(path string, result OwnerIdentityResult) (bool, error) {
+	if !result.Enrolled {
+		return false, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		path = DefaultOwnerIdentityFile
+	}
+
+	// Marshal ONLY the public identity (the OwnerIdentity JSON tags are uuid/username/
+	// emailConfirmed — exactly the fields the platform reads).
+	payload, err := json.MarshalIndent(result.Identity, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("marshal owner identity: %w", err)
+	}
+	payload = append(payload, '\n')
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, stateRootMode); err != nil {
+		return false, fmt.Errorf("create owner identity dir: %w", err)
+	}
+
+	// Atomic write: a temp file in the same dir, then rename over the target so a reader never
+	// sees a half-written identity.
+	tmp, err := os.CreateTemp(dir, ".owner-identity-*.tmp")
+	if err != nil {
+		return false, fmt.Errorf("create owner identity temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return false, fmt.Errorf("write owner identity temp: %w", err)
+	}
+	if err := tmp.Chmod(ownerIdentityFileMode); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return false, fmt.Errorf("chmod owner identity temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return false, fmt.Errorf("close owner identity temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return false, fmt.Errorf("rename owner identity: %w", err)
+	}
+	return true, nil
+}
+
+// ResolveAndWriteOwnerIdentity is the convenience the boot path calls: resolve the public
+// owner identity from the enrolled credential, then write the platform identity file. It
+// returns (wrote, err) so the caller can emit a boot witness reflecting whether the live
+// owner-auth identity was provisioned.
+func (c *Capability) ResolveAndWriteOwnerIdentity(ctx context.Context, path string) (bool, error) {
+	result, err := c.ResolveOwnerIdentity(ctx)
+	if err != nil {
+		return false, err
+	}
+	return WriteOwnerIdentityFile(path, result)
 }
 
 // ownerIdentityFromCredential derives the PUBLIC owner identity from the enrolled

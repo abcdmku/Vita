@@ -31,6 +31,7 @@ import (
 	"github.com/vita/agent/capabilities/update"
 	"github.com/vita/agent/hardware"
 	"github.com/vita/agent/internal/auditlog"
+	"github.com/vita/agent/internal/sysdeps"
 	"github.com/vita/agent/transport"
 )
 
@@ -73,6 +74,8 @@ func main() {
 	archiveCapability := backup.NewArchiveCapability()
 	executeCapability := capsule.NewExecuteCapability()
 	lifecycleCapability := capsule.NewLifecycleCapability(executeCapability, archiveCapability)
+	ownerCapability := owner.NewCapability()
+	networkCapability := network.NewCapability()
 
 	registry, err := capabilities.NewRegistry(
 		accounts.NewCapability(),
@@ -85,9 +88,9 @@ func main() {
 		capsule.NewCapability(),
 		hostname.NewCapability(),
 		identity.NewCapability(),
-		network.NewCapability(),
+		networkCapability,
 		nodeconfig.NewCapability(),
-		owner.NewCapability(),
+		ownerCapability,
 		pdsrepo.NewCapability(),
 		pdssync.NewCapability(),
 		services.NewCapability(),
@@ -99,6 +102,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("build capability registry: %v", err)
 	}
+
+	// IDENTITY BRIDGE (boot): project the node's PUBLIC owner identity into the platform's
+	// owner-identity record so the TS owner-auth path (/whoami, minted sessions) binds to the
+	// REAL enrolled owner instead of the trust-on-host default. Best-effort + fail-open at boot:
+	// a node with no enrolled owner (first boot) writes nothing and keeps the default; an error
+	// only logs a witness and does not block agentd startup (the platform still serves under the
+	// trust-on-host default). The path is overridable via VITA_OWNER_IDENTITY_FILE to match the
+	// platform's reader.
+	provisionOwnerIdentity(ownerCapability)
+
+	// NODE-FACE FIREWALL (boot): apply + verify the default-deny node firewall (input chain policy drop;
+	// loopback + established/related + the owner-token TLS ingress allowed; explicit policy grants added),
+	// mirroring the WIRED per-capsule egress lockdown. On success the boot witness
+	// `VITA-NODE-FIREWALL: default=deny owner_ingress=OK ... status=OK` is printed to the serial console;
+	// the on-device boot verification asserts that marker. Best-effort at startup: on a host without
+	// nftables (the dev/Windows host; sysdeps stub returns ErrUnsupported) we log the reason and continue
+	// rather than crashing agentd — the marker is only expected on a real linux node.
+	provisionNodeFirewall(networkCapability)
 
 	auditStore, err := auditlog.NewStore(auditlog.OSFileSystem{}, filepath.Join(stateRoot, auditLogFilename), auditLogMaxEvents)
 	if err != nil {
@@ -146,6 +167,52 @@ func main() {
 	if err := serveUntilStopped(tcpServer, unixServer, unixListener, transportReadiness); err != nil {
 		log.Fatalf("serve agent: %v", err)
 	}
+}
+
+// provisionOwnerIdentity resolves the node's public owner identity and writes the platform
+// identity file (the identity bridge). The path matches the platform reader: VITA_OWNER_IDENTITY_FILE
+// when set, else owner.DefaultOwnerIdentityFile. Best-effort: a not-enrolled node writes nothing
+// (keeps the trust-on-host default); any error is logged as a witness and never blocks startup.
+func provisionOwnerIdentity(ownerCapability *owner.Capability) {
+	path := os.Getenv("VITA_OWNER_IDENTITY_FILE")
+	if path == "" {
+		path = owner.DefaultOwnerIdentityFile
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wrote, err := ownerCapability.ResolveAndWriteOwnerIdentity(ctx, path)
+	switch {
+	case err != nil:
+		log.Printf("VITA-OWNER-IDENTITY: provisioning failed: %v (platform falls back to trust-on-host default)", err)
+	case wrote:
+		log.Printf("VITA-OWNER-IDENTITY: bridged enrolled owner identity to %s status=OK", path)
+	default:
+		log.Printf("VITA-OWNER-IDENTITY: no enrolled owner — platform uses trust-on-host default status=DEFAULT")
+	}
+}
+
+// provisionNodeFirewall applies + verifies the node-face default-deny firewall at boot and prints the
+// witness marker. Best-effort: on a host without nftables (sysdeps stub / non-linux dev host) the apply
+// returns ErrUnsupported, which we log and tolerate rather than crashing agentd — the marker is only
+// asserted on a real linux node. A genuine apply/verify FAILURE on a node that DOES have nft is logged
+// as a FAILSAFE witness (the on-device boot confirm flags it for the orchestrator).
+func provisionNodeFirewall(networkCapability *network.Capability) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Port 0 → the platform owner-token TLS ingress default (network.OwnerTokenTLSIngressPort, 7443).
+	result, err := network.ProvisionNodeFirewall(ctx, networkCapability, network.DefaultNodeFirewallNft{}, 0)
+	if err != nil {
+		if errors.Is(err, sysdeps.ErrUnsupported) {
+			log.Printf("VITA-NODE-FIREWALL: nftables unavailable on this host (%v) status=SKIPPED", err)
+			return
+		}
+		log.Printf("VITA-NODE-FIREWALL-ERROR: node firewall apply/verify failed: %v status=FAILSAFE", err)
+		return
+	}
+	log.Print(result.Marker)
 }
 
 // memberPrincipalUID is the authenticated uid agentd binds to the spec §11

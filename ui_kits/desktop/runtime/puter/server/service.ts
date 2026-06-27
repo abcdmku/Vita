@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
 import { createCapabilityRegistry, randomOpaqueToken, type CapabilityAuditSink, type PuterCapability, type PuterCapabilityRegistry, type PuterOwner } from "../capability.ts";
 import type { AgentControlPlane } from "../control-plane.ts";
+import type { ExecBackend } from "../exec-plane.ts";
 import { openAppStore, DEFAULT_APPS_ROOT } from "../fs-store.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel, type AppGrantRegistry } from "../permission-model.ts";
 import type { MetaPlane } from "../pkgmgr/meta-plane.ts";
@@ -91,6 +92,11 @@ export interface ServiceOptions {
   // capability registry once they exist, so the meta plane writes the SAME grant store the broker reads
   // (a revoke takes effect on the next gated call). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
   readonly metaPlaneFactory?: (deps: { readonly grants: AppGrantRegistry; readonly capabilities: PuterCapabilityRegistry }) => MetaPlane;
+  // The EXEC backend powering the /pty websocket (the Terminal). When present, the LOCAL (kiosk) face
+  // mounts /pty, gated on the `exec` capability via the shared registry (only the exec-granted Terminal
+  // can open it). NEVER mounted on the network face. Absent → /pty is not mounted (default-deny). On-device
+  // the boot entry builds this as createDevExecBackend(...) over node:child_process. See exec-plane.ts.
+  readonly execBackend?: ExecBackend;
   // The MULTI-WINDOW SHELL config. When present the LOCAL (kiosk) face serves the shell page at `/` +
   // `/shell.html` plus `/shell-session.js` (a per-app capability-session map), instead of the single-app
   // kiosk-entry. ONE capability session is minted per registry app (each app gets EXACTLY its declared
@@ -269,6 +275,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
       ...(options.controlPlane !== undefined ? { controlPlane: options.controlPlane } : {}),
       ...(metaPlane !== undefined ? { metaPlane } : {}),
       ...(localExtraRoutes !== undefined ? { localExtraRoutes } : {}),
+      ...(options.execBackend !== undefined ? { execBackend: options.execBackend } : {}),
       ...(tls !== undefined ? { networkTls: { cert: tls.cert, key: tls.key } } : {}),
     });
 
