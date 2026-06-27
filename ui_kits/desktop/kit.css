@@ -30,10 +30,13 @@
 .v-mitem.disabled:hover{background:transparent;color:var(--text-faint)}
 .v-mitem.is-checked .v-mitem-label::before{content:'✓ ';color:var(--accent)}
 
-/* windows */
-.v-win{position:absolute;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-window);box-shadow:var(--shadow-window);overflow:hidden}
-.v-tt{height:36px;flex-shrink:0;display:flex;align-items:center;gap:10px;padding:0 13px;background:var(--surface-raised);border-bottom:1px solid var(--hairline)}
-.v-dots{display:flex;gap:7px}.v-dots span{width:11px;height:11px;border-radius:50%;background:var(--border-strong)}
+/* windows — polished chrome: deeper shadow, rounded, clear focus elevation */
+.v-win{position:absolute;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-window);box-shadow:0 1px 2px rgba(0,0,0,.3),0 14px 40px rgba(0,0,0,.45);overflow:hidden;transition:box-shadow .14s ease,border-color .14s ease}
+.v-win.is-focused{box-shadow:0 2px 6px rgba(0,0,0,.4),0 28px 72px rgba(0,0,0,.6),0 0 0 1px rgba(79,157,255,.18)}
+.v-win.is-maximized{border-radius:var(--radius-lg)}
+.v-tt{height:40px;flex-shrink:0;display:flex;align-items:center;gap:11px;padding:0 14px;background:var(--surface-raised);border-bottom:1px solid var(--hairline)}
+.v-dots{display:flex;gap:8px}
+.v-dots span{width:12px;height:12px;border-radius:50%;background:var(--border-strong);box-shadow:inset 0 0 0 .5px rgba(0,0,0,.25),0 1px 1px rgba(0,0,0,.15)}
 .v-tname{font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary)}
 
 /* app shell: sidebar + content — denser */

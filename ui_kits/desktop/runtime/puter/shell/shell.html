@@ -25,16 +25,20 @@
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
   <style>
     /* ---------------------------------------------------------------------------------------------
-       Vita DESKTOP SHELL layout. This is the LIVE multi-window desktop (not a static design-canvas
-       mockup). kit.css sizes `.v-screen` to a fixed 1280x800 design canvas for the mockup screens
-       (Files.html, Activity.html, …); that fixed size is WRONG for the live shell, which must fill
-       the real display (e.g. the on-device 1920x1440 CEF surface). We therefore own the shell's
-       layout HERE, scoped to `.v-desktop-shell`, and force full-viewport so it can never collapse to
-       the 1280x800 canvas regardless of CSS cascade/order on-device. `!important` is deliberate: the
-       on-device build must not be able to clip the desktop to the design canvas.
+       Vita DESKTOP SHELL — the LIVE multi-window desktop frame (not a static design-canvas mockup).
+       kit.css sizes `.v-screen` to a fixed 1280x800 canvas for the mockup screens; that is WRONG for
+       the live shell, which must fill the real display (e.g. the on-device 1920x1440 CEF surface). We
+       own the shell's chrome HERE, scoped to `.v-desktop-shell`, and force full-viewport so it can
+       never collapse to the design canvas regardless of cascade/order on-device. `!important` on the
+       layout root is deliberate: the on-device build must not be able to clip the desktop.
+
+       This stylesheet is the PREMIUM FRAME: a tasteful wallpaper, a prominent system bar (brand +
+       menu context left, live status + clock right), a macOS/Windows-quality dock with pinned apps,
+       and polished window chrome. All of it is Vita's own code — no AGPL Puter desktop is shipped.
        --------------------------------------------------------------------------------------------- */
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #08090c; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #06070a; }
     html, body { height: 100dvh; }
+    .v-desktop-shell, .v-desktop-shell * { -webkit-font-smoothing: antialiased; }
 
     /* The shell root fills the viewport (overrides kit.css `.v-screen{width:1280px;height:800px}`). */
     .v-desktop-shell.v-screen {
@@ -49,73 +53,172 @@
       overflow: hidden !important;
     }
 
+    /* ----- WALLPAPER -----------------------------------------------------------------------------
+       A deliberate, layered desktop background so the empty desktop reads as intentional (not flat
+       black): a cool aurora glow top-right, a violet wash bottom-left, a deep vertical base gradient,
+       and a faint dot grid for texture + a soft inner vignette to frame the windows. */
+    .v-desktop-shell.v-wall-dark {
+      background:
+        radial-gradient(1300px 880px at 84% -16%, rgba(79, 157, 255, 0.20), transparent 58%),
+        radial-gradient(1020px 760px at -10% 116%, rgba(124, 92, 246, 0.16), transparent 60%),
+        radial-gradient(760px 520px at 50% 50%, rgba(40, 120, 200, 0.05), transparent 70%),
+        linear-gradient(168deg, #10141b 0%, #0a0d13 52%, #07090d 100%) !important;
+    }
+    .v-desktop-shell .v-wallpaper-fx {
+      position: absolute; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        radial-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+        radial-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+      background-size: 46px 46px, 46px 46px;
+      background-position: 0 0, 23px 23px;
+      box-shadow: inset 0 0 240px 40px rgba(0, 0, 0, 0.55);
+    }
+
     /* The desktop area between the system bar (top) and the dock (bottom). App windows mount here. */
     .v-desktop-shell .v-desk-area { position: absolute; inset: 0; }
 
-    /* System bar pinned to the TOP edge, prominent + opaque (not the faint translucent mockup bar). */
+    /* ----- SYSTEM BAR (top) ----------------------------------------------------------------------
+       A real OS menu bar: opaque, elevated, well-contrasted. brand + active context on the left, a
+       live status cluster (Connected pill, quick-settings affordance, clock + date) on the right. */
     .v-desktop-shell .v-menubar {
       position: absolute; top: 0; left: 0; right: 0;
-      height: 44px;
-      padding: 0 18px;
-      background: linear-gradient(180deg, #171b22 0%, #12151b 100%);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
-      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.28);
+      height: 46px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 14px 0 16px;
+      background: linear-gradient(180deg, #1b2029 0%, #14181f 100%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 8px 24px rgba(0, 0, 0, 0.34);
       backdrop-filter: none; -webkit-backdrop-filter: none;
       z-index: 60;
+      font-family: var(--font-sans, system-ui);
     }
-    .v-desktop-shell .v-brand { font-size: 15px; color: #f1f4f8; }
-    .v-desktop-shell .v-brand i { font-size: 11px; color: var(--accent, #4f9dff); }
-    .v-desktop-shell .v-menus { font-size: 13px; color: var(--text-secondary, #b3bcc8); }
-    .v-desktop-shell .v-status { gap: 14px; }
+    .v-desktop-shell .v-bar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    /* Brand: a real logo mark + wordmark, clearly legible against the bar. */
+    .v-desktop-shell .v-brand {
+      display: inline-flex; align-items: center; gap: 9px;
+      font-weight: 650; font-size: 14.5px; letter-spacing: 0.01em; color: #f4f6fa;
+    }
+    .v-desktop-shell .v-brand .v-logo {
+      width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: linear-gradient(150deg, #5ba2ff 0%, #3178c6 62%, #7c5cf6 130%);
+      box-shadow: 0 2px 6px rgba(49, 120, 198, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      font: 800 12px var(--font-mono, ui-monospace, monospace); color: #fff;
+    }
+    .v-desktop-shell .v-brand i {
+      font-style: normal; font: 700 11px var(--font-mono, ui-monospace, monospace);
+      color: #8fc0ff; opacity: 0.95;
+    }
+    .v-desktop-shell .v-bar-sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.12); }
+    /* Active window / menu context. */
+    .v-desktop-shell .v-menus { font-size: 13px; color: #c4cdd9; font-weight: 550; }
+    .v-desktop-shell .v-menus [data-shell-status] { color: #d7dee8; }
+
+    .v-desktop-shell .v-status { display: flex; align-items: center; gap: 10px; }
     .v-desktop-shell .v-status .clk {
+      display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1;
       font-family: var(--font-mono, ui-monospace, monospace);
-      font-size: 13px; color: #f1f4f8; font-variant-numeric: tabular-nums;
+      color: #f1f4f8; font-variant-numeric: tabular-nums;
     }
-    /* Connectivity pill on the right of the system bar. */
+    .v-desktop-shell .v-status .clk .clk-time { font-size: 13.5px; font-weight: 600; }
+    .v-desktop-shell .v-status .clk .clk-date {
+      font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      color: #7e8a9a; font-family: var(--font-sans, system-ui); margin-top: 1px;
+    }
+    /* Connectivity pill. */
     .v-desktop-shell .v-net {
-      display: inline-flex; align-items: center; gap: 6px;
-      font: 600 11.5px var(--font-sans, system-ui); color: #b9c2cf;
-      padding: 3px 9px; border-radius: 999px;
-      background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08);
+      display: inline-flex; align-items: center; gap: 7px;
+      font: 600 11.5px var(--font-sans, system-ui); color: #cdd5e0;
+      padding: 4px 11px; border-radius: 999px;
+      background: rgba(91, 191, 134, 0.10); border: 1px solid rgba(91, 191, 134, 0.30);
     }
     .v-desktop-shell .v-net::before {
       content: ''; width: 7px; height: 7px; border-radius: 50%;
-      background: #46d07f; box-shadow: 0 0 8px rgba(70, 208, 127, 0.8);
+      background: #5bd08a; box-shadow: 0 0 9px rgba(91, 208, 138, 0.95);
     }
+    /* Quick-settings affordance (control center button). */
+    .v-desktop-shell .v-sysbtn {
+      width: 30px; height: 30px; border-radius: 9px;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: #aeb8c6; cursor: pointer;
+      background: rgba(255, 255, 255, 0.045); border: 1px solid rgba(255, 255, 255, 0.07);
+      transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+    }
+    .v-desktop-shell .v-sysbtn:hover { background: rgba(255, 255, 255, 0.10); color: #eef2f7; border-color: rgba(255, 255, 255, 0.16); }
+    .v-desktop-shell .v-sysbtn svg { width: 16px; height: 16px; display: block; }
 
-    /* Dock pinned to the BOTTOM edge — prominent, clearly visible, larger tiles. */
+    /* ----- DOCK (bottom) -------------------------------------------------------------------------
+       A macOS/Windows-quality dock: a launcher (all apps), PINNED apps always visible, and a section
+       for any extra running windows. Real, recognizable icons; hover lift; active accent ring; a
+       running-window indicator dot under each pinned/running app. */
     .v-desktop-shell .v-dock {
       position: fixed;
       left: 50%;
-      bottom: 16px;
+      bottom: 14px;
       top: auto;
       transform: translateX(-50%);
-      display: flex; align-items: center; gap: 10px;
-      padding: 9px 13px;
-      background: rgba(20, 24, 31, 0.82);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 20px;
-      box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-      backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3);
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      background: linear-gradient(180deg, rgba(30, 36, 46, 0.78) 0%, rgba(18, 22, 29, 0.86) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 22px;
+      box-shadow:
+        0 18px 48px rgba(0, 0, 0, 0.62),
+        0 2px 0 rgba(0, 0, 0, 0.4),
+        inset 0 1px 0 rgba(255, 255, 255, 0.10);
+      backdrop-filter: blur(22px) saturate(1.4); -webkit-backdrop-filter: blur(22px) saturate(1.4);
       z-index: 55;
     }
+    .v-desktop-shell .v-dsep {
+      width: 1px; height: 36px; align-self: center; margin: 0 3px;
+      background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+    }
     .v-desktop-shell .v-dtile {
-      width: 52px; height: 52px;
-      border-radius: 14px;
-      background: linear-gradient(180deg, #20252e 0%, #181c23 100%);
+      width: 54px; height: 54px;
+      border-radius: 15px;
+      background: linear-gradient(158deg, #2a313d 0%, #1b212a 64%, #151a22 100%);
       border: 1px solid rgba(255, 255, 255, 0.10);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 6px rgba(0, 0, 0, 0.4);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 8px rgba(0, 0, 0, 0.45);
       color: #e6e8ee;
       display: flex; align-items: center; justify-content: center;
-      font-size: 24px; line-height: 1; cursor: pointer; position: relative;
-      transition: transform 0.12s ease, border-color 0.12s ease;
+      cursor: pointer; position: relative;
+      transition: transform 0.14s cubic-bezier(.2,.8,.3,1.2), border-color 0.14s ease, box-shadow 0.14s ease;
     }
-    .v-desktop-shell .v-dtile:hover { transform: translateY(-3px); border-color: rgba(255, 255, 255, 0.22); }
-    .v-desktop-shell .v-dtile.on { border-color: var(--accent, #4f9dff); color: var(--accent, #4f9dff); }
-    .v-desktop-shell .v-dtile.on::after {
+    .v-desktop-shell .v-dtile svg { width: 26px; height: 26px; display: block; }
+    .v-desktop-shell .v-dtile .v-demoji { font-size: 25px; line-height: 1; }
+    .v-desktop-shell .v-dtile:hover {
+      transform: translateY(-7px) scale(1.04);
+      border-color: rgba(255, 255, 255, 0.26);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 12px 22px rgba(0, 0, 0, 0.5);
+    }
+    .v-desktop-shell .v-dtile:active { transform: translateY(-3px) scale(0.99); }
+    /* Tooltip label that floats above a tile on hover. */
+    .v-desktop-shell .v-dtile .v-dtip {
+      position: absolute; bottom: calc(100% + 12px); left: 50%; transform: translateX(-50%) translateY(4px);
+      padding: 4px 9px; border-radius: 7px; white-space: nowrap;
+      font: 600 11.5px var(--font-sans, system-ui); color: #eef2f7;
+      background: rgba(20, 24, 31, 0.96); border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+      opacity: 0; pointer-events: none; transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+    .v-desktop-shell .v-dtile:hover .v-dtip { opacity: 1; transform: translateX(-50%) translateY(0); }
+    /* The launcher tile reads as the primary action — subtle accent wash. */
+    .v-desktop-shell .v-dtile.v-launcher {
+      background: linear-gradient(158deg, #2f6fc0 0%, #2756a0 70%, #244a8c 100%);
+      border-color: rgba(143, 192, 255, 0.45);
+      color: #fff;
+    }
+    .v-desktop-shell .v-dtile.v-launcher:hover { border-color: rgba(180, 214, 255, 0.7); }
+    /* Running-window indicator under a tile. */
+    .v-desktop-shell .v-dtile .v-run-dot {
       content: ''; position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
-      width: 5px; height: 5px; border-radius: 50%; background: var(--accent, #4f9dff);
+      width: 6px; height: 6px; border-radius: 50%; background: #6c7280;
+      opacity: 0; transition: opacity 0.14s ease, background 0.14s ease, width 0.14s ease;
     }
+    .v-desktop-shell .v-dtile.running .v-run-dot { opacity: 1; background: var(--accent, #4f9dff); box-shadow: 0 0 8px rgba(79, 157, 255, 0.85); }
+    .v-desktop-shell .v-dtile.focused .v-run-dot { width: 18px; border-radius: 3px; background: var(--accent, #4f9dff); box-shadow: 0 0 10px rgba(79, 157, 255, 0.9); }
+    .v-desktop-shell .v-dtile.running { border-color: rgba(79, 157, 255, 0.32); }
+    .v-desktop-shell .v-dtile.focused { border-color: rgba(79, 157, 255, 0.6); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(79, 157, 255, 0.35), 0 4px 12px rgba(0, 0, 0, 0.5); }
   </style>
   <!-- Publishes the api origin + per-app session tokens the shell hands each app iframe. Served by the
        LOCAL face only (like /session.js). On the network face it 404s and the shell falls back to
@@ -123,7 +226,10 @@
   <script src="/shell-session.js"></script>
 </head>
 <body>
-  <div class="v-desktop-shell v-screen theme-dark v-wall-dark" id="screen" data-vita-screen="desktop"></div>
+  <div class="v-desktop-shell v-screen theme-dark v-wall-dark" id="screen" data-vita-screen="desktop">
+    <!-- Wallpaper texture/vignette layer (sits behind all chrome + windows; z-index:0). -->
+    <div class="v-wallpaper-fx" aria-hidden="true"></div>
+  </div>
   <!-- The offline shell bundle: real WM + web-app window host + ui broker + dock/launcher. -->
   <script type="module" src="/shell/shell.js"></script>
 </body>

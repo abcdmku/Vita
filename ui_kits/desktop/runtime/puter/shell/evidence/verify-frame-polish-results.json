@@ -1,0 +1,216 @@
+{
+  "passed": 42,
+  "total": 42,
+  "results": [
+    {
+      "name": "[1920x1440] shell booted",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] system bar pinned TOP, full-width, >=44px tall",
+      "ok": true,
+      "detail": "{\"x\":0,\"y\":0,\"w\":1920,\"h\":46,\"bottom\":46}"
+    },
+    {
+      "name": "[1920x1440] dock pinned to the BOTTOM edge",
+      "ok": true,
+      "detail": "bottom-gap=14px"
+    },
+    {
+      "name": "[1920x1440] wallpaper layer present (desktop not flat black)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] brand mark + wordmark rendered",
+      "ok": true,
+      "detail": "VVita.ts"
+    },
+    {
+      "name": "[1920x1440] \"Connected\" status indicator present",
+      "ok": true,
+      "detail": "Connected"
+    },
+    {
+      "name": "[1920x1440] quick-settings affordance present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] live clock shows time + date",
+      "ok": true,
+      "detail": "08:06 / Sat 27 Jun"
+    },
+    {
+      "name": "[1920x1440] system bar reads brighter than wallpaper (contrast, not dark-on-dark)",
+      "ok": true,
+      "detail": "barLuma=27.7 belowLuma=14.4 Δ=13.3"
+    },
+    {
+      "name": "[1920x1440] dock launcher (all apps) present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] dock shows PINNED apps always-visible (>=5)",
+      "ok": true,
+      "detail": "7 pinned: vita.desk,vita.app.terminal,vita.app.editor,vita.app.package-manager,vita.app.deploy-console,com.puter-apps.serverless-todo,com.puter-apps.notepad"
+    },
+    {
+      "name": "[1920x1440] every pinned tile has a real icon (svg/glyph, not faint text)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] pinned tiles carry running-indicator + tooltip affordances",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] the user's requested pinned set is present",
+      "ok": true,
+      "detail": "all present"
+    },
+    {
+      "name": "[1920x1440] clicking a dock pinned icon OPENS the app",
+      "ok": true,
+      "detail": "vita.app.terminal"
+    },
+    {
+      "name": "[1920x1440] running app's dock tile shows running+focused indicator",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1920x1440] launcher opens a second app (2 windows)",
+      "ok": true,
+      "detail": "2 windows"
+    },
+    {
+      "name": "[1920x1440] window has 3 traffic-light controls + title + resize grip",
+      "ok": true,
+      "detail": "{\"close\":true,\"min\":true,\"zoom\":true,\"title\":\"Vita Code\",\"resize\":true}"
+    },
+    {
+      "name": "[1920x1440] window CLOSE (red traffic light) removes the window",
+      "ok": true,
+      "detail": "2 -> 1"
+    },
+    {
+      "name": "[1920x1440] window MAXIMIZE (green traffic light) enlarges the window",
+      "ok": true,
+      "detail": "720 -> 1904px"
+    },
+    {
+      "name": "[1920x1440] no uncaught console errors",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] shell booted",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] system bar pinned TOP, full-width, >=44px tall",
+      "ok": true,
+      "detail": "{\"x\":0,\"y\":0,\"w\":1366,\"h\":46,\"bottom\":46}"
+    },
+    {
+      "name": "[1366x768] dock pinned to the BOTTOM edge",
+      "ok": true,
+      "detail": "bottom-gap=14px"
+    },
+    {
+      "name": "[1366x768] wallpaper layer present (desktop not flat black)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] brand mark + wordmark rendered",
+      "ok": true,
+      "detail": "VVita.ts"
+    },
+    {
+      "name": "[1366x768] \"Connected\" status indicator present",
+      "ok": true,
+      "detail": "Connected"
+    },
+    {
+      "name": "[1366x768] quick-settings affordance present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] live clock shows time + date",
+      "ok": true,
+      "detail": "08:06 / Sat 27 Jun"
+    },
+    {
+      "name": "[1366x768] system bar reads brighter than wallpaper (contrast, not dark-on-dark)",
+      "ok": true,
+      "detail": "barLuma=27.7 belowLuma=13.7 Δ=13.9"
+    },
+    {
+      "name": "[1366x768] dock launcher (all apps) present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] dock shows PINNED apps always-visible (>=5)",
+      "ok": true,
+      "detail": "7 pinned: vita.desk,vita.app.terminal,vita.app.editor,vita.app.package-manager,vita.app.deploy-console,com.puter-apps.serverless-todo,com.puter-apps.notepad"
+    },
+    {
+      "name": "[1366x768] every pinned tile has a real icon (svg/glyph, not faint text)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] pinned tiles carry running-indicator + tooltip affordances",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] the user's requested pinned set is present",
+      "ok": true,
+      "detail": "all present"
+    },
+    {
+      "name": "[1366x768] clicking a dock pinned icon OPENS the app",
+      "ok": true,
+      "detail": "vita.app.terminal"
+    },
+    {
+      "name": "[1366x768] running app's dock tile shows running+focused indicator",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[1366x768] launcher opens a second app (2 windows)",
+      "ok": true,
+      "detail": "2 windows"
+    },
+    {
+      "name": "[1366x768] window has 3 traffic-light controls + title + resize grip",
+      "ok": true,
+      "detail": "{\"close\":true,\"min\":true,\"zoom\":true,\"title\":\"Vita Code\",\"resize\":true}"
+    },
+    {
+      "name": "[1366x768] window CLOSE (red traffic light) removes the window",
+      "ok": true,
+      "detail": "2 -> 1"
+    },
+    {
+      "name": "[1366x768] window MAXIMIZE (green traffic light) enlarges the window",
+      "ok": true,
+      "detail": "720 -> 1350px"
+    },
+    {
+      "name": "[1366x768] no uncaught console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}
