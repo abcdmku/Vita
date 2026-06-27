@@ -25,6 +25,7 @@ import {
 } from "./capability.ts";
 import {
   buildLaunchUrl,
+  type LaunchItem,
 } from "./launch-url.ts";
 import type {
   WindowContent,
@@ -62,6 +63,10 @@ export interface WebAppSpec {
   // the iframe's HTTP requests authenticate. Omitted → a fresh random token (single-process / on-device
   // where the host + api_origin share one registry).
   readonly token?: string;
+  // Open this app WITH a launch item (puter.ui.onLaunchedWithItems). The SDK reads the item from the
+  // launch URL on boot. Used to "Open with…" a file into an app (e.g. a file manager launching Notepad
+  // on a .txt).
+  readonly launchItem?: LaunchItem;
 }
 
 export interface WebAppHandle {
@@ -157,6 +162,7 @@ export function createWebAppWindowHost(deps: WebAppWindowHostDeps): WebAppWindow
         appUrl: spec.appUrl,
         authToken: session.token,
         ...(deps.guiOrigin === undefined ? {} : { guiOrigin: deps.guiOrigin }),
+        ...(spec.launchItem === undefined ? {} : { launchItem: spec.launchItem }),
       });
 
       const body = handle.bodyElement;
