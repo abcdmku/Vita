@@ -44,6 +44,7 @@ import {
   KIOSK_ENTRY_PATH,
   startPuterPlatformService,
 } from "../../../../ui_kits/desktop/runtime/puter/server/service.ts";
+import { createStubControlPlane } from "../../../../ui_kits/desktop/runtime/puter/control-plane.ts";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
@@ -294,6 +295,21 @@ test("ownerTokenFaceGate: allows the owner token (header/bearer/query), denies o
   assert.equal(gate(r({ "x-vita-owner": "wrong" }))?.status, 401); // wrong → 401
   // a per-APP bearer that is not the owner token must NOT pass the owner gate.
   assert.equal(gate(r({ authorization: "Bearer some-app-token" }))?.status, 401);
+
+  // CONSTANT-TIME compare (MED-HIGH finding): the token comparison must be exact, not a prefix/length
+  // match. These cases prove correctness is preserved by the timingSafeEqual-over-digest implementation
+  // (the timing property itself is not observable in a unit test, but the functional contract is):
+  //   - a correct PREFIX of the token is denied (the classic timing-oracle target),
+  //   - a token with extra trailing bytes is denied,
+  //   - an empty presented token is denied.
+  assert.equal(gate(r({ "x-vita-owner": "OWNER-SECRE" }))?.status, 401, "prefix of owner token denied");
+  assert.equal(gate(r({ "x-vita-owner": "OWNER-SECRET-extra" }))?.status, 401, "owner token + suffix denied");
+  assert.equal(gate(r({ "x-vita-owner": "" }))?.status, 401, "empty presented token denied");
+  assert.equal(gate(r({}, { vita_owner: "OWNER-SECRE" }))?.status, 401, "prefix via query denied");
+  // An empty configured owner token can never authenticate anything (fail-closed).
+  const emptyGate = ownerTokenFaceGate("");
+  assert.equal(emptyGate(r({ "x-vita-owner": "" }))?.status, 401, "empty owner token never authenticates");
+  assert.equal(emptyGate(r({}))?.status, 401);
 });
 
 // ===================================== DUAL-FACE integration (loopback + network, one store, restart) =====================================
@@ -478,6 +494,67 @@ test("service: SINGLE SHARED registry mints app tokens in-process; the api_origi
 
     assert.equal(blocked.status, 403);
     assert.equal(((await blocked.json()) as { code?: string }).code, "CAP_DENIED");
+  } finally {
+    await svc.close();
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("service: a supplied control plane is mounted on the api_origin and /control/* is gated on `control`", async () => {
+  // This proves the LIVE-wiring chain end-to-end at the service level: a control plane handed to
+  // startPuterPlatformService({ controlPlane }) is threaded through the dual-face backend into the
+  // single shared api_origin, so /control/* is served on the local face. On-device the supplied plane is
+  // createOnDeviceControlPlane(agentd socket); here a stub stands in (no agentd / no VM boot).
+  const root = freshDir("vita-svc-control-");
+  const svc = await startPuterPlatformService({
+    appGrants: { "vita.app.deploy-console": ["control", "auth", "kv.read", "kv.write"], "other.app": ["auth"] },
+    appsRoot: root,
+    controlPlane: createStubControlPlane({ now: () => 1_700_000_000_000 }),
+    faces: { localHost: "127.0.0.1" },
+    mode: "local-desktop",
+  });
+
+  try {
+    const localApi = `${svc.localUrl}/api`;
+    const consoleApp = svc.mintApp({ appId: "vita.app.deploy-console", grants: ["control", "auth", "kv.read", "kv.write"], instanceId: "console-i1" });
+    const otherApp = svc.mintApp({ appId: "other.app", grants: ["auth"], instanceId: "other-i1" });
+
+    // The console (granted `control`) lists REAL capsules through the bridge.
+    const listed = await fetch(`${localApi}/control/apps`, { headers: { authorization: `Bearer ${consoleApp.token}` } });
+    assert.equal(listed.status, 200);
+    const apps = ((await listed.json()) as { apps: unknown[] }).apps;
+    assert.ok(Array.isArray(apps) && apps.length > 0, "console sees the stub node's seeded capsules");
+
+    // node status header summary is served too.
+    const status = await fetch(`${localApi}/control/status`, { headers: { authorization: `Bearer ${consoleApp.token}` } });
+    assert.equal(status.status, 200);
+    assert.equal(((await status.json()) as { ready: boolean }).ready, true);
+
+    // A different app WITHOUT `control` is denied (default-deny) — the capability gate is enforced.
+    const denied = await fetch(`${localApi}/control/apps`, { headers: { authorization: `Bearer ${otherApp.token}` } });
+    assert.equal(denied.status, 403);
+  } finally {
+    await svc.close();
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("service: WITHOUT a control plane, /control/* answers 404 (data-plane-only)", async () => {
+  const root = freshDir("vita-svc-nocontrol-");
+  const svc = await startPuterPlatformService({
+    appGrants: { "vita.app.deploy-console": ["control", "auth"] },
+    appsRoot: root,
+    faces: { localHost: "127.0.0.1" },
+    mode: "local-desktop",
+  });
+
+  try {
+    const consoleApp = svc.mintApp({ appId: "vita.app.deploy-console", grants: ["control", "auth"], instanceId: "console-i1" });
+    const res = await fetch(`${svc.localUrl}/api/control/apps`, { headers: { authorization: `Bearer ${consoleApp.token}` } });
+
+    // Even a control-granted app gets 404: no control plane is mounted (the node booted without agentd).
+    assert.equal(res.status, 404);
+    assert.equal(((await res.json()) as { code?: string }).code, "control_plane_unavailable");
   } finally {
     await svc.close();
     rmSync(root, { force: true, recursive: true });

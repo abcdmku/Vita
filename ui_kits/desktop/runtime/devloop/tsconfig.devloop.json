@@ -1,0 +1,17 @@
+{
+  "//": "Strict typecheck lane for the dev-loop (editor + scaffold + packager bridge + serve harness). These node-only/harness modules are NOT in the repo typecheck include; the pure modules (scaffold.ts, packager-bridge*.ts) are ALSO covered by the repo lane via sdk/typescript/test/ui-kits/devloop-*.test.ts. Run: node node_modules/typescript/lib/tsc.js --noEmit -p ui_kits/desktop/runtime/devloop/tsconfig.devloop.json",
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": [
+    "scaffold.ts",
+    "packager-bridge.ts",
+    "packager-bridge-assets.ts",
+    "strip-types.ts",
+    "serve-devloop.ts"
+  ]
+}

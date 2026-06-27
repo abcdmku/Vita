@@ -1,0 +1,95 @@
+/* Vita Code — editor app styles (Vita's own; AGPL-clean). Dark, matches the platform shell tone. */
+:root {
+  --bg: #0e1116;
+  --surface: #161b22;
+  --surface-raised: #1c232c;
+  --hairline: #2a313c;
+  --text: #e6edf3;
+  --text-secondary: #9aa7b4;
+  --text-faint: #6b7682;
+  --accent: #42d18a;
+  --accent-weak: #18351f;
+  --danger: #f87171;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace, monospace;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-sans); }
+
+.app { display: grid; grid-template-rows: auto 1fr auto; height: 100%; min-height: 0; }
+
+.topbar {
+  align-items: center; background: var(--surface); border-bottom: 1px solid var(--hairline);
+  display: flex; gap: 10px; padding: 8px 12px;
+}
+.brand { align-items: center; display: flex; gap: 8px; }
+.logo { background: var(--accent); border-radius: 5px; display: inline-block; height: 16px; width: 16px; }
+.brand-name { font-size: 13px; font-weight: 650; }
+.path-wrap { align-items: center; display: flex; gap: 6px; }
+.path {
+  background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: 6px;
+  color: var(--text); font: 12px/1 var(--font-mono); min-width: 320px; padding: 7px 9px;
+}
+.path:focus { border-color: var(--accent); outline: none; }
+.spacer { flex: 1; }
+.lang { color: var(--text-secondary); font-size: 12px; }
+.dirty { color: var(--text-secondary); font-size: 12px; }
+.dirty[data-dirty="true"] { color: var(--accent); }
+
+.btn {
+  background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: 6px;
+  color: var(--text); cursor: pointer; font: 600 12px/1 var(--font-sans); padding: 7px 11px;
+}
+.btn:hover { border-color: var(--text-faint); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #06210f; }
+.btn-primary:hover { filter: brightness(1.06); }
+
+.editor-wrap { min-height: 0; position: relative; }
+.CodeMirror {
+  background: var(--bg); color: var(--text); font: 13px/1.55 var(--font-mono);
+  height: 100%;
+}
+.CodeMirror-gutters { background: var(--surface); border-right: 1px solid var(--hairline); }
+.CodeMirror-linenumber { color: var(--text-faint); }
+.CodeMirror-cursor { border-left: 1px solid var(--accent); }
+.CodeMirror-selected { background: #284b3a !important; }
+.cm-s-default .cm-keyword { color: #ff7b72; }
+.cm-s-default .cm-string { color: #a5d6ff; }
+.cm-s-default .cm-comment { color: var(--text-faint); }
+.cm-s-default .cm-number { color: #79c0ff; }
+.cm-s-default .cm-tag { color: #7ee787; }
+.cm-s-default .cm-attribute { color: #ffa657; }
+.cm-s-default .cm-property { color: #79c0ff; }
+
+.statusbar {
+  align-items: center; background: var(--surface); border-top: 1px solid var(--hairline);
+  color: var(--text-secondary); display: flex; font-size: 12px; gap: 12px; min-height: 30px;
+  padding: 4px 12px;
+}
+.status[data-kind="error"] { color: var(--danger); }
+.status[data-kind="ok"] { color: var(--accent); }
+
+.toasts { bottom: 44px; display: flex; flex-direction: column; gap: 8px; position: fixed; right: 16px; z-index: 50; }
+.toast {
+  background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4); color: var(--text); font-size: 12px; max-width: 320px;
+  padding: 9px 12px;
+}
+.toast.ok { border-color: var(--accent); }
+.toast.error { border-color: var(--danger); }
+
+.boot {
+  align-items: center; background: var(--bg); display: flex; inset: 0; justify-content: center;
+  position: absolute; transition: opacity .3s; z-index: 100;
+}
+.app[data-state="ready"] .boot { opacity: 0; pointer-events: none; }
+.boot-inner { text-align: center; }
+.boot-spinner {
+  animation: spin 1s linear infinite; border: 3px solid var(--hairline); border-top-color: var(--accent);
+  border-radius: 50%; height: 28px; margin: 0 auto 12px; width: 28px;
+}
+.boot-msg { color: var(--text-secondary); font-size: 13px; }
+.boot-err { color: var(--danger); font-size: 12px; margin-top: 8px; max-width: 420px; }
+@keyframes spin { to { transform: rotate(360deg); } }

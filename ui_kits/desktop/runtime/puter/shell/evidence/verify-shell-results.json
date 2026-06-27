@@ -1,0 +1,87 @@
+{
+  "passed": 16,
+  "total": 16,
+  "results": [
+    {
+      "name": "shell booted (window.__vitaShellReady)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "dock/taskbar mounted",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "dock launcher button present",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Vita Desk auto-opened as a managed window",
+      "ok": true,
+      "detail": "1 window(s)"
+    },
+    {
+      "name": "app launcher overlay opened",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "real third-party app (Serverless Todo) opened in a window",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Serverless Todo booted puter.js inside its sandbox",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "real app fs/kv: added a todo (puter.kv.set round-tripped)",
+      "ok": true,
+      "detail": "Buy milk 1782541581080"
+    },
+    {
+      "name": "multiple app windows open at once (2+)",
+      "ok": true,
+      "detail": "3 windows (Desk + Todo + Notepad)"
+    },
+    {
+      "name": "dock shows one tile per open window",
+      "ok": true,
+      "detail": "3 dock tiles"
+    },
+    {
+      "name": "window DRAG by title bar moves the window",
+      "ok": true,
+      "detail": "Δx=-160 Δy=70"
+    },
+    {
+      "name": "dock tile click focuses the window (z-order)",
+      "ok": true,
+      "detail": "focused=com.puter-apps.serverless-todo"
+    },
+    {
+      "name": "window CLOSE (red dot) removes the window",
+      "ok": true,
+      "detail": "3 -> 2"
+    },
+    {
+      "name": "real app KV write landed in api_origin store (read-back)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "realtime events feed recorded the kv.set",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no uncaught console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "consoleErrors": []
+}

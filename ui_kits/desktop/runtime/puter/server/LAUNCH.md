@@ -161,6 +161,10 @@ and opens `http://127.0.0.1:7681/kiosk-entry.html`.
     (the service factory is done; the boot entry + `Deno.serveTls` mirror of `service.ts` is the
     remaining glue).
   - Provision `/var/lib/vita/apps` as a real persistent mount under agentd/host-proxy and wire the
-    owner-token mint+persist + (optional) owner TLS cert delivery.
+    owner-token mint+persist + (optional) owner TLS cert delivery. **DONE** (feat/vita-prod-harden):
+    first-boot mint is `vita-owner-token.service`; **rotation** without a reboot is the on-demand
+    `vita-owner-token-rotate.service` (regenerate + `systemctl restart vita-platform.service`); **owner
+    TLS cert delivery** is `vita-tls-cert.service` (validate the owner-provided `net.crt`/`net.key`
+    before the server reads them; self-signed stays the fallback). Owner flow: `docs/install.md` §6.
   - Package the kiosk browser (`cage` + `chromium`) + the two systemd units into the image (KIOSK.md).
   - One boot to confirm the markers + node-survival (the single serial QEMU boot gate).

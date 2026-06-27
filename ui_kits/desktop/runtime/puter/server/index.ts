@@ -26,6 +26,42 @@ export {
   KIOSK_ENTRY_PATH,
   startPuterPlatformService,
 } from "./service.ts";
+
+// ── the MULTI-WINDOW SHELL registry (the catalog the launcher reads + the service mints sessions from) ──
+export {
+  DEFAULT_SHELL_APPS,
+  findShellApp,
+} from "../shell/app-registry.ts";
+export type {
+  ShellAppEntry,
+  ShellAppKind,
+  ShellAppOrigin,
+  ShellAppSession,
+  ShellSessionPayload,
+} from "../shell/app-registry.ts";
+
+// ── the on-device host-proxy: agentd unix socket → /control/* bridge ──
+export {
+  createAgentdUnixFetch,
+  createOnDeviceControlPlane,
+  DEFAULT_AGENTD_SOCKET,
+} from "./agentd-host-proxy.ts";
+export type {
+  AgentdHostProxyOptions,
+} from "./agentd-host-proxy.ts";
+
+// ── the control-plane bridge contract (the console-facing projection + the agentd client) ──
+export {
+  createAgentHttpControlPlane,
+  createStubControlPlane,
+} from "../control-plane.ts";
+export type {
+  AgentControlPlane,
+  ConsoleAppView,
+  LifecycleResult,
+  LogLine,
+  NodeStatus,
+} from "../control-plane.ts";
 export type {
   AppHandle,
   PuterPlatformService,
@@ -87,6 +123,7 @@ export {
   randomOpaqueToken,
 } from "../capability.ts";
 export type {
+  CapabilityAuditSink,
   CapabilityRegistryOptions,
   GateDenialCode,
   GateResult,
@@ -97,6 +134,16 @@ export type {
   PuterOwner,
   PuterPermissionModel,
 } from "../capability.ts";
+
+// ── the EXEC/PTY backend (the Terminal's process plane; node:child_process-backed dev sandbox) ──
+export {
+  createDevExecBackend,
+} from "../exec-plane.ts";
+export type {
+  ChildProcessLike,
+  DevExecBackendOptions,
+  ExecBackend,
+} from "../exec-plane.ts";
 
 // ── REAL enforcement: delegate to the platform permission-broker ──
 export {
@@ -137,6 +184,29 @@ export type {
   PuterStore,
   ReadResult,
 } from "../store.ts";
+
+// ── the PACKAGE-MANAGER meta plane (/meta/*) — the capability-gated control plane for PERMISSIONS ──
+// (read a package's raw source + read/alter its per-package grants + read its audit log; held ONLY by
+// the Package Manager app). See pkgmgr/index.ts.
+export {
+  createAuditLog,
+  createMetaPlane,
+  createPackageRegistry,
+  nodeSourceFs,
+  PackageRegistryError,
+  contentDigest,
+} from "../pkgmgr/index.ts";
+export type {
+  AuditEntry,
+  AuditLog,
+  InstalledPackage,
+  MetaPlane,
+  MetaPlaneDeps,
+  PackageRegistry,
+  RebuildHook,
+  SourceFsPort,
+  SourceNode,
+} from "../pkgmgr/index.ts";
 
 // ── the in-process native binding (@vita/puter) — same store, same gate ──
 export {

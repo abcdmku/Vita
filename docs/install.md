@@ -302,6 +302,70 @@ A/B + recovery on top of the same data partition.
 
 ---
 
+## 6. Production hardening (TLS cert + owner-token)
+
+The network face of the platform server (`https://<host>:7443`) is authenticated by an opaque **owner
+token** (a bearer secret) over **TLS**. Out of the box both are bootstrapped automatically — the server
+self-signs the TLS cert in-process and mints+persists a random owner token on first boot — so a node is
+secure with no owner action. The two knobs below are for owners who want a *real* cert or to *rotate*
+the token. All three persistence paths live on the `vita-data` partition under `/var/lib/vita`
+(`apps/`, `owner/`, `tls/`), so everything survives reboot and RAUC updates.
+
+### 6.1 Deliver your own TLS cert (optional; self-signed is the default)
+
+The owner alone holds the private key (spec §16) — Vita never generates or transmits it. To serve a
+real cert instead of the in-process self-signed one, drop **two PEM files** onto the running node:
+
+```
+/var/lib/vita/tls/net.crt   # the leaf cert (or full chain), PEM
+/var/lib/vita/tls/net.key   # the matching private key, PEM (you keep the original; this is your copy)
+```
+
+The `tls/` directory already exists (`2750 root:vita-agent`). Deliver the files out-of-band (scp over
+the loopback/owner channel, a USB copy, etc.). On the next start of `vita-platform.service`:
+
+1. `vita-tls-cert.service` (ordered `Before=vita-platform.service`) **validates** the pair — both files
+   present, parseable PEM, and the cert's public key **matches** the private key — and normalizes the
+   key group so the unprivileged server can read it. A typo'd or mismatched pair is logged **loud** on
+   the console (`VITA-TLS-CERT: WARN ...`) and the server falls back to self-signed (fail-safe, never
+   fail-closed).
+2. `server-entry.ts` hands the validated paths to the service; the network face now serves your cert.
+
+Apply without a reboot: `systemctl restart vita-platform.service`. Remove the two files and restart to
+return to self-signed. The owner token — not the cert chain — is the trust anchor either way, so a
+self-signed node is fully secure; a real cert just removes the browser warning / lets you pin a CA.
+
+### 6.2 Rotate the owner token (no reboot)
+
+The owner token is minted once and persisted at `/var/lib/vita/owner/owner.token`. To roll it (suspected
+leak, periodic rotation) **without a full reboot**:
+
+```
+systemctl start vita-owner-token-rotate.service
+```
+
+This regenerates the persisted token (256-bit, atomic replace) and `systemctl restart`s
+`vita-platform.service` — **not** a reboot. The faces are back in ~2s (`Type=notify`, `RestartSec=2s`),
+the persistent apps store and the local kiosk session are untouched, and the **old token stops
+authenticating the instant the new process binds**. Read the new token out-of-band from
+`/run/vita/owner-token` (`0640`) or the durable `/var/lib/vita/owner/owner.token`, then re-log in on the
+network face. The rotate unit is **on-demand only** — it never runs at boot (first boot mints-if-absent
+via `vita-owner-token.service`).
+
+### 6.3 Verity + RAUC (what production relies on)
+
+- **dm-verity**: build with `VITA_VERITY=1` (section 1). The read-only verity root and the writable
+  `vita-data` partition coexist; `var.mount` mounts `vita-data` at `/var` so all platform state lands on
+  the writable partition, not the verity-protected root. The mount targets `/dev/mapper/vita-data`
+  (never a raw `by-label` device), so a wrong/absent key fails closed.
+- **RAUC A/B updates**: the deterministic, unsigned rootfs bundle plan is
+  [`os/x86_64/rauc-bundle.conf`](../os/x86_64/rauc-bundle.conf) →
+  [`rauc-bundle.mjs`](../os/x86_64/rauc-bundle.mjs); it installs into the inactive `root-a`/`root-b`
+  slot. **Owner signing is out-of-band** (the `[Signing]` block is declare-only — the owner's RAUC key
+  is never in the repo, mirroring Secure Boot signing in section 1).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |

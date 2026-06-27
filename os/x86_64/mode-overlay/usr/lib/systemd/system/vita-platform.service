@@ -25,6 +25,11 @@ Documentation=file:///usr/share/doc/vita/three-modes.md
 # 0.0.0.0 still binds (it accepts on whichever address appears).
 After=vita-agentd.service
 Wants=vita-agentd.service
+# Owner TLS cert delivery normalizes the key group/mode (so the DynamicUser can read an owner-delivered
+# net.key) and flags a mismatched cert BEFORE the server reads VITA_TLS_CERT/KEY. After= (not Requires=)
+# so an absent/failed validation never blocks the server — self-signed is the documented fallback.
+After=vita-tls-cert.service
+Wants=vita-tls-cert.service
 # The persisted store must be mounted before we open it (the verity-only var.mount provides /var). On a
 # plain non-verity smoke image var.mount is skipped and the store falls back to /var on the root fs.
 # Bind ALL THREE persistence subtrees this unit reads/writes — the apps store (fs+kv backing), the

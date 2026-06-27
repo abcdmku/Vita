@@ -416,6 +416,11 @@ function installModeOverlay() {
   const wants = [
     [join(sys, "multi-user.target.wants", "vita-platform.service"), "../vita-platform.service"],
     [join(sys, "multi-user.target.wants", "vita-owner-token.service"), "../vita-owner-token.service"],
+    // Owner TLS cert delivery: validate (NOT generate) an owner-provided net.crt/net.key before the
+    // platform unit reads VITA_TLS_CERT/KEY. Non-fatal (self-signed is the fallback); ordered
+    // Before=vita-platform.service so a mismatched owner cert is flagged loud at boot. (The rotation
+    // unit vita-owner-token-rotate.service is on-demand only — deliberately NOT enabled here.)
+    [join(sys, "multi-user.target.wants", "vita-tls-cert.service"), "../vita-tls-cert.service"],
     [join(sys, "multi-user.target.wants", "vita-platform-selftest.service"), "../vita-platform-selftest.service"],
     // Bring the routable NIC up (DHCP via 10-vita-net.network) so the TLS network face is actually
     // REACHABLE off-box — a 0.0.0.0:7443 bind is not reach until the iface has an address. The unit
@@ -494,7 +499,36 @@ function installPuterOverlay() {
     mkdirSync(dirname(to), { recursive: true });
     copyFileSync(from, to);
   }
-  log(`   staged puter platform runtime (repo-mirror) → ${stagedAppRoot}`);
+
+  // 4) MULTI-WINDOW SHELL out-of-tree app assets. The shell config in server-entry.ts aliases two app
+  //    dirs that live OUTSIDE the puter runtime tree (so they are not copied by step 1), plus the two
+  //    ui_kits CSS files shell.html <link>s. Stage them at their repo-relative paths so the aliases
+  //    (/console → apps/vita-deploy-console, /editor → runtime/devloop/editor, /ui_kits → ui_kits)
+  //    resolve on-device exactly as they do in the dev harness. Without these the shell page renders but
+  //    the console/editor windows 404 and the page is unstyled.
+  const shellAssetDirs = [
+    ["apps", "vita-deploy-console"],
+    ["ui_kits", "desktop", "runtime", "devloop", "editor"],
+  ];
+  for (const parts of shellAssetDirs) {
+    const from = join(REPO, ...parts);
+    if (!existsSync(from)) fail(`1e · shell app asset missing: ${from} (the shell aliases it — did the wave merge land?)`);
+    const to = join(stagedAppRoot, ...parts);
+    mkdirSync(dirname(to), { recursive: true });
+    cpSync(from, to, { recursive: true });
+  }
+  const shellCssFiles = [
+    ["ui_kits", "styles.css"],
+    ["ui_kits", "desktop", "kit.css"],
+  ];
+  for (const parts of shellCssFiles) {
+    const from = join(REPO, ...parts);
+    if (!existsSync(from)) fail(`1e · shell CSS missing: ${from} (shell.html links it)`);
+    const to = join(stagedAppRoot, ...parts);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+  }
+  log(`   staged puter platform runtime + multi-window shell assets (repo-mirror) → ${stagedAppRoot}`);
   return useNative ? staged : "/work/os/x86_64/out/puter-overlay";
 }
 

@@ -1,0 +1,71 @@
+<!doctype html>
+<!--
+  Vita New App — the dev-loop "NEW APP" scaffold flow. A REAL Puter app (Vita's own code, AGPL-clean):
+  type a name, click Create, and it GENERATES a minimal runnable Vita/Puter app (manifest + index.html
+  with the SDK wired to the api_origin + app.js + app.css) and WRITES it into the owner space via
+  puter.fs — immediately runnable (an "Open it" link launches the new app's index.html).
+
+  Boot wiring is identical to the kiosk entry (PUTER_API_ORIGIN pin + vendored puter.js + /session.js).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita New App</title>
+  <link rel="stylesheet" href="./newapp.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%23b07bff'/&gt;&lt;/svg&gt;" />
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <script src="/_vendor/puter/v2.js"></script>
+  <script src="/session.js"></script>
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <span class="logo" aria-hidden="true"></span>
+      <h1>New App</h1>
+      <span id="who" class="who">…</span>
+    </header>
+
+    <section class="card">
+      <p class="lede">Scaffold a minimal, runnable Vita app. It writes a manifest + an index.html with
+        the puter.js SDK wired to this node's api_origin, ready to open and edit.</p>
+
+      <label class="field">
+        <span>App name</span>
+        <input id="name" class="input" placeholder="Hello Vita" value="Hello Vita" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Description <em>(optional)</em></span>
+        <input id="desc" class="input" placeholder="What does it do?" autocomplete="off" />
+      </label>
+      <div class="field-row">
+        <label class="field small">
+          <span>Icon</span>
+          <input id="icon" class="input" value="✨" maxlength="4" />
+        </label>
+        <label class="field grow">
+          <span>Folder</span>
+          <input id="appsdir" class="input" value="/home/apps" autocomplete="off" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="create" class="btn btn-primary">Create app</button>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <section id="result" class="card result" hidden>
+      <h2>Created <code id="r-id"></code></h2>
+      <ul id="r-files" class="files"></ul>
+      <div class="actions">
+        <a id="r-open" class="btn btn-primary" target="_blank" rel="noopener">Open it ↗</a>
+        <a id="r-edit" class="btn" target="_blank" rel="noopener">Edit in Vita Code ↗</a>
+      </div>
+    </section>
+
+    <div id="boot" class="boot">Starting…</div>
+  </main>
+  <script type="module" src="./newapp.js"></script>
+</body>
+</html>

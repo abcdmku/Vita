@@ -18,16 +18,40 @@
 //
 // NEVER import from the browser bundle. node-only modules + Deno-only globals (Deno.env / Deno.Command).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { spawn as nodeSpawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
+  createAuditLog,
+  createDevExecBackend,
+  createMetaPlane,
+  createOnDeviceControlPlane,
+  createPackageRegistry,
+  DEFAULT_AGENTD_SOCKET,
+  DEFAULT_SHELL_APPS,
   KIOSK_ENTRY_PATH,
+  nodeSourceFs,
   randomOpaqueToken,
   startPuterPlatformService,
+  type AgentControlPlane,
+  type CapabilityAuditSink,
+  type ChildProcessLike,
+  type ExecBackend,
+  type InstalledPackage,
+  type PuterOwner,
   type ServiceOptions,
+  type ShellAppEntry,
   type VitaMode,
 } from "./index.ts";
+
+// The deploy/management console — the ONLY app minted the `control` capability (default-deny everywhere
+// else). Mirrors apps/vita-deploy-console/manifest.ts (DEPLOY_CONSOLE_APP_ID / PUTER_API_ORIGIN_GRANTS);
+// kept inline so the boot entry has no dependency on the apps/ tree.
+const DEPLOY_CONSOLE_APP_ID = "vita.app.deploy-console";
+const DEPLOY_CONSOLE_GRANTS = ["control", "auth", "kv.read", "kv.write"] as const;
 
 const MARKER = "VITA-PLATFORM";
 
@@ -167,6 +191,64 @@ function readOwnerToken(): string | undefined {
   }
 }
 
+// Resolve the node's REAL owner identity for the LIVE owner-auth path. §16: the owner HOLDS the
+// private key; the node only ever consults the owner's PUBLIC identity (a uuid + a display
+// username + an emailConfirmed flag). We read it from a small JSON record the node persists on /var
+// (VITA_OWNER_IDENTITY_FILE, default /var/lib/vita/owner/owner-identity.json), which the on-device
+// owner-identity provisioning writes from agentd's owner record (identity.attestation /
+// owner.identity). This file carries NO key material — only the public owner identity — so reading
+// it here never touches the owner's private key.
+//
+// Returns undefined when the file is absent/unreadable/malformed (the platform then falls back to
+// the trust-on-host single-owner default "owner"). The registry re-validates the identity strictly
+// and refuses to mint a session on a malformed identity, so a bad file fails closed rather than
+// minting a forged owner.
+function readOwnerIdentity(): PuterOwner | undefined {
+  const path = env("VITA_OWNER_IDENTITY_FILE") ?? "/var/lib/vita/owner/owner-identity.json";
+
+  let raw: string;
+
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return undefined; // not provisioned → fall back to the default owner
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    emit(`${MARKER}: owner-identity file is not valid JSON at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    emit(`${MARKER}: owner-identity file is not an object at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const uuid = record["uuid"];
+  const username = record["username"];
+  // emailConfirmed is optional in the file; default true for the single trusted owner.
+  const emailConfirmed = record["emailConfirmed"];
+
+  if (typeof uuid !== "string" || uuid.length === 0 || typeof username !== "string" || username.length === 0) {
+    emit(`${MARKER}: owner-identity file is missing uuid/username at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  return Object.freeze({
+    emailConfirmed: typeof emailConfirmed === "boolean" ? emailConfirmed : true,
+    username,
+    uuid,
+  });
+}
+
 // Persist a small file under /run/vita (tmpfs, per-boot). The platform DynamicUser can write here via
 // RuntimeDirectory=; the baked boot probe reads these to present the local session token + owner token.
 function writeRunFile(path: string, contents: string): void {
@@ -176,6 +258,60 @@ function writeRunFile(path: string, contents: string): void {
   } catch (err) {
     emit(`${MARKER}: could not write ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+// Adapt node:child_process.spawn to the exec-plane's ChildProcessLike port (the dev exec backend spawns
+// allow-listed commands with NO shell, a scrubbed env, and a private cwd — see exec-plane.ts). The on-
+// device Terminal runs here over loopback (trust-on-host); the capability gate already restricted /pty to
+// the exec-granted Terminal before any process is spawned.
+const nodeChildProcess: ChildProcessLike = {
+  spawn(command, args, options) {
+    const child = nodeSpawn(command, [...args], {
+      cwd: options.cwd,
+      env: { ...options.env },
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    return {
+      stderr: { on: (_e, cb) => child.stderr?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stdout: { on: (_e, cb) => child.stdout?.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stdin: { write: (d: string) => child.stdin?.write(d), end: () => child.stdin?.end() },
+      on: (event, cb) => { child.on(event, cb as never); },
+      kill: (signal?: string) => { child.kill((signal ?? "SIGTERM") as NodeJS.Signals); },
+    };
+  },
+};
+
+// Build the EXEC backend for the on-device Terminal: the hardened dev-sandbox backend (allow-list,
+// no-shell, scrubbed env, private throwaway cwd per session, wall-clock + output caps). The /pty gate
+// (exec capability) is enforced by the platform BEFORE this backend ever opens a session.
+function buildExecBackend(): ExecBackend {
+  return createDevExecBackend({
+    childProcess: nodeChildProcess,
+    makeCwd: () => mkdtempSync(join(tmpdir(), "vita-term-")),
+    pathEnv: env("PATH") ?? "/usr/bin:/bin",
+  });
+}
+
+// Project the shell catalog into InstalledPackage records so the Package Manager's /meta surface lists
+// the REAL apps (id/name/version/kind/source/requested). The grants in the shell registry are the
+// REQUESTED set the owner has granted; the meta plane reads the LIVE grant store for the granted set.
+function shellAppsAsPackages(apps: readonly ShellAppEntry[], appsRoot: string): InstalledPackage[] {
+  return apps.map((app) => ({
+    id: app.id,
+    name: app.title,
+    version: "1.0.0",
+    kind: "web-app" as const,
+    sourceDir: resolve(appsRoot, app.id),
+    entry: app.entry,
+    // The meta plane only surfaces the GRANTABLE data caps (fs/kv/ui/auth) as "requested"; privileged
+    // planes (control/exec/meta) are not owner-grantable through the meta UI.
+    requested: app.grants.filter((g): g is "fs.read" | "fs.write" | "kv.read" | "kv.write" | "ui" | "auth" =>
+      g === "fs.read" || g === "fs.write" || g === "kv.read" || g === "kv.write" || g === "ui" || g === "auth"),
+    state: "installed" as const,
+    description: app.description,
+  }));
 }
 
 async function main(): Promise<void> {
@@ -198,6 +334,11 @@ async function main(): Promise<void> {
   //   2. VITA_OWNER_TOKEN - a direct value (dev / hand-start).
   //   3. a freshly minted ephemeral token (logged) - bootstrap with no persisted token.
   const ownerToken = readOwnerToken() ?? env("VITA_OWNER_TOKEN") ?? randomOpaqueToken();
+
+  // The node's REAL owner identity (the LIVE owner-auth source). Resolved from the node's persisted
+  // PUBLIC owner record (no key material — §16). Absent ⇒ the platform uses the trust-on-host
+  // default owner. The owner identity is what /whoami + minted sessions answer as.
+  const ownerIdentity = readOwnerIdentity();
 
   // Owner-provided TLS material (spec §16: the owner holds the private key). The unit ALWAYS points
   // VITA_TLS_CERT/KEY at the conventional /var/lib/vita/tls paths, but those files exist only when the
@@ -222,13 +363,114 @@ async function main(): Promise<void> {
   emit(`${MARKER}: boot entry - image_mode=${env("VITA_MODE") ?? "headless"} server_mode=${serverMode} apps_root=${appsRoot}`);
   emit(`${MARKER}: faces local=${localHost}:${localPort} network=${networkHost}:${networkPort}`);
 
+  // CONTROL PLANE: wire the deploy/management console to the LIVE node control plane (agentd) via the
+  // on-device host-proxy. agentd serves its control surface over a unix socket (ADR-0008); the host-proxy
+  // dials that socket per request and exposes agentd's real shapes (GET /state, POST /apply, GET
+  // /healthz, GET /read/capsule.logs) behind the api_origin's /control/* bridge. The platform process is
+  // in the vita-agent group, so agentd authenticates the connection by peer credentials (no token on this
+  // hop); the api_origin's `control` capability gate is the per-app authorization layer.
+  //
+  // Enabled when the agentd socket is present (the on-device default) OR VITA_CONTROL_PLANE=1 is set
+  // (a dev override). Absent socket + no override → /control/* answers 404 (data-plane-only), so a
+  // node booted without agentd still serves the platform.
+  const agentdSocket = env("VITA_AGENTD_SOCKET") ?? DEFAULT_AGENTD_SOCKET;
+  const controlPlaneForced = env("VITA_CONTROL_PLANE") === "1";
+  const controlPlaneEnabled = controlPlaneForced || fileExists(agentdSocket);
+  let controlPlane: AgentControlPlane | undefined;
+
+  if (controlPlaneEnabled) {
+    try {
+      controlPlane = createOnDeviceControlPlane({ socketPath: agentdSocket });
+      emit(`${MARKER}: control plane WIRED to agentd at ${agentdSocket} (/control/* live)`);
+    } catch (err) {
+      emit(`${MARKER}: control plane NOT wired (${err instanceof Error ? err.message : String(err)}) — /control/* will 404`);
+      controlPlane = undefined;
+    }
+  } else {
+    emit(`${MARKER}: control plane disabled (no agentd socket at ${agentdSocket}, VITA_CONTROL_PLANE!=1) — /control/* will 404`);
+  }
+
+  // MULTI-WINDOW SHELL (the on-device kiosk desktop). On by default — the local/kiosk face serves the
+  // shell page (multi-window desktop hosting Vita Desk + deploy console + terminal + editor + package
+  // manager + the third-party apps, each in its own capability-gated window) at `/`, instead of the
+  // single-app Vita Desk kiosk-entry. Set VITA_SHELL=0 to fall back to the legacy single-app kiosk.
+  // The service mints ONE default-deny capability session per registry app (console=control,
+  // package-manager=meta, terminal=exec, others minimal); the per-app map is served only on the local face.
+  //
+  // Path layout (staged + dev both): the runtime dir is .../ui_kits/desktop/runtime/puter. The shell
+  // page + bundle live under shell/; Vita Desk (app/) + the third-party apps (apps/) + the package
+  // manager (pkgmgr-app/) are sub-paths of staticRoot (the runtime dir) and need no alias. The deploy
+  // console (apps/vita-deploy-console) and the editor (runtime/devloop/editor) live OUTSIDE the runtime
+  // dir, so they get explicit aliases (/console, /editor); /ui_kits + /shell serve the shell's own assets.
+  const shellEnabled = env("VITA_SHELL") !== "0";
+  const runtimeDir = resolve(fileURLToPath(import.meta.url), "..", ".."); // .../runtime/puter
+  const repoRootStaged = resolve(runtimeDir, "..", "..", "..", ".."); // app-platform root (or repo root)
+  let shell: ServiceOptions["shell"];
+
+  if (shellEnabled) {
+    const shellHtmlPath = resolve(runtimeDir, "shell", "shell.html");
+
+    if (existsSync(shellHtmlPath)) {
+      shell = {
+        apps: DEFAULT_SHELL_APPS,
+        htmlPath: shellHtmlPath,
+        staticAliases: {
+          "/console": resolve(repoRootStaged, "apps", "vita-deploy-console"),
+          "/editor": resolve(runtimeDir, "..", "devloop", "editor"),
+          "/shell": resolve(runtimeDir, "shell"),
+          "/ui_kits": resolve(repoRootStaged, "ui_kits"),
+        },
+      };
+      emit(`${MARKER}: SHELL enabled — local face serves the multi-window desktop (${DEFAULT_SHELL_APPS.length} apps) at /`);
+    } else {
+      emit(`${MARKER}: SHELL requested but shell.html not found at ${shellHtmlPath} — falling back to single-app kiosk`);
+    }
+  } else {
+    emit(`${MARKER}: SHELL disabled (VITA_SHELL=0) — local face serves the single-app kiosk-entry`);
+  }
+
+  // AUDIT SINK (finding #5): wire ONE capability audit log into the shared registry so EVERY gate
+  // decision (allow + deny) is recorded. The SAME log is the meta-plane's audit source below, so the
+  // Package Manager's activity view + the /meta audit endpoint surface what each app actually did
+  // (especially DENIALS — the owner's signal that an app tried to exceed its grant). Without this the
+  // gate recorded nothing.
+  const auditLog = createAuditLog();
+  const audit: CapabilityAuditSink = auditLog;
+
+  // META PLANE (finding #7): the Package Manager's /meta/* control-plane-for-permissions, gated on the
+  // `meta` capability (the Package Manager app only — now SAFE because control/exec/meta are distinct
+  // broker scopes after finding #1). Built against the SHARED grant + capability registry, so a
+  // grant change it writes is the grant store the broker reads on the next gated call (live revoke). The
+  // package registry is seeded from the real shell catalog so /meta lists the installed apps.
+  const metaPlaneFactory: ServiceOptions["metaPlaneFactory"] = ({ capabilities, grants }) => {
+    const packages = createPackageRegistry({ fs: nodeSourceFs, seed: shellAppsAsPackages(DEFAULT_SHELL_APPS, appsRoot) });
+
+    return createMetaPlane({ audit: auditLog, capabilities, grants, packages });
+  };
+
+  // EXEC BACKEND (finding #7): the on-device Terminal's /pty process plane (hardened dev sandbox). Mounted
+  // on the LOCAL face only, gated on `exec` (the Terminal only). Safe now that exec is a distinct cap.
+  const execBackend = buildExecBackend();
+
   const options: ServiceOptions = {
     appsRoot,
+    audit,
+    execBackend,
     faces: { localHost, localPort, networkHost, networkPort },
+    metaPlaneFactory,
     mode: serverMode,
     ownerToken,
+    ...(controlPlane !== undefined ? { controlPlane } : {}),
+    ...(ownerIdentity !== undefined ? { ownerIdentity } : {}),
+    ...(shell !== undefined ? { shell } : {}),
     ...(tlsCert !== undefined && tlsKey !== undefined ? { tls: { certPath: tlsCert, keyPath: tlsKey } } : {}),
   };
+
+  if (ownerIdentity !== undefined) {
+    emit(`${MARKER}: owner identity resolved (uuid=${ownerIdentity.uuid} username=${ownerIdentity.username}) — live owner-auth source`);
+  } else {
+    emit(`${MARKER}: no owner-identity record — using trust-on-host default owner`);
+  }
 
   let service;
 
@@ -260,6 +502,38 @@ async function main(): Promise<void> {
   // session-token provider, so the token is NEVER served to a remote client (owner-gated separately).
   service.setLocalSessionToken(localApp.token);
 
+  // SHELL sessions: when the shell is on, the service already minted ONE default-deny capability session
+  // per registry app (console=control, package-manager=meta, terminal=exec, others minimal) and serves the
+  // map at /shell-session.js on the local face. Publish that map to /run so the diagnostic probe can
+  // confirm each app got exactly its grants (and the console + pkgmgr + terminal carry their privileged caps).
+  if (shell !== undefined && Object.keys(service.shellSessions).length > 0) {
+    writeRunFile(`${runDir}/shell-sessions.json`, `${JSON.stringify({
+      apiOrigin: "/api",
+      sessions: service.shellSessions,
+    }, null, 2)}\n`);
+    const summary = DEFAULT_SHELL_APPS.map((a) => `${a.id}[${a.grants.join("+")}]`).join(" ");
+    emit(`${MARKER}: SHELL sessions minted (${Object.keys(service.shellSessions).length} apps): ${summary}`);
+  }
+
+  // DEPLOY CONSOLE session (legacy single-app kiosk path): when the shell is OFF and the control plane is
+  // wired, mint the console app's session with the `control` grant so it can clear /control/*. With the
+  // shell ON, the registry's `vita.app.deploy-console` entry already holds `control` via the shared
+  // registry (minted above), so this separate mint is skipped to avoid a redundant duplicate.
+  if (shell === undefined && controlPlane !== undefined) {
+    const consoleApp = service.mintApp({
+      appId: DEPLOY_CONSOLE_APP_ID,
+      grants: [...DEPLOY_CONSOLE_GRANTS],
+      instanceId: `console-${randomOpaqueToken().slice(0, 12)}`,
+    });
+
+    writeRunFile(`${runDir}/console-session.json`, `${JSON.stringify({
+      appId: consoleApp.appId,
+      appToken: consoleApp.token,
+      grants: consoleApp.grants,
+    }, null, 2)}\n`);
+    emit(`${MARKER}: deploy console session minted app_id=${consoleApp.appId} (control granted; token in ${runDir}/console-session.json)`);
+  }
+
   // Publish the runtime facts the kiosk page + the boot probe consume (tmpfs, per-boot).
   writeRunFile(`${runDir}/platform-session.json`, `${JSON.stringify({
     appId: localApp.appId,
@@ -272,6 +546,14 @@ async function main(): Promise<void> {
   // The owner token is the network-face bearer secret; keep it 0640 under /run for the owner/probe to
   // read out-of-band. (The durable copy lives on /var via the first-boot mint script.)
   writeRunFile(`${runDir}/owner-token`, `${ownerToken}\n`);
+
+  // Witness the newly-wired planes so the on-device boot confirm can assert them (findings #5 + #7):
+  // the capability audit sink records every gate decision; the meta plane (/meta/*) + the exec plane
+  // (/pty) are mounted on the local face (gated on `meta` / `exec`, which are now DISTINCT broker scopes
+  // after finding #1, so the Package Manager + Terminal work without capability confusion).
+  emit(`${MARKER}: AUDIT sink wired (capability allow/deny recorded) status=OK`);
+  emit(`${MARKER}: META plane wired (/meta/* gated on meta — Package Manager) status=OK`);
+  emit(`${MARKER}: EXEC plane wired (/pty gated on exec — Terminal, local face) status=OK`);
 
   if (service.localUrl !== undefined) emit(`${MARKER}: LOCAL face up ${service.localUrl} (kiosk ${service.kioskUrl})`);
   if (service.networkUrl !== undefined) emit(`${MARKER}: NETWORK face up ${service.networkUrl} (owner-token${service.tls ? " + TLS" : " PLAINTEXT"})`);

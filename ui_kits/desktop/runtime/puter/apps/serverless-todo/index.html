@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!--
+  THIRD-PARTY VENDORED APP — Serverless Todo (Puter-Apps/serverless-todo).
+  Source: https://github.com/Puter-Apps/serverless-todo  © 2025 Puter Technologies Inc.
+  License: MIT (see ./LICENSE.txt). Vendored UNMODIFIED except the SDK <script src> below,
+  which is repointed from the public CDN (https://js.puter.com/v2/) to Vita's OFFLINE vendored,
+  Apache-2.0 puter.js bundle (/_vendor/puter/v2.js) so the app runs against Vita's LOCAL,
+  capability-gated api_origin with no network egress. The app uses puter.kv.get/set only;
+  those round-trip to Vita's /api over HTTP exactly as on puter.com.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Todo App - Powered by Puter.js</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Serverless Todo App</h1>
+            <p class="subtitle">
+                <a href="https://developer.puter.com" target="_blank" style="margin-right: 5px;">Powered by Puter.js</a>
+                <a href="https://github.com/Puter-Apps/serverless-todo" target="_blank">View on GitHub</a>
+            </p>
+        </header>
+
+        <main>
+            <!-- Add new todo form -->
+            <div class="add-todo-section">
+                <div class="input-group">
+                    <input
+                        type="text"
+                        id="todoInput"
+                        placeholder="What needs to be done?"
+                        maxlength="500"
+                    >
+                    <button id="addBtn" class="btn btn-primary">Add Todo</button>
+                </div>
+            </div>
+
+            <!-- Filter buttons -->
+            <div class="filter-section">
+                <button class="filter-btn active" data-filter="all">All</button>
+                <button class="filter-btn" data-filter="active">Active</button>
+                <button class="filter-btn" data-filter="completed">Completed</button>
+            </div>
+
+            <!-- Todo list -->
+            <div class="todo-list-container">
+                <ul id="todoList" class="todo-list">
+                    <!-- Todos will be dynamically inserted here -->
+                </ul>
+
+                <!-- Empty state -->
+                <div id="emptyState" class="empty-state">
+                    <h3>No todos yet!</h3>
+                    <p>Add your first todo above to get started.</p>
+                </div>
+            </div>
+
+            <!-- Stats and actions -->
+            <div class="todo-stats">
+                <span id="todoCount">0 items left</span>
+                <button id="clearCompleted" class="btn btn-secondary">Clear Completed</button>
+            </div>
+        </main>
+
+        <!-- Loading indicator -->
+        <div id="loadingIndicator" class="loading-indicator">
+            <div class="spinner"></div>
+            <p>Syncing with cloud...</p>
+        </div>
+
+        <!-- Status messages -->
+        <div id="statusMessage" class="status-message"></div>
+    </div>
+
+    <!-- Vita: vendored OFFLINE Apache-2.0 puter.js SDK (was https://js.puter.com/v2/). -->
+    <script src="/_vendor/puter/v2.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

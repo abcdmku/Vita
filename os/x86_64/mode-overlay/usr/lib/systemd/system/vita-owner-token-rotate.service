@@ -1,0 +1,33 @@
+# Vita owner-token ROTATION — regenerate the network-face owner secret WITHOUT a full reboot.
+#
+# ON-DEMAND only: NOT WantedBy any target (so it never runs at boot — boot mints-if-absent via
+# vita-owner-token.service). The owner triggers it explicitly:
+#     systemctl start vita-owner-token-rotate.service
+# It regenerates the persisted /var token (vita-owner-token.sh --rotate) and restarts
+# vita-platform.service so the network-face gate adopts the new secret in ~2s. No reboot; the persistent
+# apps store + local kiosk face survive. See /usr/lib/vita/owner-token/vita-owner-token-rotate.sh.
+[Unit]
+Description=Vita owner-token rotation (regenerate the network-face owner secret, no reboot)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Needs the persistent /var partition mounted (the token lives there) and the platform unit present.
+After=local-fs.target vita-platform.service
+RequiresMountsFor=/var/lib/vita/owner
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/vita/owner-token/vita-owner-token-rotate.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# Writes the new token under /var/lib/vita/owner and issues `systemctl restart vita-platform.service`.
+# Runs as root: it must write the 0640 root:vita-agent token AND talk to the service manager (the
+# restart). It deliberately does NOT use the tight ProtectSystem=strict sandbox of the mint oneshot —
+# it shells out to systemctl, which needs to reach the private D-Bus / notify socket. Keep a moderate
+# hardening floor (no new privileges, native syscalls) without blocking the manager handoff.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# This unit is NOT installed into any .target.wants — it is started on demand only.

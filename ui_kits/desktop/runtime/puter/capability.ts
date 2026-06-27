@@ -26,7 +26,21 @@ export type PuterCapability =
   | "auth"
   // The control plane (list/start/stop capsules, node status/health, logs) — gates /control/* on the
   // api_origin. Held by the deploy/management console; NOT granted to ordinary apps (default-deny).
-  | "control";
+  | "control"
+  // PROCESS/EXEC — run a real command inside a hardened, cgroup-gated capsule and stream its
+  // stdin/stdout/stderr over the /pty websocket (server.ts → exec-plane.ts). This is the "real machine
+  // access" the product vision wants, deliberately the MOST privileged compat capability: it can spawn
+  // a process on the node. Default-deny, fail-closed — only an app explicitly granted `exec` (the
+  // Terminal) may open a /pty session; everything else is 401/403. NEVER granted by default to ordinary
+  // Puter apps (the local kiosk session does NOT carry it unless the owner opts the Terminal in).
+  | "exec"
+  // The PACKAGE-MANAGER meta plane (read a package's raw source + read/alter its per-package grants +
+  // read its audit log) — gates /meta/* on the api_origin. This is the CONTROL PLANE FOR PERMISSIONS:
+  // the owner-held meta-capability that can read another package's source and change another package's
+  // grants. It is held ONLY by the Package Manager app and is NEVER granted to an ordinary app
+  // (default-deny by construction: the platform declares `meta` for exactly the pkg-manager appId, and
+  // a granted-meta app cannot grant `meta` to anyone — the meta endpoint refuses to write a `meta` grant).
+  | "meta";
 
 // A launched-app session: the opaque token, the app it belongs to, the instance id the iframe carries,
 // the owner identity, and the granted capability set. Minted by `mintAppSession` at launch.
@@ -107,10 +121,37 @@ export function createSessionGrantModel(): PuterPermissionModel {
   });
 }
 
+// An audit sink the registry calls on EVERY authorize() outcome (allow + deny), so capability activity
+// is visible to the owner (the Package Manager's activity view + the meta-API audit endpoint). Kept as a
+// minimal structural interface (not an import) so capability.ts carries no dependency on the pkgmgr
+// audit log — any sink with this shape works, and the default registry has no sink (zero overhead).
+export interface CapabilityAuditSink {
+  record(input: {
+    readonly appId: string;
+    readonly capability: PuterCapability;
+    readonly operation?: string;
+    readonly outcome: "allow" | "deny";
+    readonly code?: string;
+    readonly reason?: string;
+  }): unknown;
+}
+
 export interface CapabilityRegistryOptions {
   // The authorization authority the registry delegates every `authorize` call to. Default: the
   // session-grant model. Pass a broker-backed model for REAL on-device enforcement.
   readonly permissionModel?: PuterPermissionModel;
+  // The node's REAL owner identity, consulted as the live owner-auth source instead of the
+  // hardcoded DEFAULT_OWNER. On a real node this is supplied by the host from the node's persisted
+  // owner record (agentd's identity.attestation / owner.identity — see resolveOwnerIdentity in the
+  // platform server entry), NEVER from a transport request and NEVER from a caller. When absent the
+  // registry falls back to DEFAULT_OWNER (the trust-on-host single-owner default) so existing
+  // single-owner deployments keep working. A minted session's owner is THIS identity unless an
+  // explicit per-mint override is given (and a per-mint override may only NARROW within the same
+  // owner — it can never name a different owner; see mintAppSession).
+  readonly ownerIdentity?: PuterOwner;
+  // Optional audit sink — records every authorize() decision (allow + deny) for the owner-facing
+  // activity view / meta-API audit log. Absent by default (no recording, no overhead).
+  readonly audit?: CapabilityAuditSink;
 }
 
 export interface MintInput {
@@ -131,10 +172,41 @@ const DEFAULT_OWNER: PuterOwner = Object.freeze({
   uuid: "owner-0000-0000-0000-000000000000",
 });
 
+// Validate + freeze a host-supplied owner identity into the registry's trusted owner. Fail-closed:
+// a non-plain object, a missing/empty/non-string id (uuid) or username, or an unknown field is
+// REJECTED (throws) rather than silently coerced — a malformed identity must never mint a session.
+// Mirrors the SDK loader's strict ownerIdentity validation (owner-auth-port.test.ts) so the live
+// server and the SDK agree on what a trustworthy owner identity is.
+function resolveTrustedOwner(identity: PuterOwner | undefined): PuterOwner {
+  if (identity === undefined) return DEFAULT_OWNER;
+
+  if (identity === null || typeof identity !== "object" || Object.getPrototypeOf(identity) !== Object.prototype) {
+    throw new Error("ownerIdentity must be a plain object");
+  }
+
+  const allowed = new Set(["emailConfirmed", "username", "uuid"]);
+
+  for (const key of Object.keys(identity)) {
+    if (!allowed.has(key)) throw new Error(`ownerIdentity has unexpected field '${key}'`);
+  }
+
+  const { username, uuid, emailConfirmed } = identity;
+
+  if (typeof uuid !== "string" || uuid.length === 0) throw new Error("ownerIdentity.uuid must be a non-empty string");
+  if (typeof username !== "string" || username.length === 0) throw new Error("ownerIdentity.username must be a non-empty string");
+  if (typeof emailConfirmed !== "boolean") throw new Error("ownerIdentity.emailConfirmed must be a boolean");
+
+  return Object.freeze({ emailConfirmed, username, uuid });
+}
+
 export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}): PuterCapabilityRegistry {
   const byToken = new Map<string, PuterAppSession>();
   const byInstance = new Map<string, PuterAppSession>();
   const permissionModel = options.permissionModel ?? createSessionGrantModel();
+  // The node's trusted owner identity (validated once at construction). Every minted session is
+  // bound to THIS owner. A per-mint override may not name a different owner uuid (see mintAppSession).
+  const trustedOwner = resolveTrustedOwner(options.ownerIdentity);
+  const audit = options.audit;
 
   function denial(code: GateDenialCode, message: string, status: number): GateResult {
     return Object.freeze({ code, message, ok: false, status });
@@ -158,17 +230,47 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
       }
 
       if (!allowed) {
+        // Record the DENIAL so the owner can SEE that this app tried to exceed its grant (the thing the
+        // activity view flags as unexpected/malicious). Best-effort: a sink error never affects the gate.
+        try {
+          audit?.record({
+            appId: session.appId,
+            capability,
+            code: "CAP_DENIED",
+            outcome: "deny",
+            reason: `app '${session.appId}' lacks capability '${capability}'`,
+          });
+        } catch {
+          // ignore sink errors — auditing must never break enforcement
+        }
+
         return denial("CAP_DENIED", `app '${session.appId}' lacks capability '${capability}'`, 403);
+      }
+
+      try {
+        audit?.record({ appId: session.appId, capability, outcome: "allow" });
+      } catch {
+        // ignore sink errors
       }
 
       return Object.freeze({ ok: true, session });
     },
     mintAppSession(input: MintInput): PuterAppSession {
       const token = input.token ?? (input.randomToken ?? randomOpaqueToken)();
+      // The session owner is the node's TRUSTED owner identity (the live owner-auth source),
+      // never caller-fabricated. A per-mint override may supply username/emailConfirmed but may
+      // NOT name a different uuid: an override uuid that disagrees with the trusted owner is
+      // rejected fail-closed (a caller must not be able to forge a different owner's identity).
+      const overrideUuid = input.owner?.uuid;
+
+      if (overrideUuid !== undefined && overrideUuid !== trustedOwner.uuid) {
+        throw new Error("mintAppSession: owner.uuid override does not match the trusted owner identity");
+      }
+
       const owner: PuterOwner = Object.freeze({
-        emailConfirmed: input.owner?.emailConfirmed ?? DEFAULT_OWNER.emailConfirmed,
-        username: input.owner?.username ?? DEFAULT_OWNER.username,
-        uuid: input.owner?.uuid ?? DEFAULT_OWNER.uuid,
+        emailConfirmed: input.owner?.emailConfirmed ?? trustedOwner.emailConfirmed,
+        username: input.owner?.username ?? trustedOwner.username,
+        uuid: trustedOwner.uuid,
       });
       const session: PuterAppSession = Object.freeze({
         appId: input.appId,
@@ -228,22 +330,25 @@ export function parseBearer(header: string | undefined | null): string | undefin
   return match?.[1];
 }
 
-// The default opaque-token source: 32 bytes of CSPRNG hex when crypto is available, else a
-// time+counter fallback (still unguessable enough for a single-owner host spike; the real on-device
-// minting uses the platform's token service).
-let fallbackCounter = 0;
-
+// The default opaque-token source: 32 bytes of CSPRNG hex. This token is a TRUST ANCHOR — it is the
+// app-session bearer the api_origin honors and (for the owner token) the sole remote-authn secret — so
+// it MUST be cryptographically random. If `crypto.getRandomValues` is unavailable we HARD-FAIL rather
+// than fall back to Date.now()/Math.random(): a predictable token would let an attacker forge a session.
+// Fail-closed: a missing CSPRNG is a fatal environment defect, never silently downgraded. (On-device the
+// pinned Deno/Node runtime always provides WebCrypto; this throw only fires in a broken/hostile runtime.)
 export function randomOpaqueToken(): string {
   const g = globalThis as { crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array } };
   const getRandomValues = g.crypto?.getRandomValues;
 
-  if (typeof getRandomValues === "function") {
-    const bytes = new Uint8Array(32);
-
-    getRandomValues.call(g.crypto, bytes);
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (typeof getRandomValues !== "function") {
+    throw new Error(
+      "randomOpaqueToken: crypto.getRandomValues is unavailable — refusing to mint a trust-anchor token " +
+        "without a CSPRNG (no Date.now()/Math.random() fallback). This is a fatal runtime defect.",
+    );
   }
 
-  fallbackCounter += 1;
-  return `tok-${Date.now().toString(16)}-${fallbackCounter.toString(16)}-${Math.random().toString(16).slice(2)}`;
+  const bytes = new Uint8Array(32);
+
+  getRandomValues.call(g.crypto, bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
