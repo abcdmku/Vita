@@ -509,6 +509,17 @@ function installPuterOverlay() {
   const shellAssetDirs = [
     ["apps", "vita-deploy-console"],
     ["ui_kits", "desktop", "runtime", "devloop", "editor"],
+    // The canonical design-system tokens. ui_kits/styles.css `@import`s ./tokens/{fonts,colors,
+    // typography,spacing,elevation,motion}.css — those define --accent (#4F9DFF), --radius-window
+    // (13px), the cool-ink --surface ladder, fonts, etc. Without this dir staged the @import chain
+    // 404s on-device and the redesign tokens are LOST (the shell + apps fall back to hardcoded
+    // values). The handoff redesign renders correctly ONLY if these ship alongside styles.css.
+    ["ui_kits", "tokens"],
+    // Vendored Lucide (shell.html + editor <script src="/ui_kits/_vendor/lucide.min.js">). The
+    // /ui_kits alias resolves to repoRootStaged/ui_kits, so Lucide must ship at ui_kits/_vendor/
+    // (distinct from the already-staged ui_kits/desktop/_vendor = puter.js/xterm/codemirror).
+    // Without it the dock + window-chrome icons 404 and render blank on-device.
+    ["ui_kits", "_vendor"],
   ];
   for (const parts of shellAssetDirs) {
     const from = join(REPO, ...parts);
