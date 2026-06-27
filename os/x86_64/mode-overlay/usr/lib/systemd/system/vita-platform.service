@@ -27,7 +27,11 @@ After=vita-agentd.service
 Wants=vita-agentd.service
 # The persisted store must be mounted before we open it (the verity-only var.mount provides /var). On a
 # plain non-verity smoke image var.mount is skipped and the store falls back to /var on the root fs.
-RequiresMountsFor=/var/lib/vita/apps
+# Bind ALL THREE persistence subtrees this unit reads/writes — the apps store (fs+kv backing), the
+# owner-token dir, and the TLS material dir — so on a VITA_VERITY build the vita-data partition is mounted
+# at /var before the server opens any of them (not just the apps store). All three live under /var, so on
+# a non-verity smoke image they share the same nofail-skipped var.mount and fall back to the rw root.
+RequiresMountsFor=/var/lib/vita/apps /var/lib/vita/owner /var/lib/vita/tls
 
 [Service]
 # INTEGRATED: the real platform server now runs on the on-device, pinned Deno runtime (the same binary
