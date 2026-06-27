@@ -98,6 +98,11 @@ export interface PuterPlatformService {
   // Mint a per-app session in-process. The app's declared grants MUST already be in the grant registry
   // (via appGrants or grants.declare) or the broker denies every call (fail-closed).
   mintApp(input: { readonly appId: string; readonly instanceId: string; readonly grants: readonly PuterCapability[]; readonly token?: string }): AppHandle;
+  // Publish the LOCAL-face session token to the loopback/kiosk listener. After the boot entry mints the
+  // well-known kiosk app session, it calls this so the local face's `GET /session.js` hands that token
+  // to the in-browser puter.js SDK (which then authenticates to the local api_origin — no 401). The
+  // token is NEVER published to the network face (that listener has no session-token provider).
+  setLocalSessionToken(token: string | undefined): void;
   close(): Promise<void>;
 }
 
@@ -153,6 +158,13 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
     "/_vendor": vendorDir,
   };
 
+  // ── LOCAL-face session token holder ──
+  // The boot entry mints the well-known kiosk app session AFTER this service resolves, then calls
+  // setLocalSessionToken() below. The local listener reads it live via this provider so /session.js
+  // serves the current token. Never wired into the network listener (owner-token gated separately).
+  let localSessionToken: string | undefined;
+  const localSessionTokenProvider = (): string | undefined => localSessionToken;
+
   // ── bind the faces the mode calls for ──
   let backend: DualFaceBackend | undefined;
   let localUrl: string | undefined;
@@ -168,6 +180,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
       networkHost: options.faces?.networkHost ?? "0.0.0.0",
       networkPort: options.faces?.networkPort ?? 0,
       store,
+      localSessionToken: localSessionTokenProvider,
       ...(tls !== undefined ? { networkTls: { cert: tls.cert, key: tls.key } } : {}),
     });
 
@@ -198,6 +211,9 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
     mode,
     networkUrl,
     ownerToken,
+    setLocalSessionToken(token: string | undefined): void {
+      localSessionToken = token;
+    },
     tls,
   });
 }

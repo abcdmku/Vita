@@ -259,19 +259,32 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     }
   }
 
+  // The SDK's `fs.delete` sends `POST /delete { paths: [<path>,…], recursive, descendants_only }` — a
+  // `paths` ARRAY, not a single `path` (verified against the vendored bundle: `r.send(JSON.stringify(
+  // {paths:n,descendants_only:…,recursive:…}))`). Accept the array (delete each), and still accept the
+  // legacy single `path` (query/body) for the native/test callers. `descendants_only` deletes the
+  // directory's contents but keeps the dir itself.
   function handleDelete(req: ApiRequest): ApiResponse {
     const gated = gate(req, "fs.write");
 
     if (!gated.ok) return gated.response;
 
-    const path = readPathFromRequest(req);
-
-    if (path === undefined) return errorResponse(400, "field_missing", "path is required");
-
     const obj = parseJsonBody(req.body);
+    const recursive = obj["recursive"] !== false;
+    const descendantsOnly = obj["descendants_only"] === true || obj["descendantsOnly"] === true;
+    const targets = collectDeletePaths(req, obj);
+
+    if (targets.length === 0) return errorResponse(400, "field_missing", "path is required");
 
     try {
-      store.fs.delete(path, { recursive: obj["recursive"] !== false });
+      for (const target of targets) {
+        if (descendantsOnly) {
+          for (const child of store.fs.readdir(target)) store.fs.delete(child.path, { recursive });
+        } else {
+          store.fs.delete(target, { recursive });
+        }
+      }
+
       return json(200, { success: true });
     } catch (err) {
       return mapStoreError(err);
@@ -525,6 +538,25 @@ function readPathFromRequest(req: ApiRequest): string | undefined {
   }
 
   return undefined;
+}
+
+// Collect the delete targets from a /delete request. The SDK sends `{ paths: [<path>,…] }`; legacy
+// callers may send a single `path` (query or body). Returns a normalized, de-duplicated list. Pure.
+function collectDeletePaths(req: ApiRequest, obj: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const raw = obj["paths"];
+
+  if (Array.isArray(raw)) {
+    for (const p of raw) {
+      if (typeof p === "string" && p.length > 0) out.push(normalizePath(p));
+    }
+  }
+
+  const single = readPathFromRequest(req);
+
+  if (single !== undefined) out.push(normalizePath(single));
+
+  return [...new Set(out)];
 }
 
 function resolveWritePath(op: BatchOperation): string {

@@ -535,3 +535,69 @@ test("service: TLS network face — owner token over a genuine (pinned-CA) TLS h
     rmSync(root, { force: true, recursive: true });
   }
 });
+
+test("service: LOCAL face /session.js publishes the minted kiosk token and the SDK whoami clears the gate; NETWORK face 404s it (no leak)", async () => {
+  const root = freshDir("vita-svc-session-");
+  // network-desktop = BOTH faces, so we can assert the local face serves the token AND the network face hides it.
+  const svc = await startPuterPlatformService({ appsRoot: root, faces: { localHost: "127.0.0.1", networkHost: "127.0.0.1" }, mode: "network-desktop", storeAppId: "vita.kiosk" });
+
+  try {
+    const localUrl = svc.localUrl!;
+
+    // Before the kiosk session is published, /session.js serves a benign NO-token stub (still 200, no token).
+    const before = await fetch(`${localUrl}/session.js`);
+
+    assert.equal(before.status, 200);
+    const beforeBody = await before.text();
+
+    assert.ok(beforeBody.includes("var token = \"\";"), "pre-mint /session.js must carry an empty token");
+
+    // The boot entry mints the well-known kiosk app session, then publishes it to the local face.
+    const kiosk = svc.mintApp({ appId: "vita.kiosk", grants: ["fs.read", "fs.write", "kv.read", "kv.write", "auth"], instanceId: "boot-test" });
+
+    svc.setLocalSessionToken(kiosk.token);
+
+    // (1) LOCAL face: /session.js now embeds the minted token + points the SDK at /api.
+    const sess = await fetch(`${localUrl}/session.js`);
+
+    assert.equal(sess.status, 200);
+    assert.equal(sess.headers.get("content-type"), "text/javascript; charset=utf-8");
+    const body = await sess.text();
+
+    assert.ok(body.includes(`var token = ${JSON.stringify(kiosk.token)};`), "/session.js must embed the minted token");
+    assert.ok(body.includes('window.location.origin + "/api"'), "/session.js must point the SDK at the same-origin /api");
+    assert.ok(body.includes("setAuthToken"), "/session.js must call setAuthToken");
+
+    // (2) Using that token, the SDK's whoami path (GET /api/whoami with the bearer) returns 200 owner —
+    //     the very call kiosk-entry.html makes after /session.js runs. This is the no-401 proof.
+    const who = await fetch(`${localUrl}/api/whoami`, { headers: { authorization: `Bearer ${kiosk.token}` } });
+
+    assert.equal(who.status, 200);
+    assert.equal(((await who.json()) as { username?: string }).username, "owner");
+
+    // A whoami WITHOUT the token is still 401 (the gate is genuinely on — the token is what clears it).
+    const noTok = await fetch(`${localUrl}/api/whoami`);
+
+    assert.equal(noTok.status, 401);
+
+    // (3) NETWORK face: /session.js must NOT be served (no token provider there). With the owner token the
+    //     request clears the face gate yet still 404s — proving the kiosk token is never reachable remotely.
+    const netUrl = svc.networkUrl!;
+    const cert = svc.tls!.cert;
+    const u = new URL(`${netUrl}/session.js`);
+    const netStatus = await new Promise<number>((res, rej) => {
+      const r = httpsRequest({ ca: cert, headers: { "x-vita-owner": svc.ownerToken }, host: u.hostname, method: "GET", path: u.pathname, port: u.port, servername: "vita.local" }, (resp) => {
+        resp.on("data", () => undefined);
+        resp.on("end", () => res(resp.statusCode ?? 0));
+      });
+
+      r.on("error", rej);
+      r.end();
+    });
+
+    assert.equal(netStatus, 404);
+  } finally {
+    await svc.close();
+    rmSync(root, { force: true, recursive: true });
+  }
+});

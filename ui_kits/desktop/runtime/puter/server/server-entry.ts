@@ -246,6 +246,12 @@ async function main(): Promise<void> {
     instanceId: `boot-${randomOpaqueToken().slice(0, 12)}`,
   });
 
+  // Publish the minted kiosk token to the LOCAL face so its `GET /session.js` hands it to the
+  // in-browser puter.js SDK (which then authenticates to the local api_origin — fixes the documented
+  // 401: kiosk-entry.html previously called /api/whoami with NO token). The network face has no
+  // session-token provider, so the token is NEVER served to a remote client (owner-gated separately).
+  service.setLocalSessionToken(localApp.token);
+
   // Publish the runtime facts the kiosk page + the boot probe consume (tmpfs, per-boot).
   writeRunFile(`${runDir}/platform-session.json`, `${JSON.stringify({
     appId: localApp.appId,

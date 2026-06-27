@@ -1,44 +1,39 @@
 <!doctype html>
 <!--
-  Vita kiosk entry — the LOCAL (kiosk) face page served at `/kiosk-entry.html` (and `/`).
+  Vita Desk — a REAL, interactive Puter app (Vita's own code, Apache-2.0-SDK-only; AGPL-clean).
 
-  This IS the interactive desktop now (not a static proof page). A stock kiosk browser
-  (cage + chromium --kiosk, see KIOSK.md) loads it from http://127.0.0.1:<localPort>/kiosk-entry.html.
-  It loads the vendored Apache-2.0 puter.js SDK (offline, same-origin), the LOCAL-face session
-  bootstrap (/session.js, which points the SDK at our same-origin /api + injects the minted
-  vita.kiosk app-session token), and then Vita Desk — a REAL, clickable app (file manager + notes
-  editor + KV-backed settings) written in Vita's own code (AGPL-clean). Every action persists to
-  /var/lib/vita/apps through the capability-gated api_origin.
+  This is NOT the AGPL Puter desktop GUI. It is a self-contained rich app written by Vita that runs
+  ON the vendored Apache-2.0 puter.js SDK, pointed at Vita's LOCAL api_origin. It is the page the
+  kiosk (local face) loads full-screen so the owner can CLICK and DO things:
+    - a FILE MANAGER  : browse / create folders / new files / rename / delete  (→ puter.fs.* over HTTP)
+    - a NOTES EDITOR  : open a file, edit, Save                                (→ puter.fs.write upload)
+    - a SETTINGS panel: theme + a counter persisted in KV                      (→ puter.kv.* over HTTP)
+  Everything persists to /var/lib/vita/apps via the api_origin's file-backed store, so a reload (or a
+  reboot) shows it again. This exercises the genuine browser-only fs.write signed-batch/upload path
+  the earlier Node-VM shim could not reach.
 
-  The network (remote) face serves the SAME page, but the backend's owner-token gate (backend.ts)
-  requires the owner token before this page is served to a remote client.
-
-  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) is third-party. The Vita Desk app
-  (app/index.html structure inlined here + app/app.css + app/app.js) is Vita's own. No AGPL Puter
-  desktop bundle is shipped or fetched.
-
-  A minimal connectivity-proof page is still available at /proof.html for boot diagnostics.
+  Licensing: only `/_vendor/puter/v2.js` (Apache-2.0 puter.js SDK) is third-party + vendored. This
+  HTML/CSS/JS is Vita's own (AGPL-clean). No AGPL Puter desktop bundle is shipped or fetched.
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Vita Desk</title>
-  <link rel="stylesheet" href="/app/app.css" />
+  <link rel="stylesheet" href="./app.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
-  <!-- PRE-SDK origin pin: the puter.js bundle reads globalThis.PUTER_API_ORIGIN at INIT for its default
-       origin. Setting it BEFORE v2.js loads makes the SDK target our same-origin /api from its very
-       first call — so it never races a boot whoami/rao against the cloud api.puter.com (which is
-       offline + 401s on the kiosk). /session.js still injects the auth token after the SDK loads. -->
+  <!-- PRE-SDK origin pin (see kiosk-entry.html): target our same-origin /api from the SDK's first call
+       so it never races a boot call against the cloud api.puter.com. -->
   <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
-  <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). Same-origin on the local face. -->
+  <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
   <script src="/_vendor/puter/v2.js"></script>
-  <!-- LOCAL-FACE session bootstrap: points puter.js at our same-origin /api and injects the minted
+  <!-- LOCAL-FACE session bootstrap: points the SDK at our same-origin /api and injects the minted
        vita.kiosk app-session token. On the network face /session.js 404s (owner-gated separately). -->
   <script src="/session.js"></script>
 </head>
 <body>
   <div id="app" class="app" data-state="booting">
+    <!-- Top bar -->
     <header class="topbar">
       <div class="brand">
         <span class="logo" aria-hidden="true"></span>
@@ -55,6 +50,7 @@
       </div>
     </header>
 
+    <!-- FILES view -->
     <section class="view view-files is-active" data-view="files">
       <div class="toolbar">
         <button id="btn-up" class="btn" title="Parent folder">↑ Up</button>
@@ -68,6 +64,7 @@
       <div id="files-empty" class="empty" hidden>This folder is empty. Create a file or folder to get started.</div>
     </section>
 
+    <!-- NOTES view -->
     <section class="view view-notes" data-view="notes">
       <div class="toolbar">
         <input id="note-path" class="note-path" value="/home/notes/welcome.txt"
@@ -81,6 +78,7 @@
                 placeholder="Type here, then Save. The text persists to Vita's store and survives a reload."></textarea>
     </section>
 
+    <!-- SETTINGS view -->
     <section class="view view-settings" data-view="settings">
       <div class="settings-card">
         <h2>Appearance</h2>
@@ -107,6 +105,7 @@
       </div>
     </section>
 
+    <!-- Toasts + modal prompt -->
     <div id="toasts" class="toasts" aria-live="polite"></div>
     <div id="modal" class="modal" hidden>
       <div class="modal-card" role="dialog" aria-modal="true">
@@ -119,6 +118,7 @@
       </div>
     </div>
 
+    <!-- Boot overlay (hidden once the SDK + whoami resolve) -->
     <div id="boot" class="boot">
       <div class="boot-inner">
         <div class="boot-spinner" aria-hidden="true"></div>
@@ -128,6 +128,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app/app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
