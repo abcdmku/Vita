@@ -54,6 +54,12 @@ export interface HarnessServerDeps {
   // client (the network face already gates on the separate owner token). Returns the current token, or
   // undefined before the session is minted (then /session.js answers a benign no-token stub).
   readonly localSessionToken?: () => string | undefined;
+  // Extra dynamic GET routes (exact-path → handler returning {contentType, body}). Evaluated AFTER the
+  // session/socket short-circuits and BEFORE static serving. Used by the shell harness to serve
+  // /shell-session.js (the per-app token map) without a static file. Subject to the same face gate as
+  // static requests (so the network face won't leak local-only routes). Returns undefined to fall
+  // through to static serving.
+  readonly extraRoutes?: Readonly<Record<string, () => { readonly contentType: string; readonly body: string }>>;
 }
 
 export interface HarnessServer {
@@ -88,9 +94,10 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
 
   const faceGate = deps.faceGate;
   const localSessionToken = deps.localSessionToken;
+  const extraRoutes = deps.extraRoutes;
 
   const onRequest = (req: IncomingMessage, res: ServerResponse): void => {
-    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate, localSessionToken).catch((err: unknown) => {
+    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate, localSessionToken, extraRoutes).catch((err: unknown) => {
       res.statusCode = 500;
       res.end(`internal error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -139,6 +146,7 @@ async function handleRequest(
   aliases: readonly [string, string][],
   faceGate: FaceGate | undefined,
   localSessionToken: (() => string | undefined) | undefined,
+  extraRoutes: Readonly<Record<string, () => { readonly contentType: string; readonly body: string }>> | undefined,
 ): Promise<void> {
   const rawUrl = req.url ?? "/";
   const [pathOnly, queryString] = splitQuery(rawUrl);
@@ -216,6 +224,22 @@ async function handleRequest(
       res.statusCode = denied.status;
       res.setHeader("content-type", "application/json; charset=utf-8");
       res.end(denied.body);
+      return;
+    }
+  }
+
+  // Extra dynamic GET routes (e.g. /shell-session.js). Evaluated after the face gate, before static
+  // serving. Exact-path match, GET only.
+  if (extraRoutes !== undefined && (req.method ?? "GET").toUpperCase() === "GET") {
+    const route = extraRoutes[pathOnly];
+
+    if (route !== undefined) {
+      const { contentType, body } = route();
+
+      res.statusCode = 200;
+      res.setHeader("content-type", contentType);
+      res.setHeader("cache-control", "no-store");
+      res.end(body);
       return;
     }
   }

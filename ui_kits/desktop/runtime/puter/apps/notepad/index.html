@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  THIRD-PARTY VENDORED APP — Notepad (Puter-Apps/notepad).
+  Source: https://github.com/Puter-Apps/notepad  © 2023 Puter Technologies Inc.
+  License: MIT (see ./LICENSE). Vendored UNMODIFIED except the SDK <script src> below,
+  repointed from the public CDN to Vita's OFFLINE vendored Apache-2.0 puter.js bundle
+  (/_vendor/puter/v2.js). Notepad exercises puter.ui.* (showOpenFilePicker / showSaveFilePicker /
+  onWindowClose / alert) brokered to Vita's window manager, and puter.kv for settings. puter.ai
+  (Speak) has no offline backend on Vita and is a no-op.
+-->
+<html>
+
+<head>
+    <title>Notepad</title>
+    <link rel="stylesheet" href="notepad.css">
+</head>
+
+<body>
+    <nav>
+        <button id="open-button">Open</button>
+        <button id="save-button">Save</button>
+        <button id="save-as-button">Save As</button>
+        <button id="font-button">Font</button>
+        <button id="font-color-button">Font Color</button>
+        <button id="background-color-button">Background Color</button>
+        <button id="speak-button">Speak</button>
+        <button id="exit-button">Exit</button>
+    </nav>
+
+    <textarea id="editor"></textarea>
+
+    <!-- Vita: vendored OFFLINE Apache-2.0 puter.js SDK (was https://js.puter.com/v2/). -->
+    <script src="/_vendor/puter/v2.js"></script>
+    <script src="notepad.js"></script>
+</body>
+
+</html>
