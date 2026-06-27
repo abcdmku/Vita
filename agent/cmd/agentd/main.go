@@ -81,6 +81,7 @@ func main() {
 		executeCapability,
 		lifecycleCapability,
 		capsule.NewFetchCapability(),
+		capsule.NewLogsCapability(),
 		capsule.NewCapability(),
 		hostname.NewCapability(),
 		identity.NewCapability(),

@@ -26,6 +26,29 @@ export {
   KIOSK_ENTRY_PATH,
   startPuterPlatformService,
 } from "./service.ts";
+
+// ── the on-device host-proxy: agentd unix socket → /control/* bridge ──
+export {
+  createAgentdUnixFetch,
+  createOnDeviceControlPlane,
+  DEFAULT_AGENTD_SOCKET,
+} from "./agentd-host-proxy.ts";
+export type {
+  AgentdHostProxyOptions,
+} from "./agentd-host-proxy.ts";
+
+// ── the control-plane bridge contract (the console-facing projection + the agentd client) ──
+export {
+  createAgentHttpControlPlane,
+  createStubControlPlane,
+} from "../control-plane.ts";
+export type {
+  AgentControlPlane,
+  ConsoleAppView,
+  LifecycleResult,
+  LogLine,
+  NodeStatus,
+} from "../control-plane.ts";
 export type {
   AppHandle,
   PuterPlatformService,

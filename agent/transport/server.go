@@ -688,19 +688,25 @@ func DefaultReadRequests() map[string]ReadRequestFactory {
 		capsule.ExecuteName:   func() capabilities.TypedRequest { return capsule.ExecuteReadRequest{} },
 		capsule.FetchName:     func() capabilities.TypedRequest { return capsule.FetchReadRequest{} },
 		capsule.LifecycleName: func() capabilities.TypedRequest { return capsule.LifecycleReadRequest{} },
-		capsule.Name:          func() capabilities.TypedRequest { return capsule.ReadRequest{} },
-		nodeconfig.Name:       func() capabilities.TypedRequest { return nodeconfig.ReadRequest{} },
-		nodetime.Name:         func() capabilities.TypedRequest { return nodetime.ReadRequest{} },
-		hostname.Name:         func() capabilities.TypedRequest { return hostname.ReadRequest{} },
-		identity.Name:         func() capabilities.TypedRequest { return identity.ReadRequest{} },
-		network.Name:          func() capabilities.TypedRequest { return network.ReadRequest{} },
-		owner.Name:            func() capabilities.TypedRequest { return owner.ReadRequest{} },
-		pdsrepo.Name:          func() capabilities.TypedRequest { return pdsrepo.ReadRequest{} },
-		pdssync.Name:          func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
-		services.Name:         func() capabilities.TypedRequest { return services.ReadRequest{} },
-		storage.Name:          func() capabilities.TypedRequest { return storage.ReadRequest{} },
-		timesync.Name:         func() capabilities.TypedRequest { return timesync.ReadRequest{} },
-		update.Name:           func() capabilities.TypedRequest { return update.ReadRequest{} },
+		// capsule.logs is a QUERY-parameterized read (?id=&limit=): the bare factory
+		// returns a default-limit request with no id, which the capability rejects as
+		// invalid. The real request is built from the query in readCapsuleLogsQuery
+		// (handleRead routes capsule.logs there when id/limit are present), mirroring
+		// the pdsrepo query-read special case.
+		capsule.LogsName: func() capabilities.TypedRequest { return capsule.LogsReadRequest{} },
+		capsule.Name:     func() capabilities.TypedRequest { return capsule.ReadRequest{} },
+		nodeconfig.Name:  func() capabilities.TypedRequest { return nodeconfig.ReadRequest{} },
+		nodetime.Name:    func() capabilities.TypedRequest { return nodetime.ReadRequest{} },
+		hostname.Name:    func() capabilities.TypedRequest { return hostname.ReadRequest{} },
+		identity.Name:    func() capabilities.TypedRequest { return identity.ReadRequest{} },
+		network.Name:     func() capabilities.TypedRequest { return network.ReadRequest{} },
+		owner.Name:       func() capabilities.TypedRequest { return owner.ReadRequest{} },
+		pdsrepo.Name:     func() capabilities.TypedRequest { return pdsrepo.ReadRequest{} },
+		pdssync.Name:     func() capabilities.TypedRequest { return pdssync.ReadRequest{} },
+		services.Name:    func() capabilities.TypedRequest { return services.ReadRequest{} },
+		storage.Name:     func() capabilities.TypedRequest { return storage.ReadRequest{} },
+		timesync.Name:    func() capabilities.TypedRequest { return timesync.ReadRequest{} },
+		update.Name:      func() capabilities.TypedRequest { return update.ReadRequest{} },
 	}
 }
 
@@ -920,9 +926,12 @@ func (h *handler) handleRead(w http.ResponseWriter, r *http.Request, name string
 
 	var response capabilities.TypedResponse
 	var readErr *requestError
-	if name == pdsrepo.Name && hasPDSRepoQuery(r.URL.Query()) {
+	switch {
+	case name == pdsrepo.Name && hasPDSRepoQuery(r.URL.Query()):
 		response, readErr = h.readPDSRepoQuery(r.Context(), r.URL.Query())
-	} else {
+	case name == capsule.LogsName:
+		response, readErr = h.readCapsuleLogsQuery(r.Context(), r.URL.Query())
+	default:
 		response, readErr = h.readCapability(r.Context(), name)
 	}
 	if readErr != nil {
@@ -986,6 +995,75 @@ func (h *handler) readPDSRepoQuery(ctx context.Context, values url.Values) (capa
 		}
 	}
 	return response, nil
+}
+
+// readCapsuleLogsQuery backs GET /read/capsule.logs?id=&limit=. It builds the
+// LogsReadRequest from the query parameters (id required; limit optional, defaults
+// applied by the capability) and dispatches to the registered capsule.logs
+// capability. This mirrors readPDSRepoQuery: a read whose request is carried in the
+// query string rather than a JSON body. Owner gating is already enforced by the
+// transport's peer-credential auth before this point.
+func (h *handler) readCapsuleLogsQuery(ctx context.Context, values url.Values) (capabilities.TypedResponse, *requestError) {
+	capability, ok := h.registry.Lookup(capsule.LogsName)
+	if !ok {
+		return nil, &requestError{
+			status:  http.StatusNotFound,
+			code:    "unknown_capability",
+			message: fmt.Sprintf("unknown capability %q", capsule.LogsName),
+		}
+	}
+
+	readRequest, requestErr := capsuleLogsQueryReadRequest(values)
+	if requestErr != nil {
+		return nil, requestErr
+	}
+
+	response, err := capability.Handle(ctx, readRequest)
+	if err != nil {
+		return nil, &requestError{
+			status:  http.StatusBadRequest,
+			code:    "invalid_request",
+			message: err.Error(),
+		}
+	}
+	return response, nil
+}
+
+func capsuleLogsQueryReadRequest(values url.Values) (capsule.LogsReadRequest, *requestError) {
+	for key := range values {
+		switch key {
+		case "id", "limit":
+		default:
+			return capsule.LogsReadRequest{}, badRequest("unknown_field", fmt.Sprintf("unknown query parameter %q", key))
+		}
+	}
+
+	id, requestErr := requiredSingleQueryValue(values, "id")
+	if requestErr != nil {
+		return capsule.LogsReadRequest{}, requestErr
+	}
+
+	limit := 0
+	if values.Has("limit") {
+		limitText, requestErr := requiredSingleQueryValue(values, "limit")
+		if requestErr != nil {
+			return capsule.LogsReadRequest{}, requestErr
+		}
+		parsed, requestErr := parseQueryInt(limitText, "limit")
+		if requestErr != nil {
+			return capsule.LogsReadRequest{}, requestErr
+		}
+		if parsed < 0 {
+			return capsule.LogsReadRequest{}, badRequest("invalid_request", "query parameter \"limit\" must be non-negative")
+		}
+		limit = int(parsed)
+	}
+
+	request := capsule.LogsReadRequest{ID: id, Limit: limit}
+	if err := request.Validate(); err != nil {
+		return capsule.LogsReadRequest{}, badRequest("invalid_request", err.Error())
+	}
+	return request, nil
 }
 
 func (h *handler) handleState(w http.ResponseWriter, r *http.Request) {
