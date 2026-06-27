@@ -229,10 +229,14 @@ test("shell registry: catalog has Vita apps + two real third-party apps", () => 
   assert.deepEqual(withControl.map((a) => a.id), ["vita.app.deploy-console"]);
 });
 
-test("shell registry: Vita Desk autostarts; the rest are launcher-only", () => {
+test("shell registry: no app autostarts — the shell boots to a clean desktop (launcher-only)", () => {
+  // feat/vita-shell-polish removed Vita Desk's autostart: auto-opening an app over an empty chrome made
+  // the desktop read as "a random app is open with no system bar/dock". The shell now boots to a CLEAN
+  // desktop (wallpaper + system bar + pinned dock) and every app — Vita Desk included — is launched from
+  // the dock. So NO entry carries autostart=true.
   const autos = DEFAULT_SHELL_APPS.filter((a) => a.autostart === true);
 
-  assert.deepEqual(autos.map((a) => a.id), ["vita.desk"]);
+  assert.deepEqual(autos.map((a) => a.id), []);
 });
 
 test("mintShellSessions: one capability session per app, honored by the api_origin", () => {
