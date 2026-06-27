@@ -44,11 +44,21 @@ RequiresMountsFor=/var/lib/vita/apps /var/lib/vita/owner /var/lib/vita/tls
 # below, maps it onto ServiceOptions, starts startPuterPlatformService(), mints the local kiosk session,
 # and sd_notify(READY=1)s once both faces listen. Unlike vita-ts.service this unit BINDS TCP+TLS, so it
 # needs --allow-net scoped to the bind addresses and --allow-read of the served static dir + TLS material.
+#
+# /run/vita-agent is agentd's runtime dir; /run/vita-agent/agentd.sock is its control-plane unix socket
+# (ADR-0008). The platform's on-device host-proxies dial it for capsule-exec (the Terminal's /pty stream,
+# agentd-host-proxy.ts) AND the Deploy Console's control-plane bridge (createOnDeviceControlPlane → GET
+# /state, capsule.execute/logs, POST /apply). Deno's unix-socket connect (Deno.connect transport:"unix")
+# checks BOTH read AND write permission on the socket path, so /run/vita-agent is granted on both lists —
+# without it the Terminal fails "exec: could not open on-device capsule session: Requires read access to
+# \"/run/vita-agent/agentd.sock\"" and the Deploy Console's bridge cannot reach the node. agentd still
+# authenticates the connection by the platform process's peer credentials (SO_PEERCRED; it is in the
+# vita-agent group via SupplementaryGroups below), so this grants reachability, not authority.
 Type=notify
 NotifyAccess=all
 ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
-  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita \
-  --allow-write=/var/lib/vita/apps,/run/vita \
+  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita,/run/vita-agent \
+  --allow-write=/var/lib/vita/apps,/run/vita,/run/vita-agent \
   --allow-net \
   --allow-run=systemd-notify \
   --allow-env \
