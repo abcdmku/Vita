@@ -36,9 +36,9 @@ RequiresMountsFor=/var/lib/vita/apps
 # and sd_notify(READY=1)s once both faces listen. Unlike vita-ts.service this unit BINDS TCP+TLS, so it
 # needs --allow-net scoped to the bind addresses and --allow-read of the served static dir + TLS material.
 Type=notify
-NotifyAccess=main
+NotifyAccess=all
 ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
-  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/run/vita \
+  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita \
   --allow-write=/var/lib/vita/apps,/run/vita \
   --allow-net \
   --allow-run=systemd-notify \
@@ -72,11 +72,11 @@ Environment=VITA_TLS_KEY=/var/lib/vita/tls/net.key
 # DENO_DIR keeps Deno from erroring on a missing/RO default cache location.
 Environment=DENO_DIR=/run/vita-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
 EnvironmentFile=-/run/vita/platform.env
-# The network-face owner bearer secret. Minted + persisted on first boot by vita-owner-token.service and
-# delivered here as a systemd credential (LoadCredential reads the persisted file; the entry reads
-# VITA_OWNER_TOKEN). If the credential is absent the entry mints an ephemeral token and logs it (dev).
-LoadCredential=owner_token:/var/lib/vita/owner/owner.token
-Environment=VITA_OWNER_TOKEN_FILE=%d/owner_token
+# The network-face owner bearer secret. Minted + persisted on first boot by vita-owner-token.service
+# (0640 root:vita-agent on the /var partition). The entry reads it directly via VITA_OWNER_TOKEN_FILE;
+# the platform DynamicUser is in SupplementaryGroups=vita-agent so it can read the group-readable file.
+# (LoadCredential was dropped: the per-unit credentials mount fails on this image's systemd/kernel.)
+Environment=VITA_OWNER_TOKEN_FILE=/var/lib/vita/owner/owner.token
 
 # ── Least privilege (spec §9.3): the server is an unprivileged network service ───────────────────
 # Privileged host mutation stays in agentd; this serves HTTP and reads/writes the apps store only.
@@ -85,10 +85,11 @@ SupplementaryGroups=vita-agent
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-# Persisted store lives under /var/lib/vita/apps. StateDirectory= would create /var/lib/<name> owned by
-# the DynamicUser; we point at the shared vita tree and let tmpfiles own the parent. ReadWritePaths
-# grants write to the apps store while ProtectSystem=strict keeps the rest of the rootfs read-only.
-StateDirectory=vita
+# Persisted store lives under /var/lib/vita/apps (created by tmpfiles.d/vita-apps.conf as
+# root:vita-agent). We deliberately do NOT use StateDirectory=vita: with DynamicUser=yes systemd would
+# recursively chown /var/lib/vita to the (per-boot-changing) dynamic UID, clobbering the root:vita-agent
+# owner-token + the apps store ownership. Instead tmpfiles owns the tree and ReadWritePaths grants write
+# to the apps store while ProtectSystem=strict keeps the rest of the rootfs read-only.
 # /run/vita is created owned by the DynamicUser each start (the published session + owner token land here).
 RuntimeDirectory=vita vita-deno
 RuntimeDirectoryMode=0750

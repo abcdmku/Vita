@@ -64,13 +64,15 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-# Write 0400 so only root (LoadCredential at unit setup) reads it; persisted on /var.
-umask 0077
+# Write 0640 root:vita-agent so the platform DynamicUser (SupplementaryGroups=vita-agent) can read
+# it directly via VITA_OWNER_TOKEN_FILE; persisted on /var (survives reboot).
+umask 0027
 if ! printf '%s\n' "$TOKEN" > "$TOKEN_FILE"; then
   emit "$MARKER: FATAL could not write ${TOKEN_FILE}"
   exit 1
 fi
-chmod 0400 "$TOKEN_FILE" 2>/dev/null || true
+chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
+chgrp vita-agent "$TOKEN_FILE" 2>/dev/null || true
 
 emit "$MARKER: minted + persisted a new owner token at ${TOKEN_FILE} (read it out-of-band to log into the network face)"
 exit 0
