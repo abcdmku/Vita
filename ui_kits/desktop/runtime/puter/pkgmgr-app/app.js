@@ -28,14 +28,28 @@ function authToken() {
 // A meta-API fetch. Carries the bearer so the gate authorizes on `meta`. Returns parsed JSON; throws an
 // Error carrying the HTTP status + the server's error code on a non-2xx (so callers can show 403, etc.).
 async function meta(path, init = {}) {
-  const res = await fetch(apiOrigin() + path, {
-    ...init,
-    headers: {
-      authorization: "Bearer " + authToken(),
-      ...(init.body ? { "content-type": "application/json" } : {}),
-      ...(init.headers || {}),
-    },
-  });
+  // Bound every meta call so an unreachable/wedged meta plane can never hang the UI. On timeout/network
+  // failure we throw a `disconnected`-tagged error the list/detail renderers turn into a clean state.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  let res;
+  try {
+    res = await fetch(apiOrigin() + path, {
+      ...init,
+      signal: ctrl.signal,
+      headers: {
+        authorization: "Bearer " + authToken(),
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    const err = new Error(e && e.name === "AbortError" ? "meta plane timed out" : "meta plane unreachable");
+    err.disconnected = true;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   let data = null;
   try { data = await res.json(); } catch { /* non-json */ }
   if (!res.ok) {
@@ -44,6 +58,9 @@ async function meta(path, init = {}) {
     const err = new Error(`${code}: ${msg}`);
     err.status = res.status;
     err.code = code;
+    // A 404 means no meta plane is mounted on this api_origin (browser-only / no permission control plane
+    // here). Treat it as "not connected" so the app shows a clean state, not a hard error.
+    if (res.status === 404) err.disconnected = true;
     throw err;
   }
   return data;
@@ -76,6 +93,10 @@ async function boot() {
     $("#conn").textContent = "offline";
     $("#conn").classList.add("err");
   }
+  // Load the package list. NEVER let a failed load leave the app wedged in "booting": the meta plane may
+  // be absent (no /meta/* mounted in this context) or unreachable, in which case loadPackages() renders a
+  // clean "not connected" empty state with a Retry. Either way the app reaches a settled `ready` state —
+  // no infinite spinner. (Before: a throw here left dataset.state === "booting" forever.)
   await loadPackages();
   $("#app").dataset.state = "ready";
   window.__vitaPkgMgrReady = true;
@@ -90,9 +111,28 @@ async function fetchWhoami() {
 // 1) LIST installed packages.
 // ----------------------------------------------------------------------------------------------
 async function loadPackages() {
-  const data = await meta("/meta/packages");
-  state.packages = (data && data.packages) || [];
-  renderList();
+  const ul = $("#pkg-list");
+  try {
+    const data = await meta("/meta/packages");
+    state.packages = (data && data.packages) || [];
+    if (state.packages.length === 0) {
+      ul.innerHTML = '<li class="pkg-state"><div class="empty">No packages installed.</div></li>';
+      return;
+    }
+    renderList();
+  } catch (e) {
+    // Unreachable / unmounted meta plane → a clean state with Retry, NOT a wedged spinner. A real error
+    // the plane answered is shown inline too. Either way boot() continues to `ready`.
+    state.packages = [];
+    const reason = e && e.disconnected ? "Permission control plane not connected." : ("Could not load packages: " + e.message);
+    ul.innerHTML =
+      '<li class="pkg-state"><div class="empty">' +
+        '<div style="margin-bottom:12px">' + esc(reason) + '</div>' +
+        '<button class="btn" id="pkg-retry" type="button">Retry</button>' +
+      '</div></li>';
+    const rb = document.getElementById("pkg-retry");
+    if (rb) rb.addEventListener("click", () => { ul.innerHTML = ""; loadPackages(); });
+  }
 }
 
 function renderList() {

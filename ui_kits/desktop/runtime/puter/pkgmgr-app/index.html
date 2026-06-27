@@ -21,8 +21,10 @@
   <title>Vita Package Manager</title>
   <link rel="stylesheet" href="/pkgmgr-app/app.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%237c5cff'/&gt;&lt;/svg&gt;" />
-  <!-- PRE-SDK origin pin: target our same-origin /api from the SDK's first call (never the cloud). -->
-  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- PRE-SDK origin pins (api base + GUI/auth origin): target our same-origin /api AND keep the SDK's
+       GUI/auth origin local, so it never POSTs the cloud puter.com/auth/migrate-token (which HANGS on an
+       offline node). See kiosk-entry.html. -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.PUTER_ORIGIN = window.location.origin; window.puter_gui_enabled = false;</script>
   <!-- Vendored, offline, Apache-2.0 puter.js client SDK. Same-origin on the local face. -->
   <script src="/_vendor/puter/v2.js"></script>
   <!-- LOCAL-FACE session bootstrap: points puter.js at /api + injects the vita.pkgmgr app-session token. -->

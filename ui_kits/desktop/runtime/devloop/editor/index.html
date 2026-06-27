@@ -20,7 +20,9 @@
   <link rel="stylesheet" href="/_vendor/codemirror/codemirror.min.css" />
   <link rel="stylesheet" href="./editor.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%2342d18a'/&gt;&lt;/svg&gt;" />
-  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- PRE-SDK origin pins (api base + GUI/auth origin) — keep the SDK on this node; never reach the
+       cloud puter.com/auth/migrate-token (which HANGS on an offline node). See kiosk-entry.html. -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.PUTER_ORIGIN = window.location.origin; window.puter_gui_enabled = false;</script>
   <script src="/_vendor/puter/v2.js"></script>
   <script src="/session.js"></script>
   <!-- CodeMirror 5 (MIT) + the language modes the editor highlights, vendored offline. -->

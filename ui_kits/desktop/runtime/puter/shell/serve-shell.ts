@@ -20,6 +20,7 @@
 //
 // Emits a single JSON line `[serve-shell] READY {...}` once listening so a driver can parse the URL.
 
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,9 +29,16 @@ import { fileURLToPath } from "node:url";
 import { createApiOrigin } from "../api-origin.ts";
 import { createCapabilityRegistry } from "../capability.ts";
 import { createStubControlPlane } from "../control-plane.ts";
+import { type ChildProcessLike, createDevExecBackend } from "../exec-plane.ts";
+import { createAppGrantRegistry } from "../permission-model.ts";
 import { createNodeFsStore } from "../store.ts";
 import { nodeFsAdapter } from "../spike/node-fs-adapter.ts";
 import { startHarnessServer } from "../server.ts";
+import { createAuditLog } from "../pkgmgr/audit-log.ts";
+import { createMetaPlane } from "../pkgmgr/meta-plane.ts";
+import { createPackageRegistry } from "../pkgmgr/package-registry.ts";
+import { nodeSourceFs } from "../pkgmgr/node-source-fs.ts";
+import { materializeSamples } from "../pkgmgr/samples.ts";
 import { DEFAULT_SHELL_APPS } from "./app-registry.ts";
 import { buildShellSessionScript, mintShellSessions } from "./shell-session.ts";
 
@@ -38,6 +46,25 @@ const here = dirname(fileURLToPath(import.meta.url)); // .../runtime/puter/shell
 const puterDir = resolve(here, ".."); // .../runtime/puter
 const uiKitsDesktop = resolve(puterDir, "../.."); // ui_kits/desktop
 const repoRoot = resolve(uiKitsDesktop, "../.."); // repo root
+
+// Adapt node:child_process.spawn to the dev exec backend's injected ChildProcessLike (same adapter the
+// terminal harness uses — the backend stays runtime-agnostic + testable). Powers the Terminal's /pty.
+const childProcess: ChildProcessLike = {
+  spawn(command, args, options) {
+    const child = spawn(command, [...args], { cwd: options.cwd, env: { ...options.env }, shell: false });
+
+    return {
+      stdout: { on: (_e, cb) => child.stdout.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stderr: { on: (_e, cb) => child.stderr.on("data", (c: Buffer) => cb(new Uint8Array(c))) },
+      stdin: { write: (d: string) => child.stdin.write(d), end: () => child.stdin.end() },
+      on: (event, cb) => {
+        if (event === "exit") child.on("exit", (code, signal) => (cb as (c: number | null, s: string | null) => void)(code, signal));
+        else child.on("error", (err) => (cb as (e: Error) => void)(err));
+      },
+      kill: (signal?: string) => { child.kill((signal as NodeJS.Signals | undefined) ?? "SIGTERM"); },
+    };
+  },
+};
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -58,21 +85,74 @@ export async function startShellHarness(opts: { port?: number; dir?: string } = 
   const store = createNodeFsStore({ fs: nodeFsAdapter, path: { join }, rootDir: dataDir });
   const capabilities = createCapabilityRegistry();
 
-  // Mint one capability session per registry app (the shell hands each app its own token).
+  // Mint one capability session per registry app (the shell hands each app its own token). This is what
+  // /shell-session.js publishes; each app's iframe authenticates to /api with ITS token + grants — so the
+  // Package Manager's `meta` calls and the Terminal's `exec` upgrade clear the gate (and no other app's
+  // do, default-deny).
   const sessions = mintShellSessions(capabilities, DEFAULT_SHELL_APPS);
 
   const controlPlane = createStubControlPlane();
 
+  // PACKAGE-MANAGER meta plane (/meta/*) — without this mounted, the Package Manager's GET /meta/packages
+  // 404s and the app wedges. Materialize the sample packages' source on disk, seed the grant store, and
+  // build the meta plane against the SAME capability + grant registries the gate enforces. Gated on the
+  // `meta` capability (only the Package Manager app holds it — see app-registry.ts PKGMGR_GRANTS).
+  const samples = materializeSamples(dataDir);
+  const audit = createAuditLog();
+  const packageRegistry = createPackageRegistry({ fs: nodeSourceFs, seed: samples.packages });
+  const grants = createAppGrantRegistry(samples.grants);
+  const metaPlane = createMetaPlane({ audit, capabilities, grants, packages: packageRegistry });
+
+  // EXEC backend (/pty) — without this the Terminal's websocket upgrade 404s and it sits on "connecting…".
+  // A dev sandbox that genuinely runs an allow-listed command set (server.ts gates the upgrade on `exec`,
+  // which only the Terminal app holds).
+  const execBackend = createDevExecBackend({
+    childProcess,
+    makeCwd: () => mkdtempSync(join(tmpdir(), "vita-shell-term-")),
+    pathEnv: process.env["PATH"] ?? "",
+    timeoutMs: 5000,
+  });
+
   // Origin base for absolute site/share URLs. When a fixed port is given (the harness + verify always
   // pass one) we know it up front; for an ephemeral port (0) the site/share URLs fall back to relative.
   const originBase = port > 0 ? `http://127.0.0.1:${port}` : "";
-  const apiOrigin = createApiOrigin({ capabilities, store, controlPlane, originBase });
+  const apiOrigin = createApiOrigin({ capabilities, store, controlPlane, metaPlane, originBase });
 
-  const vendorDir = resolve(uiKitsDesktop, "_vendor"); // → /_vendor/puter/v2.js
-  const consoleDir = resolve(repoRoot, "apps/vita-deploy-console"); // → /app/index.html
+  const vendorDir = resolve(uiKitsDesktop, "_vendor"); // → /_vendor/puter/v2.js + /_vendor/xterm + codemirror
+  const consoleDir = resolve(repoRoot, "apps/vita-deploy-console"); // → /console/index.html
+  const editorDir = resolve(uiKitsDesktop, "runtime/devloop/editor"); // → /editor/index.html (Vita Code)
   const deskRuntimeDir = puterDir; // kiosk-entry.html + app/app.js live under .../runtime/puter
   const appsDir = resolve(puterDir, "apps"); // → /apps/<id>/index.html (vendored third-party apps)
   const shellDir = here; // → /shell/shell.js + shell.html
+
+  // /session.js for the SHELL: several Vita-own apps (Vita Desk, Package Manager, Vita Code) load
+  // /session.js in <head>. In the single-kiosk server it injects ONE app's token. In the SHELL there is
+  // no single app — each iframe gets its OWN token via the launch URL (puter.auth.token), and that token
+  // is authoritative. So the shell's /session.js MUST NOT set/override the auth token (doing so would
+  // clobber the per-app URL token with one app's — e.g. give the Package Manager the Vita Desk token and
+  // get CAP_DENIED on /meta/*). It only pins the api + GUI origin (keeping the SDK same-origin / offline)
+  // and leaves the URL-provided token intact. Serving it (instead of 404) also removes the console noise +
+  // the SDK boot race the apps' getPuter() guards against.
+  const shellSessionJs = [
+    "// Vita SHELL /session.js — pins api + GUI origin same-origin; does NOT touch the auth token (each",
+    "// app adopts its OWN token from the launch URL — overriding it here would cross app identities).",
+    "(function () {",
+    "  var apiOrigin = window.location.origin + \"/api\";",
+    "  try { window.PUTER_ORIGIN = window.location.origin; } catch (e) {}",
+    "  function apply() {",
+    "    if (typeof window.puter !== 'object' || window.puter === null) return false;",
+    "    try { if (typeof window.puter.setAPIOrigin === 'function') window.puter.setAPIOrigin(apiOrigin); } catch (e) {}",
+    "    try { window.puter.APIOrigin = apiOrigin; } catch (e) {}",
+    "    try { window.puter.env = 'app'; } catch (e) {}",
+    "    try { window.puter.quiet = true; } catch (e) {}",
+    "    return true;",
+    "  }",
+    "  // hasToken:true so the apps' getPuter() waits for the URL token to be applied by the SDK (not for us).",
+    "  window.__vitaSession = { apiOrigin: apiOrigin, hasToken: true };",
+    "  if (!apply()) { var n = 0; var iv = setInterval(function () { n++; if (apply() || n > 50) clearInterval(iv); }, 20); }",
+    "})();",
+    "",
+  ].join("\n");
 
   const sessionScript = buildShellSessionScript({ apiOrigin: "/api", sessions });
   const shellHtml = readFileSync(resolve(shellDir, "shell.html"), "utf8");
@@ -81,11 +161,15 @@ export async function startShellHarness(opts: { port?: number; dir?: string } = 
   const server = await startHarnessServer({
     apiOrigin,
     apiPrefix: "/api",
+    capabilities, // gate the /pty exec upgrade against the same registry
+    execBackend, // mount /pty (Terminal)
     host: "127.0.0.1",
     port,
     extraRoutes: {
       // The shell page is served at the kiosk root + an explicit path (the on-device kiosk opens "/").
       "/": htmlRoute,
+      // Token-less session bootstrap for apps that load /session.js (pins origin, preserves URL token).
+      "/session.js": () => ({ body: shellSessionJs, contentType: "text/javascript; charset=utf-8" }),
       "/shell-session.js": () => ({ body: sessionScript, contentType: "text/javascript; charset=utf-8" }),
       "/shell.html": htmlRoute,
     },
@@ -96,10 +180,11 @@ export async function startShellHarness(opts: { port?: number; dir?: string } = 
       "/_vendor": vendorDir,
       "/apps": appsDir,
       "/console": consoleDir, // deploy console (its index.html is at /console/index.html)
+      "/editor": editorDir, // Vita Code (devloop editor; its index.html + editor.js,css live here)
       "/shell": shellDir,
       "/ui_kits": resolve(repoRoot, "ui_kits"),
     },
-    staticRoot: deskRuntimeDir, // kiosk-entry.html, app/app.js, app/app.css, proof.html resolve here
+    staticRoot: deskRuntimeDir, // kiosk-entry.html, app/app.js, app/app.css, pkgmgr-app/*, proof.html
   });
 
   return Object.freeze({ close: () => server.close(), dataDir, url: server.url });

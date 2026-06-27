@@ -721,6 +721,11 @@ async function boot() {
   await openNote(state.noteCurrent).catch(() => {});
 
   els.app.dataset.state = "ready";
+  // Explicitly remove the boot overlay from layout once ready (belt-and-suspenders over the CSS fade) so
+  // its spinner can never flash back or sit (invisible) atop the desk. Reset the message first so a stale
+  // "Authenticating…" never lingers if the overlay is ever shown again.
+  try { els.bootMsg.textContent = ""; els.boot.hidden = true; els.boot.style.display = "none"; } catch (_) {}
+  // Mark for the boot-log / screenshot verification.
   document.title = "Vita Desk — ready";
   window.__vitaDeskReady = true;
 }

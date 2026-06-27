@@ -36,6 +36,16 @@
          palette/typography instead of its local fallbacks — making it cohesive with the shell. -->
     <link rel="stylesheet" href="/ui_kits/styles.css" />
     <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
+    <!-- PRE-SDK origin pins: the puter.js bundle reads globalThis.PUTER_API_ORIGIN (its api base) and
+         globalThis.PUTER_ORIGIN (its GUI/auth origin) at INIT. Pinning BOTH to our same origin BEFORE
+         v2.js loads keeps every SDK call on this node — it never reaches the cloud api.puter.com or
+         puter.com/auth/migrate-token (which 401 online and HANG on an offline/firewalled node, the root
+         of the "connecting…" stall). The launch URL still overrides api_origin per the puter.* params. -->
+    <script>
+      window.PUTER_API_ORIGIN = (new URLSearchParams(location.search)).get("puter.api_origin") || (window.location.origin + "/api");
+      window.PUTER_ORIGIN = window.location.origin;
+      window.puter_gui_enabled = false;
+    </script>
     <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
     <script src="/_vendor/puter/v2.js"></script>
     <style>
@@ -444,13 +454,27 @@
 
       // ---- control-plane client: direct HTTP to api_origin /control/*, owner-bearer auth ----
       // Classifies failures so the lifecycle can distinguish "control plane simply not here"
-      // (offline / off-device) from a real transport/HTTP error once connected.
+      // (offline / off-device) from a real transport/HTTP error once connected. `kind === "unreachable"`
+      // is mirrored onto `.disconnected` so BOTH consumer styles work — the connect() lifecycle reads
+      // `e.kind`, while refreshAll()/renderDisconnected() reads `e.disconnected`.
       class ControlError extends Error {
-        constructor(message, kind, status) { super(message); this.kind = kind; this.status = status; }
+        constructor(message, kind, status) {
+          super(message);
+          this.kind = kind;
+          this.status = status;
+          // Unreachable === not connected from here → drives the clean disconnected/offline takeover.
+          this.disconnected = (kind === "unreachable");
+        }
       }
+      // Every call is bounded by a hard timeout (AbortController) so a control plane that is unreachable
+      // or never answers (no agentd in this context, a wedged socket, a firewalled origin) can NEVER hang
+      // the UI on "connecting…/Loading apps…" — the fetch aborts and the caller renders a clean
+      // disconnected state instead. `timeoutMs` is overridable per call (e.g. the connect() probe uses
+      // PROBE_TIMEOUT_MS); it defaults to a hard ceiling so no call can ever spin forever.
+      const CONTROL_TIMEOUT_MS = 6000;
       async function control(method, path, body, timeoutMs) {
         const ctl = new AbortController();
-        const timer = timeoutMs ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+        const timer = setTimeout(() => ctl.abort(), timeoutMs || CONTROL_TIMEOUT_MS);
         let res;
         try {
           res = await fetch(apiOrigin + path, {
@@ -463,14 +487,15 @@
             ...(body ? { body: JSON.stringify(body) } : {}),
           });
         } catch (e) {
-          // Network failure / abort → the control plane is not reachable from here (off-device).
+          // Network failure / abort (timeout) → the control plane is not reachable from here (off-device).
+          // ControlError sets `.disconnected` so refreshAll() shows the disconnected state too.
           throw new ControlError(
-            ctl.signal.aborted ? "timed out" : (e && e.message) || "network error",
+            ctl.signal.aborted ? "control plane timed out" : (e && e.message) || "control plane unreachable",
             "unreachable",
             0,
           );
         } finally {
-          if (timer) clearTimeout(timer);
+          clearTimeout(timer);
         }
         const text = await res.text();
         let json = {};
@@ -479,7 +504,7 @@
           const code = json && (json.code || (json.error && json.error.code));
           const msg = (json && (json.message || (json.error && json.error.message))) || ("HTTP " + res.status);
           // A 404 "no control plane mounted" (or 403 control denied) means this api_origin can't reach
-          // agentd from here — treat it as off-device, not a transient error.
+          // agentd from here — treat it as off-device (unreachable → disconnected), not a transient error.
           const kind = (code === "control_plane_unavailable" || res.status === 404 || res.status === 403)
             ? "unreachable"
             : "error";
@@ -691,6 +716,62 @@
       async function refreshData() {
         await Promise.all([loadStatus(), loadApps()]);
         if (state.selectedId && $("d-logs")) await loadLogs(state.selectedId);
+      }
+
+      // Render a clean "Control plane not connected" state: a styled empty state with a Retry button,
+      // NOT an endless "connecting…/Loading apps…/—". Called whenever a control call reports the plane is
+      // unreachable (no agentd / browser-only / timeout). Resolving the plane later (Retry) clears it.
+      function renderDisconnected(reason) {
+        // Header pill → unreachable.
+        $("node-dot").className = "dot bad";
+        $("node-label").textContent = "control plane not connected";
+        // Stat strip → dashes (we have no data), but no longer a "loading" implication.
+        $("stat-installed").textContent = "—";
+        $("stat-running").textContent = "—";
+        $("stat-mode").textContent = "—";
+        $("stat-eval").textContent = "—";
+        // List pane → the empty/offline state with a Retry.
+        const host = $("app-list");
+        host.innerHTML =
+          '<div class="empty" data-disconnected="1">' +
+            '<div style="font-weight:650;color:var(--c-text-soft);margin-bottom:6px">Control plane not connected</div>' +
+            '<div style="margin-bottom:14px">' + esc(reason || "agentd is not reachable from here.") + '</div>' +
+            '<button class="btn primary" id="reconnect-btn" type="button">Retry</button>' +
+          '</div>';
+        const rc = document.getElementById("reconnect-btn");
+        if (rc) rc.addEventListener("click", () => { report("reconnect.click"); refreshAll(); });
+        // Detail pane → benign empty.
+        $("detail-body").hidden = true;
+        $("detail-empty").hidden = false;
+        report("disconnected", reason || "");
+      }
+
+      async function refreshAll() {
+        // Show an honest in-flight state on (re)connect so the user knows it's working, not stuck.
+        $("node-label").textContent = "connecting…";
+        $("node-dot").className = "dot";
+        try {
+          await Promise.all([loadStatus(), loadApps()]);
+          if (state.selectedId) await loadLogs(state.selectedId);
+          window.__CONSOLE__.error = null;
+        } catch (e) {
+          // Unreachable plane → the clean disconnected state (with Retry). A real error the plane DID
+          // answer → surface it as a toast but still leave the UI in a settled (not "loading") state.
+          if (e && e.disconnected) {
+            window.__CONSOLE__.error = e.message;
+            renderDisconnected(e.message);
+          } else {
+            window.__CONSOLE__.error = e.message;
+            report("error", e.message);
+            toast("Control plane error: " + e.message, true);
+            // Don't leave "Loading apps…" up forever on a hard error either.
+            if ($("app-list").innerHTML.indexOf("Loading apps…") !== -1) {
+              $("app-list").innerHTML = '<div class="empty">Control plane error: ' + esc(e.message) + '</div>';
+            }
+            $("node-dot").className = "dot bad";
+            $("node-label").textContent = "agentd error";
+          }
+        }
       }
 
       async function selectApp(id) {

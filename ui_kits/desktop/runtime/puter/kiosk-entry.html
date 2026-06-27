@@ -33,11 +33,12 @@
   <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
   <link rel="stylesheet" href="/app/app.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
-  <!-- PRE-SDK origin pin: the puter.js bundle reads globalThis.PUTER_API_ORIGIN at INIT for its default
-       origin. Setting it BEFORE v2.js loads makes the SDK target our same-origin /api from its very
-       first call — so it never races a boot whoami/rao against the cloud api.puter.com (which is
-       offline + 401s on the kiosk). /session.js still injects the auth token after the SDK loads. -->
-  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- PRE-SDK origin pins: the puter.js bundle reads globalThis.PUTER_API_ORIGIN (api base) AND
+       globalThis.PUTER_ORIGIN (GUI/auth origin) at INIT. Setting BOTH before v2.js loads keeps every SDK
+       call on this node: it never races a boot whoami/rao against the cloud api.puter.com, and never
+       POSTs puter.com/auth/migrate-token (which 401s online and HANGS on an offline/firewalled node — a
+       root cause of the "connecting…" stall). /session.js still injects the auth token after the SDK loads. -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.PUTER_ORIGIN = window.location.origin; window.puter_gui_enabled = false;</script>
   <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). Same-origin on the local face. -->
   <script src="/_vendor/puter/v2.js"></script>
   <!-- LOCAL-FACE session bootstrap: points puter.js at our same-origin /api and injects the minted

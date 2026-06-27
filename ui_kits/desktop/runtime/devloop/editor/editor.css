@@ -82,9 +82,11 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 
 .boot {
   align-items: center; background: var(--bg); display: flex; inset: 0; justify-content: center;
-  position: absolute; transition: opacity .3s; z-index: 100;
+  position: absolute; transition: opacity .3s, visibility 0s linear .3s; z-index: 100;
 }
-.app[data-state="ready"] .boot { opacity: 0; pointer-events: none; }
+/* When ready, fade out AND drop from the visibility tree so the spinner stops + it can't flash back. */
+.app[data-state="ready"] .boot { opacity: 0; pointer-events: none; visibility: hidden; }
+.app[data-state="ready"] .boot-spinner { animation: none; }
 .boot-inner { text-align: center; }
 .boot-spinner {
   animation: spin 1s linear infinite; border: 3px solid var(--hairline); border-top-color: var(--accent);
