@@ -12,6 +12,11 @@
 //       with no owner token (401) and ACCEPTS one with it.
 //   (d) BREADTH — the wider op set the real SDK demands: fs write/read/readdir/stat/mkdir/delete/rename,
 //       kv get/set/del/list, auth whoami — each driven with the SDK's exact request shape.
+//   (e) TLS NETWORK FACE — the CONSOLIDATED on-device service (server/service.ts) with a REAL TLS
+//       network face: the owner token is presented over a genuine TLS handshake (the self-signed cert
+//       PINNED as the CA, strict verification ON), the kiosk entry + vendored SDK are served owner-gated
+//       over TLS, and a no-owner-token request over TLS is rejected (401). Proves the bearer secret only
+//       ever travels encrypted on the network face.
 //
 // Run: node --experimental-strip-types ui_kits/desktop/runtime/puter/spike/dual-face-harness.ts
 //      [--apps-root <dir>]  (default: a fresh temp dir; the dir PERSISTS across the restart step)
@@ -23,6 +28,7 @@ import { createCapabilityRegistry } from "../capability.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel } from "../permission-model.ts";
 import { openAppStore } from "../fs-store.ts";
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
+import { startPuterPlatformService } from "../server/service.ts";
 
 const APP_ID = "spike.puter.testapp";
 const APP_TOKEN = "app-session-token-cafef00d"; // the per-app session token the api_origin mints/honors
@@ -226,11 +232,145 @@ async function main(): Promise<void> {
     if (cleanup) rmSync(appsRoot, { force: true, recursive: true });
   }
 
+  // ============================ (e) TLS NETWORK FACE (consolidated service) ============================
+  // Spin up the CONSOLIDATED on-device service (server/service.ts) in network-desktop mode with a REAL
+  // TLS network face, and prove the owner token only travels over a genuine, verified TLS handshake.
+  await proveTlsNetworkFace();
+
   const passed = checks.filter((c) => c.ok).length;
 
   console.log(`[dual-face] === ${passed}/${checks.length} checks passed ===`);
   console.log(`[dual-face] SUMMARY ${JSON.stringify({ passed, total: checks.length })}`);
   if (passed !== checks.length) process.exitCode = 1;
+}
+
+// ----------------------------- (e) TLS network-face proof -----------------------------
+
+// Prove the consolidated service's TLS network face: a real TLS handshake (cert pinned as CA, strict
+// verification ON), owner-gated kiosk-entry + vendored SDK over TLS, fs round-trip over TLS, and a
+// no-owner-token request over TLS rejected (401). No global TLS-insecure flag — verification stays on.
+async function proveTlsNetworkFace(): Promise<void> {
+  const { connect } = await import("node:tls");
+  const tlsAppsRoot = mkdtempSync(`${tmpdir()}/vita-puter-tls-`);
+  const svc = await startPuterPlatformService({
+    appsRoot: tlsAppsRoot,
+    faces: { networkHost: "127.0.0.1" },
+    mode: "network-desktop",
+    storeAppId: "puter",
+  });
+
+  try {
+    const netUrl = svc.networkUrl;
+    const tls = svc.tls;
+
+    record("tls: network face is https + self-signed cert minted", netUrl !== undefined && netUrl.startsWith("https://") && tls?.source === "self-signed", `url ${netUrl ?? "(none)"}, src ${tls?.source ?? "(none)"}`);
+
+    if (netUrl === undefined || tls === undefined) return;
+
+    const port = Number(new URL(netUrl).port);
+
+    // --- a genuine TLS handshake with the server's OWN cert pinned as the trusted CA (strict) ---
+    const authorized = await new Promise<boolean>((res) => {
+      const sock = connect({ ca: tls.cert, host: "127.0.0.1", port, servername: "vita.local" }, () => {
+        const ok = sock.authorized;
+
+        sock.end();
+        res(ok);
+      });
+
+      sock.on("error", () => res(false));
+    });
+
+    record("tls: strict TLS handshake authorized with pinned self-signed cert", authorized, `authorized=${authorized}`);
+
+    // --- fetch over TLS with the cert pinned (verification ON via a per-request CA) ---
+    // Node's global fetch can't take a per-call CA, so use node:https directly with the pinned CA.
+    const app = svc.mintApp({ appId: "puter", grants: ["fs.read", "fs.write", "auth"], instanceId: "i-tls" });
+
+    // owner-gated kiosk entry over TLS: 401 without owner, 200 with owner.
+    const noOwner = await httpsGet(`${netUrl}/kiosk-entry.html`, tls.cert, {});
+
+    record("tls: kiosk entry over TLS WITHOUT owner token → 401", noOwner.status === 401, `status ${noOwner.status}`);
+
+    const withOwner = await httpsGet(`${netUrl}/kiosk-entry.html`, tls.cert, { "x-vita-owner": svc.ownerToken });
+
+    record("tls: kiosk entry over TLS WITH owner token → 200 + serves puter.js", withOwner.status === 200 && withOwner.body.includes("/_vendor/puter/v2.js"), `status ${withOwner.status}`);
+
+    const sdk = await httpsGet(`${netUrl}/_vendor/puter/v2.js`, tls.cert, { "x-vita-owner": svc.ownerToken });
+
+    record("tls: vendored puter.js served owner-gated over TLS", sdk.status === 200 && sdk.body.length > 100000, `status ${sdk.status}, bytes ${sdk.body.length}`);
+
+    // fs round-trip over the TLS network face with owner token + app token.
+    const w = await httpsBatchWrite(`${netUrl}/api/batch`, tls.cert, app.token, svc.ownerToken, "/tls-note.txt", "over-tls");
+
+    record("tls: fs.write over TLS network face (owner+app token) → 200", w.status === 200, `status ${w.status}`);
+
+    const r = await httpsGet(`${netUrl}/api/read?file=${encodeURIComponent("/tls-note.txt")}`, tls.cert, { authorization: `Bearer ${app.token}`, "x-vita-owner": svc.ownerToken });
+
+    record("tls: fs.read over TLS network face returns the value", r.status === 200 && r.body === "over-tls", `=> ${JSON.stringify(r.body)}`);
+  } finally {
+    await svc.close();
+    rmSync(tlsAppsRoot, { force: true, recursive: true });
+  }
+}
+
+// GET over TLS with the server cert PINNED as the CA (strict verification on, no global insecure flag).
+async function httpsGet(url: string, ca: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+  const https = await import("node:https");
+  const u = new URL(url);
+
+  return new Promise((res, rej) => {
+    const req = https.request(
+      { ca, headers, host: u.hostname, method: "GET", path: u.pathname + u.search, port: u.port, servername: "vita.local" },
+      (resp) => {
+        const chunks: Buffer[] = [];
+
+        resp.on("data", (c: Buffer) => chunks.push(c));
+        resp.on("end", () => res({ body: Buffer.concat(chunks).toString("utf8"), status: resp.statusCode ?? 0 }));
+      },
+    );
+
+    req.on("error", rej);
+    req.end();
+  });
+}
+
+// The SDK's multipart /batch write, over TLS with the pinned CA + owner token.
+async function httpsBatchWrite(url: string, ca: string, appToken: string, ownerToken: string, path: string, content: string): Promise<{ status: number }> {
+  const https = await import("node:https");
+  const u = new URL(url);
+  const name = path.split("/").pop() ?? path;
+  const parent = path.slice(0, path.length - name.length).replace(/\/$/u, "") || "/";
+  const boundary = `----vita-tls-${Date.now().toString(16)}`;
+  const parts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="operation"\r\n\r\n${JSON.stringify({ name, op: "write", operation_id: "0", overwrite: true, path: parent })}\r\n`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="fileinfo"\r\n\r\n${JSON.stringify({ name, size: content.length, type: "text/plain" })}\r\n`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: text/plain\r\n\r\n${content}\r\n`,
+    `--${boundary}--\r\n`,
+  ];
+  const body = Buffer.from(parts.join(""), "utf8");
+
+  return new Promise((res, rej) => {
+    const req = https.request(
+      {
+        ca,
+        headers: { authorization: `Bearer ${appToken}`, "content-length": body.length, "content-type": `multipart/form-data; boundary=${boundary}`, "x-vita-owner": ownerToken },
+        host: u.hostname,
+        method: "POST",
+        path: u.pathname + u.search,
+        port: u.port,
+        servername: "vita.local",
+      },
+      (resp) => {
+        resp.on("data", () => undefined);
+        resp.on("end", () => res({ status: resp.statusCode ?? 0 }));
+      },
+    );
+
+    req.on("error", rej);
+    req.write(body);
+    req.end();
+  });
 }
 
 // ----------------------------- request shape helpers (mirror the SDK) -----------------------------

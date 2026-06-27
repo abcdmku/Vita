@@ -6,9 +6,12 @@
 // Run: node --experimental-strip-types --test sdk/typescript/test/ui-kits/puter-ondevice.test.ts
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import { test } from "node:test";
 
 import {
@@ -33,6 +36,14 @@ import {
   ownerTokenFaceGate,
   startDualFaceBackend,
 } from "../../../../ui_kits/desktop/runtime/puter/backend.ts";
+import {
+  generateSelfSigned,
+  resolveTlsMaterial,
+} from "../../../../ui_kits/desktop/runtime/puter/server/tls.ts";
+import {
+  KIOSK_ENTRY_PATH,
+  startPuterPlatformService,
+} from "../../../../ui_kits/desktop/runtime/puter/server/service.ts";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const dec = (b: Uint8Array): string => new TextDecoder().decode(b);
@@ -349,5 +360,178 @@ test("dual-face backend: loopback + network share ONE store; network requires ow
   } finally {
     await backend.close();
     rmSync(appsRoot, { force: true, recursive: true });
+  }
+});
+
+// ===================================== TLS (server/tls.ts) =====================================
+
+test("tls: generateSelfSigned produces a valid, verifiable X.509 cert with the SAN host", () => {
+  const m = generateSelfSigned("vita.local", 30);
+
+  assert.equal(m.source, "self-signed");
+  assert.ok(m.cert.includes("BEGIN CERTIFICATE"));
+  assert.ok(m.key.includes("BEGIN PRIVATE KEY"));
+  assert.ok(typeof m.fingerprintSha256 === "string" && m.fingerprintSha256.includes(":"));
+
+  // The DER must parse as a real X.509 and carry the host as CN + SAN dNSName.
+  const x = new X509Certificate(m.cert);
+
+  assert.ok(x.subject.includes("vita.local"));
+  assert.ok((x.subjectAltName ?? "").includes("vita.local"));
+});
+
+test("tls: resolveTlsMaterial prefers owner-provided cert+key, else self-signs", () => {
+  // No paths → self-signed.
+  assert.equal(resolveTlsMaterial({}).source, "self-signed");
+
+  // Owner-provided paths that exist → owner-provided (write the self-signed material to disk first).
+  const dir = freshDir("vita-tls-owner-");
+
+  try {
+    const gen = generateSelfSigned("owner.example", 30);
+    const certPath = join(dir, "cert.pem");
+    const keyPath = join(dir, "key.pem");
+
+    writeFileSync(certPath, gen.cert);
+    writeFileSync(keyPath, gen.key);
+
+    const m = resolveTlsMaterial({ certPath, keyPath });
+
+    assert.equal(m.source, "owner-provided");
+    assert.equal(m.cert, gen.cert);
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("tls: resolveTlsMaterial throws (fail-loud) when an owner-provided cert path is missing", () => {
+  assert.throws(() => resolveTlsMaterial({ certPath: "/no/such/cert.pem", keyPath: "/no/such/key.pem" }), /TLS cert not found/u);
+});
+
+// ===================================== consolidated service (server/service.ts) =====================================
+
+test("service: mode → faces mapping (headless=network-only, local-desktop=local-only, network-desktop=both)", async () => {
+  // headless: network face only (TLS), no local face.
+  {
+    const root = freshDir("vita-svc-hl-");
+    const svc = await startPuterPlatformService({ appsRoot: root, faces: { networkHost: "127.0.0.1" }, mode: "headless" });
+
+    try {
+      assert.equal(svc.localUrl, undefined);
+      assert.equal(svc.kioskUrl, undefined);
+      assert.ok(svc.networkUrl?.startsWith("https://"));
+      assert.equal(svc.tls?.source, "self-signed");
+    } finally {
+      await svc.close();
+      rmSync(root, { force: true, recursive: true });
+    }
+  }
+
+  // local-desktop: local face only (plain loopback), no network face.
+  {
+    const root = freshDir("vita-svc-ld-");
+    const svc = await startPuterPlatformService({ appsRoot: root, faces: { localHost: "127.0.0.1" }, mode: "local-desktop" });
+
+    try {
+      assert.ok(svc.localUrl?.startsWith("http://"));
+      assert.equal(svc.kioskUrl, `${svc.localUrl}${KIOSK_ENTRY_PATH}`);
+      assert.equal(svc.networkUrl, undefined);
+      assert.equal(svc.tls, undefined);
+    } finally {
+      await svc.close();
+      rmSync(root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("service: SINGLE SHARED registry mints app tokens in-process; the api_origin honors them; broker enforces", async () => {
+  const root = freshDir("vita-svc-reg-");
+  const svc = await startPuterPlatformService({
+    appGrants: { "app.full": ["fs.read", "fs.write", "auth"], "app.ro": ["fs.read", "auth"] },
+    appsRoot: root,
+    faces: { localHost: "127.0.0.1" },
+    mode: "local-desktop",
+  });
+
+  try {
+    const full = svc.mintApp({ appId: "app.full", grants: ["fs.read", "fs.write", "auth"], instanceId: "i1" });
+    const ro = svc.mintApp({ appId: "app.ro", grants: ["fs.read", "auth"], instanceId: "i2" });
+    const localApi = `${svc.localUrl}/api`;
+
+    // full app: write succeeds (the host-minted token is honored by the SAME-process api_origin).
+    const form = new FormData();
+
+    form.append("operation", JSON.stringify({ name: "a.txt", op: "write", operation_id: "0", overwrite: true, path: "/" }));
+    form.append("fileinfo", JSON.stringify({ name: "a.txt", size: 2, type: "text/plain" }));
+    form.append("file", new Blob(["hi"], { type: "text/plain" }), "a.txt");
+    const w = await fetch(`${localApi}/batch`, { body: form, headers: { authorization: `Bearer ${full.token}` }, method: "POST" });
+
+    assert.equal(w.status, 200);
+
+    // read-only app: a write is DENIED 403 (broker CAP_DENIED) even though it is a validly minted token.
+    const form2 = new FormData();
+
+    form2.append("operation", JSON.stringify({ name: "blocked.txt", op: "write", operation_id: "0", overwrite: true, path: "/" }));
+    form2.append("fileinfo", JSON.stringify({ name: "blocked.txt", size: 1, type: "text/plain" }));
+    form2.append("file", new Blob(["x"], { type: "text/plain" }), "blocked.txt");
+    const blocked = await fetch(`${localApi}/batch`, { body: form2, headers: { authorization: `Bearer ${ro.token}` }, method: "POST" });
+
+    assert.equal(blocked.status, 403);
+    assert.equal(((await blocked.json()) as { code?: string }).code, "CAP_DENIED");
+  } finally {
+    await svc.close();
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("service: TLS network face — owner token over a genuine (pinned-CA) TLS handshake; no-owner → 401", async () => {
+  const root = freshDir("vita-svc-tls-");
+  const svc = await startPuterPlatformService({ appsRoot: root, faces: { networkHost: "127.0.0.1" }, mode: "network-desktop", storeAppId: "puter" });
+
+  try {
+    const netUrl = svc.networkUrl!;
+    const cert = svc.tls!.cert;
+    const port = Number(new URL(netUrl).port);
+
+    // 1) genuine TLS handshake with the server cert PINNED as the CA (strict verification ON).
+    const authorized = await new Promise<boolean>((res) => {
+      const sock = tlsConnect({ ca: cert, host: "127.0.0.1", port, servername: "vita.local" }, () => {
+        const ok = sock.authorized;
+
+        sock.end();
+        res(ok);
+      });
+
+      sock.on("error", () => res(false));
+    });
+
+    assert.equal(authorized, true);
+
+    // 2) kiosk entry over TLS: 401 without owner token, 200 with it (verification stays ON via per-req CA).
+    const get = (path: string, headers: Record<string, string>): Promise<{ status: number; body: string }> =>
+      new Promise((res, rej) => {
+        const u = new URL(`${netUrl}${path}`);
+        const r = httpsRequest({ ca: cert, headers, host: u.hostname, method: "GET", path: u.pathname + u.search, port: u.port, servername: "vita.local" }, (resp) => {
+          const chunks: Buffer[] = [];
+
+          resp.on("data", (c: Buffer) => chunks.push(c));
+          resp.on("end", () => res({ body: Buffer.concat(chunks).toString("utf8"), status: resp.statusCode ?? 0 }));
+        });
+
+        r.on("error", rej);
+        r.end();
+      });
+
+    const noOwner = await get(KIOSK_ENTRY_PATH, {});
+
+    assert.equal(noOwner.status, 401);
+
+    const withOwner = await get(KIOSK_ENTRY_PATH, { "x-vita-owner": svc.ownerToken });
+
+    assert.equal(withOwner.status, 200);
+    assert.ok(withOwner.body.includes("/_vendor/puter/v2.js"));
+  } finally {
+    await svc.close();
+    rmSync(root, { force: true, recursive: true });
   }
 });

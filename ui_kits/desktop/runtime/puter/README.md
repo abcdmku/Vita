@@ -39,7 +39,8 @@ two planes:
 | [`web-app-window.ts`](web-app-window.ts) | mounts a Puter app (sandboxed iframe) into a managed WM window; mints the session + builds the launch URL. |
 | [`launch-url.ts`](launch-url.ts) | builds/parses the `puter.*` launch params. |
 | [`native.ts`](native.ts) | the `@vita/puter` in-process binding for native VitaApps (same store, same gate). **P2**. |
-| [`server.ts`](server.ts) | node:http adapter for the harness (the ONLY node:http-coupled file). |
+| [`server.ts`](server.ts) | node:http / node:https adapter (the face server; plain on the local face, TLS on the network face). |
+| [`server/`](server/) | the CONSOLIDATED, WM-free **server spine**: [`service.ts`](server/service.ts) (the on-device dual-face service runner), [`tls.ts`](server/tls.ts) (in-process native TLS), [`index.ts`](server/index.ts) (the server barrel — excludes the WM-coupled `web-app-window.ts`). The launch contract is [`server/LAUNCH.md`](server/LAUNCH.md). |
 | [`_vendor/puter/`](../../_vendor/puter/) | the vendored Apache-2.0 puter.js client SDK (offline, checksum-pinned). |
 
 ## Protocol notes baked into `api-origin.ts` (learned from the live SDK)
@@ -115,6 +116,30 @@ node --experimental-strip-types ui_kits/desktop/runtime/puter/spike/real-sdk-har
 # unit/integration for the new persistence + enforcement + dual-bind paths — 16 tests
 node --experimental-strip-types --test sdk/typescript/test/ui-kits/puter-ondevice.test.ts
 ```
+
+## The consolidated SERVER SPINE (`server/`)
+
+The server side of the platform — everything needed to SERVE it (data plane + enforcement +
+persistence + dual-face + TLS + the on-device service runner) — is consolidated under
+[`server/`](server/) with **no compositor / CEF / window-manager dependency**:
+
+- [`server/service.ts`](server/service.ts) — `startPuterPlatformService({ mode, appsRoot, ... })`: ONE
+  service for all three Vita modes. Opens the REAL `/var/lib/vita/apps` store, wires the broker
+  permission model into the **single shared registry** (the host mints owner + per-app tokens
+  in-process; the same-process api_origin honors them — no cross-process token injection), binds the
+  faces the mode calls for, and serves the kiosk entry + vendored SDK.
+- [`server/tls.ts`](server/tls.ts) — in-process native TLS for the network face. **Decision:** native
+  `node:https` (and `Deno.serveTls` on-device), NOT a reverse proxy (caddy) — leaner + more secure for
+  a single self-hosted node (no extra vendored/signed binary in the verity image, no second hop, no
+  ACME). Owner-provided cert+key wins; else a valid self-signed X.509 is generated from `node:crypto`.
+- [`server/index.ts`](server/index.ts) — the server barrel. **Excludes** `web-app-window.ts` (it
+  imports `../window-manager.ts` — the archived local-shell path). The `ui-broker` is a renderer-side
+  concern and is re-exported from the parent `index.ts`, not the server spine.
+- [`server/LAUNCH.md`](server/LAUNCH.md) — the launch contract for the image layer (binary, ports,
+  env, served URLs, mode effects, systemd sketch).
+
+Verify (no VM boot): the dual-face harness now also proves the **TLS network face** (owner token over a
+genuine pinned-CA TLS handshake) — 24 checks; the on-device test suite adds TLS + service tests.
 
 ## Still on-device work (NOT done here — OS image / boot wave)
 

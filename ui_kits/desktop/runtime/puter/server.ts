@@ -11,7 +11,8 @@
 //
 // Node-only. Imported by tools/harness scripts via dynamic import; never part of the browser bundle.
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
@@ -41,12 +42,18 @@ export interface HarnessServerDeps {
   // Optional face gate (owner-auth) applied to BOTH api + static requests on this listener. Default:
   // allow all (the loopback face). The network face supplies an owner-token gate.
   readonly faceGate?: FaceGate;
+  // Optional TLS material (PEM cert+key). When present, the listener is HTTPS (node:https) instead of
+  // plain HTTP — used for the NETWORK face (the owner token is a bearer secret, so TLS is mandatory
+  // there). The local/kiosk face omits this (plain HTTP on loopback, trust-on-host). See server/tls.ts.
+  readonly tls?: { readonly cert: string; readonly key: string };
 }
 
 export interface HarnessServer {
   readonly url: string;
   readonly port: number;
   readonly host: string;
+  // "http" (plain) or "https" (TLS). The network face is https; the local face is http.
+  readonly scheme: "http" | "https";
   close(): Promise<void>;
 }
 
@@ -73,15 +80,21 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
 
   const faceGate = deps.faceGate;
 
-  const server = createServer((req, res) => {
+  const onRequest = (req: IncomingMessage, res: ServerResponse): void => {
     handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate).catch((err: unknown) => {
       res.statusCode = 500;
       res.end(`internal error: ${err instanceof Error ? err.message : String(err)}`);
     });
-  });
+  };
+
+  // TLS network face → node:https; plain face → node:http. Same request handler either way.
+  const scheme: "http" | "https" = deps.tls !== undefined ? "https" : "http";
+  const server = deps.tls !== undefined
+    ? createHttpsServer({ cert: deps.tls.cert, key: deps.tls.key }, onRequest)
+    : createServer(onRequest);
 
   const port = await listen(server, deps.port ?? 0, host);
-  const url = `http://${host}:${port}`;
+  const url = `${scheme}://${host}:${port}`;
 
   return Object.freeze({
     async close(): Promise<void> {
@@ -89,6 +102,7 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     },
     host,
     port,
+    scheme,
     url,
   });
 }
@@ -205,7 +219,7 @@ function serveFromRoot(decoded: string, res: ServerResponse, staticRoot: string)
   createReadStream(filePath).pipe(res);
 }
 
-function listen(server: ReturnType<typeof createServer>, port: number, host: string): Promise<number> {
+function listen(server: Server, port: number, host: string): Promise<number> {
   return new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
     server.listen(port, host, () => {

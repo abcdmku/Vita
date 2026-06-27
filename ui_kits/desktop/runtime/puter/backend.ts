@@ -36,6 +36,11 @@ export interface DualFaceDeps {
   // distinct loopback host (127.0.0.1 on a different port) so it is reachable yet test-safe.
   readonly networkHost?: string;
   readonly networkPort?: number;
+  // TLS material (PEM cert+key) for the NETWORK face. The owner token is a bearer secret, so a
+  // network face carrying it MUST be TLS in production (see server/tls.ts). When omitted the network
+  // face binds plain HTTP — harness-only / explicit opt-out. The LOCAL face is always plain (loopback,
+  // trust-on-host). Build this with `resolveTlsMaterial()` from server/tls.ts.
+  readonly networkTls?: { readonly cert: string; readonly key: string };
 }
 
 export interface DualFaceBackend {
@@ -88,6 +93,7 @@ export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFace
     port: deps.networkPort ?? 0,
     staticRoot: deps.staticRoot,
     ...(aliases !== undefined ? { staticAliases: aliases } : {}),
+    ...(deps.networkTls !== undefined ? { tls: deps.networkTls } : {}),
   });
 
   return Object.freeze({
