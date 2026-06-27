@@ -138,6 +138,29 @@ export type {
   ReadResult,
 } from "../store.ts";
 
+// ── the PACKAGE-MANAGER meta plane (/meta/*) — the capability-gated control plane for PERMISSIONS ──
+// (read a package's raw source + read/alter its per-package grants + read its audit log; held ONLY by
+// the Package Manager app). See pkgmgr/index.ts.
+export {
+  createAuditLog,
+  createMetaPlane,
+  createPackageRegistry,
+  nodeSourceFs,
+  PackageRegistryError,
+  contentDigest,
+} from "../pkgmgr/index.ts";
+export type {
+  AuditEntry,
+  AuditLog,
+  InstalledPackage,
+  MetaPlane,
+  MetaPlaneDeps,
+  PackageRegistry,
+  RebuildHook,
+  SourceFsPort,
+  SourceNode,
+} from "../pkgmgr/index.ts";
+
 // ── the in-process native binding (@vita/puter) — same store, same gate ──
 export {
   createVitaPuter,

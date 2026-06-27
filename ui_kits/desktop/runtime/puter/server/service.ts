@@ -22,9 +22,10 @@
 import { resolve } from "node:path";
 
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
-import { createCapabilityRegistry, randomOpaqueToken, type PuterCapability, type PuterCapabilityRegistry } from "../capability.ts";
+import { createCapabilityRegistry, randomOpaqueToken, type CapabilityAuditSink, type PuterCapability, type PuterCapabilityRegistry } from "../capability.ts";
 import { openAppStore, DEFAULT_APPS_ROOT } from "../fs-store.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel, type AppGrantRegistry } from "../permission-model.ts";
+import type { MetaPlane } from "../pkgmgr/meta-plane.ts";
 import { resolveTlsMaterial, type TlsMaterial, type TlsSourceOptions } from "./tls.ts";
 
 // The Vita mode the service runs in. Affects WHICH faces are exposed (see resolveFaces):
@@ -67,6 +68,13 @@ export interface ServiceOptions {
   // The per-app declared grants the broker enforces. Keyed by appId. Empty/absent app → no grants
   // (fail-closed). The default grants the store app full fs+kv+auth (the owner's own app store).
   readonly appGrants?: Readonly<Record<string, readonly PuterCapability[]>>;
+  // An audit sink wired into the SHARED capability registry, so every gate decision (allow + deny) for
+  // every app is recorded (the Package Manager activity view / meta audit endpoint). Absent → no audit.
+  readonly audit?: CapabilityAuditSink;
+  // A factory for the PACKAGE-MANAGER meta plane (/meta/*). Called with the shared grant registry +
+  // capability registry once they exist, so the meta plane writes the SAME grant store the broker reads
+  // (a revoke takes effect on the next gated call). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
+  readonly metaPlaneFactory?: (deps: { readonly grants: AppGrantRegistry; readonly capabilities: PuterCapabilityRegistry }) => MetaPlane;
 }
 
 // A live app session the host minted in-process. The api_origin honors `token`; a sandboxed iframe
@@ -131,7 +139,16 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
 
   // ── single shared registry: host mints, api_origin honors, broker enforces ──
   const grants = createAppGrantRegistry(options.appGrants ?? { [storeAppId]: ["fs.read", "fs.write", "kv.read", "kv.write", "auth"] });
-  const capabilities = createCapabilityRegistry({ permissionModel: createBrokerPermissionModel({ grants }) });
+  const capabilities = createCapabilityRegistry({
+    permissionModel: createBrokerPermissionModel({ grants }),
+    ...(options.audit !== undefined ? { audit: options.audit } : {}),
+  });
+
+  // ── the package-manager meta plane (optional). Built against the SAME grant + capability registry, so
+  //    a grant change it writes is the grant store the broker reads on the next gated call (live revoke). ──
+  const metaPlane = options.metaPlaneFactory !== undefined
+    ? options.metaPlaneFactory({ capabilities, grants })
+    : undefined;
 
   // ── REAL persistence: the owner's app store under <appsRoot>/<storeAppId> (persistent partition) ──
   const store = openAppStore({ appId: storeAppId, appsRoot });
@@ -181,6 +198,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
       networkPort: options.faces?.networkPort ?? 0,
       store,
       localSessionToken: localSessionTokenProvider,
+      ...(metaPlane !== undefined ? { metaPlane } : {}),
       ...(tls !== undefined ? { networkTls: { cert: tls.cert, key: tls.key } } : {}),
     });
 

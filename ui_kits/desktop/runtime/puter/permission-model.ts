@@ -97,6 +97,10 @@ const CAP_MAP: Readonly<Record<PuterCapability, CapMapping>> = Object.freeze({
   "fs.write": { access: "read-write", class: "user-content" },
   "kv.read": { access: "read-only", class: "app-state" },
   "kv.write": { access: "read-write", class: "app-state" },
+  // The PACKAGE-MANAGER meta plane MUTATES per-package grant policy (it alters which capabilities other
+  // packages hold) and reads their source — a read-write configuration-class capability. Only the
+  // Package Manager app is ever granted it (default-deny for everyone else).
+  meta: { access: "read-write", class: "configuration" },
   ui: { access: "read-only", class: "configuration" },
 });
 

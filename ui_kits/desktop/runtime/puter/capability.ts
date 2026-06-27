@@ -26,7 +26,14 @@ export type PuterCapability =
   | "auth"
   // The control plane (list/start/stop capsules, node status/health, logs) — gates /control/* on the
   // api_origin. Held by the deploy/management console; NOT granted to ordinary apps (default-deny).
-  | "control";
+  | "control"
+  // The PACKAGE-MANAGER meta plane (read a package's raw source + read/alter its per-package grants +
+  // read its audit log) — gates /meta/* on the api_origin. This is the CONTROL PLANE FOR PERMISSIONS:
+  // the owner-held meta-capability that can read another package's source and change another package's
+  // grants. It is held ONLY by the Package Manager app and is NEVER granted to an ordinary app
+  // (default-deny by construction: the platform declares `meta` for exactly the pkg-manager appId, and
+  // a granted-meta app cannot grant `meta` to anyone — the meta endpoint refuses to write a `meta` grant).
+  | "meta";
 
 // A launched-app session: the opaque token, the app it belongs to, the instance id the iframe carries,
 // the owner identity, and the granted capability set. Minted by `mintAppSession` at launch.
@@ -107,10 +114,28 @@ export function createSessionGrantModel(): PuterPermissionModel {
   });
 }
 
+// An audit sink the registry calls on EVERY authorize() outcome (allow + deny), so capability activity
+// is visible to the owner (the Package Manager's activity view + the meta-API audit endpoint). Kept as a
+// minimal structural interface (not an import) so capability.ts carries no dependency on the pkgmgr
+// audit log — any sink with this shape works, and the default registry has no sink (zero overhead).
+export interface CapabilityAuditSink {
+  record(input: {
+    readonly appId: string;
+    readonly capability: PuterCapability;
+    readonly operation?: string;
+    readonly outcome: "allow" | "deny";
+    readonly code?: string;
+    readonly reason?: string;
+  }): unknown;
+}
+
 export interface CapabilityRegistryOptions {
   // The authorization authority the registry delegates every `authorize` call to. Default: the
   // session-grant model. Pass a broker-backed model for REAL on-device enforcement.
   readonly permissionModel?: PuterPermissionModel;
+  // Optional audit sink — records every authorize() decision (allow + deny) for the owner-facing
+  // activity view / meta-API audit log. Absent by default (no recording, no overhead).
+  readonly audit?: CapabilityAuditSink;
 }
 
 export interface MintInput {
@@ -135,6 +160,7 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
   const byToken = new Map<string, PuterAppSession>();
   const byInstance = new Map<string, PuterAppSession>();
   const permissionModel = options.permissionModel ?? createSessionGrantModel();
+  const audit = options.audit;
 
   function denial(code: GateDenialCode, message: string, status: number): GateResult {
     return Object.freeze({ code, message, ok: false, status });
@@ -158,7 +184,27 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
       }
 
       if (!allowed) {
+        // Record the DENIAL so the owner can SEE that this app tried to exceed its grant (the thing the
+        // activity view flags as unexpected/malicious). Best-effort: a sink error never affects the gate.
+        try {
+          audit?.record({
+            appId: session.appId,
+            capability,
+            code: "CAP_DENIED",
+            outcome: "deny",
+            reason: `app '${session.appId}' lacks capability '${capability}'`,
+          });
+        } catch {
+          // ignore sink errors — auditing must never break enforcement
+        }
+
         return denial("CAP_DENIED", `app '${session.appId}' lacks capability '${capability}'`, 403);
+      }
+
+      try {
+        audit?.record({ appId: session.appId, capability, outcome: "allow" });
+      } catch {
+        // ignore sink errors
       }
 
       return Object.freeze({ ok: true, session });

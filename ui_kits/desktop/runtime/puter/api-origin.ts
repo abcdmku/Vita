@@ -26,6 +26,7 @@ import {
   parseBearer,
 } from "./capability.ts";
 import type { AgentControlPlane } from "./control-plane.ts";
+import type { MetaPlane } from "./pkgmgr/meta-plane.ts";
 import {
   type FsEntry,
   type PuterStore,
@@ -82,6 +83,11 @@ export interface ApiOriginDeps {
   // the api_origin is data-plane-only (the original spike surface) and /control/* answers 404. When
   // present, /control/* is mounted and gated on the `control` capability. See control-plane.ts.
   readonly controlPlane?: AgentControlPlane;
+  // The PACKAGE-MANAGER meta plane (/meta/*). Optional: when absent, /meta/* answers 404. When present,
+  // /meta/* is mounted and gated on the `meta` capability (held ONLY by the Package Manager app). This is
+  // the control plane for PERMISSIONS — read package source + read/alter per-package grants + read audit.
+  // See pkgmgr/meta-plane.ts.
+  readonly metaPlane?: MetaPlane;
 }
 
 const TEXT = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -90,6 +96,7 @@ const JSON_CT = "application/json";
 export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
   const { capabilities, store } = deps;
   const controlPlane = deps.controlPlane;
+  const metaPlane = deps.metaPlane;
   const allowOrigin = deps.allowOrigin ?? "*";
 
   function baseHeaders(contentType: string): Record<string, string> {
@@ -541,6 +548,30 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     return path === "/control/status" || path === "/control/apps" || path.startsWith("/control/apps/");
   }
 
+  // The PACKAGE-MANAGER meta plane (/meta/*). Gated on the `meta` capability — ONLY the Package Manager
+  // app holds it (default-deny for everyone else, enforced by the same gate as fs/kv). A sandboxed app
+  // without the meta grant is denied CAP_DENIED / 403 here before any meta handler runs, so it can never
+  // read another package's source or alter another package's grants.
+  async function handleMeta(req: ApiRequest, method: string, path: string): Promise<ApiResponse> {
+    if (metaPlane === undefined) {
+      return errorResponse(404, "meta_plane_unavailable", "this api_origin has no package-manager meta plane mounted");
+    }
+
+    const gated = gate(req, "meta");
+
+    if (!gated.ok) return gated.response;
+
+    try {
+      return await metaPlane.handle(req, method, path);
+    } catch (err) {
+      return errorResponse(502, "meta_plane_error", err instanceof Error ? err.message : "meta plane error");
+    }
+  }
+
+  function isMetaPath(path: string): boolean {
+    return path === "/meta/packages" || path.startsWith("/meta/");
+  }
+
   function handleSync(request: ApiRequest): ApiResponse {
     const method = request.method.toUpperCase();
 
@@ -576,8 +607,9 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
       const method = request.method.toUpperCase();
       const path = request.path.split("?")[0] ?? request.path;
 
-      // Control plane is async; everything else delegates to the synchronous data-plane dispatch.
+      // Control + meta planes are async; everything else delegates to the synchronous data-plane dispatch.
       if (method !== "OPTIONS" && isControlPath(path)) return handleControl(request, method, path);
+      if (method !== "OPTIONS" && isMetaPath(path)) return handleMeta(request, method, path);
 
       return handleSync(request);
     },

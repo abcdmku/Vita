@@ -17,6 +17,7 @@
 
 import { createApiOrigin, type ApiOrigin, type ApiRequest } from "./api-origin.ts";
 import { parseBearer, type PuterCapabilityRegistry } from "./capability.ts";
+import type { MetaPlane } from "./pkgmgr/meta-plane.ts";
 import { startHarnessServer, type FaceGate, type HarnessServer } from "./server.ts";
 import type { PuterStore } from "./store.ts";
 
@@ -47,6 +48,9 @@ export interface DualFaceDeps {
   // trust-on-host secret and must not be served to a remote client (the network face gates on the
   // separate owner token). Returns the current token, or undefined before it is minted.
   readonly localSessionToken?: () => string | undefined;
+  // The PACKAGE-MANAGER meta plane (/meta/*). When present, mounted on the shared api_origin and gated on
+  // the `meta` capability (Package Manager only). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
+  readonly metaPlane?: MetaPlane;
 }
 
 export interface DualFaceBackend {
@@ -77,7 +81,11 @@ export function ownerTokenFaceGate(ownerToken: string): FaceGate {
 // Start BOTH faces over ONE store + ONE capability registry + ONE api_origin handler.
 export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFaceBackend> {
   // ONE handler instance — both listeners route /api/* to it, so there is genuinely one backend.
-  const apiOrigin: ApiOrigin = createApiOrigin({ capabilities: deps.capabilities, store: deps.store });
+  const apiOrigin: ApiOrigin = createApiOrigin({
+    capabilities: deps.capabilities,
+    store: deps.store,
+    ...(deps.metaPlane !== undefined ? { metaPlane: deps.metaPlane } : {}),
+  });
   const apiPrefix = deps.apiPrefix ?? "/api";
   const aliases = deps.staticAliases;
 
