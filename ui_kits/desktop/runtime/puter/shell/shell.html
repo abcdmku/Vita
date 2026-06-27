@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  Vita multi-window SHELL — served at the kiosk URL (the on-device local face and the dev harness
+  both serve this page). It hosts MULTIPLE app windows in one desktop: Vita's own apps (Vita Desk,
+  the deploy console) AND real third-party Puter apps (serverless-todo, notepad), each in a managed,
+  draggable/resizable/closable window, launched from the dock's app launcher.
+
+  How it differs from kiosk-entry.html: that page WAS the single full-screen Vita Desk app. THIS page
+  is the window manager + dock + launcher that hosts Vita Desk (and everything else) as a WINDOW.
+
+  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) and the two third-party apps under
+  /apps/* (each MIT, under their own LICENSE) are third-party. The shell itself (shell.js, this page,
+  the window manager + broker + api_origin) is Vita's own code. No AGPL Puter desktop is shipped.
+
+  The shell does NOT load puter.js itself — only the app IFRAMES do. The shell is the postMessage
+  PARENT (the broker) those iframes talk to.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita Desktop</title>
+  <link rel="stylesheet" href="/ui_kits/styles.css" />
+  <link rel="stylesheet" href="/ui_kits/desktop/kit.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #08090c; }
+    .v-screen { width: 100vw; height: 100vh; }
+    /* The dock tiles + launcher use cursor:pointer affordance. */
+    .v-dtile { cursor: pointer; }
+  </style>
+  <!-- Publishes the api origin + per-app session tokens the shell hands each app iframe. Served by the
+       LOCAL face only (like /session.js). On the network face it 404s and the shell falls back to
+       same-origin /api with no pre-minted tokens (apps then mint fresh in-process tokens). -->
+  <script src="/shell-session.js"></script>
+</head>
+<body>
+  <div class="v-screen theme-dark v-wall-dark" id="screen" data-vita-screen="desktop"></div>
+  <!-- The offline shell bundle: real WM + web-app window host + ui broker + dock/launcher. -->
+  <script type="module" src="/shell/shell.js"></script>
+</body>
+</html>

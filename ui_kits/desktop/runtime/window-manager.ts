@@ -220,7 +220,12 @@ export function createWindowManager(doc: WmDocument, env?: Partial<WmHostEnv>): 
   }
 
   return Object.freeze({
-    windows: emptyWindowsView(registry),
+    // LIVE read-through view: a fresh frozen snapshot of the open windows on each access. (Was a
+    // one-time empty snapshot taken at construction — a bug: `wm.windows` was permanently []. The
+    // dock/taskbar + any "list open windows" caller depend on this reflecting the registry now.)
+    get windows(): readonly WindowHandle[] {
+      return Object.freeze([...registry.values()]);
+    },
     closeAll(): void {
       for (const win of [...registry.values()]) remove(win);
     },
@@ -245,13 +250,6 @@ export function createWindowManager(doc: WmDocument, env?: Partial<WmHostEnv>): 
       return open(appId, seed);
     },
   });
-}
-
-// A live, read-through view of the registry's handles (frozen array snapshot per access).
-function emptyWindowsView(registry: ReadonlyMap<string, ManagedWindow>): readonly WindowHandle[] {
-  // Defined as a getter via Object.defineProperty would be ideal, but the public type is a plain
-  // readonly array; callers that need a fresh list can use `wm.windows`. We return a snapshot.
-  return Object.freeze([...registry.values()]);
 }
 
 function topMost(registry: ReadonlyMap<string, ManagedWindow>): ManagedWindow | undefined {

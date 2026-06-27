@@ -21,6 +21,10 @@
 // static owner identity (trust-on-host). Errors map to puter's envelope `{ error|message, code }`.
 
 import {
+  type AppSiteRegistry,
+  createAppSiteRegistry,
+} from "./app-registry-store.ts";
+import {
   type PuterCapability,
   type PuterCapabilityRegistry,
   parseBearer,
@@ -82,6 +86,9 @@ export interface ApiOriginDeps {
   // the api_origin is data-plane-only (the original spike surface) and /control/* answers 404. When
   // present, /control/* is mounted and gated on the `control` capability. See control-plane.ts.
   readonly controlPlane?: AgentControlPlane;
+  // The base URL the origin is reachable at (e.g. "http://127.0.0.1:7681") — used to build absolute
+  // site/share URLs for the apps/sites surface. Defaults to a relative "" (URLs become path-only).
+  readonly originBase?: string;
 }
 
 const TEXT = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -91,6 +98,9 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
   const { capabilities, store } = deps;
   const controlPlane = deps.controlPlane;
   const allowOrigin = deps.allowOrigin ?? "*";
+  const originBase = deps.originBase ?? "";
+  // The apps/sites/shares/events registry — store-backed over the SAME KV (reserved key prefixes).
+  const registry: AppSiteRegistry = createAppSiteRegistry(store.kv);
 
   function baseHeaders(contentType: string): Record<string, string> {
     return {
@@ -190,6 +200,11 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
       }
     } catch (err) {
       return mapStoreError(err);
+    }
+
+    // Emit a realtime event per written entry so subscribers see fs activity.
+    for (const entry of results) {
+      registry.recordEvent({ app: gated.session.appId, kind: "fs.write", path: entry.path });
     }
 
     // The SDK accepts either a single fsentry or an array (it normalizes). Return the array of results.
@@ -358,6 +373,13 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     const obj = parseJsonBody(req.body);
     const iface = typeof obj["interface"] === "string" ? obj["interface"] : "";
 
+    // The SDK reaches apps/sites through the SAME /drivers/call endpoint with a different interface
+    // name (`puter.apps.*` → "puter-apps", `puter.hosting.*` → "puter-subdomains"). Route those to the
+    // store-backed registry. Everything else falls through to the kvstore handler below.
+    if (iface === "puter-apps" || iface === "puter-subdomains") {
+      return handleEntityDriverCall(req, obj, iface);
+    }
+
     if (iface !== "puter-kvstore") {
       return errorResponse(400, "interface_not_found", `unsupported interface: ${iface || "(none)"}`);
     }
@@ -382,6 +404,8 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
           const value = args["value"];
 
           store.kv.set(key, typeof value === "string" ? value : JSON.stringify(value ?? null));
+          // Don't echo the registry's own reserved keys as events (avoids a feedback loop).
+          if (!key.startsWith("__vita.")) registry.recordEvent({ app: gated.session.appId, detail: key, kind: "kv.set" });
           return json(200, { result: true, success: true });
         }
         case "del": {
@@ -392,13 +416,17 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
         }
         case "list": {
           const asKeys = args["as"] === "keys";
-          const entries = store.kv.list();
+          // Hide the registry's reserved keys (apps/sites/shares/events) from app-visible kv.list().
+          const entries = store.kv.list().filter((e) => !e.key.startsWith("__vita."));
           const result = asKeys ? entries.map((e) => e.key) : entries.map((e) => ({ key: e.key, value: e.value }));
 
           return json(200, { result, success: true });
         }
         case "flush": {
-          for (const e of store.kv.list()) store.kv.del(e.key);
+          // Flush only app-visible keys; never wipe the registry's reserved keys.
+          for (const e of store.kv.list()) {
+            if (!e.key.startsWith("__vita.")) store.kv.del(e.key);
+          }
           return json(200, { result: true, success: true });
         }
         default:
@@ -407,6 +435,154 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     } catch (err) {
       return mapStoreError(err);
     }
+  }
+
+  // ----- apps / sites entity-driver handler (/drivers/call, interfaces puter-apps / puter-subdomains) -----
+  //
+  // The SDK's entity-storage drivers send `{ interface, method, args }` where method ∈
+  // {select, read, create, update, delete} and args carries `{object}` (create/update), `{id}` or a
+  // uid (read/delete), or `{predicate}` (select). We map those onto the store-backed registry and
+  // return `{ success, result }` with the entity (or array). Gated: apps/sites read = fs.read,
+  // create/update/delete = fs.write (registering an app or publishing a site is an authoring action).
+  function handleEntityDriverCall(req: ApiRequest, obj: Record<string, unknown>, iface: string): ApiResponse {
+    const method = typeof obj["method"] === "string" ? obj["method"] : "";
+    const isWrite = method === "create" || method === "update" || method === "delete";
+    const gated = gate(req, isWrite ? "fs.write" : "fs.read");
+
+    if (!gated.ok) return gated.response;
+
+    const args = (obj["args"] !== null && typeof obj["args"] === "object" ? obj["args"] : {}) as Record<string, unknown>;
+    const ownerApp = gated.session.appId;
+
+    try {
+      if (iface === "puter-apps") {
+        switch (method) {
+          case "select":
+            return json(200, { result: registry.listApps(), success: true });
+          case "read": {
+            const name = readEntityName(args);
+            const found = name === undefined ? undefined : registry.getApp(name);
+
+            return found === undefined
+              ? errorResponse(404, "entity_not_found", `no such app: ${name ?? "(none)"}`)
+              : json(200, { result: found, success: true });
+          }
+          case "create":
+          case "update": {
+            const object = (args["object"] !== null && typeof args["object"] === "object" ? args["object"] : args) as Record<string, unknown>;
+
+            return json(200, { result: registry.createApp(readAppInput(object), ownerApp), success: true });
+          }
+          case "delete": {
+            const name = readEntityName(args);
+
+            return json(200, { result: name !== undefined && registry.deleteApp(name), success: true });
+          }
+          default:
+            return errorResponse(400, "method_not_found", `unsupported puter-apps method: ${method || "(none)"}`);
+        }
+      }
+
+      // puter-subdomains (sites / hosting)
+      switch (method) {
+        case "select":
+          return json(200, { result: registry.listSites(), success: true });
+        case "read": {
+          const subdomain = readEntityName(args, "subdomain");
+          const found = subdomain === undefined ? undefined : registry.getSite(subdomain);
+
+          return found === undefined
+            ? errorResponse(404, "entity_not_found", `no such subdomain: ${subdomain ?? "(none)"}`)
+            : json(200, { result: found, success: true });
+        }
+        case "create":
+        case "update": {
+          const object = (args["object"] !== null && typeof args["object"] === "object" ? args["object"] : args) as Record<string, unknown>;
+
+          return json(200, { result: registry.createSite(readSiteInput(object), ownerApp, originBase), success: true });
+        }
+        case "delete": {
+          const subdomain = readEntityName(args, "subdomain");
+
+          return json(200, { result: subdomain !== undefined && registry.deleteSite(subdomain), success: true });
+        }
+        default:
+          return errorResponse(400, "method_not_found", `unsupported puter-subdomains method: ${method || "(none)"}`);
+      }
+    } catch (err) {
+      return mapStoreError(err);
+    }
+  }
+
+  // ----- REST handlers for apps / sites / shares / realtime events -----
+  //
+  // A browser-friendly REST face for the same registry (used by Vita's own apps + a convenience for any
+  // app that prefers REST over the driver-call shape). Each is capability-gated like fs/kv.
+
+  function handleApps(req: ApiRequest, method: string): ApiResponse {
+    if (method === "GET") {
+      const gated = gate(req, "fs.read");
+
+      if (!gated.ok) return gated.response;
+
+      return json(200, { apps: registry.listApps() });
+    }
+
+    const gated = gate(req, "fs.write");
+
+    if (!gated.ok) return gated.response;
+
+    return json(200, { app: registry.createApp(readAppInput(parseJsonBody(req.body)), gated.session.appId) });
+  }
+
+  function handleSites(req: ApiRequest, method: string): ApiResponse {
+    if (method === "GET") {
+      const gated = gate(req, "fs.read");
+
+      if (!gated.ok) return gated.response;
+
+      return json(200, { sites: registry.listSites() });
+    }
+
+    const gated = gate(req, "fs.write");
+
+    if (!gated.ok) return gated.response;
+
+    return json(200, { site: registry.createSite(readSiteInput(parseJsonBody(req.body)), gated.session.appId, originBase) });
+  }
+
+  function handleShare(req: ApiRequest, method: string): ApiResponse {
+    if (method === "GET") {
+      const gated = gate(req, "fs.read");
+
+      if (!gated.ok) return gated.response;
+
+      return json(200, { shares: registry.listShares() });
+    }
+
+    const gated = gate(req, "fs.write");
+
+    if (!gated.ok) return gated.response;
+
+    const obj = parseJsonBody(req.body);
+    const path = typeof obj["path"] === "string" ? obj["path"] : "/";
+    const mode = obj["mode"] === "write" ? "write" : "read";
+
+    return json(200, { share: registry.createShare({ mode, path }, gated.session.appId, originBase) });
+  }
+
+  // Realtime change feed (long-poll). The SDK's socket.io is stubbed (server.ts); this is the REAL
+  // event surface Vita's own apps poll: `GET /events?since=<seq>` returns events newer than the cursor.
+  function handleEvents(req: ApiRequest): ApiResponse {
+    const gated = gate(req, "fs.read");
+
+    if (!gated.ok) return gated.response;
+
+    const since = Number(req.query["since"] ?? "0");
+    const limit = Number(req.query["limit"] ?? "100");
+    const out = registry.events(Number.isFinite(since) ? since : 0, Number.isFinite(limit) ? limit : 100);
+
+    return json(200, { cursor: out.cursor, events: out.events });
   }
 
   // ----- auth handlers -----
@@ -558,6 +734,11 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
       if (method === "POST" && path === "/rename") return handleRename(request);
       if (method === "POST" && path === "/move") return handleMove(request);
       if (method === "POST" && path === "/drivers/call") return handleDriversCall(request);
+      // apps / sites / shares / realtime-events REST surface (capability-gated, store-backed).
+      if ((method === "GET" || method === "POST") && path === "/apps") return handleApps(request, method);
+      if ((method === "GET" || method === "POST") && path === "/sites") return handleSites(request, method);
+      if ((method === "GET" || method === "POST") && path === "/share") return handleShare(request, method);
+      if (method === "GET" && path === "/events") return handleEvents(request);
       // Steer the SDK's cloud "signed batch" upload onto the local /batch fallback (see the handler).
       if (method === "POST" && path === "/fs/startBatchWrite") return handleSignedBatchUnavailable(request);
       if (path === "/df") return handleDf(request);
@@ -625,6 +806,51 @@ export function parseJsonBody(body: Uint8Array): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+// Read an app-create input from a driver `object` / REST body. Pure.
+function readAppInput(obj: Record<string, unknown>): { name?: string; title?: string; index_url?: string; icon?: string; description?: string } {
+  const out: { name?: string; title?: string; index_url?: string; icon?: string; description?: string } = {};
+
+  if (typeof obj["name"] === "string") out.name = obj["name"];
+  if (typeof obj["title"] === "string") out.title = obj["title"];
+  const indexUrl = obj["index_url"] ?? obj["indexURL"] ?? obj["index"];
+
+  if (typeof indexUrl === "string") out.index_url = indexUrl;
+  if (typeof obj["icon"] === "string") out.icon = obj["icon"];
+  if (typeof obj["description"] === "string") out.description = obj["description"];
+  return out;
+}
+
+// Read a site-create input from a driver `object` / REST body. Pure.
+function readSiteInput(obj: Record<string, unknown>): { subdomain?: string; root_dir?: string | null } {
+  const out: { subdomain?: string; root_dir?: string | null } = {};
+
+  if (typeof obj["subdomain"] === "string") out.subdomain = obj["subdomain"];
+  const rootDir = obj["root_dir"] ?? obj["root"] ?? obj["dir_path"] ?? obj["dirPath"];
+
+  if (typeof rootDir === "string") out.root_dir = rootDir;
+  else if (rootDir === null) out.root_dir = null;
+  return out;
+}
+
+// Read an entity NAME from a driver `args` (the SDK sends `{id:{name|subdomain}}` or a bare uid). Pure.
+function readEntityName(args: Record<string, unknown>, key = "name"): string | undefined {
+  const id = args["id"];
+
+  if (id !== null && typeof id === "object") {
+    const fromId = (id as Record<string, unknown>)[key] ?? (id as Record<string, unknown>)["name"];
+
+    if (typeof fromId === "string") return fromId;
+  }
+
+  for (const k of [key, "name", "uid", "subdomain"]) {
+    const v = args[k];
+
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+
+  return undefined;
 }
 
 // Resolve a path from a request. The SDK addresses a file differently per op (verified against the

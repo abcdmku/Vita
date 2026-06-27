@@ -14,6 +14,7 @@
     "fs-store.ts",
     "permission-model.ts",
     "api-origin.ts",
+    "app-registry-store.ts",
     "control-plane.ts",
     "server/index.ts",
     "server/service.ts",
@@ -23,6 +24,10 @@
     "spike/serve-spike.ts",
     "spike/dual-face-harness.ts",
     "spike/real-sdk-harness.ts",
-    "spike/node-fs-adapter.ts"
+    "spike/node-fs-adapter.ts",
+    "shell/app-registry.ts",
+    "shell/shell-entry.ts",
+    "shell/shell-session.ts",
+    "shell/serve-shell.ts"
   ]
 }
