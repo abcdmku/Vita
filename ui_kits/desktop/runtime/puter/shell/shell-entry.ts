@@ -168,6 +168,9 @@ export function bootShell(deps: ShellDeps): ShellController {
       wm.get(appId)?.focus();
       refreshDock();
     },
+    // The currently FOCUSED window's appId (the WM tags it with the discoverable active id), so the
+    // dock can draw the focused-app indicator. Read structurally to stay DOM-lib-free.
+    focusedAppId: () => readFocusedAppId(doc),
     titleFor: (appId) => findShellApp(apps, appId)?.title ?? appId,
     iconFor: (appId) => findShellApp(apps, appId)?.icon ?? "🪟",
   });
@@ -212,6 +215,8 @@ interface ChromeCallbacks {
   onLaunch(appId: string): string | undefined;
   openWindowIds(): readonly string[];
   focus(appId: string): void;
+  // appId of the currently focused window, or undefined when none is focused.
+  focusedAppId(): string | undefined;
   titleFor(appId: string): string;
   iconFor(appId: string): string;
 }
@@ -228,21 +233,26 @@ function mountChrome(
 ): ShellChrome {
   const screen = doc.querySelector?.(".v-screen") ?? doc.body;
 
-  // ----- menubar (brand + status + clock) -----
+  // ----- SYSTEM BAR (brand + active context left; status cluster right) -----
   const menubar = doc.createElement("div");
 
   menubar.classList.add("v-menubar");
   menubar.innerHTML =
-    `<div style="display:flex;align-items:center;gap:18px">` +
-    `<span class="v-brand">Vita<i>.ts</i></span>` +
-    `<div class="v-menus"><span data-shell-status>Desktop</span></div></div>` +
+    `<div class="v-bar-left">` +
+    `<span class="v-brand"><span class="v-logo">V</span>Vita<i>.ts</i></span>` +
+    `<span class="v-bar-sep"></span>` +
+    `<div class="v-menus"><span data-shell-status>Desktop</span></div>` +
+    `</div>` +
     `<div class="v-status">` +
     `<span class="v-net" data-shell-net title="Connected to this node">Connected</span>` +
-    `<span class="clk" data-shell-clock>--:--</span></div>`;
+    `<span class="v-sysbtn" data-shell-quicksettings role="button" title="Quick settings" aria-label="Quick settings">${ICON_SLIDERS}</span>` +
+    `<span class="clk" data-shell-clock><span class="clk-time">--:--</span><span class="clk-date">———</span></span>` +
+    `</div>`;
   screen?.appendChild(menubar);
 
   const status = safeQuery(menubar, "[data-shell-status]");
-  const clock = safeQuery(menubar, "[data-shell-clock]");
+  const clockTime = safeQuery(menubar, "[data-shell-clock] .clk-time");
+  const clockDate = safeQuery(menubar, "[data-shell-clock] .clk-date");
 
   // ----- launcher overlay (one tile per registry app) -----
   const scrim = doc.createElement("div");
@@ -252,15 +262,18 @@ function mountChrome(
   // window would overlay the launcher and swallow tile clicks. 9000 keeps it under modals (90 is the
   // per-window modal scrim, but those are scoped; the launcher is a top-level overlay).
   scrim.style.cssText =
-    "position:absolute;inset:0;z-index:9000;display:none;background:rgba(5,7,10,.46);" +
-    "align-items:center;justify-content:center";
+    "position:absolute;inset:0;z-index:9000;display:none;background:rgba(5,7,10,.55);" +
+    "backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);align-items:center;justify-content:center";
 
   const palette = doc.createElement("div");
 
   palette.style.cssText =
-    "width:560px;max-width:88vw;background:var(--surface-overlay,#15171d);border:1px solid var(--border,#262a33);" +
-    "border-radius:16px;box-shadow:var(--shadow-popover);padding:18px 18px 22px;color:var(--text,#e6e8ee)";
-  palette.innerHTML = `<div style="font:600 14px system-ui;margin:2px 4px 14px">Applications</div>` +
+    "width:600px;max-width:88vw;background:var(--surface-overlay,#15171d);border:1px solid var(--border,#262a33);" +
+    "border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);padding:20px 20px 24px;color:var(--text,#e6e8ee)";
+  palette.innerHTML =
+    `<div style="display:flex;align-items:center;justify-content:space-between;margin:0 4px 16px">` +
+    `<span style="font:650 15px system-ui">Applications</span>` +
+    `<span style="font:11.5px system-ui;color:var(--text-faint,#8b8f9c)">Click an app to open it</span></div>` +
     `<div data-shell-grid style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px"></div>`;
   scrim.appendChild(palette);
   screen?.appendChild(scrim);
@@ -277,26 +290,36 @@ function mountChrome(
 
     tile.setAttribute("data-shell-app", app.id);
     tile.style.cssText =
-      "display:flex;flex-direction:column;gap:7px;padding:13px 12px;border-radius:12px;cursor:pointer;" +
-      "background:var(--surface,#0e0f13);border:1px solid var(--border,#262a33)";
+      "display:flex;flex-direction:column;gap:8px;padding:14px 13px;border-radius:13px;cursor:pointer;" +
+      "background:var(--surface,#0e0f13);border:1px solid var(--border,#262a33);transition:border-color .12s ease,background .12s ease";
     const badge = app.origin === "third-party"
       ? `<span style="font:10px ui-monospace,monospace;color:var(--accent,#5b9dff)">3rd-party</span>`
       : `<span style="font:10px ui-monospace,monospace;color:var(--text-faint,#8b8f9c)">vita</span>`;
 
     tile.innerHTML =
       `<div style="display:flex;align-items:center;justify-content:space-between">` +
-      `<span style="font-size:24px">${app.icon}</span>${badge}</div>` +
-      `<div style="font:600 13px system-ui">${escapeHtml(app.title)}</div>` +
+      `<span style="width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;` +
+      `background:${appTint(app.id)};color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 2px 6px rgba(0,0,0,.35)">` +
+      `${appIconMarkup(app, 20)}</span>${badge}</div>` +
+      `<div style="font:600 13.5px system-ui">${escapeHtml(app.title)}</div>` +
       `<div style="font:11.5px system-ui;color:var(--text-faint,#8b8f9c);line-height:1.4">${escapeHtml(app.description)}</div>` +
       (app.license === undefined ? "" : `<div style="font:10px ui-monospace,monospace;color:var(--text-faint,#6c707b);margin-top:2px">${escapeHtml(app.license)}</div>`);
     tile.addEventListener("click", (() => {
       cb.onLaunch(app.id);
       toggleLauncher(false);
     }) as never);
+    tile.addEventListener("pointerenter", (() => {
+      tile.style.setProperty("border-color", "var(--accent,#4f9dff)");
+      tile.style.setProperty("background", "var(--surface-raised,#181c22)");
+    }) as never);
+    tile.addEventListener("pointerleave", (() => {
+      tile.style.setProperty("border-color", "var(--border,#262a33)");
+      tile.style.setProperty("background", "var(--surface,#0e0f13)");
+    }) as never);
     grid?.appendChild(tile);
   }
 
-  // ----- dock (launcher button + one tile per OPEN window) -----
+  // ----- dock (launcher + ALWAYS-VISIBLE pinned apps + any extra running windows) -----
   const dock = doc.createElement("div");
 
   dock.classList.add("v-dock");
@@ -310,39 +333,86 @@ function mountChrome(
     scrim.style.setProperty("display", launcherOpen ? "flex" : "none");
   }
 
+  // Build one dock tile element. `running`/`focused` drive the indicator + ring; the click action is
+  // launch-or-focus (the shell's `launch` focuses an already-open window). Open windows additionally
+  // carry `data-shell-dock-tile` so the verifier (and "list open windows" callers) can find them.
+  function makeDockTile(app: ShellAppEntry, running: boolean, focused: boolean): WmElement {
+    const tile = doc.createElement("div");
+
+    tile.classList.add("v-dtile");
+    tile.setAttribute("data-shell-pinned", app.id);
+
+    if (running) {
+      tile.classList.add("running");
+      tile.setAttribute("data-shell-dock-tile", app.id);
+    }
+    if (focused) tile.classList.add("focused");
+
+    tile.innerHTML =
+      `<span style="width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;` +
+      `background:${appTint(app.id)};box-shadow:inset 0 1px 0 rgba(255,255,255,.16)">${appIconMarkup(app, 19)}</span>` +
+      `<span class="v-run-dot"></span>` +
+      `<span class="v-dtip">${escapeHtml(app.title)}${running ? " · running" : ""}</span>`;
+    tile.addEventListener("click", (() => {
+      cb.onLaunch(app.id); // launch if closed; focuses if already open
+      cb.focus(app.id);
+    }) as never);
+    return tile;
+  }
+
   function refresh(): void {
     dock.innerHTML = "";
 
-    // Launcher button (always first).
+    const open = cb.openWindowIds();
+    const openSet = new Set(open);
+    const focused = cb.focusedAppId();
+
+    // Launcher tile (always first) — opens the all-apps overlay.
     const launcherBtn = doc.createElement("div");
 
-    launcherBtn.classList.add("v-dtile");
+    launcherBtn.classList.add("v-dtile", "v-launcher");
     launcherBtn.setAttribute("data-shell-launcher-btn", "");
     launcherBtn.setAttribute("title", "Applications");
-    launcherBtn.style.setProperty("font-size", "22px");
-    launcherBtn.textContent = "⊞";
+    launcherBtn.innerHTML = `${ICON_GRID}<span class="v-dtip">All apps</span>`;
     launcherBtn.addEventListener("click", (() => toggleLauncher()) as never);
     dock.appendChild(launcherBtn);
 
-    // Separator.
-    const sep = doc.createElement("div");
+    dock.appendChild(makeSep(doc));
 
-    sep.style.cssText = "width:1px;height:30px;background:var(--border,#262a33);margin:0 2px;align-self:center";
-    dock.appendChild(sep);
+    // PINNED apps — always visible, in catalog order. Running ones light their indicator; the focused
+    // one shows the elongated bar.
+    const pinnedIds = pinnedAppIds(apps);
 
-    // One tile per open window.
-    const open = cb.openWindowIds();
+    for (const appId of pinnedIds) {
+      const app = findShellApp(apps, appId);
 
-    for (const appId of open) {
-      const tile = doc.createElement("div");
+      if (app === undefined) continue;
 
-      tile.classList.add("v-dtile", "on");
-      tile.setAttribute("data-shell-dock-tile", appId);
-      tile.setAttribute("title", cb.titleFor(appId));
-      tile.style.setProperty("font-size", "22px");
-      tile.textContent = cb.iconFor(appId);
-      tile.addEventListener("click", (() => cb.focus(appId)) as never);
-      dock.appendChild(tile);
+      dock.appendChild(makeDockTile(app, openSet.has(appId), focused === appId));
+    }
+
+    // Any OPEN window that isn't a pinned app (e.g. child windows, future apps) gets a trailing tile
+    // after a separator — so every open window is still reachable + counted (verifier contract).
+    const extras = open.filter((id) => !pinnedIds.includes(id));
+
+    if (extras.length > 0) {
+      dock.appendChild(makeSep(doc));
+
+      for (const appId of extras) {
+        const app = findShellApp(apps, appId);
+        const entry: ShellAppEntry = app ?? {
+          description: "",
+          entry: "",
+          grants: [],
+          icon: cb.iconFor(appId),
+          id: appId,
+          kind: "webapp",
+          origin: "vita",
+          title: cb.titleFor(appId),
+        };
+
+        dock.appendChild(makeDockTile(entry, true, focused === appId));
+      }
     }
 
     if (status !== null) status.textContent = open.length === 0 ? "Desktop" : `${open.length} window${open.length === 1 ? "" : "s"} open`;
@@ -350,12 +420,12 @@ function mountChrome(
 
   function startClock(): void {
     const tick = (): void => {
-      if (clock === null) return;
       const now = new Date();
       const hh = now.getHours().toString().padStart(2, "0");
       const mm = now.getMinutes().toString().padStart(2, "0");
 
-      clock.textContent = `${hh}:${mm}`;
+      if (clockTime !== null) clockTime.textContent = `${hh}:${mm}`;
+      if (clockDate !== null) clockDate.textContent = formatDate(now);
     };
 
     tick();
@@ -365,6 +435,26 @@ function mountChrome(
   }
 
   return Object.freeze({ refresh, startClock });
+}
+
+// Separator element for the dock.
+function makeSep(doc: ShellGlobals["document"]): WmElement {
+  const sep = doc.createElement("div");
+
+  sep.classList.add("v-dsep");
+  return sep;
+}
+
+// Short weekday + day-month, e.g. "Fri 27 Jun". Locale-light (no Intl reliance) so it renders the
+// same in the headless harness as on-device.
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+function formatDate(now: Date): string {
+  const wd = WEEKDAYS[now.getDay()] ?? "";
+  const mo = MONTHS[now.getMonth()] ?? "";
+
+  return `${wd} ${now.getDate()} ${mo}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -559,6 +649,101 @@ function escapeHtml(value: string): string {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dock / system-bar iconography. Real, recognizable line icons (inline SVG, currentColor-stroked)
+// rather than faint emoji glyphs. Keyed by registry app id; apps without a bespoke icon fall back to
+// their registry emoji so the catalog stays the single source of truth. Each line icon is a tiny,
+// self-contained SVG string (no external sprite, offline-clean).
+// ---------------------------------------------------------------------------------------------
+
+function svg(body: string): string {
+  return (
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" ` +
+    `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+  );
+}
+
+// System-bar glyphs.
+const ICON_SLIDERS = svg(`<line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.3" fill="currentColor" stroke="none"/><circle cx="15" cy="16" r="2.3" fill="currentColor" stroke="none"/>`);
+const ICON_GRID = svg(`<rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/>`);
+
+// App icons (Files / Console / Todo / Notepad / Terminal / Package Manager / Editor).
+const APP_ICONS: Readonly<Record<string, string>> = Object.freeze({
+  "com.puter-apps.notepad": svg(`<path d="M5 3.5h9l5 5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z"/><path d="M14 3.5V9h5"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="16.5" x2="13" y2="16.5"/>`),
+  "com.puter-apps.serverless-todo": svg(`<rect x="4" y="4" width="16" height="16" rx="2.4"/><path d="M8.5 12.2l2.3 2.3 4.7-5"/>`),
+  "vita.app.deploy-console": svg(`<rect x="3" y="4.5" width="18" height="15" rx="2.2"/><path d="M7 9.5l3 2.6-3 2.6"/><line x1="12.5" y1="15" x2="17" y2="15"/>`),
+  "vita.app.editor": svg(`<path d="M14.5 4.5l5 5L8 21l-5 .5.5-5Z"/><line x1="12.5" y1="6.5" x2="17.5" y2="11.5"/>`),
+  "vita.app.package-manager": svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9Z"/><path d="M4 7.5l8 4.5 8-4.5"/><line x1="12" y1="12" x2="12" y2="21"/>`),
+  "vita.app.terminal": svg(`<rect x="3" y="4.5" width="18" height="15" rx="2.2"/><path d="M7 9.5l3 2.6-3 2.6"/><line x1="12.5" y1="15" x2="17" y2="15"/>`),
+  "vita.desk": svg(`<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2Z"/>`),
+});
+
+// Per-app icon-chip tint (a subtle brand gradient behind the glyph so the dock reads as a real app
+// shelf, not a row of identical tiles). Pure, id-keyed, with a neutral default.
+const APP_TINTS: Readonly<Record<string, string>> = Object.freeze({
+  "com.puter-apps.notepad": "linear-gradient(150deg,#f0b429,#d4881f)",
+  "com.puter-apps.serverless-todo": "linear-gradient(150deg,#5bbf86,#2f9d63)",
+  "vita.app.deploy-console": "linear-gradient(150deg,#7c5cf6,#5a3ed6)",
+  "vita.app.editor": "linear-gradient(150deg,#4f9dff,#3178c6)",
+  "vita.app.package-manager": "linear-gradient(150deg,#e0795c,#c4543a)",
+  "vita.app.terminal": "linear-gradient(150deg,#3a4658,#232c39)",
+  "vita.desk": "linear-gradient(150deg,#4f9dff,#7c5cf6)",
+});
+
+function appTint(appId: string): string {
+  return APP_TINTS[appId] ?? "linear-gradient(150deg,#2f3947,#222a35)";
+}
+
+// The bespoke line icon for an app, or its registry emoji as a fallback. `size` sets the box.
+function appIconMarkup(app: ShellAppEntry, size: number): string {
+  const icon = APP_ICONS[app.id];
+
+  if (icon !== undefined) {
+    return `<span style="width:${size}px;height:${size}px;display:inline-flex;color:#fff">${icon}</span>`;
+  }
+
+  return `<span class="v-demoji" style="font-size:${Math.round(size * 1.05)}px">${app.icon}</span>`;
+}
+
+// The apps PINNED to the dock (always visible), in display order. The "I want a taskbar" set: Files
+// (Vita Desk), Terminal, Editor, Package Manager, Console — every default registry app that exists.
+// Filtered against the live catalog so a trimmed catalog never yields a dead tile.
+const PINNED_ORDER: readonly string[] = Object.freeze([
+  "vita.desk",
+  "vita.app.terminal",
+  "vita.app.editor",
+  "vita.app.package-manager",
+  "vita.app.deploy-console",
+  "com.puter-apps.serverless-todo",
+  "com.puter-apps.notepad",
+]);
+
+function pinnedAppIds(apps: readonly ShellAppEntry[]): readonly string[] {
+  const present = PINNED_ORDER.filter((id) => findShellApp(apps, id) !== undefined);
+
+  // If the catalog has apps we didn't enumerate (custom builds), pin them too so nothing is hidden.
+  const extra = apps.map((a) => a.id).filter((id) => !present.includes(id));
+
+  return [...present, ...extra];
+}
+
+// The appId of the currently focused window. The WM tags exactly one window element with the
+// discoverable active id (ACTIVE_WINDOW_ID = "vita-app-window"); its data-vita-window is the appId.
+// Read structurally (no DOM lib) so this stays portable.
+function readFocusedAppId(doc: ShellGlobals["document"]): string | undefined {
+  try {
+    const el = doc.getElementById("vita-app-window");
+
+    if (el === null) return undefined;
+
+    const id = el.getAttribute?.("data-vita-window");
+
+    return id === null || id === undefined ? undefined : id;
+  } catch {
+    return undefined;
+  }
 }
 
 // Boot when the bundle loads in the page (the harness/kiosk includes shell.js as a module).

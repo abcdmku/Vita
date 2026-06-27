@@ -425,25 +425,26 @@ class ManagedWindow implements WindowHandle {
   // a scrollable body, and a bottom-right resize grip. Everything is token-driven (dark).
   frame(content: WindowContent): string {
     const badge = content.badge === undefined ? "" : content.badge;
+    // A traffic-light dot with a glyph that fades in when the dot-group is hovered. The dot fill is
+    // inline so it reads as a real macOS-style light against the dark title bar; the glyph color is a
+    // dark ink so it sits legibly on the bright dot.
+    const dot = (attr: string, color: string, label: string, glyph: string): string =>
+      `<span ${attr} title="${label}" role="button" aria-label="${label}" ` +
+      `style="background:${color};cursor:pointer;position:relative;display:flex;align-items:center;justify-content:center">` +
+      `<span data-vita-window-glyph style="font-size:8px;font-weight:700;line-height:1;color:rgba(0,0,0,.62);opacity:0">${glyph}</span></span>`;
 
     return (
       `<div class="v-tt" data-vita-window-titlebar style="cursor:move;user-select:none">` +
       `<div class="v-dots" data-vita-window-controls>` +
-      // Close (red) — hover reveals an ✕. Title color via CSS var; the dot fill is set inline so
-      // it reads as a real traffic light against the dark title bar.
-      `<span data-vita-window-close title="Close" role="button" aria-label="Close window" ` +
-      `style="background:#f0584f;cursor:pointer;position:relative;display:flex;align-items:center;justify-content:center">` +
-      `<span data-vita-window-glyph style="font-size:8px;line-height:1;color:rgba(0,0,0,.55);opacity:0">✕</span></span>` +
-      // Minimize (amber) — hide for now.
-      `<span data-vita-window-min title="Minimize" role="button" aria-label="Minimize window" ` +
-      `style="background:#f0b429;cursor:pointer"></span>` +
-      // Maximize / restore (green).
-      `<span data-vita-window-zoom title="Zoom" role="button" aria-label="Maximize or restore window" ` +
-      `style="background:#23c65a;cursor:pointer"></span>` +
+      dot('data-vita-window-close', '#f0584f', 'Close window', '✕') +
+      dot('data-vita-window-min', '#f0b429', 'Minimize window', '–') +
+      dot('data-vita-window-zoom', '#23c65a', 'Maximize or restore window', '+') +
       `</div>` +
-      `<span style="display:flex;align-items:center;gap:8px;margin-left:4px">` +
-      `<span data-vita-window-icon style="font-size:13px">${content.icon}</span>` +
-      `<span class="v-tname" data-vita-window-title style="color:var(--text-secondary)">${escapeHtml(content.title)}</span>` +
+      `<span style="display:flex;align-items:center;gap:8px;margin-left:6px;min-width:0">` +
+      `<span data-vita-window-icon style="font-size:14px;line-height:1">${content.icon}</span>` +
+      `<span class="v-tname" data-vita-window-title ` +
+      `style="color:var(--text-secondary);font-family:var(--font-sans,system-ui);font-size:12.5px;font-weight:600;` +
+      `letter-spacing:.005em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(content.title)}</span>` +
       `</span>` +
       `<span class="v-tname" data-vita-window-badge ` +
       `style="margin-left:auto;color:var(--text-faint);font-size:10.5px">${escapeHtml(badge)}</span>` +
@@ -560,18 +561,27 @@ class ManagedWindow implements WindowHandle {
   }
 
   wireControls(): void {
+    // Reveal ALL three traffic-light glyphs together when the pointer is anywhere over the dot group
+    // (matches macOS), so the controls read as a coherent cluster rather than one lit dot.
+    const controls = safeQuery(this.element, "[data-vita-window-controls]");
+
+    if (controls !== null) {
+      const glyphs = collectGlyphs(controls);
+      const setOpacity = (value: string): void => {
+        for (const glyph of glyphs) glyph.style.setProperty("opacity", value);
+      };
+
+      this.addListener(controls, "pointerenter", () => setOpacity("1"));
+      this.addListener(controls, "pointerleave", () => setOpacity("0"));
+    }
+
     if (this.#closeDot !== null) {
-      const glyph = safeQuery(this.#closeDot, "[data-vita-window-glyph]");
-      const onEnter: WmListener = () => glyph?.style.setProperty("opacity", "1");
-      const onLeave: WmListener = () => glyph?.style.setProperty("opacity", "0");
       const onClick: WmListener = (event) => {
         event.stopPropagation?.();
         this.close();
       };
 
-      this.addListener(this.#closeDot, "pointerenter", onEnter);
-      this.addListener(this.#closeDot, "pointerleave", onLeave);
-      // Close on pointerup (so the focus pointerdown doesn't swallow it) AND click for robustness.
+      // Close on click (the focus pointerdown doesn't swallow it).
       this.addListener(this.#closeDot, "click", onClick);
     }
 
@@ -911,6 +921,28 @@ function safeQuery(root: WmElement, selector: string): WmElement | null {
     return root.querySelector?.(selector) ?? null;
   } catch {
     return null;
+  }
+}
+
+// Collect every traffic-light glyph under the control group (structural, no DOM lib). Returns [] when
+// querySelectorAll is unavailable (stub) so callers stay safe.
+function collectGlyphs(controls: WmElement): WmElement[] {
+  try {
+    const list = controls.querySelectorAll?.("[data-vita-window-glyph]");
+
+    if (list === undefined) return [];
+
+    const out: WmElement[] = [];
+
+    for (let i = 0; i < list.length; i += 1) {
+      const el = list[i];
+
+      if (el !== undefined) out.push(el);
+    }
+
+    return out;
+  } catch {
+    return [];
   }
 }
 
