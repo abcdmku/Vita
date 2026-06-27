@@ -417,11 +417,21 @@ function installModeOverlay() {
     [join(sys, "multi-user.target.wants", "vita-platform.service"), "../vita-platform.service"],
     [join(sys, "multi-user.target.wants", "vita-owner-token.service"), "../vita-owner-token.service"],
     [join(sys, "multi-user.target.wants", "vita-platform-selftest.service"), "../vita-platform-selftest.service"],
+    // Bring the routable NIC up (DHCP via 10-vita-net.network) so the TLS network face is actually
+    // REACHABLE off-box — a 0.0.0.0:7443 bind is not reach until the iface has an address. The unit
+    // ships with the systemd package; we just enable it. (NETWORK mode makes this load-bearing; in
+    // headless/desktop a configured NIC is harmless + correct for a server node.)
+    [join(sys, "multi-user.target.wants", "systemd-networkd.service"), "../systemd-networkd.service"],
     [join(sys, "graphical.target.wants", "vita-kiosk.service"), "../vita-kiosk.service"],
   ];
+  // Use lstat (does NOT follow the link) to detect presence: some wants entries (systemd-networkd
+  // .service) point at a unit that lives in the IMAGE, not in this overlay, so the symlink is
+  // legitimately DANGLING here — existsSync() follows it and returns false, which would wrongly retry
+  // symlinkSync() and throw EEXIST. lstatSync sees the link itself.
+  const linkPresent = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
   for (const [link, target] of wants) {
-    if (existsSync(link) && !lstatSync(link).isSymbolicLink()) rmSync(link, { force: true });
-    if (!existsSync(link)) { mkdirSync(dirname(link), { recursive: true }); symlinkSync(target, link); }
+    if (existsSync(link) && !linkPresent(link)) rmSync(link, { force: true }); // a real file in the way → replace
+    if (!linkPresent(link)) { mkdirSync(dirname(link), { recursive: true }); symlinkSync(target, link); }
   }
   return useNative ? overlayHost : "/work/os/x86_64/mode-overlay";
 }
@@ -794,11 +804,31 @@ function bootQemu(image, { secureBoot, sbCert }) {
   const kvm = !DRY && existsSync("/dev/kvm");
   const accel = process.env.VITA_QEMU_ACCEL ?? (kvm ? "kvm" : "tcg");
   const cpu = accel === "kvm" ? ["-cpu", "host", "-enable-kvm"] : ["-cpu", "max"];
-  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
+
+  // NETWORK DESKTOP mode (vita.mode=network): attach a real (emulated) NIC + a user-mode port-forward so
+  // the HOST can reach the guest's routable TLS network face (0.0.0.0:7443) over the emulated NIC — the
+  // EXTERNAL-client proof the headless boot (loopback-only inside the guest) could not give. Set
+  // VITA_QEMU_HOSTFWD=hostip:hostport-:guestport (e.g. 127.0.0.1:8443-:7443); we synthesize the SLIRP
+  // hostfwd= rule from it. The guest sees a normal virtio-net interface and 0.0.0.0:7443 binds on it; an
+  // external curl to https://hostip:hostport traverses the NIC into the guest's network face. Default
+  // (unset) keeps the no-NIC boot for headless/desktop/SB matrices, which need no inbound reachability.
+  let net = [];
+  const hostfwd = process.env.VITA_QEMU_HOSTFWD;
+  if (hostfwd !== undefined && hostfwd.length > 0) {
+    // Accept "HOSTIP:HOSTPORT-:GUESTPORT" (full SLIRP form) or a bare "HOSTPORT-:GUESTPORT".
+    const rule = /^\d+-:\d+$/.test(hostfwd) ? `:${hostfwd}` : hostfwd; // bare form → bind all host ifaces
+    net = [
+      "-netdev", `user,id=vnet0,hostfwd=tcp:${rule}`,
+      "-device", "virtio-net-pci,netdev=vnet0",
+    ];
+    log(`   (network desktop: virtio-net + user-mode hostfwd tcp:${rule} — host→guest TLS network face)`);
+  }
+  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel}${net.length ? ", +NIC" : ""})`, "qemu-system-x86_64", [
     "-machine", "q35", "-m", "2048", ...cpu,
     "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
     "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
     "-drive", `file=${image},format=raw,if=virtio`,
+    ...net,
     "-serial", "mon:stdio", "-nographic",
   ]);
 }

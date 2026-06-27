@@ -88,7 +88,15 @@ function fileExists(path: string): boolean {
 //                       the network TLS face, so both must bind.)
 //   image "desktop"  -> server "network-desktop": local kiosk browser (cage+chromium) on the loopback
 //                       face PLUS the network face.
-//   image "network"  -> server "headless" (network face ONLY): a remote-only node, no loopback face.
+//   image "network"  -> server "network-desktop": the NETWORK DESKTOP node — the routable TLS+owner
+//                       network face is the PRIMARY face an external client reaches, AND the loopback
+//                       face stays bound for same-machine diagnostics (the baked self-test + an on-box
+//                       curl). There is no on-device kiosk (the generator MASKS vita-kiosk.service in
+//                       network mode, so no display stack is pulled in), but the local HTTP face is NOT
+//                       a display: it is the loopback diagnostics face the three-modes doc calls out
+//                       ("loopback face available for diagnostics"). Mapping network -> "headless"
+//                       (network face ONLY) would drop that diagnostics face and break the self-test's
+//                       loopback whoami/persistence checks, so we keep BOTH faces here.
 //
 // Override the derived server mode directly with VITA_SERVER_MODE for tests / unusual nodes.
 // ---------------------------------------------------------------------------------------------------
@@ -101,7 +109,7 @@ function resolveServerMode(): VitaMode {
 
   switch (env("VITA_MODE")) {
     case "network":
-      return "headless"; // network face only (remote-only node)
+      return "network-desktop"; // routable TLS+owner network face (primary) + loopback diagnostics face
     case "desktop":
       return "network-desktop"; // local kiosk + network
     case "headless":
