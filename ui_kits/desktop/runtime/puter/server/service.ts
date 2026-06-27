@@ -22,7 +22,7 @@
 import { resolve } from "node:path";
 
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
-import { createCapabilityRegistry, randomOpaqueToken, type PuterCapability, type PuterCapabilityRegistry } from "../capability.ts";
+import { createCapabilityRegistry, randomOpaqueToken, type PuterCapability, type PuterCapabilityRegistry, type PuterOwner } from "../capability.ts";
 import type { AgentControlPlane } from "../control-plane.ts";
 import { openAppStore, DEFAULT_APPS_ROOT } from "../fs-store.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel, type AppGrantRegistry } from "../permission-model.ts";
@@ -73,6 +73,13 @@ export interface ServiceOptions {
   // createAgentHttpControlPlane(...) over the agentd unix socket (the host-proxy), so the console reads
   // and acts on REAL capsules. It is mounted on the single shared api_origin and gated on `control`.
   readonly controlPlane?: AgentControlPlane;
+  // The node's REAL owner identity — the LIVE owner-auth source. Threaded into the shared capability
+  // registry so minted sessions + /whoami answer as the actual node owner, not a hardcoded default.
+  // On a real node the boot entry resolves this from the node's persisted owner record (agentd's
+  // identity.attestation / owner.identity) — never from a request. Absent ⇒ the trust-on-host
+  // single-owner default ("owner"), so existing single-owner deployments keep working. Validated
+  // fail-closed by the registry (a malformed identity refuses to mint a session).
+  readonly ownerIdentity?: PuterOwner;
 }
 
 // A live app session the host minted in-process. The api_origin honors `token`; a sandboxed iframe
@@ -136,8 +143,13 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
   const faces = resolveFaces(mode);
 
   // ── single shared registry: host mints, api_origin honors, broker enforces ──
+  // The node's real owner identity (when supplied) is the live owner-auth source: every minted
+  // session + /whoami answers as this owner instead of the hardcoded default.
   const grants = createAppGrantRegistry(options.appGrants ?? { [storeAppId]: ["fs.read", "fs.write", "kv.read", "kv.write", "auth"] });
-  const capabilities = createCapabilityRegistry({ permissionModel: createBrokerPermissionModel({ grants }) });
+  const capabilities = createCapabilityRegistry({
+    permissionModel: createBrokerPermissionModel({ grants }),
+    ...(options.ownerIdentity !== undefined ? { ownerIdentity: options.ownerIdentity } : {}),
+  });
 
   // ── REAL persistence: the owner's app store under <appsRoot>/<storeAppId> (persistent partition) ──
   const store = openAppStore({ appId: storeAppId, appsRoot });
