@@ -176,7 +176,10 @@ export function bootShell(deps: ShellDeps): ShellController {
     chrome.refresh();
   }
 
-  // ----- boot: autostart apps, render dock, start the clock -----
+  // ----- boot: render the dock, start the clock, autostart any opt-in apps -----
+  // By default NO app is autostart (see app-registry.ts), so the shell boots to a CLEAN desktop —
+  // wallpaper + the system bar (top) + the dock (bottom). The user launches apps from the dock
+  // launcher. The loop is retained so a kiosk-style embedder can opt one app back in.
 
   for (const app of apps) {
     if (app.autostart === true) launch(app.id);
@@ -233,7 +236,9 @@ function mountChrome(
     `<div style="display:flex;align-items:center;gap:18px">` +
     `<span class="v-brand">Vita<i>.ts</i></span>` +
     `<div class="v-menus"><span data-shell-status>Desktop</span></div></div>` +
-    `<div class="v-status"><span class="clk" data-shell-clock>--:--</span></div>`;
+    `<div class="v-status">` +
+    `<span class="v-net" data-shell-net title="Connected to this node">Connected</span>` +
+    `<span class="clk" data-shell-clock>--:--</span></div>`;
   screen?.appendChild(menubar);
 
   const status = safeQuery(menubar, "[data-shell-status]");

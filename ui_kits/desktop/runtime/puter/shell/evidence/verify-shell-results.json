@@ -1,6 +1,6 @@
 {
-  "passed": 16,
-  "total": 16,
+  "passed": 20,
+  "total": 20,
   "results": [
     {
       "name": "shell booted (window.__vitaShellReady)",
@@ -18,7 +18,27 @@
       "detail": ""
     },
     {
-      "name": "Vita Desk auto-opened as a managed window",
+      "name": "shell FILLS the viewport (no top-left clustering)",
+      "ok": true,
+      "detail": "{\"x\":0,\"y\":0,\"w\":1920,\"h\":1440,\"bottom\":1440}"
+    },
+    {
+      "name": "system bar pinned to the TOP edge (full width)",
+      "ok": true,
+      "detail": "{\"x\":0,\"y\":0,\"w\":1920,\"h\":44,\"bottom\":44}"
+    },
+    {
+      "name": "dock pinned to the BOTTOM edge (not floating mid-page)",
+      "ok": true,
+      "detail": "bottom-gap=16px"
+    },
+    {
+      "name": "CLEAN desktop on boot — no app pre-opened",
+      "ok": true,
+      "detail": "0 window(s)"
+    },
+    {
+      "name": "Vita Desk opens as a managed window from the dock",
       "ok": true,
       "detail": "1 window(s)"
     },
@@ -40,7 +60,7 @@
     {
       "name": "real app fs/kv: added a todo (puter.kv.set round-tripped)",
       "ok": true,
-      "detail": "Buy milk 1782541581080"
+      "detail": "Buy milk 1782552321305"
     },
     {
       "name": "multiple app windows open at once (2+)",
