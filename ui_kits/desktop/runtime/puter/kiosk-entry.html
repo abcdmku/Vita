@@ -1,0 +1,133 @@
+<!doctype html>
+<!--
+  Vita kiosk entry — the LOCAL (kiosk) face page served at `/kiosk-entry.html` (and `/`).
+
+  This IS the interactive desktop now (not a static proof page). A stock kiosk browser
+  (cage + chromium --kiosk, see KIOSK.md) loads it from http://127.0.0.1:<localPort>/kiosk-entry.html.
+  It loads the vendored Apache-2.0 puter.js SDK (offline, same-origin), the LOCAL-face session
+  bootstrap (/session.js, which points the SDK at our same-origin /api + injects the minted
+  vita.kiosk app-session token), and then Vita Desk — a REAL, clickable app (file manager + notes
+  editor + KV-backed settings) written in Vita's own code (AGPL-clean). Every action persists to
+  /var/lib/vita/apps through the capability-gated api_origin.
+
+  The network (remote) face serves the SAME page, but the backend's owner-token gate (backend.ts)
+  requires the owner token before this page is served to a remote client.
+
+  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) is third-party. The Vita Desk app
+  (app/index.html structure inlined here + app/app.css + app/app.js) is Vita's own. No AGPL Puter
+  desktop bundle is shipped or fetched.
+
+  A minimal connectivity-proof page is still available at /proof.html for boot diagnostics.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita Desk</title>
+  <link rel="stylesheet" href="/app/app.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
+  <!-- PRE-SDK origin pin: the puter.js bundle reads globalThis.PUTER_API_ORIGIN at INIT for its default
+       origin. Setting it BEFORE v2.js loads makes the SDK target our same-origin /api from its very
+       first call — so it never races a boot whoami/rao against the cloud api.puter.com (which is
+       offline + 401s on the kiosk). /session.js still injects the auth token after the SDK loads. -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). Same-origin on the local face. -->
+  <script src="/_vendor/puter/v2.js"></script>
+  <!-- LOCAL-FACE session bootstrap: points puter.js at our same-origin /api and injects the minted
+       vita.kiosk app-session token. On the network face /session.js 404s (owner-gated separately). -->
+  <script src="/session.js"></script>
+</head>
+<body>
+  <div id="app" class="app" data-state="booting">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <span class="brand-name">Vita Desk</span>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-view="files" role="tab" aria-selected="true">Files</button>
+        <button class="tab" data-view="notes" role="tab" aria-selected="false">Notes</button>
+        <button class="tab" data-view="settings" role="tab" aria-selected="false">Settings</button>
+      </nav>
+      <div class="who">
+        <span id="who-name" class="who-name">…</span>
+        <span id="conn" class="conn" title="api_origin connectivity">connecting…</span>
+      </div>
+    </header>
+
+    <section class="view view-files is-active" data-view="files">
+      <div class="toolbar">
+        <button id="btn-up" class="btn" title="Parent folder">↑ Up</button>
+        <span id="cwd" class="cwd">/</span>
+        <span class="spacer"></span>
+        <button id="btn-newfolder" class="btn">New folder</button>
+        <button id="btn-newfile" class="btn btn-primary">New file</button>
+        <button id="btn-refresh" class="btn" title="Reload directory">Refresh</button>
+      </div>
+      <ul id="filelist" class="filelist" aria-label="Files in the current folder"></ul>
+      <div id="files-empty" class="empty" hidden>This folder is empty. Create a file or folder to get started.</div>
+    </section>
+
+    <section class="view view-notes" data-view="notes">
+      <div class="toolbar">
+        <input id="note-path" class="note-path" value="/home/notes/welcome.txt"
+               aria-label="Note file path" spellcheck="false" />
+        <button id="btn-open" class="btn">Open</button>
+        <span class="spacer"></span>
+        <span id="note-status" class="note-status"></span>
+        <button id="btn-save" class="btn btn-primary">Save</button>
+      </div>
+      <textarea id="note-body" class="note-body" spellcheck="false"
+                placeholder="Type here, then Save. The text persists to Vita's store and survives a reload."></textarea>
+    </section>
+
+    <section class="view view-settings" data-view="settings">
+      <div class="settings-card">
+        <h2>Appearance</h2>
+        <label class="row">
+          <span>Theme</span>
+          <select id="theme-select">
+            <option value="dark">Dark</option>
+            <option value="midnight">Midnight</option>
+            <option value="slate">Slate</option>
+          </select>
+        </label>
+        <h2>Persisted counter (KV)</h2>
+        <p class="muted">Stored in <code>puter.kv</code> against Vita's api_origin. Reload to confirm it sticks.</p>
+        <div class="row">
+          <button id="btn-count" class="btn btn-primary">Clicks: <span id="count">0</span></button>
+          <button id="btn-count-reset" class="btn">Reset</button>
+        </div>
+        <h2>Backend</h2>
+        <dl class="kvs">
+          <dt>api_origin</dt><dd id="dbg-origin">—</dd>
+          <dt>whoami</dt><dd id="dbg-whoami">—</dd>
+          <dt>token</dt><dd id="dbg-token">—</dd>
+        </dl>
+      </div>
+    </section>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true">
+        <div id="modal-title" class="modal-title">Name</div>
+        <input id="modal-input" class="modal-input" />
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn">Cancel</button>
+          <button id="modal-ok" class="btn btn-primary">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boot" class="boot">
+      <div class="boot-inner">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div id="boot-msg" class="boot-msg">Starting Vita Desk…</div>
+        <div id="boot-err" class="boot-err" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/app/app.js"></script>
+</body>
+</html>

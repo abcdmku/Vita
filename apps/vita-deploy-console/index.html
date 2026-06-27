@@ -1,0 +1,539 @@
+<!doctype html>
+<!--
+  Vita Deploy / Management Console — the FIRST real app on the Vita platform and the node's interactive
+  admin UI.
+
+  A REAL Puter app: a sandboxed web page that uses the GENUINE vendored puter.js SDK (Apache-2.0). It
+  does not know it's running on Vita — it reads the puter.* launch params from its URL, points fs/kv/auth
+  at Vita's LOCAL api_origin, and posts ui messages to the Vita shell (the parent).
+
+  What it manages (the on-device control plane, VITA-EVAL → STATE → APPLY):
+    - LIST installed/running apps (capsules) + their runtime, version, health
+    - START / STOP a capsule (capsule.execute / capsule.lifecycle apply, via the control bridge)
+    - node STATUS / health header (the VITA-EVAL / STATE summary)
+    - per-capsule LOGS (the transient unit's journal)
+
+  Two planes, exactly as Vita's compat layer prescribes:
+    - data plane  (puter.kv / puter.auth)  → direct HTTP to api_origin, via the SDK
+    - control plane (/control/*)           → direct HTTP to api_origin (the capability-gated bridge to
+                                              agentd), authenticated with the SAME owner bearer token the
+                                              SDK carries (read from puter.authToken)
+    - ui plane    (puter.ui.*)             → postMessage to the Vita shell (window title, alerts)
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vita Console</title>
+    <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
+    <script src="/_vendor/puter/v2.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --c-accent: var(--vita-color-accent, #5b8cff);
+        --c-accent-soft: color-mix(in srgb, var(--c-accent) 18%, transparent);
+        --c-ok: #4ade80;
+        --c-warn: #fbbf24;
+        --c-err: #f87171;
+        --c-bg: var(--vita-color-surface, #0e0f13);
+        --c-panel: var(--vita-color-panel, #16181f);
+        --c-sunken: var(--vita-color-sunken, #1b1e27);
+        --c-border: var(--vita-color-border, #2a2d38);
+        --c-hairline: var(--vita-color-hairline, #23252e);
+        --c-text: var(--vita-color-text, #e6e8ee);
+        --c-text-soft: var(--vita-color-text-soft, #c7cad3);
+        --c-muted: var(--vita-color-muted, #868b98);
+        --c-radius: var(--vita-radius-control, 9px);
+        --c-radius-sm: var(--vita-radius-sm, 6px);
+        --c-font: var(--vita-font-ui, Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+        --c-mono: var(--vita-font-mono, "Geist Mono", "SFMono-Regular", Consolas, monospace);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+
+      body {
+        background: var(--c-bg);
+        color: var(--c-text);
+        font: 13px/1.45 var(--c-font);
+      }
+
+      .console {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      /* ---- header ---- */
+      header.bar {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--c-hairline);
+        background: var(--c-panel);
+      }
+      .brand { display: flex; align-items: center; gap: 10px; }
+      .logo {
+        width: 26px; height: 26px; border-radius: 7px;
+        background: linear-gradient(135deg, var(--c-accent), #8a6bff);
+        display: grid; place-items: center;
+        font-weight: 800; color: #fff; font-size: 14px;
+      }
+      .brand h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+      .brand .sub { font-size: 11px; color: var(--c-muted); }
+
+      .node-pill {
+        display: inline-flex; align-items: center; gap: 8px;
+        margin-left: auto;
+        padding: 6px 12px;
+        border: 1px solid var(--c-border);
+        border-radius: 999px;
+        background: var(--c-sunken);
+        font-size: 12px;
+        color: var(--c-text-soft);
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-muted); }
+      .dot.ok { background: var(--c-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-ok) 22%, transparent); }
+      .dot.bad { background: var(--c-err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-err) 22%, transparent); }
+
+      button.btn {
+        font: inherit; cursor: pointer;
+        border: 1px solid var(--c-border);
+        background: var(--c-sunken);
+        color: var(--c-text-soft);
+        border-radius: var(--c-radius-sm);
+        padding: 7px 12px;
+        transition: background 0.12s, border-color 0.12s, color 0.12s;
+      }
+      button.btn:hover { background: var(--c-panel); border-color: var(--c-accent); color: var(--c-text); }
+      button.btn:disabled { opacity: 0.45; cursor: default; }
+      button.btn.primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; }
+      button.btn.primary:hover { background: color-mix(in srgb, var(--c-accent) 88%, #fff); }
+      button.btn.danger:hover { border-color: var(--c-err); color: var(--c-err); }
+
+      /* ---- stat strip ---- */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--c-hairline);
+      }
+      .stat {
+        padding: 11px 14px;
+        border: 1px solid var(--c-hairline);
+        border-radius: var(--c-radius);
+        background: var(--c-panel);
+      }
+      .stat .k { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c-muted); }
+      .stat .v { font-size: 20px; font-weight: 700; margin-top: 4px; }
+      .stat .v small { font-size: 12px; font-weight: 500; color: var(--c-muted); }
+
+      /* ---- body: list + detail ---- */
+      .body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); min-height: 0; }
+      .list-pane { min-height: 0; overflow: auto; border-right: 1px solid var(--c-hairline); }
+      .list-head, .app-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 1.6fr) 96px 84px 100px 132px;
+        align-items: center;
+        gap: 8px;
+        padding: 0 18px;
+      }
+      .list-head {
+        position: sticky; top: 0; z-index: 1;
+        min-height: 34px;
+        background: var(--c-bg);
+        border-bottom: 1px solid var(--c-hairline);
+        font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--c-muted); font-weight: 700;
+      }
+      .app-row {
+        min-height: 52px;
+        border-bottom: 1px solid var(--c-hairline);
+        cursor: pointer;
+        background: transparent;
+        text-align: left; width: 100%; border-left: 0; border-right: 0; border-top: 0;
+        color: inherit; font: inherit;
+        transition: background 0.1s;
+      }
+      .app-row:hover { background: var(--c-panel); }
+      .app-row[aria-selected="true"] { background: var(--c-accent-soft); box-shadow: inset 3px 0 0 var(--c-accent); }
+      .app-name { display: flex; flex-direction: column; min-width: 0; }
+      .app-name .n { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .app-name .r { font-size: 11px; color: var(--c-muted); font-family: var(--c-mono); }
+      .mono { font-family: var(--c-mono); }
+      .muted { color: var(--c-muted); }
+
+      .badge {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 3px 9px; border-radius: 999px;
+        font-size: 11px; font-weight: 600;
+        border: 1px solid var(--c-border); background: var(--c-sunken); color: var(--c-text-soft);
+      }
+      .badge .d { width: 7px; height: 7px; border-radius: 50%; background: var(--c-muted); }
+      .badge.running { color: var(--c-ok); border-color: color-mix(in srgb, var(--c-ok) 40%, var(--c-border)); }
+      .badge.running .d { background: var(--c-ok); }
+      .badge.stopped { color: var(--c-muted); }
+      .badge.disabled { color: var(--c-warn); border-color: color-mix(in srgb, var(--c-warn) 40%, var(--c-border)); }
+      .badge.disabled .d { background: var(--c-warn); }
+
+      .health { font-size: 11px; font-weight: 600; }
+      .health.ok { color: var(--c-ok); }
+      .health.unhealthy { color: var(--c-err); }
+      .health.unknown { color: var(--c-muted); }
+
+      .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+      .row-actions button { padding: 5px 10px; font-size: 12px; }
+
+      /* ---- detail pane ---- */
+      .detail { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+      .detail-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--c-hairline); }
+      .detail-head h2 { margin: 0; font-size: 16px; }
+      .detail-head .meta { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--c-muted); }
+      .detail-head .meta b { color: var(--c-text-soft); font-weight: 600; }
+      .detail-actions { display: flex; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--c-hairline); }
+
+      .logs-wrap { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+      .logs-head { display: flex; align-items: center; gap: 10px; padding: 10px 18px; }
+      .logs-head .t { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--c-muted); font-weight: 700; }
+      .logs {
+        flex: 1; min-height: 0; overflow: auto;
+        margin: 0 14px 14px; padding: 12px 14px;
+        background: #0a0b0e; border: 1px solid var(--c-hairline); border-radius: var(--c-radius);
+        font-family: var(--c-mono); font-size: 12px; line-height: 1.65;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .logs .l { display: flex; gap: 10px; }
+      .logs .l .ts { color: #5a6072; flex: none; }
+      .logs .l.info .m { color: var(--c-text-soft); }
+      .logs .l.warn .m { color: var(--c-warn); }
+      .logs .l.error .m { color: var(--c-err); }
+
+      .empty { padding: 40px 18px; text-align: center; color: var(--c-muted); }
+
+      .toast {
+        position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+        background: var(--c-panel); border: 1px solid var(--c-border); border-radius: var(--c-radius);
+        padding: 10px 16px; font-size: 13px; color: var(--c-text);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        opacity: 0; pointer-events: none; transition: opacity 0.18s, transform 0.18s;
+      }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+      .toast.err { border-color: var(--c-err); }
+
+      @media (max-width: 880px) {
+        .stats { grid-template-columns: repeat(2, 1fr); }
+        .body { grid-template-columns: 1fr; }
+        .detail { display: none; }
+        .body.detail-open .list-pane { display: none; }
+        .body.detail-open .detail { display: flex; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="console" data-vita-app="vita.app.deploy-console">
+      <header class="bar">
+        <div class="brand">
+          <div class="logo">V</div>
+          <div>
+            <h1>Vita Console</h1>
+            <div class="sub">Deploy &amp; manage the node</div>
+          </div>
+        </div>
+        <span class="node-pill" id="node-pill" title="agentd / control-plane reachability">
+          <span class="dot" id="node-dot"></span>
+          <span id="node-label">connecting…</span>
+        </span>
+        <button class="btn" id="refresh-btn" type="button">Refresh</button>
+      </header>
+
+      <section class="stats" aria-label="Node summary">
+        <div class="stat"><div class="k">Installed</div><div class="v" id="stat-installed">—</div></div>
+        <div class="stat"><div class="k">Running</div><div class="v" id="stat-running">—</div></div>
+        <div class="stat"><div class="k">Mode</div><div class="v" id="stat-mode" style="font-size:15px">—</div></div>
+        <div class="stat"><div class="k">VITA-EVAL</div><div class="v" id="stat-eval" style="font-size:12px;font-weight:500;color:var(--c-text-soft)">—</div></div>
+      </section>
+
+      <div class="body" id="body">
+        <div class="list-pane">
+          <div class="list-head" aria-hidden="true">
+            <span>App / Capsule</span><span>Runtime</span><span>Health</span><span>Status</span><span style="text-align:right">Actions</span>
+          </div>
+          <div id="app-list"><div class="empty">Loading apps…</div></div>
+        </div>
+
+        <aside class="detail" id="detail">
+          <div class="empty" id="detail-empty">Select an app to view status and logs.</div>
+          <div id="detail-body" hidden>
+            <div class="detail-head">
+              <h2 id="d-name">—</h2>
+              <div class="meta">
+                <span><b>Version</b> <span id="d-version" class="mono">—</span></span>
+                <span><b>Runtime</b> <span id="d-runtime">—</span></span>
+                <span><b>Unit</b> <span id="d-unit" class="mono">—</span></span>
+                <span><b>UID</b> <span id="d-uid" class="mono">—</span></span>
+                <span><b>Integrity</b> <span id="d-integrity" class="mono">—</span></span>
+              </div>
+            </div>
+            <div class="detail-actions">
+              <button class="btn primary" id="d-start" type="button">Start</button>
+              <button class="btn danger" id="d-stop" type="button">Stop</button>
+              <span style="margin-left:auto;align-self:center" id="d-status-badge"></span>
+            </div>
+            <div class="logs-wrap">
+              <div class="logs-head">
+                <span class="t">Logs</span>
+                <button class="btn" id="d-logs-refresh" type="button" style="margin-left:auto;padding:4px 9px;font-size:11px">Reload logs</button>
+              </div>
+              <div class="logs" id="d-logs"></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script type="module">
+      // ---- launch params: the SDK reads puter.api_origin / puter.authToken from the URL ----
+      // We read the SAME values to authenticate our direct-HTTP control-plane calls. (The SDK exposes
+      // them as puter.APIOrigin / puter.authToken once booted; we also parse the URL as a fallback so
+      // the console works even if a future SDK build renames those.)
+      const params = new URLSearchParams(location.search);
+      const apiOrigin =
+        (window.puter && (puter.APIOrigin || puter.api_origin)) ||
+        params.get("puter.api_origin") ||
+        "/api";
+      const authToken =
+        (window.puter && puter.authToken) ||
+        params.get("puter.auth.token") ||
+        "";
+
+      const $ = (id) => document.getElementById(id);
+      const state = { apps: [], selectedId: null, owner: null };
+
+      // ---- self-report channel for the headless verification harness ----
+      window.__CONSOLE__ = { ready: false, ops: [], state, error: null };
+      function report(op, detail) {
+        window.__CONSOLE__.ops.push({ op, detail, at: Date.now() });
+        console.log("[console] " + op + (detail ? " — " + (typeof detail === "string" ? detail : JSON.stringify(detail)) : ""));
+      }
+
+      // ---- toast ----
+      let toastTimer = null;
+      function toast(msg, isErr) {
+        const t = $("toast");
+        t.textContent = msg;
+        t.className = "toast show" + (isErr ? " err" : "");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { t.className = "toast"; }, 2600);
+      }
+
+      // ---- control-plane client: direct HTTP to api_origin /control/*, owner-bearer auth ----
+      async function control(method, path, body) {
+        const res = await fetch(apiOrigin + path, {
+          method,
+          headers: {
+            "authorization": "Bearer " + authToken,
+            ...(body ? { "content-type": "application/json" } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        const text = await res.text();
+        let json = {};
+        try { json = text ? JSON.parse(text) : {}; } catch { /* non-json */ }
+        if (!res.ok) {
+          const msg = (json && (json.message || (json.error && json.error.message))) || ("HTTP " + res.status);
+          throw new Error(msg);
+        }
+        return json;
+      }
+
+      // ---- rendering ----
+      function healthClass(h) { return h === "OK" ? "ok" : (h === "unhealthy" ? "unhealthy" : "unknown"); }
+      function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+      function statusBadge(app) {
+        if (app.installState === "disabled") return '<span class="badge disabled"><span class="d"></span>disabled</span>';
+        if (app.running) return '<span class="badge running"><span class="d"></span>running</span>';
+        return '<span class="badge stopped"><span class="d"></span>stopped</span>';
+      }
+
+      function renderList() {
+        const host = $("app-list");
+        if (!state.apps.length) { host.innerHTML = '<div class="empty">No apps installed.</div>'; return; }
+        host.innerHTML = "";
+        for (const app of state.apps) {
+          const row = document.createElement("button");
+          row.className = "app-row";
+          row.type = "button";
+          row.setAttribute("data-app-id", app.id);
+          row.setAttribute("aria-selected", String(app.id === state.selectedId));
+          const canStart = app.installState === "installed" && !app.running;
+          const canStop = app.running;
+          row.innerHTML =
+            '<span class="app-name"><span class="n">' + esc(app.id) + '</span><span class="r">v' + esc(app.version) + '</span></span>' +
+            '<span class="mono muted">' + esc(app.runtime) + '</span>' +
+            '<span class="health ' + healthClass(app.health) + '">' + esc(app.health) + '</span>' +
+            '<span>' + statusBadge(app) + '</span>' +
+            '<span class="row-actions">' +
+              '<button class="btn primary" data-act="start" data-id="' + esc(app.id) + '"' + (canStart ? "" : " disabled") + '>Start</button>' +
+              '<button class="btn danger" data-act="stop" data-id="' + esc(app.id) + '"' + (canStop ? "" : " disabled") + '>Stop</button>' +
+            '</span>';
+          host.appendChild(row);
+        }
+      }
+
+      function renderDetail() {
+        const app = state.apps.find((a) => a.id === state.selectedId);
+        const body = $("detail-body");
+        const empty = $("detail-empty");
+        if (!app) { body.hidden = true; empty.hidden = false; return; }
+        empty.hidden = true; body.hidden = false;
+        $("d-name").textContent = app.id;
+        $("d-version").textContent = "v" + app.version;
+        $("d-runtime").textContent = app.runtime;
+        $("d-unit").textContent = app.unit || "—";
+        $("d-uid").textContent = app.dynamicUid || "—";
+        $("d-integrity").textContent = (app.integrity || "—").slice(0, 23) + (app.integrity.length > 23 ? "…" : "");
+        $("d-status-badge").innerHTML = statusBadge(app) +
+          ' <span class="health ' + healthClass(app.health) + '" style="margin-left:8px">' + esc(app.health) + "</span>";
+        $("d-start").disabled = !(app.installState === "installed" && !app.running);
+        $("d-stop").disabled = !app.running;
+      }
+
+      function renderStats(status) {
+        $("stat-installed").innerHTML = status.installedCount + ' <small>capsules</small>';
+        $("stat-running").innerHTML = status.runningCount + ' <small>active</small>';
+        $("stat-mode").textContent = status.mode;
+        $("stat-eval").textContent = status.evalSummary;
+        const dot = $("node-dot"), label = $("node-label");
+        dot.className = "dot " + (status.ready ? "ok" : "bad");
+        label.textContent = status.ready ? "agentd ready" : "agentd unreachable";
+      }
+
+      // ---- data loads ----
+      async function loadStatus() {
+        const status = await control("GET", "/control/status");
+        renderStats(status);
+        report("status", { running: status.runningCount, installed: status.installedCount, ready: status.ready });
+        return status;
+      }
+      async function loadApps() {
+        const { apps } = await control("GET", "/control/apps");
+        state.apps = apps || [];
+        renderList();
+        renderDetail();
+        report("list", state.apps.map((a) => a.id + ":" + (a.running ? "running" : a.installState)));
+      }
+      async function loadLogs(id) {
+        const out = $("d-logs");
+        out.textContent = "loading…";
+        const { lines } = await control("GET", "/control/apps/" + encodeURIComponent(id) + "/logs?limit=200");
+        out.innerHTML = (lines || []).map((l) =>
+          '<div class="l ' + esc(l.level) + '"><span class="ts">' + esc((l.ts || "").replace("T", " ").replace("Z", "").slice(5, 19)) +
+          '</span><span class="m">' + esc(l.message) + "</span></div>"
+        ).join("") || '<span class="muted">no log lines</span>';
+        report("logs", { id, count: (lines || []).length });
+      }
+
+      async function refreshAll() {
+        try {
+          await Promise.all([loadStatus(), loadApps()]);
+          if (state.selectedId) await loadLogs(state.selectedId);
+        } catch (e) {
+          window.__CONSOLE__.error = e.message;
+          report("error", e.message);
+          toast("Control plane error: " + e.message, true);
+        }
+      }
+
+      async function selectApp(id) {
+        state.selectedId = id;
+        if (document.body.clientWidth <= 880) $("body").classList.add("detail-open");
+        renderList(); renderDetail();
+        try { await loadLogs(id); } catch (e) { $("d-logs").textContent = "log error: " + e.message; }
+      }
+
+      // ---- lifecycle actions ----
+      async function doStart(id) {
+        report("start.click", id);
+        try {
+          const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/start");
+          report("start.result", { id, outcome: r.outcome });
+          if (r.outcome === "rejected") toast("Start rejected: " + (r.reason || "denied"), true);
+          else toast("Started " + id);
+          await loadStatus(); await loadApps();
+          if (state.selectedId === id) await loadLogs(id);
+        } catch (e) { report("start.error", e.message); toast("Start failed: " + e.message, true); }
+      }
+      async function doStop(id) {
+        report("stop.click", id);
+        try {
+          const r = await control("POST", "/control/apps/" + encodeURIComponent(id) + "/stop");
+          report("stop.result", { id, outcome: r.outcome });
+          toast(r.outcome === "noop" ? (id + " was not running") : ("Stopped " + id));
+          await loadStatus(); await loadApps();
+          if (state.selectedId === id) await loadLogs(id);
+        } catch (e) { report("stop.error", e.message); toast("Stop failed: " + e.message, true); }
+      }
+
+      // ---- event wiring (delegated) ----
+      $("app-list").addEventListener("click", (e) => {
+        const actBtn = e.target.closest("button[data-act]");
+        if (actBtn) {
+          e.stopPropagation();
+          const id = actBtn.getAttribute("data-id");
+          if (actBtn.getAttribute("data-act") === "start") doStart(id); else doStop(id);
+          return;
+        }
+        const row = e.target.closest(".app-row");
+        if (row) selectApp(row.getAttribute("data-app-id"));
+      });
+      $("d-start").addEventListener("click", () => state.selectedId && doStart(state.selectedId));
+      $("d-stop").addEventListener("click", () => state.selectedId && doStop(state.selectedId));
+      $("d-logs-refresh").addEventListener("click", () => state.selectedId && loadLogs(state.selectedId));
+      $("refresh-btn").addEventListener("click", () => { report("refresh.click"); refreshAll(); });
+
+      // ---- expose imperative hooks for the headless harness (no reliance on synthetic DOM events) ----
+      window.__CONSOLE__.api = { refreshAll, loadApps, loadStatus, selectApp, doStart, doStop, loadLogs };
+
+      // ---- boot ----
+      (async () => {
+        report("boot", { apiOrigin, hasToken: Boolean(authToken) });
+
+        // Data plane (real puter.js): identify the owner + persist a "last opened" marker via kv. This
+        // proves the SAME app uses BOTH planes — fs/kv data plane AND the control plane.
+        try {
+          if (window.puter && puter.auth && puter.auth.getUser) {
+            state.owner = await puter.auth.getUser();
+            report("auth.whoami", state.owner && state.owner.username);
+          }
+        } catch (e) { report("auth.error", e.message); }
+        try {
+          if (window.puter && puter.kv) {
+            await puter.kv.set("console.lastOpened", new Date().toISOString());
+            const seen = await puter.kv.get("console.openCount");
+            const next = (Number(seen) || 0) + 1;
+            await puter.kv.set("console.openCount", String(next));
+            report("kv.persist", { openCount: next });
+          }
+        } catch (e) { report("kv.error", e.message); }
+
+        // UI plane (postMessage broker) — title the window in the Vita shell. No-op outside the shell.
+        try { if (window.puter && puter.ui && puter.ui.setWindowTitle) puter.ui.setWindowTitle("Vita Console"); } catch {}
+
+        await refreshAll();
+        // Auto-select the first app so logs are visible on first paint.
+        if (!state.selectedId && state.apps.length) await selectApp(state.apps[0].id);
+
+        window.__CONSOLE__.ready = true;
+        report("ready", { apps: state.apps.length });
+      })().catch((e) => {
+        window.__CONSOLE__.error = e && e.message;
+        report("fatal", e && e.message);
+      });
+    </script>
+  </body>
+</html>

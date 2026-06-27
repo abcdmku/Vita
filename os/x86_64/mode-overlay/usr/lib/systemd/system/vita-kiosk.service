@@ -1,0 +1,59 @@
+# Vita LOCAL DESKTOP kiosk — cage (Wayland kiosk compositor) + chromium --kiosk on the local display.
+#
+# LOCAL DESKTOP mode only. cage is the standard single-application Wayland kiosk compositor: it owns
+# the DRM/KMS display, runs exactly one client fullscreen, and exits when that client exits. chromium
+# runs as that client in --kiosk against the platform server's LOCAL face (http://127.0.0.1:<port>).
+# This REPLACES the archived bespoke renderer (custom Rust compositor + CEF/osr + WM) — the browser
+# owns rendering now (see architecture/puter-compat-layer.md "Access faces").
+#
+# Mode gating: the vita-mode-generator masks THIS unit (and its display deps) unless vita.mode=desktop.
+# In headless / network-only boots the generator symlinks it to /dev/null so it never starts and no
+# display stack is pulled in. So a single image supports all three modes; the cmdline selects.
+[Unit]
+Description=Vita local desktop kiosk (cage + chromium --kiosk)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Need the GPU/DRM + input devices (udev) and a seat (systemd-logind provides seat0). Start AFTER the
+# platform server so chromium points at a live local face — vita-kiosk-launch.sh additionally POLLS
+# the loopback port (readiness gate) before launching chromium, so a slow server never shows a browser
+# error page. Ordered after multi-user basics; not after network-online (the local face is loopback).
+After=systemd-user-sessions.service systemd-logind.service systemd-udev-trigger.service vita-platform.service
+Wants=systemd-udev-trigger.service vita-platform.service
+Requires=vita-platform.service
+# If cage/chromium exits (display loss, crash), rebuild the desktop; the OS itself stays up regardless.
+ConditionPathExists=/usr/lib/vita/kiosk/vita-kiosk-launch.sh
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/vita/kiosk/vita-kiosk-launch.sh
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+StandardError=journal+console
+
+# Local face the kiosk browser loads. Kept in lockstep with vita-platform.service's port.
+Environment=VITA_PLATFORM_PORT=7681
+Environment=VITA_KIOSK_URL=http://127.0.0.1:7681/kiosk-entry.html
+# cage/chromium need a writable HOME + XDG_RUNTIME_DIR (wayland socket, chromium profile). A read-only
+# verity root has none, so point them at /run (tmpfs) created per-start by RuntimeDirectory=.
+Environment=HOME=/run/vita-kiosk
+Environment=XDG_RUNTIME_DIR=/run/vita-kiosk
+RuntimeDirectory=vita-kiosk
+RuntimeDirectoryMode=0700
+
+# cage takes the seat via systemd-logind (libseat) and drives KMS directly. It needs the DRM render +
+# card nodes, the input devices, and the tty. Run as root for the seat/DRM master in this VM/bring-up
+# config (a dedicated seat user is a later hardening slice, mirroring agentd's "binds first, hardens
+# later" note). NoNewPrivileges stays on; the device allow-list is closed to exactly DRM + input + tty.
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+DeviceAllow=char-input rw
+DeviceAllow=/dev/tty0 rw
+# chromium's setuid sandbox needs CAP_SYS_ADMIN to set up user namespaces on this kernel; if it is
+# unavailable the launch script falls back to --no-sandbox (logged). Kept narrow.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG
+AmbientCapabilities=CAP_SYS_ADMIN
+
+[Install]
+WantedBy=graphical.target

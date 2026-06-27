@@ -1,0 +1,27 @@
+# Vita NETWORK DESKTOP — bring the routable NIC up so the TLS network face (0.0.0.0:7443) is actually
+# reachable from off-box. The platform server BINDS 0.0.0.0:7443 regardless, but a bind is not reach:
+# the kernel only delivers inbound packets once the interface has an address + a route. In the minimal
+# image there is no DHCP client / .network match for the emulated NIC, so it comes up link-only with NO
+# address — and an EXTERNAL client (a remote browser, or QEMU user-mode hostfwd → guest 10.0.2.15:7443)
+# gets nothing. This .network matches the standard predictable ethernet names (en*, plus legacy eth*)
+# and requests DHCP, so on QEMU user-mode (SLIRP DHCP at 10.0.2.2 leases 10.0.2.15) — and on a real NIC
+# behind a DHCP server — the interface gets an address and the network face becomes externally reachable.
+#
+# Shipped in the mode overlay (present in every mode); it is the NETWORK mode that makes this load-bearing.
+# Headless/desktop simply also get a configured NIC, which is correct for a server node. systemd-networkd
+# is enabled alongside this file (mode-overlay multi-user.target.wants/systemd-networkd.service).
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+# Don't block boot on networkd-wait-online: the platform unit is deliberately NOT ordered after
+# network-online.target (loopback face must come up on no-NIC boots), and the network face binds 0.0.0.0
+# at start and accepts on whichever address appears. DHCP completing slightly after the bind is fine —
+# SLIRP/the DHCP server answers in well under a second and the listener is already up.
+[DHCP]
+UseDNS=yes
+UseRoutes=yes
+
+[Link]
+RequiredForOnline=no

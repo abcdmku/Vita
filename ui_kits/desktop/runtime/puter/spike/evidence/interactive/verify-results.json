@@ -1,0 +1,72 @@
+{
+  "passed": 13,
+  "total": 13,
+  "results": [
+    {
+      "name": "app booted (window.__vitaDeskReady)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "api_origin connected (whoami)",
+      "ok": true,
+      "detail": "conn=connected"
+    },
+    {
+      "name": "whoami rendered owner",
+      "ok": true,
+      "detail": "who=owner"
+    },
+    {
+      "name": "New file created + opened in Notes",
+      "ok": true,
+      "detail": "vita-verify-1782537511230.txt"
+    },
+    {
+      "name": "Note saved (fs.write overwrite)",
+      "ok": true,
+      "detail": "/home/notes/welcome.txt"
+    },
+    {
+      "name": "KV counter incremented",
+      "ok": true,
+      "detail": "0 -> 2"
+    },
+    {
+      "name": "Theme set (kv.set)",
+      "ok": true,
+      "detail": "slate"
+    },
+    {
+      "name": "New file appears in file list",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "PERSIST: file survives reload",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "PERSIST: theme survives reload (KV)",
+      "ok": true,
+      "detail": "theme=slate"
+    },
+    {
+      "name": "PERSIST: KV counter survives reload",
+      "ok": true,
+      "detail": "expected 2, got 2"
+    },
+    {
+      "name": "PERSIST: note content survives reload",
+      "ok": true,
+      "detail": "len=67"
+    },
+    {
+      "name": "no uncaught console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "consoleErrors": []
+}

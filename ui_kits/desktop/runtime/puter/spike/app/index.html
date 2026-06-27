@@ -1,0 +1,122 @@
+<!doctype html>
+<!--
+  Vita ⇄ Puter spike test app.
+
+  A REAL Puter app: a sandboxed web page that uses the GENUINE vendored puter.js SDK. It does NOT know
+  it's running on Vita — it calls `puter.fs.*`, `puter.kv.*`, `puter.ui.*` exactly as it would on
+  puter.com. The SDK reads the puter.* launch params from this page's URL (set by web-app-window.ts),
+  points fs/kv/auth at Vita's LOCAL api_origin, and posts ui messages to the Vita shell (the parent).
+
+  This is the page from architecture/puter-compat-layer.md, extended to self-report each step so the
+  harness can read PASS/FAIL from the console + a postMessage summary.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Vita ↔ Puter spike</title>
+  <style>
+    body { margin: 0; font: 13px system-ui, sans-serif; background: #0e0f13; color: #e6e8ee; }
+    header { padding: 14px 16px; border-bottom: 1px solid #23252e; }
+    h1 { font-size: 15px; margin: 0; }
+    .sub { color: #8b8f9c; font-size: 12px; margin-top: 4px; }
+    pre { margin: 0; padding: 14px 16px; white-space: pre-wrap; line-height: 1.6; }
+    .ok { color: #4ade80; }
+    .err { color: #f87171; }
+    .step { color: #c7cad3; }
+  </style>
+  <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
+  <script src="/_vendor/puter/v2.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Vita ↔ Puter spike</h1>
+    <div class="sub">A real Puter app running on Vita's local, capability-gated backend.</div>
+  </header>
+  <pre id="out"></pre>
+  <script>
+    window.__SPIKE_ERRORS__ = [];
+    window.addEventListener("error", (e) => {
+      window.__SPIKE_ERRORS__.push((e.message || "") + " @ " + (e.filename || "").split("/").pop() + ":" + e.lineno);
+      console.log("[spike] WINDOW ERROR: " + e.message);
+    });
+    const out = document.getElementById("out");
+    const results = [];
+    function line(cls, m) {
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = m + "\n";
+      out.appendChild(span);
+      // Console for the headless/preview harness to scrape.
+      console.log("[spike] " + m);
+    }
+    function record(name, ok, detail) {
+      results.push({ name, ok, detail });
+      line(ok ? "ok" : "err", (ok ? "PASS " : "FAIL ") + name + (detail ? " — " + detail : ""));
+    }
+
+    (async () => {
+      line("step", "puter SDK present: " + (typeof window.puter === "object"));
+      line("step", "APIOrigin: " + (window.puter && puter.APIOrigin));
+
+      // ---- fs.write / fs.read round-trip ----
+      // puter.fs.read returns a Blob in current puter.js; some builds wrap it as {result: Blob}. Read
+      // the text robustly across either shape.
+      async function readText(path) {
+        const r = await puter.fs.read(path);
+        const blob = (r && typeof r.text === "function") ? r : (r && r.result ? r.result : r);
+        if (blob && typeof blob.text === "function") return await blob.text();
+        return typeof blob === "string" ? blob : String(blob);
+      }
+      try {
+        await puter.fs.write("spike.txt", "hello from Vita");
+        const text = await readText("spike.txt");
+        record("fs.write+read", text === "hello from Vita", "read => " + JSON.stringify(text));
+      } catch (e) { record("fs.write+read", false, e.message); }
+
+      // ---- fs.readdir ----
+      try {
+        const entries = await puter.fs.readdir(".");
+        const names = entries.map(e => e.name);
+        record("fs.readdir", names.includes("spike.txt"), "entries => " + names.join(", "));
+      } catch (e) { record("fs.readdir", false, e.message); }
+
+      // ---- kv.set / kv.get ----
+      try {
+        await puter.kv.set("spike_key", "spike_val");
+        const v = await puter.kv.get("spike_key");
+        record("kv.set+get", v === "spike_val", "get => " + JSON.stringify(v));
+      } catch (e) { record("kv.set+get", false, e.message); }
+
+      // ---- auth.whoami ----
+      try {
+        const me = await puter.auth.getUser();
+        record("auth.whoami", me && me.username === "owner", "user => " + JSON.stringify(me && me.username));
+      } catch (e) { record("auth.whoami", false, e.message); }
+
+      // ---- ui.alert (control plane via postMessage to the Vita shell) ----
+      try {
+        await puter.ui.alert("fs + kv + ui all answered by Vita");
+        record("ui.alert", true, "broker acknowledged");
+      } catch (e) { record("ui.alert", false, e.message); }
+
+      // ---- ui.setWindowTitle ----
+      try {
+        puter.ui.setWindowTitle("Vita Puter Spike OK");
+        record("ui.setWindowTitle", true, "sent");
+      } catch (e) { record("ui.setWindowTitle", false, e.message); }
+
+      const passed = results.filter(r => r.ok).length;
+      const summary = { type: "vita-spike-summary", passed, total: results.length, results };
+      line(passed === results.length ? "ok" : "err",
+        "\n=== " + passed + "/" + results.length + " checks passed ===");
+      // Surface the summary to the parent + a global for the preview harness to read.
+      window.__VITA_SPIKE_SUMMARY__ = summary;
+      try { window.parent.postMessage(summary, "*"); } catch {}
+      console.log("[spike] SUMMARY " + JSON.stringify(summary));
+    })().catch(e => {
+      record("fatal", false, e && e.message);
+      console.log("[spike] FATAL " + (e && e.message));
+    });
+  </script>
+</body>
+</html>

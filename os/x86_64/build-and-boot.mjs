@@ -50,26 +50,28 @@ const opt = (k, d) => { const a = argv.find((x) => x.startsWith(`${k}=`)); retur
 
 const DRY = has("--dry-run");
 const MODE = opt("--mode", "smoke");
+// Three-mode INSTALL profile baked onto the cmdline as vita.mode= (distinct from --mode smoke|full,
+// which selects the BUILD pipeline). headless (default) | desktop (local kiosk) | network (TLS face).
+// The vita-mode generator enforces it at boot; here we just choose what to bake. Override: VITA_MODE.
+const MODE_SELECT = process.env.VITA_MODE ?? opt("--install-mode", "headless");
 const MKOSI = opt("--mkosi", process.env.VITA_MKOSI ?? "auto"); // auto | native | docker
 const NO_BOOT = has("--no-boot");
 const NO_SIGN = has("--no-sign");
 const OUT = resolve(opt("--out", join(HERE, "out")));
 const CACHE = resolve(process.env.VITA_MKOSI_CACHE ?? join(HERE, ".cache"));
-// VITA_CEF=1 (ADR-0014 M4): bake the CEF live-render verification overlay. CEF's libcef.so
-// pulls in a large runtime shared-lib set beyond the compositor's Mesa GL stack already in the
-// base package allowlist (libgbm1/libegl1/libgles2/libdrm2/libinput10/dbus/udev). These are the
-// CEF DT_NEEDED libs not already present — resolved against Debian trixie main (t64 names where
-// the time_t transition renamed them). Verified present in the trixie Packages index.
-const CEF_RUNTIME_PACKAGES = [
-  "libx11-6", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxrandr2",
-  "libxcb1", "libxkbcommon0", "libasound2t64", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
-  "libatspi2.0-0t64", "libcairo2", "libcups2t64", "libexpat1", "libglib2.0-0t64",
-  "libnss3", "libnspr4", "libpango-1.0-0", "libstdc++6",
-].map((p) => `--package=${p}`);
-const CEF_ENABLED = process.env.VITA_CEF === "1";
-const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools", ...(CEF_ENABLED ? CEF_RUNTIME_PACKAGES : [])];
+// ARCHIVED (feat/os-three-modes): the bespoke local-rendering stack — the custom Rust compositor
+// (packages/compositor-core), CEF/osr (spikes/cef-osr), and the WM/desktop-shell rendering path — is
+// NO LONGER built into or booted by the image. The standard kiosk renderer (cage + chromium, shipped
+// as Debian packages and launched by vita-kiosk.service in LOCAL DESKTOP mode) replaces it. The
+// source stays in the repo (git-recoverable); only the image build + boot path drops it. The old
+// VITA_CEF=1 overlay (installCefOverlay) + its libcef.so runtime package set are removed here.
+// chromium's own runtime deps are resolved automatically by apt from the `chromium` package now in
+// the allowlist — no hand-maintained DT_NEEDED list is needed.
+const SMOKE_VERIFICATION_PACKAGES = ["--package=open-vm-tools"];
 
 if (!["smoke", "full"].includes(MODE)) fail(`--mode must be smoke|full, got ${MODE}`);
+if (!["headless", "desktop", "network"].includes(MODE_SELECT))
+  fail(`install mode (VITA_MODE / --install-mode) must be headless|desktop|network, got ${MODE_SELECT}`);
 
 function fail(msg) { console.error(`\n✖ ${msg}`); process.exit(1); }
 function log(msg) { console.log(msg); }
@@ -381,125 +383,127 @@ function installAgentOverlay() {
   return useNative ? overlayHost : "/work/os/x86_64/agent-overlay";
 }
 
-function installCompositorOverlay() {
-  const overlayHost = join(HERE, "smoke-overlay");
-  const binDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor");
-  const commandDest = join(overlayHost, "usr", "lib", "vita", "compositor", "vita-compositor-smoke.commands");
-  // The driver-produced command stream is COMMITTED at commandDest and baked as-is. We do NOT regenerate it here:
-  // the generator imports the .ts compositor bridge and the build HOST's Node may lack TS support entirely
-  // (ERR_NO_TYPESCRIPT — see the smoke-must-not-import-.ts note above). Freshness/no-drift between the TS model and the
-  // baked commands is enforced by the os smoke TEST (compositor-selftest.test.ts), which runs the generator on a
-  // TS-capable Node and asserts byte-equality with this committed file.
-  if (!DRY && !existsSync(commandDest)) {
-    fail(`1b0 · committed compositor smoke layout missing: ${commandDest}`);
-  }
-  const buildArgs = [
-    "tools/build/rust-in-docker.mjs",
-    "--dir",
-    "packages/compositor-core",
-    "--out",
-    "os/x86_64/smoke-overlay/usr/lib/vita/compositor/vita-compositor",
+// Stage the smoke overlay WITHOUT the bespoke renderer (feat/os-three-modes). The smoke overlay still
+// carries the non-rendering boot-verification bits the smoke boot needs (the Secure Boot state probe,
+// modules-load, open-vm-tools, the serial autologin getty), but the custom Rust compositor self-test
+// (the bespoke local-rendering path) is ARCHIVED: we no longer build packages/compositor-core, and we
+// strip vita-compositor-selftest.service + its multi-user.target.wants entry + the compositor binary
+// dir from the staged copy so it is never enabled or shipped. Returns a FILTERED overlay dir in OUT.
+function installSmokeOverlayWithoutRenderer() {
+  const src = join(HERE, "smoke-overlay");
+  if (DRY) return useNative ? src : "/work/os/x86_64/smoke-overlay-norender";
+  const staged = join(OUT, "smoke-overlay-norender");
+  rmSync(staged, { recursive: true, force: true });
+  cpSync(src, staged, { recursive: true });
+  // Drop the bespoke compositor self-test rendering service + its enablement + the binary dir.
+  const sys = join(staged, "usr", "lib", "systemd", "system");
+  rmSync(join(sys, "vita-compositor-selftest.service"), { force: true });
+  rmSync(join(sys, "multi-user.target.wants", "vita-compositor-selftest.service"), { force: true });
+  rmSync(join(staged, "usr", "lib", "vita", "compositor"), { recursive: true, force: true });
+  log("   smoke overlay staged WITHOUT the bespoke compositor renderer (cage+chromium replaces it)");
+  return useNative ? staged : "/work/os/x86_64/smoke-overlay-norender";
+}
+
+// Stage the three-mode overlay: the platform server unit (placeholder ExecStart), the cage+chromium
+// LOCAL DESKTOP kiosk unit, the vita-mode generator (headless|desktop|network selection), the apps
+// tmpfiles, and the *.target.wants enablement. Committed under mode-overlay/; here we only materialize
+// the two wants entries as REAL relative symlinks on the staging tree (they are committed as plain
+// text files for cross-platform checkout, mirroring the agentd/ts/cef overlays).
+function installModeOverlay() {
+  const overlayHost = join(HERE, "mode-overlay");
+  if (DRY) return useNative ? overlayHost : "/work/os/x86_64/mode-overlay";
+  const sys = join(overlayHost, "usr", "lib", "systemd", "system");
+  const wants = [
+    [join(sys, "multi-user.target.wants", "vita-platform.service"), "../vita-platform.service"],
+    [join(sys, "multi-user.target.wants", "vita-owner-token.service"), "../vita-owner-token.service"],
+    [join(sys, "multi-user.target.wants", "vita-platform-selftest.service"), "../vita-platform-selftest.service"],
+    // Bring the routable NIC up (DHCP via 10-vita-net.network) so the TLS network face is actually
+    // REACHABLE off-box — a 0.0.0.0:7443 bind is not reach until the iface has an address. The unit
+    // ships with the systemd package; we just enable it. (NETWORK mode makes this load-bearing; in
+    // headless/desktop a configured NIC is harmless + correct for a server node.)
+    [join(sys, "multi-user.target.wants", "systemd-networkd.service"), "../systemd-networkd.service"],
+    [join(sys, "graphical.target.wants", "vita-kiosk.service"), "../vita-kiosk.service"],
   ];
-  run("1b · build vita compositor self-test (linux x86_64 Rust binary)", "node", buildArgs);
-  if (!DRY && !existsSync(binDest)) {
-    fail(`compositor build did not stage ${binDest} — check rust-in-docker.mjs`);
+  // Use lstat (does NOT follow the link) to detect presence: some wants entries (systemd-networkd
+  // .service) point at a unit that lives in the IMAGE, not in this overlay, so the symlink is
+  // legitimately DANGLING here — existsSync() follows it and returns false, which would wrongly retry
+  // symlinkSync() and throw EEXIST. lstatSync sees the link itself.
+  const linkPresent = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
+  for (const [link, target] of wants) {
+    if (existsSync(link) && !linkPresent(link)) rmSync(link, { force: true }); // a real file in the way → replace
+    if (!linkPresent(link)) { mkdirSync(dirname(link), { recursive: true }); symlinkSync(target, link); }
   }
-  return useNative ? overlayHost : "/work/os/x86_64/smoke-overlay";
+  return useNative ? overlayHost : "/work/os/x86_64/mode-overlay";
 }
 
-// ADR-0014 M4: stage the CEF runtime + osr_host + flagship desktop assets into cef-overlay so
-// mkosi's --extra-tree ships them into the image. Large (~1.5GB CEF runtime, expected). The
-// committed parts (service unit, wants symlink-file, launch script) live under cef-overlay/ in
-// git; the heavy CEF runtime + ui_kits assets are STAGED here (gitignored, like the Deno runtime).
-// Requires the vendored CEF (spikes/cef-osr/fetch-cef.sh) + a built osr_host (ninja in spikes/cef-osr).
-function installCefOverlay() {
-  const overlayHost = join(HERE, "cef-overlay");
-  const cefDst = join(overlayHost, "usr", "lib", "vita", "cef");
-  const uikitsDst = join(overlayHost, "usr", "lib", "vita", "ui_kits");
-  const serviceUnit = join(overlayHost, "usr", "lib", "systemd", "system", "vita-cef-live.service");
-  const launchSh = join(cefDst, "vita-cef-live.sh");
-  // Committed pieces must exist (these are in git, not staged).
-  if (!DRY && !existsSync(serviceUnit)) fail(`1d0 · committed CEF service unit missing: ${serviceUnit}`);
-  if (!DRY && !existsSync(launchSh)) fail(`1d0 · committed CEF launch script missing: ${launchSh}`);
+// Stage the PUTER PLATFORM RUNTIME into the image, MIRRORING the repo layout under a single root so
+// EVERY relative import in the server graph resolves on-device. The server modules import OUT of the
+// puter dir into the platform permission-broker + the SDK:
+//   ui_kits/desktop/runtime/puter/permission-model.ts -> ../../../../runtime/permission-broker/src/{decide,grants}.ts
+//   runtime/permission-broker/src/* -> ../../../sdk/manifests/src/package-contract.ts
+//   sdk/manifests/src/package-contract.ts -> ../../typescript/src/capabilities.ts -> ./plan.ts
+// (full graph enumerated with `deno info` = 18 local modules, 5 of them outside the puter dir.)
+//
+// So we stage the repo-relative tree under /usr/lib/vita/app-platform/<repo-relative-path>:
+//   app-platform/ui_kits/desktop/runtime/puter/**      (the server spine + boot entry)
+//   app-platform/ui_kits/desktop/_vendor/**            (vendored Apache-2.0 puter.js)
+//   app-platform/runtime/permission-broker/src/{decide,grants}.ts
+//   app-platform/sdk/manifests/src/package-contract.ts
+//   app-platform/sdk/typescript/src/{capabilities,plan}.ts
+// Then server-entry.ts at .../app-platform/ui_kits/desktop/runtime/puter/server/server-entry.ts has
+//   ../../../../runtime/...  -> /usr/lib/vita/app-platform/runtime/...   (resolves)
+//   server.ts ../../_vendor  -> /usr/lib/vita/app-platform/ui_kits/desktop/_vendor (resolves)
+// EXCLUDING the dev-only spike/ + *.test.ts. The Deno binary itself is staged by ts-image.mjs.
+function installPuterOverlay() {
+  if (DRY) return useNative ? join(OUT, "puter-overlay") : "/work/os/x86_64/out/puter-overlay";
+  const staged = join(OUT, "puter-overlay");
+  const APP_ROOT_REL = ["usr", "lib", "vita", "app-platform"];
+  const stagedAppRoot = join(staged, ...APP_ROOT_REL);
+  const puterSrc = join(REPO, "ui_kits", "desktop", "runtime", "puter");
+  const vendorSrc = join(REPO, "ui_kits", "desktop", "_vendor");
+  if (!existsSync(puterSrc)) fail(`1e · puter runtime missing: ${puterSrc} (did the platform-server merge land?)`);
+  if (!existsSync(join(vendorSrc, "puter", "v2.js"))) fail(`1e · vendored puter.js missing: ${join(vendorSrc, "puter", "v2.js")}`);
+  rmSync(staged, { recursive: true, force: true });
 
-  // Locate the vendored CEF Release/Resources (the dir name carries the pinned version).
-  const vendorRoot = join(REPO, "spikes", "cef-osr", ".vendor");
-  const cefBin = !DRY && existsSync(vendorRoot)
-    ? readdirSync(vendorRoot).find((d) => d.startsWith("cef_binary_")) : null;
-  if (!DRY && !cefBin) {
-    fail("1d0 · vendored CEF missing under spikes/cef-osr/.vendor — run spikes/cef-osr/fetch-cef.sh");
+  // 1) the puter runtime (minus spike/ + *.test.ts) at app-platform/ui_kits/desktop/runtime/puter
+  const puterDst = join(stagedAppRoot, "ui_kits", "desktop", "runtime", "puter");
+  mkdirSync(dirname(puterDst), { recursive: true });
+  cpSync(puterSrc, puterDst, {
+    recursive: true,
+    filter: (src) => {
+      const rel = src.slice(puterSrc.length);
+      if (rel === "/spike" || rel.startsWith("/spike/")) return false;
+      if (rel.endsWith(".test.ts")) return false;
+      return true;
+    },
+  });
+  // 2) the vendored puter.js at app-platform/ui_kits/desktop/_vendor
+  cpSync(vendorSrc, join(stagedAppRoot, "ui_kits", "desktop", "_vendor"), { recursive: true });
+  // 3) the external server-graph deps, repo-relative (enumerated via deno info — keep in lockstep).
+  const externalDeps = [
+    ["runtime", "permission-broker", "src", "decide.ts"],
+    ["runtime", "permission-broker", "src", "grants.ts"],
+    ["sdk", "manifests", "src", "package-contract.ts"],
+    ["sdk", "typescript", "src", "capabilities.ts"],
+    ["sdk", "typescript", "src", "plan.ts"],
+  ];
+  for (const parts of externalDeps) {
+    const from = join(REPO, ...parts);
+    if (!existsSync(from)) fail(`1e · puter server dep missing: ${from} (server-graph changed — re-run deno info)`);
+    const to = join(stagedAppRoot, ...parts);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
   }
-  const cefRelease = DRY ? "<cef>/Release" : join(vendorRoot, cefBin, "Release");
-  const cefResources = DRY ? "<cef>/Resources" : join(vendorRoot, cefBin, "Resources");
-  const osrBin = join(REPO, "spikes", "cef-osr", "build", "Release", "vita_cef_osr");
-  const osrBinAlt = join(REPO, "spikes", "cef-osr", "build", "vita_cef_osr");
-
-  if (!DRY) {
-    // Ensure a freshly built osr_host is staged into the spike Release dir (next to libcef.so),
-    // mirroring run-m1.sh: the binary's rpath includes '.' so libcef resolves there. Prefer the
-    // FRESHER of build/vita_cef_osr (ninja output) vs build/Release/vita_cef_osr — using a stale
-    // Release copy silently shipped an old osr_host (this caused the input/render osr changes to be
-    // ignored across rebuilds).
-    if (existsSync(osrBinAlt)) {
-      const altNewer = !existsSync(osrBin) ||
-        statSync(osrBinAlt).mtimeMs > statSync(osrBin).mtimeMs;
-      if (altNewer) {
-        mkdirSync(dirname(osrBin), { recursive: true });
-        copyFileSync(osrBinAlt, osrBin);
-      }
-    }
-    if (!existsSync(osrBin)) {
-      fail("1d0 · osr_host binary missing — build it: (cd spikes/cef-osr && ninja -C build)");
-    }
-    // Stage the CEF runtime: copy the whole Release dir (libcef.so + sibling libs + paks) and the
-    // Resources (icudtl.dat + locales) FLAT into /usr/lib/vita/cef, matching the spike Release layout.
-    // Preserve the COMMITTED launch script + the baked instant-desktop assets (first-frame snapshot
-    // + cursor command streams) across the clean — they live in this dir under git (cef-vm-input).
-    const launchBody = readFileSync(launchSh);
-    const loadingPath = join(cefDst, "loading.commands");
-    const cursorPath = join(cefDst, "cursor.commands");
-    const injectorPath = join(cefDst, "uinput-inject.ts");
-    const hostProxyPath = join(cefDst, "vita-host-proxy.ts");
-    const loadingBody = existsSync(loadingPath) ? readFileSync(loadingPath) : null;
-    const cursorBody = existsSync(cursorPath) ? readFileSync(cursorPath) : null;
-    const injectorBody = existsSync(injectorPath) ? readFileSync(injectorPath) : null;
-    const hostProxyBody = existsSync(hostProxyPath) ? readFileSync(hostProxyPath) : null;
-    rmSync(cefDst, { recursive: true, force: true });
-    mkdirSync(cefDst, { recursive: true });
-    cpSync(cefRelease, cefDst, { recursive: true, dereference: true });
-    cpSync(cefResources, cefDst, { recursive: true, dereference: true });
-    copyFileSync(osrBin, join(cefDst, "vita_cef_osr"));
-    chmodSync(join(cefDst, "vita_cef_osr"), 0o755);
-    // Restore the committed launch script into the freshly-staged runtime dir.
-    writeFileSync(launchSh, launchBody);
-    chmodSync(launchSh, 0o755);
-    // Restore the honest loading screen + cursor + verification injector (if present). NO baked
-    // flagship snapshot — the boot shows the honest loading screen, then the LIVE CEF render. The
-    // cursor + loading are committed so they are normally present.
-    if (loadingBody) writeFileSync(loadingPath, loadingBody);
-    if (cursorBody) writeFileSync(cursorPath, cursorBody);
-    if (injectorBody) writeFileSync(injectorPath, injectorBody);  // PSD-055 verification injector
-    if (hostProxyBody) writeFileSync(hostProxyPath, hostProxyBody);  // PSD-500 host proxy (Deno)
-    // Stage the flagship desktop assets: the WHOLE ui_kits/ tree so every relative path resolves
-    // (../styles.css, ../_vendor/lucide.min.js + fonts, ./tokens/*, runtime/bootstrap.js).
-    rmSync(uikitsDst, { recursive: true, force: true });
-    mkdirSync(dirname(uikitsDst), { recursive: true });
-    cpSync(join(REPO, "ui_kits"), uikitsDst, { recursive: true, dereference: true });
-    // Materialize the multi-user.target.wants entry as a REAL symlink (committed as a text file
-    // for cross-platform checkout; the sibling vita-agentd/vita-ts entries ship as symlinks). A
-    // regular file here is empirically followed by this systemd, but a true relative symlink is the
-    // unambiguous enablement — make it one on the ext4 staging tree before mkosi --extra-tree.
-    const wantsLink = join(overlayHost, "usr", "lib", "systemd", "system",
-                           "multi-user.target.wants", "vita-cef-live.service");
-    if (existsSync(wantsLink) && !lstatSync(wantsLink).isSymbolicLink()) {
-      rmSync(wantsLink, { force: true });
-    }
-    if (!existsSync(wantsLink)) {
-      symlinkSync("../vita-cef-live.service", wantsLink);
-    }
-  }
-  return useNative ? overlayHost : "/work/os/x86_64/cef-overlay";
+  log(`   staged puter platform runtime (repo-mirror) → ${stagedAppRoot}`);
+  return useNative ? staged : "/work/os/x86_64/out/puter-overlay";
 }
+
+// ARCHIVED (feat/os-three-modes): installCefOverlay() — staged the CEF runtime + osr_host + flagship
+// desktop assets (the bespoke embedded-web-engine renderer, ADR-0014 M4) into cef-overlay. The image
+// no longer builds or boots CEF/osr; the standard `cage` + `chromium --kiosk` kiosk (vita-kiosk
+// .service, LOCAL DESKTOP mode) renders the desktop instead. The committed cef-overlay/ source +
+// spikes/cef-osr remain in the repo (git-recoverable) but are NOT wired into the build path. The full
+// previous implementation is recoverable from git history on this branch's parent (origin/main).
 
 log(`  engine=${useNative ? "host-native mkosi" : `docker ${PINNED_MKOSI_IMAGE}`}`);
 
@@ -526,10 +530,14 @@ if (MODE === "smoke") {
   // unlike --autologin), AND set a root password (root/vita) as a fallback. Smoke/test only — full image gets
   // real auth. The overlay path differs by engine (host dir for native mkosi; the /work mount for docker).
   const agentOverlay = installAgentOverlay();   // build + stage the Vita agent, then ship it via --extra-tree
-  const smokeOverlay = installCompositorOverlay(); // build + stage the compositor self-test into smoke-overlay
-  // ADR-0014 M4: optionally stage the CEF live-render overlay (CEF runtime + osr_host + flagship
-  // assets + service). Gated by VITA_CEF=1 — the ~1.5GB CEF runtime is opt-in for the CEF GPU boot.
-  const cefOverlay = CEF_ENABLED ? installCefOverlay() : null;
+  // De-wired renderer (feat/os-three-modes): the smoke overlay still ships the boot-verification markers
+  // (Secure Boot probe, modules-load, open-vm-tools, serial autologin) but NO bespoke compositor self-test.
+  const smokeOverlay = installSmokeOverlayWithoutRenderer();
+  // Three-mode overlay: platform server (placeholder) + cage/chromium kiosk unit + vita-mode generator
+  // (headless|desktop|network) + apps tmpfiles. Shipped in EVERY build; the generator selects per boot.
+  const modeOverlay = installModeOverlay();
+  // Puter platform runtime + vendored Apache-2.0 puter.js (the real server the platform unit runs on Deno).
+  const puterOverlay = installPuterOverlay();
   // P1-030: stage the pinned Deno runtime into ts-overlay (ts-image.mjs fetches + sha256-verifies + extracts the
   // binary to ts-overlay/usr/lib/vita/deno), then ship the on-device TS runtime + entrypoint via --extra-tree.
   const tsOverlay = useNative ? join(HERE, "ts-overlay") : "/work/os/x86_64/ts-overlay";
@@ -615,21 +623,18 @@ if (MODE === "smoke") {
     ];
     log(`   (Secure Boot: sign UKI with TEST db key ${sbKey}; enrollment is offline via virt-fw-vars)`);
   }
+  // Three-mode selection: bake vita.mode= onto the cmdline. The vita-mode generator reads it at boot
+  // and enables/masks the local kiosk + display path accordingly (headless|desktop|network). Default
+  // headless (no display stack) so a bare boot stays minimal; override with VITA_MODE.
   const cmdline = `console=ttyS0,115200 ${rootOpts} systemd.firstboot=off systemd.mask=getty@tty1.service` +
+    ` vita.mode=${MODE_SELECT}` +
     (process.env.VITA_SB_NONCE ? ` vita.sbnonce=${process.env.VITA_SB_NONCE}` : "") +
-    // PSD-055 verification: bake the input self-test token so the CEF launch script injects a
-    // scripted gesture at boot (uinput -> libinput -> route -> CEF) on the real GPU. Off by default.
-    (process.env.VITA_INPUT_SELFTEST === "1" ? " vita.input_selftest=1" : "") +
-    // PSD-501: bake the verification scenario so the CEF self-test clicks real dock tiles and proves
-    // a real action (settings-toggle persists a setting; settings-read shows it survived a reboot;
-    // activity shows real /proc stats). Off by default; the boot script defaults to no-op without it.
-    (process.env.VITA_VERIFY ? ` vita.verify=${process.env.VITA_VERIFY}` : "") +
     (process.env.VITA_BOOT_DEBUG === "1" ? " systemd.log_level=debug systemd.log_target=console systemd.show_status=1" : "");
   runMkosi("1 · build bootable disk (mkosi --format disk, smoke)",
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,
      ...incremental, ...verity, ...bootloaderPin, ...sb,
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
-     ...(cefOverlay ? [`--extra-tree=${cefOverlay}`] : []), ...verityTree, ...luksTree,
+     `--extra-tree=${modeOverlay}`, `--extra-tree=${puterOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   if (luksMode) luksFormatDataPartition(disk, luksKey);
@@ -799,11 +804,31 @@ function bootQemu(image, { secureBoot, sbCert }) {
   const kvm = !DRY && existsSync("/dev/kvm");
   const accel = process.env.VITA_QEMU_ACCEL ?? (kvm ? "kvm" : "tcg");
   const cpu = accel === "kvm" ? ["-cpu", "host", "-enable-kvm"] : ["-cpu", "max"];
-  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel})`, "qemu-system-x86_64", [
+
+  // NETWORK DESKTOP mode (vita.mode=network): attach a real (emulated) NIC + a user-mode port-forward so
+  // the HOST can reach the guest's routable TLS network face (0.0.0.0:7443) over the emulated NIC — the
+  // EXTERNAL-client proof the headless boot (loopback-only inside the guest) could not give. Set
+  // VITA_QEMU_HOSTFWD=hostip:hostport-:guestport (e.g. 127.0.0.1:8443-:7443); we synthesize the SLIRP
+  // hostfwd= rule from it. The guest sees a normal virtio-net interface and 0.0.0.0:7443 binds on it; an
+  // external curl to https://hostip:hostport traverses the NIC into the guest's network face. Default
+  // (unset) keeps the no-NIC boot for headless/desktop/SB matrices, which need no inbound reachability.
+  let net = [];
+  const hostfwd = process.env.VITA_QEMU_HOSTFWD;
+  if (hostfwd !== undefined && hostfwd.length > 0) {
+    // Accept "HOSTIP:HOSTPORT-:GUESTPORT" (full SLIRP form) or a bare "HOSTPORT-:GUESTPORT".
+    const rule = /^\d+-:\d+$/.test(hostfwd) ? `:${hostfwd}` : hostfwd; // bare form → bind all host ifaces
+    net = [
+      "-netdev", `user,id=vnet0,hostfwd=tcp:${rule}`,
+      "-device", "virtio-net-pci,netdev=vnet0",
+    ];
+    log(`   (network desktop: virtio-net + user-mode hostfwd tcp:${rule} — host→guest TLS network face)`);
+  }
+  run(`7 · QEMU boot (${secureBoot ? "Secure Boot" : "no SB"}, accel=${accel}${net.length ? ", +NIC" : ""})`, "qemu-system-x86_64", [
     "-machine", "q35", "-m", "2048", ...cpu,
     "-drive", `if=pflash,format=raw,readonly=on,file=${ovmfCode}`,
     "-drive", `if=pflash,format=raw,file=${ovmfVars}`,
     "-drive", `file=${image},format=raw,if=virtio`,
+    ...net,
     "-serial", "mon:stdio", "-nographic",
   ]);
 }

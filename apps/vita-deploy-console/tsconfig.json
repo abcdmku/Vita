@@ -1,0 +1,14 @@
+{
+  "//": "Strict typecheck lane for the Vita Deploy Console's TS (manifest + the node-only preview harness). The browser code is in index.html (no TS build). Run: node node_modules/typescript/lib/tsc.js --noEmit -p apps/vita-deploy-console/tsconfig.json",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": [
+    "manifest.ts",
+    "serve-console.ts"
+  ]
+}

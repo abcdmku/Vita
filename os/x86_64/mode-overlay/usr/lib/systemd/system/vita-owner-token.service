@@ -1,0 +1,49 @@
+# Vita owner-token provisioning — mint + persist the network-face owner bearer secret on first boot.
+#
+# Ordered Before=vita-platform.service so the persisted token file exists before the platform unit starts
+# and reads it (the platform DynamicUser reads /var/lib/vita/owner/owner.token directly via group
+# vita-agent — LoadCredential was dropped: the per-unit credentials mount fails on this image's
+# systemd/kernel). Idempotent: a no-op when the token already exists (kept across reboots).
+# See /usr/lib/vita/owner-token/vita-owner-token.sh for the mechanism rationale.
+[Unit]
+Description=Vita owner-token provisioning (mint + persist the network-face owner secret)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Needs the persistent /var partition mounted (that is where the token is persisted). DefaultDependencies
+# keep it after local-fs; the explicit RequiresMountsFor binds it to the apps/owner tree on var.mount.
+After=local-fs.target
+RequiresMountsFor=/var/lib/vita
+Before=vita-platform.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vita/owner-token/vita-owner-token.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# Minting a random file under /var needs no host-mutation authority; run with a tight sandbox. It must
+# write /var/lib/vita/owner, so ReadWritePaths opens exactly that subtree under ProtectSystem=strict.
+# (Runs as root so it can write the token 0640 root:vita-agent — the platform DynamicUser reads it via
+# group vita-agent; no DynamicUser here.)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vita
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+# Allow the chown/fchownat family back: the mint script chgrp's the token to vita-agent so the platform
+# DynamicUser can read it. fchownat lives in @privileged, which the line above denies — re-allow exactly
+# the chown family (this unit is the legitimate provisioner of that file's group) so the explicit chgrp
+# works even on a filesystem that ignores the setgid bit on owner/. (Primary fix is the SETGID dir in
+# tmpfiles.d/vita-apps.conf; this keeps the script's chgrp from being a silent no-op as defense-in-depth.)
+SystemCallFilter=@chown
+
+[Install]
+WantedBy=multi-user.target

@@ -58,6 +58,34 @@ test("bindActions installs one delegated listener per event type and resolves ne
   ]);
 });
 
+test("an element may carry an event-specific action via data-vita-action-<type>", () => {
+  const root = element();
+  // One tile: click → "open" (gated by data-vita-event), right-click → "props" (override).
+  const tile = element({
+    "data-vita-action": "open",
+    "data-vita-action-contextmenu": "props",
+    "data-vita-event": "click",
+  });
+  root.appendChild(tile);
+
+  const events: string[] = [];
+  const binding = bindActions(root, new Map([
+    ["open", (context) => { events.push(`${context.event.type}:${context.action}`); }],
+    ["props", (context) => { events.push(`${context.event.type}:${context.action}`); }],
+  ]), {
+    eventTypes: Object.freeze(["click", "contextmenu"]),
+  });
+
+  root.dispatch("click", tile); // → open
+  root.dispatch("contextmenu", tile); // → props (override bypasses the data-vita-event=click gate)
+  binding.dispose();
+
+  assert.deepEqual(events, [
+    "click:open",
+    "contextmenu:props",
+  ]);
+});
+
 test("applyBindSinks writes text only when changed and reflects class and attr sinks", () => {
   const root = element();
   const title = element({
