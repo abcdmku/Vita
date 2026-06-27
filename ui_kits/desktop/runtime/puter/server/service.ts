@@ -23,6 +23,7 @@ import { resolve } from "node:path";
 
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
 import { createCapabilityRegistry, randomOpaqueToken, type PuterCapability, type PuterCapabilityRegistry } from "../capability.ts";
+import type { AgentControlPlane } from "../control-plane.ts";
 import { openAppStore, DEFAULT_APPS_ROOT } from "../fs-store.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel, type AppGrantRegistry } from "../permission-model.ts";
 import { resolveTlsMaterial, type TlsMaterial, type TlsSourceOptions } from "./tls.ts";
@@ -67,6 +68,11 @@ export interface ServiceOptions {
   // The per-app declared grants the broker enforces. Keyed by appId. Empty/absent app → no grants
   // (fail-closed). The default grants the store app full fs+kv+auth (the owner's own app store).
   readonly appGrants?: Readonly<Record<string, readonly PuterCapability[]>>;
+  // The CONTROL-PLANE bridge the deploy/management console talks to (/control/*). Optional: absent → the
+  // api_origin is data-plane-only (/control/* answers 404). On-device the boot entry builds this as
+  // createAgentHttpControlPlane(...) over the agentd unix socket (the host-proxy), so the console reads
+  // and acts on REAL capsules. It is mounted on the single shared api_origin and gated on `control`.
+  readonly controlPlane?: AgentControlPlane;
 }
 
 // A live app session the host minted in-process. The api_origin honors `token`; a sandboxed iframe
@@ -181,6 +187,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
       networkPort: options.faces?.networkPort ?? 0,
       store,
       localSessionToken: localSessionTokenProvider,
+      ...(options.controlPlane !== undefined ? { controlPlane: options.controlPlane } : {}),
       ...(tls !== undefined ? { networkTls: { cert: tls.cert, key: tls.key } } : {}),
     });
 

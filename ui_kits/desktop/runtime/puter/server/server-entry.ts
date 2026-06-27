@@ -22,12 +22,21 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import {
+  createOnDeviceControlPlane,
+  DEFAULT_AGENTD_SOCKET,
   KIOSK_ENTRY_PATH,
   randomOpaqueToken,
   startPuterPlatformService,
+  type AgentControlPlane,
   type ServiceOptions,
   type VitaMode,
 } from "./index.ts";
+
+// The deploy/management console — the ONLY app minted the `control` capability (default-deny everywhere
+// else). Mirrors apps/vita-deploy-console/manifest.ts (DEPLOY_CONSOLE_APP_ID / PUTER_API_ORIGIN_GRANTS);
+// kept inline so the boot entry has no dependency on the apps/ tree.
+const DEPLOY_CONSOLE_APP_ID = "vita.app.deploy-console";
+const DEPLOY_CONSOLE_GRANTS = ["control", "auth", "kv.read", "kv.write"] as const;
 
 const MARKER = "VITA-PLATFORM";
 
@@ -222,11 +231,39 @@ async function main(): Promise<void> {
   emit(`${MARKER}: boot entry - image_mode=${env("VITA_MODE") ?? "headless"} server_mode=${serverMode} apps_root=${appsRoot}`);
   emit(`${MARKER}: faces local=${localHost}:${localPort} network=${networkHost}:${networkPort}`);
 
+  // CONTROL PLANE: wire the deploy/management console to the LIVE node control plane (agentd) via the
+  // on-device host-proxy. agentd serves its control surface over a unix socket (ADR-0008); the host-proxy
+  // dials that socket per request and exposes agentd's real shapes (GET /state, POST /apply, GET
+  // /healthz, GET /read/capsule.logs) behind the api_origin's /control/* bridge. The platform process is
+  // in the vita-agent group, so agentd authenticates the connection by peer credentials (no token on this
+  // hop); the api_origin's `control` capability gate is the per-app authorization layer.
+  //
+  // Enabled when the agentd socket is present (the on-device default) OR VITA_CONTROL_PLANE=1 is set
+  // (a dev override). Absent socket + no override → /control/* answers 404 (data-plane-only), so a
+  // node booted without agentd still serves the platform.
+  const agentdSocket = env("VITA_AGENTD_SOCKET") ?? DEFAULT_AGENTD_SOCKET;
+  const controlPlaneForced = env("VITA_CONTROL_PLANE") === "1";
+  const controlPlaneEnabled = controlPlaneForced || fileExists(agentdSocket);
+  let controlPlane: AgentControlPlane | undefined;
+
+  if (controlPlaneEnabled) {
+    try {
+      controlPlane = createOnDeviceControlPlane({ socketPath: agentdSocket });
+      emit(`${MARKER}: control plane WIRED to agentd at ${agentdSocket} (/control/* live)`);
+    } catch (err) {
+      emit(`${MARKER}: control plane NOT wired (${err instanceof Error ? err.message : String(err)}) — /control/* will 404`);
+      controlPlane = undefined;
+    }
+  } else {
+    emit(`${MARKER}: control plane disabled (no agentd socket at ${agentdSocket}, VITA_CONTROL_PLANE!=1) — /control/* will 404`);
+  }
+
   const options: ServiceOptions = {
     appsRoot,
     faces: { localHost, localPort, networkHost, networkPort },
     mode: serverMode,
     ownerToken,
+    ...(controlPlane !== undefined ? { controlPlane } : {}),
     ...(tlsCert !== undefined && tlsKey !== undefined ? { tls: { certPath: tlsCert, keyPath: tlsKey } } : {}),
   };
 
@@ -259,6 +296,26 @@ async function main(): Promise<void> {
   // 401: kiosk-entry.html previously called /api/whoami with NO token). The network face has no
   // session-token provider, so the token is NEVER served to a remote client (owner-gated separately).
   service.setLocalSessionToken(localApp.token);
+
+  // DEPLOY CONSOLE session: when the control plane is wired, mint the console app's session with the
+  // `control` grant (and its data-plane grants) so it can clear the api_origin's /control/* gate. It is
+  // the ONLY app minted `control` (default-deny everywhere else). The token is published to /run for the
+  // launcher/probe; the console reads it from its launch URL exactly like any launched app. When the
+  // control plane is NOT wired we skip this (no point minting control no app can use).
+  if (controlPlane !== undefined) {
+    const consoleApp = service.mintApp({
+      appId: DEPLOY_CONSOLE_APP_ID,
+      grants: [...DEPLOY_CONSOLE_GRANTS],
+      instanceId: `console-${randomOpaqueToken().slice(0, 12)}`,
+    });
+
+    writeRunFile(`${runDir}/console-session.json`, `${JSON.stringify({
+      appId: consoleApp.appId,
+      appToken: consoleApp.token,
+      grants: consoleApp.grants,
+    }, null, 2)}\n`);
+    emit(`${MARKER}: deploy console session minted app_id=${consoleApp.appId} (control granted; token in ${runDir}/console-session.json)`);
+  }
 
   // Publish the runtime facts the kiosk page + the boot probe consume (tmpfs, per-boot).
   writeRunFile(`${runDir}/platform-session.json`, `${JSON.stringify({

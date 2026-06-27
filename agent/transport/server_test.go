@@ -2284,6 +2284,93 @@ func capsuleRegistry(capsules []capsule.CapsuleEntry) capsule.Registry {
 	return capsule.Registry{Capsules: &copied}
 }
 
+// fakeJournalReader is a transport-test JournalReader: it returns a canned set of
+// raw journald JSON lines so GET /read/capsule.logs is exercised end-to-end through
+// the handler without a live journald.
+type fakeJournalReader struct {
+	lines []string
+}
+
+func (f fakeJournalReader) Tail(_ context.Context, _ string, _ int) ([]string, error) {
+	return f.lines, nil
+}
+
+func newCapsuleLogsHandler(t *testing.T, reader capsule.JournalReader) http.Handler {
+	t.Helper()
+
+	registry := mustRegistry(t, capsule.NewLogsCapabilityWithReader(reader))
+	handler, err := NewHandler(Config{
+		Version:   "test",
+		StartedAt: time.Now().UTC(),
+		Registry:  registry,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler returned error: %v", err)
+	}
+	return handler
+}
+
+func TestReadCapsuleLogsQueryReturnsProjectedTail(t *testing.T) {
+	reader := fakeJournalReader{lines: []string{
+		`{"__REALTIME_TIMESTAMP":"1718000000000000","PRIORITY":"6","MESSAGE":"capsule started"}`,
+		`{"__REALTIME_TIMESTAMP":"1718000001000000","PRIORITY":"3","MESSAGE":"boom"}`,
+	}}
+	handler := newCapsuleLogsHandler(t, reader)
+
+	response := perform(handler, http.MethodGet, "/read/capsule.logs?id=dev.vita.notes&limit=50", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+
+	var decoded capsule.LogsReadResponse
+	decodeResponse(t, response, &decoded)
+	if len(decoded.Lines) != 2 {
+		t.Fatalf("lines = %d, want 2; body=%s", len(decoded.Lines), response.Body.String())
+	}
+	if decoded.Lines[0].Message != "capsule started" || decoded.Lines[0].Level != capsule.LogLevelInfo {
+		t.Errorf("line 0 = %+v, want info/capsule started", decoded.Lines[0])
+	}
+	if decoded.Lines[1].Level != capsule.LogLevelError {
+		t.Errorf("line 1 level = %q, want error", decoded.Lines[1].Level)
+	}
+}
+
+func TestReadCapsuleLogsQueryDefaultsLimitWhenOmitted(t *testing.T) {
+	handler := newCapsuleLogsHandler(t, fakeJournalReader{})
+
+	response := perform(handler, http.MethodGet, "/read/capsule.logs?id=dev.vita.notes", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadCapsuleLogsQueryRejectsMissingID(t *testing.T) {
+	handler := newCapsuleLogsHandler(t, fakeJournalReader{})
+
+	response := perform(handler, http.MethodGet, "/read/capsule.logs?limit=10", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadCapsuleLogsQueryRejectsUnknownParam(t *testing.T) {
+	handler := newCapsuleLogsHandler(t, fakeJournalReader{})
+
+	response := perform(handler, http.MethodGet, "/read/capsule.logs?id=x&bogus=1", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadCapsuleLogsQueryRejectsNonInteger(t *testing.T) {
+	handler := newCapsuleLogsHandler(t, fakeJournalReader{})
+
+	response := perform(handler, http.MethodGet, "/read/capsule.logs?id=x&limit=abc", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+	}
+}
+
 // auditMemoryFS is a minimal in-memory auditlog.FileSystem so transport tests
 // can back a real *auditlog.Store without touching disk. It emulates the
 // fresh-exclusive-temp + rename commit the store relies on.

@@ -17,12 +17,18 @@
 
 import { createApiOrigin, type ApiOrigin, type ApiRequest } from "./api-origin.ts";
 import { parseBearer, type PuterCapabilityRegistry } from "./capability.ts";
+import type { AgentControlPlane } from "./control-plane.ts";
 import { startHarnessServer, type FaceGate, type HarnessServer } from "./server.ts";
 import type { PuterStore } from "./store.ts";
 
 export interface DualFaceDeps {
   readonly store: PuterStore;
   readonly capabilities: PuterCapabilityRegistry;
+  // The CONTROL-PLANE bridge the deploy/management console talks to (/control/*). Optional: when absent
+  // both faces are data-plane-only (/control/* answers 404). When present, the SAME bridge instance is
+  // mounted on BOTH faces' single shared api_origin and gated on the `control` capability. On-device the
+  // server-entry builds it as createAgentHttpControlPlane(...) over the agentd unix socket.
+  readonly controlPlane?: AgentControlPlane;
   // Absolute dir served as static root (the entry page + vendored puter.js live under here / aliases).
   readonly staticRoot: string;
   readonly staticAliases?: Readonly<Record<string, string>>;
@@ -76,8 +82,14 @@ export function ownerTokenFaceGate(ownerToken: string): FaceGate {
 
 // Start BOTH faces over ONE store + ONE capability registry + ONE api_origin handler.
 export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFaceBackend> {
-  // ONE handler instance — both listeners route /api/* to it, so there is genuinely one backend.
-  const apiOrigin: ApiOrigin = createApiOrigin({ capabilities: deps.capabilities, store: deps.store });
+  // ONE handler instance — both listeners route /api/* to it, so there is genuinely one backend. When a
+  // control plane is supplied it is mounted on this single api_origin (so /control/* is served on both
+  // faces, gated on the `control` capability exactly like fs/kv).
+  const apiOrigin: ApiOrigin = createApiOrigin({
+    capabilities: deps.capabilities,
+    store: deps.store,
+    ...(deps.controlPlane !== undefined ? { controlPlane: deps.controlPlane } : {}),
+  });
   const apiPrefix = deps.apiPrefix ?? "/api";
   const aliases = deps.staticAliases;
 
