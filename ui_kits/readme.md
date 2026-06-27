@@ -62,9 +62,9 @@ Vita uses the **[Lucide](https://lucide.dev)** icon library — clean 2px-stroke
 - `ui_kits/mobile/` — Home, Lock, Settings, Control Center
 
 ## Notes & caveats
-- **Fonts** load from the Google Fonts CDN (Geist + Geist Mono); the binaries are **not vendored**. For offline use, drop `.woff2` files in `assets/fonts/` and swap the `@import` in `tokens/fonts.css` for `@font-face` rules.
+- **Fonts** are **vendored offline** (Geist + Geist Mono): `tokens/fonts.css` declares `@font-face` rules over self-hosted `.woff2` binaries in `_vendor/fonts/` — no Google Fonts CDN.
 - **Specimen & screen HTML** are intentionally **self-contained** (they link `styles.css` and use the tokens directly) so they render reliably in the Design System tab without the component bundle. The `.jsx` components are the reusable source of truth for consuming projects and Starting Points.
-- **Icons** are **Lucide**. The `Icon` component auto-loads the Lucide runtime from the unpkg CDN on first use (static cards/screens include the UMD `<script>` directly). To vendor offline, self-host `lucide` and expose it as `window.lucide`.
+- **Icons** are **Lucide**, **vendored offline**. The `Icon` component lazy-loads the Lucide UMD runtime from the local vendored copy (`_vendor/lucide.min.js`) on first use, exposing `window.lucide`; static cards/screens include that same vendored UMD `<script>` directly. No CDN.
 
 ---
 
@@ -72,6 +72,6 @@ Vita uses the **[Lucide](https://lucide.dev)** icon library — clean 2px-stroke
 This project is a **Design System reference** for the project agent to build against.
 1. **Enable it:** in the Share menu, set this project's **file type to "Design System"** so your org (and consuming project agents) can reference it.
 2. **Styles:** link the single entry **`styles.css`**. Every token is then available (`--accent`, `--surface`, `--text`, `--radius-*`, `--shadow-*`, syntax colors…). Theme with `class="theme-dark"` and/or `class="mode-tiling"` on a container.
-3. **Components:** import the bundled primitives by name — `Button`, `IconButton`, `Input`, `SearchField`, `Select`, `Checkbox`, `Radio`, `Switch`, `SegmentedControl`, `Slider`, `Badge`, `Tag`, `Tooltip`, `ProgressBar`, `Toast`, `Card`, `Dialog`, `Tabs`, `ContextMenu`, `ListRow`, `Icon`, `WindowChrome`, `MenuBar`, `AppTile`, `Dock`, `StatusBar`, `CommandPalette`, `ControlCenterTile`, `PhoneFrame`, `PhoneStatusBar`, `HomeTile`, `LockClock`, `Widget`. They reference only CSS variables, so they adopt the host theme automatically; `Icon` needs no setup (auto-loads Lucide online).
+3. **Components:** import the bundled primitives by name — `Button`, `IconButton`, `Input`, `SearchField`, `Select`, `Checkbox`, `Radio`, `Switch`, `SegmentedControl`, `Slider`, `Badge`, `Tag`, `Tooltip`, `ProgressBar`, `Toast`, `Card`, `Dialog`, `Tabs`, `ContextMenu`, `ListRow`, `Icon`, `WindowChrome`, `MenuBar`, `AppTile`, `Dock`, `StatusBar`, `CommandPalette`, `ControlCenterTile`, `PhoneFrame`, `PhoneStatusBar`, `HomeTile`, `LockClock`, `Widget`. They reference only CSS variables, so they adopt the host theme automatically; `Icon` needs no setup (lazy-loads the vendored Lucide runtime offline).
 4. **Starting Points:** the picker is seeded with the full screens (Desktop, Settings, Files, Shell, Tiling, Notifications, Lock, Activity; mobile Home / Lock / Settings / Control Center) plus key components (Button, Card, WindowChrome, CommandPalette) — pick one to scaffold a new design.
 5. **Rules:** follow this README + each component's `.prompt.md`. Geist + Geist Mono, TS-blue accent, Lucide icons, sentence-case copy, monospace for code / paths / shortcuts.
