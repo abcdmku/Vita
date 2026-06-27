@@ -1,0 +1,40 @@
+# Vita owner-token provisioning — mint + persist the network-face owner bearer secret on first boot.
+#
+# Ordered Before=vita-platform.service so the persisted token file exists before the platform unit's
+# LoadCredential= reads it. Idempotent: a no-op when the token already exists (kept across reboots).
+# See /usr/lib/vita/owner-token/vita-owner-token.sh for the mechanism rationale.
+[Unit]
+Description=Vita owner-token provisioning (mint + persist the network-face owner secret)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Needs the persistent /var partition mounted (that is where the token is persisted). DefaultDependencies
+# keep it after local-fs; the explicit RequiresMountsFor binds it to the apps/owner tree on var.mount.
+After=local-fs.target
+RequiresMountsFor=/var/lib/vita
+Before=vita-platform.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vita/owner-token/vita-owner-token.sh
+StandardOutput=journal+console
+StandardError=journal+console
+# Minting a random file under /var needs no host-mutation authority; run with a tight sandbox. It must
+# write /var/lib/vita/owner, so ReadWritePaths opens exactly that subtree under ProtectSystem=strict.
+# (Runs as root so the 0400 token is root-owned for LoadCredential; no DynamicUser here.)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vita
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+
+[Install]
+WantedBy=multi-user.target

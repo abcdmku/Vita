@@ -12,7 +12,10 @@ export const DEFAULT_SOURCE_DATE_EPOCH = "1781308800";
 export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "bash",
   "ca-certificates",
+  "cage",
+  "chromium",
   "coreutils",
+  "curl",
   "cryptsetup-bin",
   "dbus",
   "initramfs-tools",
@@ -96,7 +99,10 @@ Output=vita-debian-trixie-x86_64-root
 Packages=
     bash
     ca-certificates
+    cage
+    chromium
     coreutils
+    curl
     cryptsetup-bin
     dbus
     initramfs-tools

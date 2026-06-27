@@ -1,0 +1,124 @@
+# Vita Platform server (the Puter-compatible HTTP service) — three-mode OS.
+#
+# This is the ONE backend behind every install mode. It serves:
+#   • a LOCAL face on http://127.0.0.1:${VITA_PLATFORM_PORT} (default 7681) — what the on-device
+#     kiosk browser (cage + chromium, desktop mode) and a same-machine browser/diagnostic hit; loopback.
+#   • a NETWORK face (TLS + owner-token) on the routable interface — what a browser on another machine
+#     hits over HTTPS. Which faces actually bind is the server's own decision, driven by vita.mode=
+#     (passed through as VITA_MODE below) and mapped to the server VitaMode in server-entry.ts — see
+#     architecture/puter-compat-layer.md "Access faces".
+#
+# APPS_ROOT=/var/lib/vita/apps is the persisted per-app store (fs+kv backing). It lives on the
+# persistent data partition (mounted at /var by var.mount) and is created by tmpfiles.d/vita-apps.conf,
+# so it is present in EVERY mode (headless included) before this unit starts. A value written here
+# survives reboot (proven by the headless boot's persistence marker).
+#
+# Health: Type=notify — server-entry.ts calls sd_notify(READY=1) once BOTH faces are listening, so the
+# unit is "active" only after the ports are bound. The kiosk unit (After=vita-platform.service) then
+# unblocks and chromium never points at a dead port.
+[Unit]
+Description=Vita platform server (Puter-compatible host: local + network faces)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+# Loopback + (optionally) the routable NIC. Deliberately NOT ordered after network-online.target:
+# the local face is loopback-only and waiting on network-online hangs headless/no-NIC boots ~120s
+# (same rationale as vita-agentd / vita-ts). The network face binds at start; if no address is up yet
+# 0.0.0.0 still binds (it accepts on whichever address appears).
+After=vita-agentd.service
+Wants=vita-agentd.service
+# The persisted store must be mounted before we open it (the verity-only var.mount provides /var). On a
+# plain non-verity smoke image var.mount is skipped and the store falls back to /var on the root fs.
+RequiresMountsFor=/var/lib/vita/apps
+
+[Service]
+# INTEGRATED: the real platform server now runs on the on-device, pinned Deno runtime (the same binary
+# vita-ts.service uses, /usr/lib/vita/deno). server-entry.ts (server/server-entry.ts) reads the env
+# below, maps it onto ServiceOptions, starts startPuterPlatformService(), mints the local kiosk session,
+# and sd_notify(READY=1)s once both faces listen. Unlike vita-ts.service this unit BINDS TCP+TLS, so it
+# needs --allow-net scoped to the bind addresses and --allow-read of the served static dir + TLS material.
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
+  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/var/lib/vita/owner,/run/vita \
+  --allow-write=/var/lib/vita/apps,/run/vita \
+  --allow-net \
+  --allow-run=systemd-notify \
+  --allow-env \
+  /usr/lib/vita/app-platform/ui_kits/desktop/runtime/puter/server/server-entry.ts
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=60s
+StandardOutput=journal+console
+StandardError=journal+console
+
+# Mode + wiring passed to the server. VITA_MODE is written to /run/vita/platform.env at boot from
+# vita.mode= by the vita-mode generator; the default here keeps a hand-started unit sane.
+# Both VITA_PLATFORM_PORT (the image/kiosk env name) AND VITA_LOCAL_PORT (the LAUNCH.md name) are pinned
+# to 7681 so the local face matches the kiosk unit + kiosk launch script regardless of which name the
+# entry reads. APPS_ROOT and VITA_APPS_ROOT are both set for the same reason.
+Environment=VITA_MODE=headless
+Environment=VITA_PLATFORM_PORT=7681
+Environment=VITA_LOCAL_PORT=7681
+Environment=VITA_LOCAL_HOST=127.0.0.1
+Environment=VITA_NETWORK_HOST=0.0.0.0
+Environment=VITA_NETWORK_PORT=7443
+Environment=VITA_APPS_ROOT=/var/lib/vita/apps
+Environment=APPS_ROOT=/var/lib/vita/apps
+Environment=VITA_RUN_DIR=/run/vita
+# Owner-provided TLS material (spec §16: the owner holds the private key). If these files are absent the
+# server self-signs in-process (server/tls.ts) and logs the cert SHA-256 fingerprint to pin out-of-band.
+Environment=VITA_TLS_CERT=/var/lib/vita/tls/net.crt
+Environment=VITA_TLS_KEY=/var/lib/vita/tls/net.key
+# Deno's own dirs on a read-only verity root: point at /run (tmpfs). --cached-only writes nothing, but
+# DENO_DIR keeps Deno from erroring on a missing/RO default cache location.
+Environment=DENO_DIR=/run/vita-deno DENO_NO_UPDATE_CHECK=1 NO_COLOR=1
+EnvironmentFile=-/run/vita/platform.env
+# The network-face owner bearer secret. Minted + persisted on first boot by vita-owner-token.service
+# (0640 root:vita-agent on the /var partition). The entry reads it directly via VITA_OWNER_TOKEN_FILE;
+# the platform DynamicUser is in SupplementaryGroups=vita-agent so it can read the group-readable file.
+# (LoadCredential was dropped: the per-unit credentials mount fails on this image's systemd/kernel.)
+Environment=VITA_OWNER_TOKEN_FILE=/var/lib/vita/owner/owner.token
+
+# ── Least privilege (spec §9.3): the server is an unprivileged network service ───────────────────
+# Privileged host mutation stays in agentd; this serves HTTP and reads/writes the apps store only.
+DynamicUser=yes
+SupplementaryGroups=vita-agent
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Persisted store lives under /var/lib/vita/apps (created by tmpfiles.d/vita-apps.conf as
+# root:vita-agent). We deliberately do NOT use StateDirectory=vita: with DynamicUser=yes systemd would
+# recursively chown /var/lib/vita to the (per-boot-changing) dynamic UID, clobbering the root:vita-agent
+# owner-token + the apps store ownership. Instead tmpfiles owns the tree and ReadWritePaths grants write
+# to the apps store while ProtectSystem=strict keeps the rest of the rootfs read-only.
+# /run/vita is created owned by the DynamicUser each start (the published session + owner token land here).
+RuntimeDirectory=vita vita-deno
+RuntimeDirectoryMode=0750
+ReadWritePaths=/var/lib/vita/apps
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# Local face = loopback; network face = TCP/TLS over the routable NIC. Allow the inet families plus
+# AF_UNIX (agentd socket + the sd_notify datagram). No raw sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+# Deno's V8 uses memory-protection-keys (PKU) hardening at startup: pkey_alloc (x86-64 syscall 330) is
+# NOT in @system-service, so the allow-list above otherwise SIGSYS-kills Deno before it prints anything
+# (host-verified on vita-ts.service: status=31/SYS, audit syscall=330). Allow back exactly the pkey
+# family and nothing else — identical to vita-ts.service. Any other forbidden syscall still kills.
+SystemCallFilter=pkey_alloc pkey_free pkey_mprotect
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

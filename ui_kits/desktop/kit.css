@@ -12,8 +12,23 @@
 /* menu bar — tightened */
 .v-menubar{position:absolute;top:0;left:0;right:0;height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:var(--surface-translucent);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);border-bottom:1px solid var(--hairline);z-index:40}
 .v-brand{font-weight:600;font-size:13.5px;color:var(--text)}.v-brand i{font-family:var(--font-mono);font-weight:600;font-size:10.5px;color:var(--accent);font-style:normal}
-.v-menus{display:flex;gap:15px;font-size:12.5px;color:var(--text-secondary);font-weight:500}
+.v-menus{display:flex;gap:4px;font-size:12.5px;color:var(--text-secondary);font-weight:500}
+.v-menus>span{padding:3px 8px;border-radius:var(--radius-sm);cursor:default;user-select:none}
+.v-menus>span:hover{background:var(--surface-raised);color:var(--text)}
+.v-menus>span.open{background:var(--accent-subtle);color:var(--accent)}
 .v-status{display:flex;align-items:center;gap:11px;color:var(--text-secondary)}.v-status .clk{font-family:var(--font-mono);font-size:12px;color:var(--text)}
+
+/* menu-bar dropdown — anchored under the active menu title (positioned inline by the view-model) */
+.v-dropdown{position:absolute;top:32px;left:14px;min-width:208px;padding:5px;background:var(--surface-overlay);backdrop-filter:var(--blur-thick);-webkit-backdrop-filter:var(--blur-thick);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-popover);z-index:48;display:none}
+.v-dropdown.show{display:block}
+.v-dropdown-list{display:flex;flex-direction:column;gap:1px}
+.v-mitem{display:flex;align-items:center;gap:18px;padding:6px 10px;border-radius:var(--radius-sm);font-size:12.5px;color:var(--text-secondary);cursor:default;white-space:nowrap}
+.v-mitem:hover{background:var(--accent-subtle);color:var(--accent)}
+.v-mitem .v-mitem-label{flex:1}
+.v-mitem .v-mitem-acc{color:var(--text-faint);font-size:11px}
+.v-mitem.disabled{color:var(--text-faint);opacity:.5;pointer-events:none}
+.v-mitem.disabled:hover{background:transparent;color:var(--text-faint)}
+.v-mitem.is-checked .v-mitem-label::before{content:'✓ ';color:var(--accent)}
 
 /* windows */
 .v-win{position:absolute;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-window);box-shadow:var(--shadow-window);overflow:hidden}
@@ -52,7 +67,10 @@
 .v-dtile.on::after{content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--accent)}
 .v-dsep{width:1px;height:36px;background:var(--hairline);margin:0 2px}
 
-/* centered command palette */
-.v-palette{position:absolute;left:50%;top:140px;transform:translateX(-50%);width:520px;background:var(--surface-overlay);backdrop-filter:var(--blur-thick);-webkit-backdrop-filter:var(--blur-thick);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-popover);overflow:hidden;z-index:50}
-.v-scrim{position:absolute;inset:0;background:rgba(10,13,18,.12);z-index:45;pointer-events:none}
+/* centered command palette — hidden by default; the shell shows it on ⌘K (.show) */
+.v-palette{position:absolute;left:50%;top:140px;transform:translateX(-50%);width:520px;background:var(--surface-overlay);backdrop-filter:var(--blur-thick);-webkit-backdrop-filter:var(--blur-thick);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-popover);overflow:hidden;z-index:50;display:none}
+.v-palette.show{display:block}
+/* dismiss scrim — only present (and click-catching) while an overlay is open (.show) */
+.v-scrim{position:absolute;inset:0;background:rgba(10,13,18,.12);z-index:45;display:none}
+.v-scrim.show{display:block}
 .theme-dark .v-scrim{background:rgba(5,7,10,.34)}
