@@ -415,6 +415,8 @@ function installModeOverlay() {
   const sys = join(overlayHost, "usr", "lib", "systemd", "system");
   const wants = [
     [join(sys, "multi-user.target.wants", "vita-platform.service"), "../vita-platform.service"],
+    [join(sys, "multi-user.target.wants", "vita-owner-token.service"), "../vita-owner-token.service"],
+    [join(sys, "multi-user.target.wants", "vita-platform-selftest.service"), "../vita-platform-selftest.service"],
     [join(sys, "graphical.target.wants", "vita-kiosk.service"), "../vita-kiosk.service"],
   ];
   for (const [link, target] of wants) {
@@ -422,6 +424,42 @@ function installModeOverlay() {
     if (!existsSync(link)) { mkdirSync(dirname(link), { recursive: true }); symlinkSync(target, link); }
   }
   return useNative ? overlayHost : "/work/os/x86_64/mode-overlay";
+}
+
+// Stage the PUTER PLATFORM RUNTIME into the image: the WM-free server spine + the api/store/capability
+// modules + the on-device Deno boot entry (server/server-entry.ts) + the vendored Apache-2.0 puter.js,
+// laid out so server.ts's relative path math resolves on-device:
+//   server-entry.ts at /usr/lib/vita/puter/server/server-entry.ts
+//     -> runtimeDir  = /usr/lib/vita/puter           (staticRoot; serves kiosk-entry.html)
+//     -> vendorDir   = /usr/lib/vita/_vendor          (/_vendor alias -> the puter.js bundle)
+// So we copy ui_kits/desktop/runtime/puter -> usr/lib/vita/puter and ui_kits/desktop/_vendor ->
+// usr/lib/vita/_vendor, EXCLUDING the spike harnesses + *.test.ts (dev-only; not served on-device).
+// The Deno runtime binary itself is staged separately by ts-image.mjs (ts-overlay/usr/lib/vita/deno);
+// vita-platform.service invokes that same pinned binary. Returns a fresh overlay dir for --extra-tree.
+function installPuterOverlay() {
+  if (DRY) return useNative ? join(OUT, "puter-overlay") : "/work/os/x86_64/out/puter-overlay";
+  const staged = join(OUT, "puter-overlay");
+  const puterSrc = join(REPO, "ui_kits", "desktop", "runtime", "puter");
+  const vendorSrc = join(REPO, "ui_kits", "desktop", "_vendor");
+  if (!existsSync(puterSrc)) fail(`1e · puter runtime missing: ${puterSrc} (did the platform-server merge land?)`);
+  if (!existsSync(join(vendorSrc, "puter", "v2.js"))) fail(`1e · vendored puter.js missing: ${join(vendorSrc, "puter", "v2.js")}`);
+  const puterDst = join(staged, "usr", "lib", "vita", "puter");
+  const vendorDst = join(staged, "usr", "lib", "vita", "_vendor");
+  rmSync(staged, { recursive: true, force: true });
+  mkdirSync(dirname(puterDst), { recursive: true });
+  // Copy the runtime, dropping the dev-only spike dir + every *.test.ts (the on-device server never runs them).
+  cpSync(puterSrc, puterDst, {
+    recursive: true,
+    filter: (src) => {
+      const rel = src.slice(puterSrc.length);
+      if (rel === "/spike" || rel.startsWith("/spike/")) return false;
+      if (rel.endsWith(".test.ts")) return false;
+      return true;
+    },
+  });
+  cpSync(vendorSrc, vendorDst, { recursive: true });
+  log(`   staged puter platform runtime → ${puterDst} (+ vendored puter.js → ${vendorDst})`);
+  return useNative ? staged : "/work/os/x86_64/out/puter-overlay";
 }
 
 // ARCHIVED (feat/os-three-modes): installCefOverlay() — staged the CEF runtime + osr_host + flagship
@@ -462,6 +500,8 @@ if (MODE === "smoke") {
   // Three-mode overlay: platform server (placeholder) + cage/chromium kiosk unit + vita-mode generator
   // (headless|desktop|network) + apps tmpfiles. Shipped in EVERY build; the generator selects per boot.
   const modeOverlay = installModeOverlay();
+  // Puter platform runtime + vendored Apache-2.0 puter.js (the real server the platform unit runs on Deno).
+  const puterOverlay = installPuterOverlay();
   // P1-030: stage the pinned Deno runtime into ts-overlay (ts-image.mjs fetches + sha256-verifies + extracts the
   // binary to ts-overlay/usr/lib/vita/deno), then ship the on-device TS runtime + entrypoint via --extra-tree.
   const tsOverlay = useNative ? join(HERE, "ts-overlay") : "/work/os/x86_64/ts-overlay";
@@ -558,7 +598,7 @@ if (MODE === "smoke") {
     ["--format", "disk", "--bootable=yes", ...SMOKE_VERIFICATION_PACKAGES,
      ...incremental, ...verity, ...bootloaderPin, ...sb,
      `--extra-tree=${smokeOverlay}`, `--extra-tree=${agentOverlay}`, `--extra-tree=${tsOverlay}`,
-     `--extra-tree=${modeOverlay}`, ...verityTree, ...luksTree,
+     `--extra-tree=${modeOverlay}`, `--extra-tree=${puterOverlay}`, ...verityTree, ...luksTree,
      "--root-password=vita", "--kernel-command-line", cmdline]);
   const disk = findOutput(".raw");
   if (luksMode) luksFormatDataPartition(disk, luksKey);

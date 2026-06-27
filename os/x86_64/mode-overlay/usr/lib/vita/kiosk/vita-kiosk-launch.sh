@@ -12,7 +12,7 @@ set -u
 MARKER=VITA-KIOSK
 TTY=/dev/ttyS0
 PORT="${VITA_PLATFORM_PORT:-7681}"
-URL="${VITA_KIOSK_URL:-http://127.0.0.1:${PORT}/}"
+URL="${VITA_KIOSK_URL:-http://127.0.0.1:${PORT}/kiosk-entry.html}"
 RUNTIME="${XDG_RUNTIME_DIR:-/run/vita-kiosk}"
 
 emit() {

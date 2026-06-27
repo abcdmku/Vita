@@ -82,6 +82,7 @@ const expectedPackageAllowlist = [
   "cage",
   "chromium",
   "coreutils",
+  "curl",
   "cryptsetup-bin",
   "dbus",
   "initramfs-tools",

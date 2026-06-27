@@ -33,7 +33,7 @@ StandardError=journal+console
 
 # Local face the kiosk browser loads. Kept in lockstep with vita-platform.service's port.
 Environment=VITA_PLATFORM_PORT=7681
-Environment=VITA_KIOSK_URL=http://127.0.0.1:7681/
+Environment=VITA_KIOSK_URL=http://127.0.0.1:7681/kiosk-entry.html
 # cage/chromium need a writable HOME + XDG_RUNTIME_DIR (wayland socket, chromium profile). A read-only
 # verity root has none, so point them at /run (tmpfs) created per-start by RuntimeDirectory=.
 Environment=HOME=/run/vita-kiosk

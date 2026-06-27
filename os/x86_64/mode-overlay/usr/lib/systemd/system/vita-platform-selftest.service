@@ -1,0 +1,38 @@
+# Vita platform self-test — the baked boot probe (task checks (a)-(f)) for the HEADLESS verification.
+#
+# Ordered After=vita-platform.service (Type=notify), so both faces are listening before it probes them.
+# It emits VITA-SELFTEST PASS/FAIL markers to the serial console (StandardOutput=journal+console) so a
+# host boot-log capture is the evidence. Always exits 0 (the markers are the verdict; it never blocks).
+#
+# Self-test only — present in every mode but harmless. (A production image can mask it; it is gated to
+# multi-user.target like the other boot-verification probes.)
+[Unit]
+Description=Vita platform boot self-test (probe local + network faces, persistence)
+Documentation=file:///usr/share/doc/vita/three-modes.md
+After=vita-platform.service
+Wants=vita-platform.service
+Requires=vita-platform.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/vita/platform/vita-platform-selftest.sh
+# It reads /run/vita (the published session) + curls loopback + the persistent kv store. It needs the
+# same port env the platform unit uses.
+Environment=VITA_PLATFORM_PORT=7681
+Environment=VITA_NETWORK_PORT=7443
+StandardOutput=journal+console
+StandardError=journal+console
+# Read-only against the host except the kv witness (written through the gated api, not the fs directly)
+# and the bootmark under /var/lib/vita/apps. Tight-ish sandbox; curl needs inet + DNS-less loopback.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vita/apps
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

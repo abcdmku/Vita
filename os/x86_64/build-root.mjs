@@ -15,6 +15,7 @@ export const DEFAULT_PACKAGE_ALLOWLIST = Object.freeze([
   "cage",
   "chromium",
   "coreutils",
+  "curl",
   "cryptsetup-bin",
   "dbus",
   "initramfs-tools",
@@ -101,6 +102,7 @@ Packages=
     cage
     chromium
     coreutils
+    curl
     cryptsetup-bin
     dbus
     initramfs-tools
