@@ -181,6 +181,8 @@ function newFile() {
 
 // ---- boot ----
 async function boot() {
+  // Paint Lucide chrome icons (idempotent; replaces any <i data-lucide> with inline SVGs).
+  try { window.lucide && window.lucide.createIcons(); } catch (_) {}
   // CodeMirror surface.
   cm = window.CodeMirror.fromTextArea(els.code || document.getElementById("code"), {
     lineNumbers: true,

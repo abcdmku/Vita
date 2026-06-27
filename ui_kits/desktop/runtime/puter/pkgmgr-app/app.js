@@ -17,6 +17,11 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+// Replace any freshly-inserted <i data-lucide> placeholders with their SVGs. Lucide's UMD bundle is
+// vendored offline at /_vendor/lucide.min.js (window.lucide). Call after every dynamic render that
+// injects icon markup; no-op if the bundle is somehow absent.
+function icons() { if (window.lucide && typeof window.lucide.createIcons === "function") window.lucide.createIcons(); }
+
 // The api_origin + bearer. /session.js sets window.puter.authToken + APIOrigin; mirror them here.
 function apiOrigin() {
   return (window.__vitaSession && window.__vitaSession.apiOrigin) || (window.location.origin + "/api");
@@ -82,6 +87,7 @@ const state = {
 async function boot() {
   wireTabs();
   wireActions();
+  icons(); // paint the static chrome icons (brand, refresh, tab labels, empty glyph) on first load.
   try {
     // whoami (proves the meta token authenticates). The data plane's /whoami is gated on `auth`, which
     // the pkgmgr app also holds — a cheap connectivity proof.
@@ -162,6 +168,7 @@ function renderList() {
     li.addEventListener("click", () => selectPackage(p.id));
     ul.appendChild(li);
   }
+  icons();
 }
 
 async function selectPackage(id) {
@@ -193,6 +200,7 @@ function renderDetail(p) {
   $("#editor-path").textContent = "select a file";
   $("#editor-status").textContent = "";
   $("#btn-save").disabled = true;
+  icons();
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -207,7 +215,7 @@ async function loadTree(path) {
   if (path !== "/") {
     const up = document.createElement("li");
     up.className = "tnode tnode-up";
-    up.textContent = "↑ ..";
+    up.innerHTML = `<span class="tnode-icon"><i data-lucide="arrow-up"></i></span><span class="tnode-name">..</span>`;
     up.addEventListener("click", () => loadTree(parentOf(path)));
     ul.appendChild(up);
   }
@@ -215,11 +223,13 @@ async function loadTree(path) {
     const li = document.createElement("li");
     li.className = "tnode tnode-" + node.kind;
     li.dataset.path = node.path;
-    li.innerHTML = `<span class="tnode-icon">${node.kind === "dir" ? "📁" : "📄"}</span><span class="tnode-name">${esc(node.name)}</span>` +
+    const icon = node.kind === "dir" ? "folder" : "file-code";
+    li.innerHTML = `<span class="tnode-icon"><i data-lucide="${icon}"></i></span><span class="tnode-name">${esc(node.name)}</span>` +
       (node.kind === "file" ? `<span class="tnode-size">${node.size}B</span>` : "");
     li.addEventListener("click", () => node.kind === "dir" ? loadTree(node.path) : openFile(node.path));
     ul.appendChild(li);
   }
+  icons();
 }
 
 async function openFile(path) {
@@ -232,6 +242,7 @@ async function openFile(path) {
   $("#editor-path").textContent = path;
   $("#editor-status").textContent = "digest " + data.digest;
   $("#btn-save").disabled = ed.disabled;
+  icons();
 }
 
 async function saveFile() {
@@ -274,8 +285,8 @@ async function loadPerms() {
     tr.dataset.cap = cap;
     tr.innerHTML = `
       <td><code>${cap}</code></td>
-      <td>${isReq ? "✔" : "—"}</td>
-      <td class="cell-granted">${isGr ? `<span class="granted-yes">granted</span>` : `<span class="granted-no">denied</span>`}</td>
+      <td>${isReq ? `<span class="perm-req-yes"><i data-lucide="check"></i></span>` : `<span class="perm-req-no">—</span>`}</td>
+      <td class="cell-granted">${isGr ? `<span class="granted-yes"><i data-lucide="check"></i>granted</span>` : `<span class="granted-no">denied</span>`}</td>
       <td class="cell-action"></td>`;
     const action = tr.querySelector(".cell-action");
     if (isGr) {
@@ -289,6 +300,7 @@ async function loadPerms() {
     }
     body.appendChild(tr);
   }
+  icons();
 }
 
 async function changeGrant(capability, action) {
@@ -329,14 +341,16 @@ async function loadAudit() {
   for (const e of entries) {
     const li = document.createElement("li");
     li.className = "audit-row audit-" + e.outcome;
+    const oIcon = e.outcome === "deny" ? "shield-alert" : "check";
     li.innerHTML = `
       <span class="a-time">${new Date(e.at).toLocaleTimeString()}</span>
-      <span class="a-outcome a-${e.outcome}">${e.outcome === "deny" ? "DENIED" : "allow"}</span>
+      <span class="a-outcome a-${e.outcome}"><i data-lucide="${oIcon}"></i>${e.outcome === "deny" ? "DENIED" : "allow"}</span>
       <span class="a-cap"><code>${esc(e.capability)}</code></span>
       <span class="a-op">${esc(e.operation || "")}</span>
       ${e.code ? `<span class="a-code">${esc(e.code)}</span>` : ""}`;
     ul.appendChild(li);
   }
+  icons();
 }
 
 // ----------------------------------------------------------------------------------------------
