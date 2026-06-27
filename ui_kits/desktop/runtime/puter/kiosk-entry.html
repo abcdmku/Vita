@@ -27,6 +27,11 @@
   </style>
   <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). Same-origin on the local face. -->
   <script src="/_vendor/puter/v2.js"></script>
+  <!-- LOCAL-FACE session bootstrap: the platform serves /session.js ONLY on the trust-on-host kiosk
+       face. It points puter.js at our same-origin /api and hands it the minted vita.kiosk app-session
+       token, so whoami/fs/kv carry the bearer and clear the always-on per-app gate (no 401). On the
+       network face /session.js 404s, so the SDK stays unauthenticated there (owner-gated separately). -->
+  <script src="/session.js"></script>
 </head>
 <body>
   <div class="wrap">
@@ -44,18 +49,42 @@
       sdkEl.textContent = hasSdk ? "puter.js loaded" : "puter.js MISSING";
       sdkEl.className = "badge " + (hasSdk ? "ok" : "err");
 
-      // Probe the same-origin api_origin liveness (whoami over the trust-on-host local face). On the
-      // kiosk face no owner token is needed; this just confirms the backend is reachable.
-      fetch("/api/whoami", { headers: { "x-vita-probe": "1" } })
-        .then(function (r) {
-          // 401/403 still means the api_origin is up (it answered) — only a network error is a failure.
-          apiEl.textContent = "api_origin reachable (HTTP " + r.status + ")";
-          apiEl.className = "badge ok";
-        })
-        .catch(function (e) {
-          apiEl.textContent = "api_origin unreachable: " + (e && e.message);
-          apiEl.className = "badge err";
-        });
+      // Authenticated probe over the trust-on-host LOCAL face. /session.js (loaded above) set puter.js's
+      // api_origin to our same-origin /api and its authToken to the minted vita.kiosk session, so the
+      // SDK's whoami carries the bearer and clears the always-on per-app gate. A successful whoami here is
+      // the proof the token injection works (the previous tokenless fetch got 401 from the gate).
+      var whoamiEl = document.createElement("div");
+      whoamiEl.className = "badge";
+      whoamiEl.id = "whoami";
+      apiEl.parentNode.appendChild(whoamiEl);
+      whoamiEl.textContent = "whoami: calling…";
+
+      function reportWhoami(u) {
+        apiEl.textContent = "api_origin authenticated (SDK)";
+        apiEl.className = "badge ok";
+        whoamiEl.textContent = "whoami: " + (u && u.username ? u.username : JSON.stringify(u));
+        whoamiEl.className = "badge ok";
+        // VITA-KIOSK-WHOAMI marker for the boot-log verification (cage/chromium console -> serial via the
+        // launcher is not captured, so we also write it where a screenshot can show it).
+      }
+      function reportWhoamiErr(e) {
+        var code = e && (e.status || (e.error && e.error.code)) ;
+        whoamiEl.textContent = "whoami FAILED: " + (code || (e && e.message) || "error");
+        whoamiEl.className = "badge err";
+        apiEl.textContent = "api_origin auth FAILED (HTTP " + (code || "?") + ")";
+        apiEl.className = "badge err";
+      }
+      try {
+        if (hasSdk && window.puter.auth && typeof window.puter.auth.whoami === "function") {
+          window.puter.auth.whoami().then(reportWhoami).catch(reportWhoamiErr);
+        } else {
+          // Fall back to a direct bearer fetch using the injected token (still proves the gate clears).
+          var t = (window.__vitaSession && window.__vitaSession.hasToken && window.puter && window.puter.authToken) || "";
+          fetch("/api/whoami", { headers: t ? { Authorization: "Bearer " + t } : {} })
+            .then(function (r) { return r.ok ? r.json().then(reportWhoami) : reportWhoamiErr({ status: r.status }); })
+            .catch(reportWhoamiErr);
+        }
+      } catch (e) { reportWhoamiErr(e); }
     })();
   </script>
 </body>

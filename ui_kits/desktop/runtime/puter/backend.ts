@@ -41,6 +41,12 @@ export interface DualFaceDeps {
   // face binds plain HTTP — harness-only / explicit opt-out. The LOCAL face is always plain (loopback,
   // trust-on-host). Build this with `resolveTlsMaterial()` from server/tls.ts.
   readonly networkTls?: { readonly cert: string; readonly key: string };
+  // LOCAL FACE ONLY: a provider for the minted local app-session token, handed to the loopback/kiosk
+  // listener so it can serve `GET /session.js` (the in-browser puter.js authenticates to the local
+  // api_origin with it). NEVER passed to the network listener — the local kiosk token is a
+  // trust-on-host secret and must not be served to a remote client (the network face gates on the
+  // separate owner token). Returns the current token, or undefined before it is minted.
+  readonly localSessionToken?: () => string | undefined;
 }
 
 export interface DualFaceBackend {
@@ -82,6 +88,8 @@ export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFace
     port: deps.localPort ?? 0,
     staticRoot: deps.staticRoot,
     ...(aliases !== undefined ? { staticAliases: aliases } : {}),
+    // LOCAL FACE ONLY: serve /session.js carrying the minted app token (trust-on-host).
+    ...(deps.localSessionToken !== undefined ? { localSessionToken: deps.localSessionToken } : {}),
     // No faceGate on the local face: trust-on-host.
   });
 

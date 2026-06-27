@@ -46,6 +46,13 @@ export interface HarnessServerDeps {
   // plain HTTP — used for the NETWORK face (the owner token is a bearer secret, so TLS is mandatory
   // there). The local/kiosk face omits this (plain HTTP on loopback, trust-on-host). See server/tls.ts.
   readonly tls?: { readonly cert: string; readonly key: string };
+  // LOCAL FACE ONLY: a provider for the minted local app-session token. When set, this listener serves a
+  // same-origin `GET /session.js` that the kiosk page loads to authenticate the in-browser puter.js SDK
+  // to the local api_origin (it calls puter.setAPIOrigin + puter.setAuthToken). The NETWORK face MUST NOT
+  // set this — the local kiosk token is a trust-on-host secret and must never be served to a remote
+  // client (the network face already gates on the separate owner token). Returns the current token, or
+  // undefined before the session is minted (then /session.js answers a benign no-token stub).
+  readonly localSessionToken?: () => string | undefined;
 }
 
 export interface HarnessServer {
@@ -79,9 +86,10 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     .sort((a, b) => b[0].length - a[0].length);
 
   const faceGate = deps.faceGate;
+  const localSessionToken = deps.localSessionToken;
 
   const onRequest = (req: IncomingMessage, res: ServerResponse): void => {
-    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate).catch((err: unknown) => {
+    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate, localSessionToken).catch((err: unknown) => {
       res.statusCode = 500;
       res.end(`internal error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -115,9 +123,21 @@ async function handleRequest(
   staticRoot: string,
   aliases: readonly [string, string][],
   faceGate: FaceGate | undefined,
+  localSessionToken: (() => string | undefined) | undefined,
 ): Promise<void> {
   const rawUrl = req.url ?? "/";
   const [pathOnly, queryString] = splitQuery(rawUrl);
+
+  // LOCAL-FACE session bootstrap. The minted local app-session token never reaches the page through the
+  // static files (the page is identical on both faces); we hand it to the in-browser puter.js SDK with a
+  // tiny same-origin script served ONLY on the face that has a token provider (the local/kiosk face). The
+  // network face never sets localSessionToken, so /session.js there falls through to a 404 — the local
+  // kiosk token is a trust-on-host secret and must not be served to a remote client. (The path is also
+  // guarded by the network face gate above for static requests; the provider gate is the primary defence.)
+  if (localSessionToken !== undefined && req.method !== undefined && req.method.toUpperCase() === "GET" && pathOnly === "/session.js") {
+    serveSessionScript(res, apiPrefix, localSessionToken());
+    return;
+  }
 
   // CORS preflight for the api surface (the SDK uses credentials + a bearer header).
   if (pathOnly.startsWith(apiPrefix)) {
@@ -187,6 +207,54 @@ async function handleRequest(
 
   // Static file serving (desktop preview, vendored puter.js, spike app).
   serveFromRoot(decodedPath, res, staticRoot);
+}
+
+// Build + serve the same-origin session bootstrap script the kiosk page loads. It points the in-browser
+// puter.js SDK at OUR local api_origin and hands it the minted app-session token, so the SDK's
+// whoami/fs/kv calls carry `Authorization: Bearer <token>` and clear the always-on per-app capability gate
+// (no 401). Served from the LOCAL face only (the network face has no token provider). The token is
+// embedded as a JSON string literal so it can never break out of the string context.
+export function buildSessionScript(apiPrefix: string, token: string | undefined): string {
+  // The SDK reads its origin from `puter.APIOrigin` and the bearer from `puter.authToken`; the public
+  // setters are setAPIOrigin()/setAuthToken() (verified against the vendored bundle). Same-origin: the
+  // api_origin is `<this origin>${apiPrefix}` — we use a relative prefix so it works regardless of host.
+  const prefixLiteral = JSON.stringify(apiPrefix);
+  const tokenLiteral = JSON.stringify(token ?? "");
+
+  return [
+    "// Vita LOCAL-face session bootstrap — served only on the trust-on-host kiosk face (server.ts).",
+    "(function () {",
+    "  var apiOrigin = window.location.origin + " + prefixLiteral + ";",
+    "  var token = " + tokenLiteral + ";",
+    "  function apply() {",
+    "    if (typeof window.puter !== 'object' || window.puter === null) return false;",
+    "    try { if (typeof window.puter.setAPIOrigin === 'function') window.puter.setAPIOrigin(apiOrigin); } catch (e) {}",
+    "    try { window.puter.APIOrigin = apiOrigin; } catch (e) {}",
+    "    if (token) {",
+    "      try { if (typeof window.puter.setAuthToken === 'function') window.puter.setAuthToken(token); } catch (e) {}",
+    "      try { window.puter.authToken = token; } catch (e) {}",
+    "    }",
+    "    return true;",
+    "  }",
+    "  window.__vitaSession = { apiOrigin: apiOrigin, hasToken: !!token };",
+    "  // puter.js initializes synchronously on load, so applying immediately works; retry briefly in case",
+    "  // this script raced ahead of the SDK's own bootstrap.",
+    "  if (!apply()) {",
+    "    var tries = 0;",
+    "    var iv = setInterval(function () { tries++; if (apply() || tries > 50) clearInterval(iv); }, 20);",
+    "  }",
+    "})();",
+    "",
+  ].join("\n");
+}
+
+function serveSessionScript(res: ServerResponse, apiPrefix: string, token: string | undefined): void {
+  const body = buildSessionScript(apiPrefix, token);
+
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/javascript; charset=utf-8");
+  res.setHeader("cache-control", "no-store");
+  res.end(body);
 }
 
 function serveFromRoot(decoded: string, res: ServerResponse, staticRoot: string): void {
