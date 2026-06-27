@@ -90,14 +90,40 @@ node --experimental-strip-types --test sdk/typescript/test/ui-kits/puter-*.test.
 node --experimental-strip-types ui_kits/desktop/runtime/puter/spike/headless-spike.ts
 ```
 
-## On-device wiring later (NOT done here — spike scope)
+## On-device wave (DONE in this branch — the dual-face backend)
 
-- Move the api_origin behind the **host-proxy** on-device: re-back `store.ts` with
-  `/var/lib/vita/apps/<id>` + the real KV, and delegate `capability.ts` to the
-  `runtime/permission-broker`. The api_origin handler itself is transport-agnostic and ports as-is.
-- **One shared registry**: in the dev preview the api_origin (serve-spike.ts) and the browser-side
-  web-app host run in SEPARATE processes, so the host is handed the server's pre-minted token
-  (`desktop.html` injects `__VITA_SPIKE_SESSION__`). On-device they share one process/registry and no
-  token injection is needed (the host mints and the api_origin honors in-process).
+The spike's in-memory store + grant-all gate have been replaced with REAL persistence + REAL
+enforcement, served on TWO reachability paths over ONE backend:
+
+| concern | spike | now |
+|---|---|---|
+| store | in-memory / temp dir | [`fs-store.ts`](fs-store.ts) — file-backed under `<appsRoot>/<appId>` (default `/var/lib/vita/apps`), survives a process/service restart. |
+| enforcement | grant-all session token, set-membership check | [`permission-model.ts`](permission-model.ts) — the capability gate DELEGATES to the platform `runtime/permission-broker` (`decideGrants`) against a per-app declared-grant policy. Ungranted → `CAP_DENIED` 403, fail-closed. |
+| reachability | single loopback listener | [`backend.ts`](backend.ts) — `startDualFaceBackend` binds a LOCAL (kiosk, trust-on-host) face AND a NETWORK (remote, owner-token) face over ONE store + ONE gate. |
+| local renderer | custom CEF/OSR compositor | a STOCK kiosk browser (`cage` + `chromium --kiosk`) — see [`KIOSK.md`](KIOSK.md) + [`kiosk-entry.html`](kiosk-entry.html). No custom compositor. |
+| fs ops | write/read/readdir/stat/mkdir/delete | + `rename`/`move` (store + `/rename` `/move`), + `/df` (the SDK's pre-write quota check). |
+
+Verify (no VM boot needed):
+```
+# the dual-face proof: persistence-across-restart, 403/grant enforcement, local+network on ONE store,
+# breadth ops (write/read/readdir/stat/mkdir/delete/rename + kv get/set/del/list + whoami) — 17 checks
+node --experimental-strip-types ui_kits/desktop/runtime/puter/spike/dual-face-harness.ts
+
+# informational: load the GENUINE bundle headless + report what it demands (non-fatal probe)
+node --experimental-strip-types ui_kits/desktop/runtime/puter/spike/real-sdk-harness.ts
+
+# unit/integration for the new persistence + enforcement + dual-bind paths — 16 tests
+node --experimental-strip-types --test sdk/typescript/test/ui-kits/puter-ondevice.test.ts
+```
+
+## Still on-device work (NOT done here — OS image / boot wave)
+
+- Bind the backend's `appsRoot` to the REAL `/var/lib/vita/apps` mount under **agentd/host-proxy** on a
+  booted node (provisioned by the OS image, not this branch).
+- Package `cage`+`chromium` into the image + the kiosk systemd units (see `KIOSK.md`), and terminate
+  **TLS** for the network face (the owner token is a bearer secret; plain HTTP is harness-only).
+- **One shared registry**: in the dev preview the api_origin and the browser-side web-app host run in
+  SEPARATE processes, so the host is handed the server's pre-minted token. On-device they share one
+  process/registry (the host mints, the api_origin honors in-process).
 - **Tighten the iframe sandbox + CORS** once the api_origin is cross-origin (drop `allow-same-origin`
   where possible; pin `Access-Control-Allow-Origin` to the app origin; enforce CSP).

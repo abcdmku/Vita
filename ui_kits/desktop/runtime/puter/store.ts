@@ -47,6 +47,10 @@ export interface PuterFsStore {
   mkdir(path: string, options?: { readonly createMissingAncestors?: boolean }): FsEntry;
   readdir(path: string): readonly FsEntry[];
   delete(path: string, options?: { readonly recursive?: boolean }): void;
+  // Move/rename `from` → `to` (file or directory subtree). `to` is the FULL destination path. Throws
+  // "subject_does_not_exist" if `from` is absent and "item_with_same_name_exists" if `to` exists and
+  // overwrite=false. The SDK's `rename` (same dir, new leaf) and `move` (new parent) both land here.
+  move(from: string, to: string, options?: { readonly overwrite?: boolean }): FsEntry;
 }
 
 export interface PuterKvStore {
@@ -236,6 +240,55 @@ export function createMemoryStore(): PuterStore {
       ensureDir(p, options?.createMissingAncestors ?? true);
       return toEntry(p, tree.get(p)!);
     },
+    move(from: string, to: string, options?: { readonly overwrite?: boolean }): FsEntry {
+      const src = normalizePath(from);
+      const dst = normalizePath(to);
+
+      if (src === "/") throw new PuterStoreError("forbidden", "cannot move root", 403);
+      if (dst === "/") throw new PuterStoreError("forbidden", "cannot move onto root", 403);
+
+      const srcNode = tree.get(src);
+
+      if (srcNode === undefined) throw new PuterStoreError("subject_does_not_exist", `no such path: ${src}`, 404);
+
+      if (dst === src) return toEntry(src, srcNode);
+      if (dst === src || dst.startsWith(`${src}/`)) {
+        throw new PuterStoreError("forbidden", "cannot move a directory into itself", 409);
+      }
+
+      const dstExisting = tree.get(dst);
+
+      if (dstExisting !== undefined && options?.overwrite !== true) {
+        throw new PuterStoreError("item_with_same_name_exists", `exists: ${dst}`, 409);
+      }
+
+      ensureDir(dirname(dst), true);
+
+      // Re-key the node and (for a dir) every descendant under the new prefix.
+      const moves: [string, string][] = [[src, dst]];
+
+      if (srcNode.isDir) {
+        for (const k of tree.keys()) {
+          if (k.startsWith(`${src}/`)) moves.push([k, `${dst}${k.slice(src.length)}`]);
+        }
+      }
+
+      // Drop any pre-existing destination subtree first (overwrite path).
+      if (dstExisting !== undefined) {
+        for (const k of [...tree.keys()]) {
+          if (k === dst || k.startsWith(`${dst}/`)) tree.delete(k);
+        }
+      }
+
+      for (const [oldKey, newKey] of moves) {
+        const node = tree.get(oldKey)!;
+
+        tree.delete(oldKey);
+        tree.set(newKey, { ...node, modified: nowSeconds() });
+      }
+
+      return toEntry(dst, tree.get(dst)!);
+    },
     read(path: string): ReadResult | undefined {
       const p = normalizePath(path);
       const node = tree.get(p);
@@ -326,6 +379,7 @@ export interface NodeFsStoreDeps {
     readFileSyncText(p: string): string;
     writeFileSync(p: string, data: Uint8Array | string): void;
     rmSync(p: string, opts: { recursive: boolean; force: boolean }): void;
+    renameSync(from: string, to: string): void;
     readdirSync(p: string): readonly string[];
     statSync(p: string): { isDirectory(): boolean; size: number; mtimeMs: number; birthtimeMs: number };
   };
@@ -392,6 +446,28 @@ export function createNodeFsStore(deps: NodeFsStoreDeps): PuterStore {
 
       nfs.mkdirSync(real(p), { recursive: options?.createMissingAncestors ?? true });
       return toEntry(p);
+    },
+    move(from: string, to: string, options?: { readonly overwrite?: boolean }): FsEntry {
+      const src = normalizePath(from);
+      const dst = normalizePath(to);
+
+      if (src === "/") throw new PuterStoreError("forbidden", "cannot move root", 403);
+      if (dst === "/") throw new PuterStoreError("forbidden", "cannot move onto root", 403);
+      if (!nfs.existsSync(real(src))) throw new PuterStoreError("subject_does_not_exist", `no such path: ${src}`, 404);
+
+      if (dst === src) return toEntry(src);
+      if (dst.startsWith(`${src}/`)) throw new PuterStoreError("forbidden", "cannot move a directory into itself", 409);
+
+      if (nfs.existsSync(real(dst))) {
+        if (options?.overwrite !== true) throw new PuterStoreError("item_with_same_name_exists", `exists: ${dst}`, 409);
+        nfs.rmSync(real(dst), { force: true, recursive: true });
+      }
+
+      const parent = real(dirname(dst));
+
+      if (!nfs.existsSync(parent)) nfs.mkdirSync(parent, { recursive: true });
+      nfs.renameSync(real(src), real(dst));
+      return toEntry(dst);
     },
     read(path: string): ReadResult | undefined {
       const p = normalizePath(path);

@@ -20,6 +20,12 @@ import {
   type ApiRequest,
 } from "./api-origin.ts";
 
+// A per-request face gate, evaluated BEFORE the api_origin's per-app capability check. The network
+// (remote-browser) face uses this to require an opaque OWNER token over the connection; the loopback
+// (trust-on-host) face passes a gate that always allows. Returns undefined to allow, or an
+// {status, body} to short-circuit (e.g. 401 when the owner token is missing/wrong).
+export type FaceGate = (request: ApiRequest) => { readonly status: number; readonly body: string } | undefined;
+
 export interface HarnessServerDeps {
   readonly apiOrigin: ApiOrigin;
   // Root directory static files are served from (the desktop ui_kits dir, etc.).
@@ -32,11 +38,15 @@ export interface HarnessServerDeps {
   readonly staticAliases?: Readonly<Record<string, string>>;
   readonly port?: number;
   readonly host?: string;
+  // Optional face gate (owner-auth) applied to BOTH api + static requests on this listener. Default:
+  // allow all (the loopback face). The network face supplies an owner-token gate.
+  readonly faceGate?: FaceGate;
 }
 
 export interface HarnessServer {
   readonly url: string;
   readonly port: number;
+  readonly host: string;
   close(): Promise<void>;
 }
 
@@ -61,8 +71,10 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     .map(([prefix, dir]) => [prefix, resolve(dir)] as [string, string])
     .sort((a, b) => b[0].length - a[0].length);
 
+  const faceGate = deps.faceGate;
+
   const server = createServer((req, res) => {
-    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases).catch((err: unknown) => {
+    handleRequest(req, res, deps.apiOrigin, apiPrefix, staticRoot, aliases, faceGate).catch((err: unknown) => {
       res.statusCode = 500;
       res.end(`internal error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -75,6 +87,7 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     async close(): Promise<void> {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     },
+    host,
     port,
     url,
   });
@@ -87,6 +100,7 @@ async function handleRequest(
   apiPrefix: string,
   staticRoot: string,
   aliases: readonly [string, string][],
+  faceGate: FaceGate | undefined,
 ): Promise<void> {
   const rawUrl = req.url ?? "/";
   const [pathOnly, queryString] = splitQuery(rawUrl);
@@ -102,12 +116,47 @@ async function handleRequest(
       path: apiPath,
       query: parseQuery(queryString),
     });
+
+    // OWNER-AUTH FACE GATE (network face): evaluated before the per-app capability gate. Preflight
+    // OPTIONS is exempt so CORS still works; everything else must clear the face gate.
+    if (faceGate !== undefined && (req.method ?? "GET").toUpperCase() !== "OPTIONS") {
+      const denied = faceGate(request);
+
+      if (denied !== undefined) {
+        res.statusCode = denied.status;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.setHeader("access-control-allow-origin", "*");
+        res.end(denied.body);
+        return;
+      }
+    }
+
     const response = apiOrigin.handle(request);
 
     res.statusCode = response.status;
     for (const [k, v] of Object.entries(response.headers)) res.setHeader(k, v);
     res.end(Buffer.from(response.body));
     return;
+  }
+
+  // Owner-auth face gate also covers static serving (the network face must not serve the entry page
+  // or vendored SDK to an unauthenticated remote client).
+  if (faceGate !== undefined) {
+    const staticReq: ApiRequest = Object.freeze({
+      body: new Uint8Array(0),
+      headers: lowercaseHeaders(req.headers),
+      method: req.method ?? "GET",
+      path: pathOnly,
+      query: parseQuery(queryString),
+    });
+    const denied = faceGate(staticReq);
+
+    if (denied !== undefined) {
+      res.statusCode = denied.status;
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.end(denied.body);
+      return;
+    }
   }
 
   // Aliased static serving: a request under an alias prefix is served from the aliased dir.

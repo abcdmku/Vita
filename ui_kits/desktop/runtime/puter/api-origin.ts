@@ -29,6 +29,8 @@ import {
   type FsEntry,
   type PuterStore,
   PuterStoreError,
+  basename,
+  dirname,
   normalizePath,
 } from "./store.ts";
 
@@ -276,6 +278,54 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     }
   }
 
+  // The SDK's `rename` sends `POST /rename { path, new_name }` (same parent, new leaf). `move` sends
+  // `POST /move { source, destination, overwrite, new_name }` where `destination` is the new PARENT dir
+  // and `new_name` (optional) the new leaf. Both land on the store's `move(from, to)`.
+  function handleRename(req: ApiRequest): ApiResponse {
+    const gated = gate(req, "fs.write");
+
+    if (!gated.ok) return gated.response;
+
+    const obj = parseJsonBody(req.body);
+    const from = readPathFromRequest(req);
+    const newName = typeof obj["new_name"] === "string" ? obj["new_name"] : (typeof obj["newName"] === "string" ? obj["newName"] : undefined);
+
+    if (from === undefined) return errorResponse(400, "field_missing", "path is required");
+    if (newName === undefined || newName === "") return errorResponse(400, "field_missing", "new_name is required");
+
+    const to = joinParent(dirOf(from), newName);
+
+    try {
+      return json(200, store.fs.move(from, to, { overwrite: obj["overwrite"] === true }));
+    } catch (err) {
+      return mapStoreError(err);
+    }
+  }
+
+  function handleMove(req: ApiRequest): ApiResponse {
+    const gated = gate(req, "fs.write");
+
+    if (!gated.ok) return gated.response;
+
+    const obj = parseJsonBody(req.body);
+    const source = typeof obj["source"] === "string" ? obj["source"] : undefined;
+    const destination = typeof obj["destination"] === "string" ? obj["destination"] : undefined;
+    const newName = typeof obj["new_name"] === "string" ? obj["new_name"] : undefined;
+
+    if (source === undefined) return errorResponse(400, "field_missing", "source is required");
+    if (destination === undefined) return errorResponse(400, "field_missing", "destination is required");
+
+    // destination is the new PARENT dir; the leaf is new_name or the source's basename.
+    const leaf = newName !== undefined && newName !== "" ? newName : baseOf(source);
+    const to = joinParent(destination, leaf);
+
+    try {
+      return json(200, store.fs.move(source, to, { overwrite: obj["overwrite"] === true }));
+    } catch (err) {
+      return mapStoreError(err);
+    }
+  }
+
   // ----- kv handler (/drivers/call, interface puter-kvstore) -----
 
   function handleDriversCall(req: ApiRequest): ApiResponse {
@@ -361,6 +411,20 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
     return json(200, { granted: true, success: true });
   }
 
+  // /df = "disk free" / quota. The SDK calls this BEFORE an fs.write to check `capacity - used >= size`
+  // (verified against the bundle: `k=await this.space(); if(k.capacity-k.used<f)…`). A 404 here makes the
+  // SDK's write throw `Cannot read properties of undefined (reading 'capacity')`. We answer a generous,
+  // static quota for the single owner (trust-on-host). Gated on fs.read (a space query is a read).
+  function handleDf(req: ApiRequest): ApiResponse {
+    const gated = gate(req, "fs.read");
+
+    if (!gated.ok) return gated.response;
+
+    const capacity = 10 * 1024 * 1024 * 1024; // 10 GiB headroom for the owner's app store
+
+    return json(200, { capacity, used: 0, free: capacity });
+  }
+
   // The newer SDK first tries a CLOUD "signed batch" upload (S3-style multipart via signed URLs):
   // POST /fs/startBatchWrite → upload to signed URLs → /fs/completeBatchWrite. That path is cloud-only
   // and not something a local single-owner api_origin implements. The SDK is designed to FALL BACK to
@@ -391,9 +455,12 @@ export function createApiOrigin(deps: ApiOriginDeps): ApiOrigin {
         if (method === "POST" && path === "/stat") return handleStat(request);
         if (method === "POST" && path === "/mkdir") return handleMkdir(request);
         if (method === "POST" && path === "/delete") return handleDelete(request);
+        if (method === "POST" && path === "/rename") return handleRename(request);
+        if (method === "POST" && path === "/move") return handleMove(request);
         if (method === "POST" && path === "/drivers/call") return handleDriversCall(request);
         // Steer the SDK's cloud "signed batch" upload onto the local /batch fallback (see the handler).
         if (method === "POST" && path === "/fs/startBatchWrite") return handleSignedBatchUnavailable(request);
+        if (path === "/df") return handleDf(request);
         if (path === "/whoami") return handleWhoami(request);
         if (path === "/rao") return handleRao(request);
 
@@ -489,6 +556,14 @@ function joinParent(parent: string | undefined, name: string): string {
   const leaf = name.replace(/^\/+/u, "");
 
   return normalizePath(base === "/" ? `/${leaf}` : `${base}/${leaf}`);
+}
+
+function dirOf(path: string): string {
+  return dirname(path);
+}
+
+function baseOf(path: string): string {
+  return basename(path);
 }
 
 // Parse a multipart/form-data body into operations + file parts. The SDK's /batch sends repeated

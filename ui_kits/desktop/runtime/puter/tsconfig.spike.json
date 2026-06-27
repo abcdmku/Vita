@@ -8,10 +8,16 @@
     "lib": ["ES2023", "DOM"]
   },
   "include": [
+    "index.ts",
     "server.ts",
+    "backend.ts",
+    "fs-store.ts",
+    "permission-model.ts",
     "spike/preview-entry.ts",
     "spike/headless-spike.ts",
     "spike/serve-spike.ts",
+    "spike/dual-face-harness.ts",
+    "spike/real-sdk-harness.ts",
     "spike/node-fs-adapter.ts"
   ]
 }

@@ -27,17 +27,30 @@ export type {
 
 export {
   createCapabilityRegistry,
+  createSessionGrantModel,
   parseBearer,
   randomOpaqueToken,
 } from "./capability.ts";
 export type {
+  CapabilityRegistryOptions,
   GateDenialCode,
   GateResult,
+  PermissionDecisionInput,
   PuterAppSession,
   PuterCapability,
   PuterCapabilityRegistry,
   PuterOwner,
+  PuterPermissionModel,
 } from "./capability.ts";
+
+export {
+  createAppGrantRegistry,
+  createBrokerPermissionModel,
+} from "./permission-model.ts";
+export type {
+  AppGrantRegistry,
+  BrokerPermissionModelDeps,
+} from "./permission-model.ts";
 
 export {
   createMemoryStore,

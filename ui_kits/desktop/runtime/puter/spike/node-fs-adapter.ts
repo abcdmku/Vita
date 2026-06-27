@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -23,6 +24,7 @@ export const nodeFsAdapter: NodeFsStoreDeps["fs"] = Object.freeze({
   readFileSyncText(p: string): string {
     return readFileSync(p, "utf8");
   },
+  renameSync,
   rmSync,
   statSync(p: string): { isDirectory(): boolean; size: number; mtimeMs: number; birthtimeMs: number } {
     const st = statSync(p);

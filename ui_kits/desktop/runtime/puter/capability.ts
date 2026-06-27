@@ -70,6 +70,46 @@ export interface PuterCapabilityRegistry {
   revoke(appInstanceId: string): void;
 }
 
+// The pluggable AUTHORIZATION authority. The registry DELEGATES every capability decision here, so the
+// gate's enforcement is not hard-coded to "the grant set baked into the session". Two implementations
+// ship:
+//   - the DEFAULT session-grant model (below): the decision is the session's declared grant set, but it
+//     is still consulted at request time (so revoking/changing grants takes effect live).
+//   - `createBrokerPermissionModel` (permission-model.ts): delegates to the REAL platform
+//     `runtime/permission-broker` (`decideGrants`) against a per-app declared-grant policy, proving the
+//     api_origin gate is enforced by the same broker the rest of the OS uses — fail-closed.
+// A model decides ALLOW only when the app genuinely holds the capability; everything else is DENY.
+export interface PuterPermissionModel {
+  // Decide whether `appId` may exercise `capability`. Returns true to ALLOW; false/throw → DENY
+  // (the registry maps a false/throw to CAP_DENIED / 403, fail-closed).
+  decide(input: PermissionDecisionInput): boolean;
+}
+
+export interface PermissionDecisionInput {
+  readonly appId: string;
+  readonly appInstanceId: string;
+  readonly capability: PuterCapability;
+  // The session's declared grants — the default model uses these; a broker model may ignore them and
+  // consult its own per-app policy keyed by appId.
+  readonly declaredGrants: ReadonlySet<PuterCapability>;
+}
+
+// The default model: ALLOW iff the capability is in the session's declared grant set. (This is the
+// spike behavior, but now routed through the delegation seam so it can be swapped for the broker.)
+export function createSessionGrantModel(): PuterPermissionModel {
+  return Object.freeze({
+    decide(input: PermissionDecisionInput): boolean {
+      return input.declaredGrants.has(input.capability);
+    },
+  });
+}
+
+export interface CapabilityRegistryOptions {
+  // The authorization authority the registry delegates every `authorize` call to. Default: the
+  // session-grant model. Pass a broker-backed model for REAL on-device enforcement.
+  readonly permissionModel?: PuterPermissionModel;
+}
+
 export interface MintInput {
   readonly appId: string;
   readonly appInstanceId: string;
@@ -88,9 +128,10 @@ const DEFAULT_OWNER: PuterOwner = Object.freeze({
   uuid: "owner-0000-0000-0000-000000000000",
 });
 
-export function createCapabilityRegistry(): PuterCapabilityRegistry {
+export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}): PuterCapabilityRegistry {
   const byToken = new Map<string, PuterAppSession>();
   const byInstance = new Map<string, PuterAppSession>();
+  const permissionModel = options.permissionModel ?? createSessionGrantModel();
 
   function denial(code: GateDenialCode, message: string, status: number): GateResult {
     return Object.freeze({ code, message, ok: false, status });
@@ -98,7 +139,22 @@ export function createCapabilityRegistry(): PuterCapabilityRegistry {
 
   return Object.freeze({
     authorize(session: PuterAppSession, capability: PuterCapability): GateResult {
-      if (!session.grants.has(capability)) {
+      // DELEGATE the decision to the pluggable permission model. Fail-closed: any false return OR thrown
+      // error from the model is a denial (CAP_DENIED / 403), never an allow.
+      let allowed = false;
+
+      try {
+        allowed = permissionModel.decide({
+          appId: session.appId,
+          appInstanceId: session.appInstanceId,
+          capability,
+          declaredGrants: session.grants,
+        });
+      } catch {
+        allowed = false;
+      }
+
+      if (!allowed) {
         return denial("CAP_DENIED", `app '${session.appId}' lacks capability '${capability}'`, 403);
       }
 
