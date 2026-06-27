@@ -54,11 +54,15 @@ CHROMIUM_FLAGS=(
   --check-for-update-interval=31536000
   --user-data-dir="${RUNTIME}/chromium"
 )
-# chromium's setuid/userns sandbox often cannot initialize in a minimal VM/container kernel; fall back
-# to --no-sandbox when the namespace setup is unavailable. The kiosk runs trusted local content only.
-if [ ! -e /proc/sys/kernel/unprivileged_userns_clone ] && [ ! -u /usr/lib/chromium/chrome-sandbox ] 2>/dev/null; then
+# chromium REFUSES to start as root with the sandbox on ("Running as root without --no-sandbox is not
+# supported"), and its setuid/userns sandbox often cannot initialize in a minimal VM/container kernel
+# anyway. The kiosk unit runs cage/chromium as root (seat0/DRM master in this bring-up config) against
+# TRUSTED local content only, so add --no-sandbox when running as root OR when the namespace/setuid
+# sandbox is unavailable. (EUID 0 is the load-bearing case here; the kernel-path check is a belt-and-
+# braces fallback for a non-root future seat user on a sandbox-incapable kernel.)
+if [ "$(id -u)" = "0" ] || { [ ! -e /proc/sys/kernel/unprivileged_userns_clone ] && [ ! -u /usr/lib/chromium/chrome-sandbox ]; } 2>/dev/null; then
   CHROMIUM_FLAGS+=(--no-sandbox)
-  emit "$MARKER: chromium sandbox unavailable in this kernel — using --no-sandbox (trusted local content)"
+  emit "$MARKER: chromium running as root / sandbox unavailable — using --no-sandbox (trusted local content)"
 fi
 
 emit "$MARKER: cage -d -- chromium ${URL}"
