@@ -2,7 +2,7 @@
 *{box-sizing:border-box}
 .v-screen{position:relative;width:1280px;height:800px;overflow:hidden;font-family:var(--font-sans);color:var(--text);background:var(--surface-base)}
 .v-wall-light{background:radial-gradient(820px 520px at 18% 4%,rgba(49,120,198,.13),transparent 60%),radial-gradient(700px 480px at 92% 98%,rgba(20,160,140,.07),transparent 60%),linear-gradient(165deg,#eef1f6,#e5eaf1 55%,#e9eef5)}
-.v-wall-dark{background:radial-gradient(1150px 760px at 82% -12%,rgba(79,157,255,.10),transparent 60%),radial-gradient(860px 620px at -6% 112%,rgba(124,92,246,.05),transparent 62%),linear-gradient(165deg,#0c0f13,#08090c)}
+.v-wall-dark{background:radial-gradient(900px 600px at 74% 4%,rgba(59,130,246,.20),transparent 56%),radial-gradient(720px 520px at 6% 98%,rgba(124,92,246,.12),transparent 58%),linear-gradient(160deg,#11151c,#0a0d12)}
 .v-grid-bg{background-image:linear-gradient(rgba(255,255,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px);background-size:30px 30px}
 .mono{font-family:var(--font-mono)}
 /* icon (Lucide) */

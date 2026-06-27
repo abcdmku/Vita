@@ -51,50 +51,42 @@
   --syn-number:#b5532b;  --syn-fn:#3178c6;      --syn-ident:#1b1f24; --syn-punct:#5a6573;
 }
 
-/* ===== DARK THEME — premium, cohesive (the Vita OS default) =====
-   A single refined cool-graphite ladder: the desktop wallpaper sits below #07090d, chrome rises
-   through #0e1117 → #161a21 → #1c212a. Surfaces are intentionally low-chroma so the TS-blue accent
-   is the ONLY saturated thing on screen — that restraint is what reads as "finished", not generic. */
+/* ===== DARK THEME (the Vita OS default) — CANONICAL handoff cool-ink ladder =====
+   Surfaces rise #0e1116 → #161a21 → #1c222b; low-chroma so the TS-blue accent (#4F9DFF) is the only
+   saturated thing on screen. These values are the single source of truth and MUST equal the typed
+   --vita-* bridge map (sdk/.../theme-tokens.ts) — the desktop-sdk token-parity test asserts it.
+   Derived/app-only extras (surface-panel, surface-hover, …) live in ui_kits/vita-app-theme.css, not
+   here, so the canonical token set stays exactly the handoff's. */
 .theme-dark {
-  /* Surface ladder (lowest → highest elevation). */
-  --surface-base:#07090d;        /* desktop / behind-everything */
-  --surface:#13161c;             /* default window/app body */
-  --surface-raised:#181c23;      /* cards, popovers, raised panels */
-  --surface-elevated:#1d222b;    /* highest: menus, dialogs, active rows */
-  --surface-sunken:#0d1014;      /* wells, code panes, inputs at rest */
-  --surface-inset:#0f1217;       /* list/track insets */
-  --surface-panel:#161a21;       /* chrome panels: system bar, toolbars, sidebars */
-  --surface-translucent:rgba(14,17,22,.66);
-  --surface-overlay:rgba(20,24,30,.86);
-  --surface-hover:rgba(255,255,255,.045);   /* row/control hover wash */
-  --surface-active:rgba(255,255,255,.075);  /* pressed/selected wash */
+  --surface-base:#0e1116;
+  --surface:#161a21;
+  --surface-raised:#1c222b;
+  --surface-sunken:#11151b;
+  --surface-inset:#1b212b;
+  --surface-translucent:rgba(16,20,27,.55);
+  --surface-overlay:rgba(28,34,43,.80);
 
-  --border:rgba(255,255,255,.085);
-  --border-strong:rgba(255,255,255,.16);
+  --border:rgba(255,255,255,.07);
+  --border-strong:rgba(255,255,255,.12);
   --hairline:rgba(255,255,255,.06);
 
-  --text:#eef1f6;
-  --text-secondary:#b6bfcc;
-  --text-muted:#838d9c;
-  --text-faint:#5d6878;
+  --text:#e6e9ef;
+  --text-secondary:#aeb8c6;
+  --text-muted:#8b97a6;
+  --text-faint:#6b7787;
 
-  /* Accent — a cleaner, slightly brighter TypeScript blue that holds up on dark chrome. */
-  --accent:#5a9bf6;
-  --accent-hover:#76aefc;
-  --accent-active:#458ae8;
-  --accent-subtle:rgba(90,155,246,.14);
-  --accent-border:rgba(90,155,246,.40);
-  --accent-fg:#06101e;
+  --accent:#4f9dff;
+  --accent-hover:#6fb0ff;
+  --accent-active:#3f8de8;
+  --accent-subtle:rgba(79,157,255,.14);
+  --accent-fg:#07101c;
 
   --success:#5bbf86; --success-subtle:rgba(91,191,134,.16);
   --warning:#e0a86b; --warning-subtle:rgba(224,168,107,.16);
   --danger:#f08a8a;  --danger-subtle:rgba(240,138,138,.16);
-  --info:#5a9bf6;
+  --info:#4f9dff;
 
-  /* Traffic-light window controls (shared by every window frame). */
-  --wc-close:#f0584f; --wc-min:#f0b429; --wc-zoom:#23c65a;
-
-  --focus-ring:rgba(90,155,246,.55);
+  --focus-ring:rgba(79,157,255,.50);
 
   --syn-comment:#5d6877; --syn-keyword:#c08bff; --syn-string:#5bbf86;
   --syn-number:#e0a86b;  --syn-fn:#7fd99a;      --syn-ident:#cdd5e0; --syn-punct:#6b7787;

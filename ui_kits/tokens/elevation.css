@@ -13,15 +13,13 @@
   --glow-accent:none;
 }
 .theme-dark {
-  /* Dark elevation reads through SHADOW DEPTH + a faint top inset highlight, not lighter fills. */
-  --shadow-1:0 1px 2px rgba(0,0,0,.45);
-  --shadow-2:0 2px 8px rgba(0,0,0,.45);
-  --shadow-3:0 12px 28px -12px rgba(0,0,0,.55);
-  --shadow-4:0 24px 56px -20px rgba(0,0,0,.66);
-  /* Window frame: a deep ambient drop + a tight contact shadow + a 1px inner top highlight so the
-     chrome catches "light" — the detail that separates a real desktop window from a flat div. */
-  --shadow-window:0 44px 90px -30px rgba(0,0,0,.74),0 12px 28px -14px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.05);
-  --shadow-popover:0 28px 64px -20px rgba(0,0,0,.66),0 6px 16px -8px rgba(0,0,0,.5);
-  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.05);
-  --glow-accent:0 0 18px -2px rgba(90,155,246,.50);
+  /* CANONICAL handoff dark elevation — deeper black shadows + an accent glow on active elements.
+     MUST equal the typed bridge map (theme-tokens.ts); the parity test asserts byte-equality. */
+  --shadow-1:0 1px 2px rgba(0,0,0,.40);
+  --shadow-2:0 2px 8px rgba(0,0,0,.40);
+  --shadow-3:0 10px 24px -10px rgba(0,0,0,.50);
+  --shadow-4:0 20px 48px -18px rgba(0,0,0,.60);
+  --shadow-window:0 40px 80px -28px rgba(0,0,0,.70),0 10px 24px -12px rgba(0,0,0,.50);
+  --shadow-popover:0 40px 80px -24px rgba(0,0,0,.60);
+  --glow-accent:0 0 18px -2px rgba(79,157,255,.50);
 }

@@ -30,6 +30,15 @@
    --------------------------------------------------------------------------------------------- */
 :root,
 .theme-dark {
+  /* Derived/app-only surface extras. These are NOT canonical handoff tokens (they're not in
+     tokens/colors.css, which must stay byte-equal to the typed bridge map the parity test checks),
+     so they're defined HERE in the app-theme layer. Values follow the canonical cool-ink ladder:
+     panel == the chrome surface, elevated == one step above raised, hover/active == white washes. */
+  --surface-panel: var(--surface-raised);
+  --surface-elevated: #20262f;
+  --surface-hover: rgba(255, 255, 255, 0.045);
+  --surface-active: rgba(255, 255, 255, 0.075);
+
   /* colors */
   --vita-color-accent: var(--accent);
   --vita-color-accent-hover: var(--accent-hover);
