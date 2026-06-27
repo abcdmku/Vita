@@ -93,6 +93,11 @@ const CAP_MAP: Readonly<Record<PuterCapability, CapMapping>> = Object.freeze({
   // lifecycle ops), so it is a read-write configuration-class capability. Only the management console
   // is ever granted it.
   control: { access: "read-write", class: "configuration" },
+  // EXEC runs a real process inside a hardened capsule on the node — the most privileged compat
+  // capability. Treated as a read-write configuration-class capability (it spawns + mutates a node
+  // sandbox), so the broker scopes + gates it exactly like control. Only an explicitly exec-granted app
+  // (the Terminal) ever holds it; default-deny everywhere else.
+  exec: { access: "read-write", class: "configuration" },
   "fs.read": { access: "read-only", class: "user-content" },
   "fs.write": { access: "read-write", class: "user-content" },
   "kv.read": { access: "read-only", class: "app-state" },

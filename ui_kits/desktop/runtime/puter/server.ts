@@ -21,6 +21,12 @@ import {
   type ApiOrigin,
   type ApiRequest,
 } from "./api-origin.ts";
+import { type PuterCapabilityRegistry, parseBearer } from "./capability.ts";
+import {
+  type ExecBackend,
+  type ExecServerMessage,
+  decodeClientMessage,
+} from "./exec-plane.ts";
 
 // A per-request face gate, evaluated BEFORE the api_origin's per-app capability check. The network
 // (remote-browser) face uses this to require an opaque OWNER token over the connection; the loopback
@@ -54,6 +60,13 @@ export interface HarnessServerDeps {
   // client (the network face already gates on the separate owner token). Returns the current token, or
   // undefined before the session is minted (then /session.js answers a benign no-token stub).
   readonly localSessionToken?: () => string | undefined;
+  // EXEC/PTY: when both are present, the server mounts a `/pty` websocket. A connection is gated on the
+  // `exec` capability (token → app → grants, via the SAME capability registry the api_origin uses), then
+  // bridged to an ExecBackend session. When either is absent, `/pty` is NOT mounted (the upgrade is
+  // refused) — default-deny by omission. See exec-plane.ts. `ptyPath` defaults to "/pty".
+  readonly execBackend?: ExecBackend;
+  readonly capabilities?: PuterCapabilityRegistry;
+  readonly ptyPath?: string;
 }
 
 export interface HarnessServer {
@@ -108,12 +121,46 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
   // and retries. Instead we COMPLETE the handshake (101) and immediately send an Engine.IO close, so
   // the client sees a clean, intentional close (no error, no infinite retry). Vita's offline kiosk has
   // no realtime backend; the app uses none. (Same posture as the polling stub above.)
+  const ptyPath = deps.ptyPath ?? "/pty";
+  const execBackend = deps.execBackend;
+  const capabilities = deps.capabilities;
+
   server.on("upgrade", (req: IncomingMessage, socket: import("node:net").Socket) => {
-    const path = (req.url ?? "").split("?")[0] ?? "";
+    const [path, queryString] = splitQuery(req.url ?? "");
 
-    if (!path.startsWith("/socket.io/")) { socket.destroy(); return; }
+    // EXEC/PTY websocket: only when an exec backend + capability registry are wired (default-deny by
+    // omission). Gate on the `exec` capability (token → app → grants) BEFORE completing the handshake;
+    // a missing/unknown token is 401 and a token lacking `exec` is 403 — the connection is refused with
+    // a real HTTP status (no 101), so an ungranted app can never open a pty.
+    if (path === ptyPath) {
+      if (execBackend === undefined || capabilities === undefined) {
+        refuseUpgrade(socket, 404, "pty not available");
+        return;
+      }
 
-    closeRealtimeUpgrade(req, socket);
+      // The network face's owner-auth gate also covers the pty upgrade (the remote face must present the
+      // owner token over the connection before the per-app exec gate runs).
+      if (deps.faceGate !== undefined) {
+        const faceReq: ApiRequest = Object.freeze({
+          body: new Uint8Array(0),
+          headers: lowercaseHeaders(req.headers),
+          method: "GET",
+          path,
+          query: parseQuery(queryString),
+        });
+        const denied = deps.faceGate(faceReq);
+
+        if (denied !== undefined) { refuseUpgrade(socket, denied.status, "forbidden"); return; }
+      }
+
+      acceptPtyUpgrade(req, socket, path, queryString, execBackend, capabilities);
+      return;
+    }
+
+    // Realtime socket.io short-circuit (unchanged): complete the handshake then close cleanly.
+    if (path.startsWith("/socket.io/")) { closeRealtimeUpgrade(req, socket); return; }
+
+    socket.destroy();
   });
 
   const port = await listen(server, deps.port ?? 0, host);
@@ -327,6 +374,203 @@ function closeRealtimeUpgrade(req: IncomingMessage, socket: import("node:net").S
   } catch {
     socket.destroy();
   }
+}
+
+// Refuse a websocket upgrade with a real HTTP status (no 101). The browser's WebSocket sees the
+// connection rejected (onerror/onclose with the status) — which is exactly how an ungranted app learns
+// it cannot open a pty. Used for the exec gate's 401/403 and for "pty not mounted" (404).
+function refuseUpgrade(socket: import("node:net").Socket, status: number, reason: string): void {
+  try {
+    const line = `HTTP/1.1 ${status} ${reason}\r\n`;
+
+    socket.write(line + "Connection: close\r\n" + `Content-Length: ${Buffer.byteLength(reason)}\r\n\r\n` + reason);
+    socket.end();
+  } catch {
+    socket.destroy();
+  }
+}
+
+// Accept a /pty websocket upgrade: gate on the `exec` capability, complete the RFC 6455 handshake, then
+// bridge the socket's frames to an ExecBackend session. The token is taken from the `auth_token` query
+// param (a browser WebSocket cannot set an Authorization header, so the Terminal app passes the token in
+// the URL — same opaque owner token the SDK uses, over loopback/TLS). Fail-closed: any gate failure
+// refuses the upgrade with 401/403 (no 101).
+function acceptPtyUpgrade(
+  req: IncomingMessage,
+  socket: import("node:net").Socket,
+  path: string,
+  queryString: string,
+  execBackend: ExecBackend,
+  capabilities: PuterCapabilityRegistry,
+): void {
+  const query = parseQuery(queryString);
+  // A browser WebSocket can't set headers, so the token rides the query string. Still accept a bearer
+  // header for non-browser clients (the headless verification uses it).
+  const token = parseBearer(req.headers["authorization"]) ?? (query["auth_token"] || undefined);
+  const resolved = capabilities.resolveToken(token);
+
+  if (!resolved.ok) { refuseUpgrade(socket, resolved.status, "unauthenticated"); return; }
+
+  const authorized = capabilities.authorize(resolved.session, "exec");
+
+  if (!authorized.ok) { refuseUpgrade(socket, authorized.status, "exec capability denied"); return; }
+
+  const key = req.headers["sec-websocket-key"];
+
+  if (typeof key !== "string") { refuseUpgrade(socket, 400, "missing key"); return; }
+
+  const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  const accept = createHash("sha1").update(key + GUID).digest("base64");
+
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+
+  void path;
+  bridgePty(socket, execBackend, resolved.session);
+}
+
+// Bridge a now-upgraded websocket to an ExecBackend session: decode inbound frames → client messages →
+// session.send; session emit → outbound text frames. Handles fragmentation-free text/close/ping frames
+// (xterm sends small text frames; that is all we need). Closes the session when the socket drops.
+function bridgePty(
+  socket: import("node:net").Socket,
+  execBackend: ExecBackend,
+  session: import("./capability.ts").PuterAppSession,
+): void {
+  const emit = (message: ExecServerMessage): void => {
+    try { socket.write(encodeTextFrame(JSON.stringify(message))); } catch { /* socket gone */ }
+  };
+
+  const exec = execBackend.open(emit, {
+    appId: session.appId,
+    appInstanceId: session.appInstanceId,
+    ownerUsername: session.owner.username,
+  });
+
+  let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  let done = false;
+  const finish = (): void => {
+    if (done) return;
+    done = true;
+    try { exec.close(); } catch { /* ignore */ }
+    try { socket.end(); } catch { /* ignore */ }
+  };
+
+  socket.on("data", (chunk: Buffer) => {
+    buffer = Buffer.concat([buffer, chunk]);
+
+    // Drain as many complete frames as the buffer holds.
+    for (;;) {
+      const frame = decodeFrame(buffer);
+
+      if (frame === undefined) break; // need more bytes
+
+      buffer = frame.rest;
+
+      if (frame.opcode === 0x8) { finish(); return; } // close
+      if (frame.opcode === 0x9) { socket.write(encodePong(frame.payload)); continue; } // ping → pong
+      if (frame.opcode === 0x1 || frame.opcode === 0x0) {
+        const text = frame.payload.toString("utf8");
+        const message = decodeClientMessage(text);
+
+        if (message !== undefined) {
+          try { exec.send(message); } catch { /* session error already surfaced via emit */ }
+        }
+      }
+      // ignore binary (0x2) / pong (0xA) — the terminal protocol is text-only.
+    }
+  });
+
+  socket.on("close", finish);
+  socket.on("error", finish);
+}
+
+// ---- minimal RFC 6455 frame codec (server side) ----
+
+// Encode an unmasked server text frame (FIN=1, opcode=0x1). Handles the 3 length encodings.
+function encodeTextFrame(text: string): Buffer {
+  const payload = Buffer.from(text, "utf8");
+
+  return frameWithOpcode(0x1, payload);
+}
+
+function encodePong(payload: Buffer): Buffer {
+  return frameWithOpcode(0xa, payload);
+}
+
+function frameWithOpcode(opcode: number, payload: Buffer): Buffer {
+  const len = payload.byteLength;
+  let header: Buffer;
+
+  if (len < 126) {
+    header = Buffer.from([0x80 | opcode, len]);
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    // 64-bit length; JS payloads never approach 2^53 so the high word is 0.
+    header.writeUInt32BE(Math.floor(len / 2 ** 32), 2);
+    header.writeUInt32BE(len >>> 0, 6);
+  }
+
+  return Buffer.concat([header, payload]);
+}
+
+interface DecodedFrame {
+  readonly opcode: number;
+  readonly payload: Buffer<ArrayBufferLike>;
+  readonly rest: Buffer<ArrayBufferLike>;
+}
+
+// Decode ONE client frame from `buf`. Browser→server frames are ALWAYS masked (RFC 6455 §5.3); we apply
+// the mask. Returns undefined when the buffer doesn't yet hold a full frame (caller waits for more).
+function decodeFrame(buf: Buffer): DecodedFrame | undefined {
+  if (buf.byteLength < 2) return undefined;
+
+  const b0 = buf[0] ?? 0;
+  const b1 = buf[1] ?? 0;
+  const opcode = b0 & 0x0f;
+  const masked = (b1 & 0x80) !== 0;
+  let len = b1 & 0x7f;
+  let offset = 2;
+
+  if (len === 126) {
+    if (buf.byteLength < 4) return undefined;
+    len = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (len === 127) {
+    if (buf.byteLength < 10) return undefined;
+    // Only the low 32 bits matter for our sizes.
+    len = buf.readUInt32BE(6);
+    offset = 10;
+  }
+
+  const maskBytes = masked ? 4 : 0;
+
+  if (buf.byteLength < offset + maskBytes + len) return undefined;
+
+  let payload: Buffer;
+
+  if (masked) {
+    const mask = buf.subarray(offset, offset + 4);
+    const data = buf.subarray(offset + 4, offset + 4 + len);
+
+    payload = Buffer.alloc(len);
+    for (let i = 0; i < len; i += 1) payload[i] = (data[i] ?? 0) ^ (mask[i % 4] ?? 0);
+  } else {
+    payload = Buffer.from(buf.subarray(offset, offset + len));
+  }
+
+  return { opcode, payload, rest: buf.subarray(offset + maskBytes + len) };
 }
 
 function serveEngineIoStub(res: ServerResponse, method: string): void {

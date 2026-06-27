@@ -26,7 +26,14 @@ export type PuterCapability =
   | "auth"
   // The control plane (list/start/stop capsules, node status/health, logs) — gates /control/* on the
   // api_origin. Held by the deploy/management console; NOT granted to ordinary apps (default-deny).
-  | "control";
+  | "control"
+  // PROCESS/EXEC — run a real command inside a hardened, cgroup-gated capsule and stream its
+  // stdin/stdout/stderr over the /pty websocket (server.ts → exec-plane.ts). This is the "real machine
+  // access" the product vision wants, deliberately the MOST privileged compat capability: it can spawn
+  // a process on the node. Default-deny, fail-closed — only an app explicitly granted `exec` (the
+  // Terminal) may open a /pty session; everything else is 401/403. NEVER granted by default to ordinary
+  // Puter apps (the local kiosk session does NOT carry it unless the owner opts the Terminal in).
+  | "exec";
 
 // A launched-app session: the opaque token, the app it belongs to, the instance id the iframe carries,
 // the owner identity, and the granted capability set. Minted by `mintAppSession` at launch.

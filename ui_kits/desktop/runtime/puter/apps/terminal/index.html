@@ -1,0 +1,166 @@
+<!doctype html>
+<!--
+  Vita Terminal — a real terminal, in the browser, wired to a shell on the node.
+
+  This is a Puter app (a sandboxed web page) that mounts xterm.js and opens a `/pty` WEBSOCKET on Vita's
+  local api_origin. The websocket is gated on the `exec` capability (server.ts → exec-plane.ts): only
+  this app — granted `exec` at launch — can open it; everything else is 401/403. Over that socket it
+  pumps the exec wire protocol: keystrokes → {t:"stdin"} frames; {t:"stdout"}/{t:"stderr"} frames →
+  term.write. Commands run inside a hardened, cgroup-gated capsule on the node (on-device) or a
+  scrubbed dev sandbox (preview) — see exec-plane.ts.
+
+  The app reads two launch params from its URL (set by the launcher / harness):
+    puter.api_origin   — the api_origin base (we derive the ws:// /pty URL from it)
+    puter.auth.token   — the opaque owner token (rides the /pty query string; a browser WebSocket
+                         cannot set an Authorization header). The exec gate validates it.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Vita Terminal</title>
+  <link rel="stylesheet" href="/_vendor/xterm/xterm.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e8ee; font: 13px system-ui, sans-serif; }
+    #bar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid #20232c; background: #11141b; }
+    #bar .dot { width: 9px; height: 9px; border-radius: 50%; background: #f87171; }
+    #bar .dot.up { background: #4ade80; }
+    #bar .title { font-weight: 600; }
+    #bar .meta { color: #8b8f9c; font-size: 12px; }
+    #term { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; padding: 6px 8px; }
+    .xterm { height: 100%; }
+  </style>
+  <!-- Vendored, offline, MIT-licensed xterm.js (no runtime CDN). -->
+  <script src="/_vendor/xterm/xterm.js"></script>
+  <script src="/_vendor/xterm/addon-fit.js"></script>
+</head>
+<body>
+  <div id="bar">
+    <span class="dot" id="dot"></span>
+    <span class="title">Vita Terminal</span>
+    <span class="meta" id="meta">connecting…</span>
+  </div>
+  <div id="term"></div>
+  <script>
+    // Expose state for the headless/browser verification to assert against.
+    window.__VITA_TERM__ = { connected: false, ready: false, runtime: null, lastError: null, output: "" };
+
+    // ---- read launch params (the SDK isn't needed for exec; we read the URL directly) ----
+    const params = new URLSearchParams(location.search);
+    function param(name) {
+      // accept both "puter.x" and "x"
+      return params.get("puter." + name) || params.get(name) || "";
+    }
+    const apiOrigin = param("api_origin") || (location.origin + "/api");
+    const token = param("auth.token") || param("auth_token") || "";
+
+    // Derive the ws(s):// /pty URL from the api_origin (http→ws, https→wss). The token rides the query
+    // string because a browser WebSocket cannot set headers; the exec gate validates it server-side.
+    function ptyUrl() {
+      let base;
+      try { base = new URL(apiOrigin, location.href); } catch (e) { base = new URL(location.origin + "/api"); }
+      const wsProto = base.protocol === "https:" ? "wss:" : "ws:";
+      // /api/.. → the server mounts /pty at the ROOT (not under the api prefix), so target the origin.
+      return wsProto + "//" + base.host + "/pty?auth_token=" + encodeURIComponent(token);
+    }
+
+    const dot = document.getElementById("dot");
+    const meta = document.getElementById("meta");
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+      fontSize: 13,
+      theme: { background: "#0b0d12", foreground: "#e6e8ee", cursor: "#5b9dff" },
+      convertEol: false,
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById("term"));
+    try { fit.fit(); } catch (e) {}
+    term.writeln("\x1b[90mVita Terminal — connecting to the node…\x1b[0m");
+
+    let ws;
+    function connect() {
+      try {
+        ws = new WebSocket(ptyUrl());
+      } catch (e) {
+        fail("could not open websocket: " + e.message);
+        return;
+      }
+
+      ws.onopen = () => {
+        window.__VITA_TERM__.connected = true;
+        dot.classList.add("up");
+        meta.textContent = "connected";
+      };
+
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.t === "ready") {
+          window.__VITA_TERM__.ready = true;
+          window.__VITA_TERM__.runtime = msg.runtime;
+          meta.textContent = msg.runtime + " · " + (msg.cwd || "~");
+          term.writeln("\x1b[90mconnected to capsule " + (msg.capsule || "?") + " (" + msg.runtime + ")\x1b[0m");
+        } else if (msg.t === "stdout") {
+          window.__VITA_TERM__.output += msg.data;
+          term.write(msg.data);
+        } else if (msg.t === "stderr") {
+          window.__VITA_TERM__.output += msg.data;
+          term.write("\x1b[31m" + msg.data + "\x1b[0m");
+        } else if (msg.t === "exit") {
+          term.writeln("\r\n\x1b[90m[process exited code=" + msg.code + (msg.signal ? " signal=" + msg.signal : "") + "]\x1b[0m");
+        } else if (msg.t === "error") {
+          window.__VITA_TERM__.lastError = msg.message;
+          term.writeln("\r\n\x1b[31mexec error: " + msg.message + "\x1b[0m");
+        }
+      };
+
+      ws.onerror = () => { fail("websocket error (exec denied? gate refused the upgrade)"); };
+      ws.onclose = (ev) => {
+        dot.classList.remove("up");
+        // A 1006/abnormal close right after a refused HTTP upgrade is how the exec gate's 401/403 shows
+        // up to the browser (no 101). Surface it so the verification can read DENIED.
+        if (!window.__VITA_TERM__.connected) {
+          fail("connection refused before open (code " + ev.code + ") — exec capability likely denied");
+        } else {
+          meta.textContent = "disconnected";
+        }
+      };
+    }
+
+    function fail(message) {
+      window.__VITA_TERM__.lastError = message;
+      dot.classList.remove("up");
+      meta.textContent = "denied";
+      term.writeln("\r\n\x1b[31m" + message + "\x1b[0m");
+    }
+
+    // keystrokes → stdin frames
+    term.onData((data) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ t: "stdin", data }));
+      }
+    });
+
+    // geometry → resize frames
+    function sendResize() {
+      try { fit.fit(); } catch (e) {}
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ t: "resize", cols: term.cols, rows: term.rows }));
+      }
+    }
+    window.addEventListener("resize", sendResize);
+
+    // A test hook: type a command + Enter programmatically (the browser verification drives this so it
+    // doesn't depend on focus/keyboard timing). Mirrors what onData would emit for each char.
+    window.__vitaTermType = function (line) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(JSON.stringify({ t: "stdin", data: line + "\r" }));
+      return true;
+    };
+
+    connect();
+  </script>
+</body>
+</html>
