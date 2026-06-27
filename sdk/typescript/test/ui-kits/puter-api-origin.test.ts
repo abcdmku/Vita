@@ -134,6 +134,39 @@ test("fs delete removes the file", async () => {
   assert.equal(api.handle(req("POST", "/read", { json: { path: "/gone.txt" }, token: TOKEN })).status, 404);
 });
 
+// The GENUINE SDK's fs.delete sends `{ paths: [<path>,…] }` (verified against the vendored bundle +
+// in a real browser: a single `path` returned "path is required" until this was added). Assert the
+// array shape deletes every target.
+test("fs delete accepts the SDK's `paths` ARRAY (real-browser shape)", async () => {
+  const { api } = setup();
+  const a = await batchBody("/d/one.txt", "1");
+  const b = await batchBody("/d/two.txt", "2");
+
+  api.handle(req("POST", "/batch", { bodyBytes: a.bytes, contentType: a.contentType, token: TOKEN }));
+  api.handle(req("POST", "/batch", { bodyBytes: b.bytes, contentType: b.contentType, token: TOKEN }));
+
+  const del = api.handle(req("POST", "/delete", { json: { paths: ["/d/one.txt", "/d/two.txt"], recursive: true }, token: TOKEN }));
+
+  assert.equal(del.status, 200);
+  assert.equal(api.handle(req("POST", "/read", { json: { path: "/d/one.txt" }, token: TOKEN })).status, 404);
+  assert.equal(api.handle(req("POST", "/read", { json: { path: "/d/two.txt" }, token: TOKEN })).status, 404);
+});
+
+// `descendants_only` empties a directory but keeps the directory itself.
+test("fs delete with descendants_only keeps the dir, removes its contents", async () => {
+  const { api } = setup();
+  const f = await batchBody("/keep/inside.txt", "x");
+
+  api.handle(req("POST", "/batch", { bodyBytes: f.bytes, contentType: f.contentType, token: TOKEN }));
+  const del = api.handle(req("POST", "/delete", { json: { paths: ["/keep"], descendants_only: true, recursive: true }, token: TOKEN }));
+
+  assert.equal(del.status, 200);
+  // the dir survives…
+  assert.equal(api.handle(req("POST", "/stat", { json: { path: "/keep" }, token: TOKEN })).status, 200);
+  // …but its contents are gone.
+  assert.equal(api.handle(req("POST", "/read", { json: { path: "/keep/inside.txt" }, token: TOKEN })).status, 404);
+});
+
 test("kvstore: set / get / del / list via /drivers/call", () => {
   const { api } = setup();
 

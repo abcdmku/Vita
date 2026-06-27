@@ -11,6 +11,7 @@
 //
 // Node-only. Imported by tools/harness scripts via dynamic import; never part of the browser bundle.
 
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { createReadStream, existsSync, statSync } from "node:fs";
@@ -101,6 +102,20 @@ export async function startHarnessServer(deps: HarnessServerDeps): Promise<Harne
     ? createHttpsServer({ cert: deps.tls.cert, key: deps.tls.key }, onRequest)
     : createServer(onRequest);
 
+  // Realtime websocket short-circuit. socket.io tries a `transport=websocket` upgrade in parallel with
+  // polling regardless of the OPEN frame's `upgrades:[]`. If we leave the node 'upgrade' event
+  // unhandled, the socket is destroyed → the browser logs a "WebSocket handshake failed (404)" error
+  // and retries. Instead we COMPLETE the handshake (101) and immediately send an Engine.IO close, so
+  // the client sees a clean, intentional close (no error, no infinite retry). Vita's offline kiosk has
+  // no realtime backend; the app uses none. (Same posture as the polling stub above.)
+  server.on("upgrade", (req: IncomingMessage, socket: import("node:net").Socket) => {
+    const path = (req.url ?? "").split("?")[0] ?? "";
+
+    if (!path.startsWith("/socket.io/")) { socket.destroy(); return; }
+
+    closeRealtimeUpgrade(req, socket);
+  });
+
   const port = await listen(server, deps.port ?? 0, host);
   const url = `${scheme}://${host}:${port}`;
 
@@ -136,6 +151,18 @@ async function handleRequest(
   // guarded by the network face gate above for static requests; the provider gate is the primary defence.)
   if (localSessionToken !== undefined && req.method !== undefined && req.method.toUpperCase() === "GET" && pathOnly === "/session.js") {
     serveSessionScript(res, apiPrefix, localSessionToken());
+    return;
+  }
+
+  // Realtime socket short-circuit. The puter.js SDK opens a socket.io realtime channel against the
+  // origin (for live fs/kv change events). Vita's single-owner offline kiosk has no realtime backend,
+  // and an unanswered `/socket.io/` makes the SDK 404 + retry a websocket forever (console noise +
+  // wasted reconnects on an offline node). Answer the Engine.IO polling handshake with a valid OPEN
+  // packet that advertises NO upgrades and a long ping interval, so the client stays on a quiet
+  // long-poll instead of hammering a websocket. (No real events are delivered — the app does not use
+  // realtime; this purely keeps the SDK calm + the console clean.)
+  if (pathOnly === "/socket.io/" || pathOnly.startsWith("/socket.io/")) {
+    serveEngineIoStub(res, req.method ?? "GET");
     return;
   }
 
@@ -234,6 +261,12 @@ export function buildSessionScript(apiPrefix: string, token: string | undefined)
     "      try { if (typeof window.puter.setAuthToken === 'function') window.puter.setAuthToken(token); } catch (e) {}",
     "      try { window.puter.authToken = token; } catch (e) {}",
     "    }",
+    // Mark the SDK as an APP (not a generic 'web' site) so it treats the trust-on-host token as its
+    // app session and NEVER pops its 'authenticate with Puter' consent modal (which is gated on
+    // `'web' === puter.env`, verified against the vendored bundle). The kiosk IS running an app
+    // against our local api_origin. Also silence the promotional console banner.
+    "    try { window.puter.env = 'app'; } catch (e) {}",
+    "    try { window.puter.quiet = true; } catch (e) {}",
     "    return true;",
     "  }",
     "  window.__vitaSession = { apiOrigin: apiOrigin, hasToken: !!token };",
@@ -255,6 +288,64 @@ function serveSessionScript(res: ServerResponse, apiPrefix: string, token: strin
   res.setHeader("content-type", "text/javascript; charset=utf-8");
   res.setHeader("cache-control", "no-store");
   res.end(body);
+}
+
+// A minimal Engine.IO v4 polling stub. The client's first request is `GET /socket.io/?EIO=4&
+// transport=polling`; it expects an OPEN frame: the char '0' followed by a JSON handshake. We
+// advertise NO upgrades (so it never tries the websocket) and a long ping interval (so it idles
+// quietly). Subsequent polling requests just get an empty 200. We never push events — Vita's offline
+// kiosk has no realtime backend; this exists only to keep the SDK from 404-looping a websocket.
+export function buildEngineIoOpen(): string {
+  const sid = "vita-" + Math.random().toString(36).slice(2, 14);
+  const handshake = { sid, upgrades: [], pingInterval: 300000, pingTimeout: 600000, maxPayload: 1000000 };
+
+  return "0" + JSON.stringify(handshake);
+}
+
+// Complete a websocket handshake (RFC 6455: 101 + Sec-WebSocket-Accept = base64(sha1(key + GUID)))
+// then send a single Engine.IO "close" frame and end the socket. The browser sees an intentional close
+// (no failed-handshake error, no retry storm). Best-effort; any error just destroys the socket.
+function closeRealtimeUpgrade(req: IncomingMessage, socket: import("node:net").Socket): void {
+  try {
+    const key = req.headers["sec-websocket-key"];
+
+    if (typeof key !== "string") { socket.destroy(); return; }
+
+    const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    const accept = createHash("sha1").update(key + GUID).digest("base64");
+    const handshake =
+      "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`;
+
+    socket.write(handshake);
+    // A masked-free server text frame carrying the Engine.IO "noop/close" intent ('1' = CLOSE packet).
+    // FIN=1, opcode=0x1 (text), payload length 1, payload '1'.
+    socket.write(Buffer.from([0x81, 0x01, 0x31]));
+    socket.end();
+  } catch {
+    socket.destroy();
+  }
+}
+
+function serveEngineIoStub(res: ServerResponse, method: string): void {
+  res.setHeader("access-control-allow-origin", "*");
+  res.setHeader("cache-control", "no-store");
+
+  if (method.toUpperCase() === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  // A GET (the handshake / a poll) gets an OPEN frame the first time and an empty 200 thereafter. We
+  // can't cheaply tell handshake from poll here without state; always returning a valid OPEN frame is
+  // harmless (the client treats it as a fresh session and idles on the long ping). A POST (the client
+  // flushing its send buffer) gets a benign "ok".
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/plain; charset=utf-8");
+  res.end(method.toUpperCase() === "POST" ? "ok" : buildEngineIoOpen());
 }
 
 function serveFromRoot(decoded: string, res: ServerResponse, staticRoot: string): void {

@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  Vita kiosk CONNECTIVITY-PROOF page — boot diagnostics only (served at /proof.html).
+
+  The interactive desktop is at /kiosk-entry.html (and /). This minimal page is kept for boot
+  verification: it loads the vendored Apache-2.0 puter.js SDK + the /session.js bootstrap and runs an
+  authenticated whoami so a boot-log / screenshot can confirm the local face + token injection work
+  without the full app. It does NOT replace the interactive UI.
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita — connectivity proof</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0e0f13; color: #e6e8ee; font: 14px system-ui, sans-serif; }
+    .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
+    .badge { font-size: 13px; color: #8b8f9c; }
+    .ok { color: #4ade80; } .err { color: #f87171; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: 0.5px; }
+    a { color: #5b8cff; }
+  </style>
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <script src="/_vendor/puter/v2.js"></script>
+  <script src="/session.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Vita</h1>
+    <div class="badge">connectivity proof</div>
+    <div class="badge" id="sdk">checking puter.js…</div>
+    <div class="badge" id="api">checking api_origin…</div>
+    <div class="badge"><a href="/kiosk-entry.html">→ open the interactive desktop</a></div>
+  </div>
+  <script>
+    (function () {
+      var sdkEl = document.getElementById("sdk");
+      var apiEl = document.getElementById("api");
+      var hasSdk = typeof window.puter === "object" && window.puter !== null;
+      sdkEl.textContent = hasSdk ? "puter.js loaded" : "puter.js MISSING";
+      sdkEl.className = "badge " + (hasSdk ? "ok" : "err");
+      function ok(u) { apiEl.textContent = "api_origin authenticated: " + (u && u.username ? u.username : JSON.stringify(u)); apiEl.className = "badge ok"; }
+      function fail(e) { var c = e && (e.status || (e.error && e.error.code)); apiEl.textContent = "api_origin auth FAILED (" + (c || (e && e.message) || "error") + ")"; apiEl.className = "badge err"; }
+      try {
+        if (hasSdk && window.puter.auth && typeof window.puter.auth.whoami === "function") {
+          window.puter.auth.whoami().then(ok).catch(fail);
+        } else { fail({ message: "no SDK" }); }
+      } catch (e) { fail(e); }
+    })();
+  </script>
+</body>
+</html>
