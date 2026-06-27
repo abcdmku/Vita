@@ -30,3 +30,7 @@ cef-overlay/usr/lib/vita/cef/*
 !cef-overlay/usr/lib/vita/cef/uinput-inject.ts
 !cef-overlay/usr/lib/vita/cef/vita-host-proxy.ts
 cef-overlay/usr/lib/vita/ui_kits/
+
+# mkosi package cache (build artifact; large, root-owned files)
+.cache/
+out-*.log

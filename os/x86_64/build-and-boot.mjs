@@ -426,28 +426,38 @@ function installModeOverlay() {
   return useNative ? overlayHost : "/work/os/x86_64/mode-overlay";
 }
 
-// Stage the PUTER PLATFORM RUNTIME into the image: the WM-free server spine + the api/store/capability
-// modules + the on-device Deno boot entry (server/server-entry.ts) + the vendored Apache-2.0 puter.js,
-// laid out so server.ts's relative path math resolves on-device:
-//   server-entry.ts at /usr/lib/vita/puter/server/server-entry.ts
-//     -> runtimeDir  = /usr/lib/vita/puter           (staticRoot; serves kiosk-entry.html)
-//     -> vendorDir   = /usr/lib/vita/_vendor          (/_vendor alias -> the puter.js bundle)
-// So we copy ui_kits/desktop/runtime/puter -> usr/lib/vita/puter and ui_kits/desktop/_vendor ->
-// usr/lib/vita/_vendor, EXCLUDING the spike harnesses + *.test.ts (dev-only; not served on-device).
-// The Deno runtime binary itself is staged separately by ts-image.mjs (ts-overlay/usr/lib/vita/deno);
-// vita-platform.service invokes that same pinned binary. Returns a fresh overlay dir for --extra-tree.
+// Stage the PUTER PLATFORM RUNTIME into the image, MIRRORING the repo layout under a single root so
+// EVERY relative import in the server graph resolves on-device. The server modules import OUT of the
+// puter dir into the platform permission-broker + the SDK:
+//   ui_kits/desktop/runtime/puter/permission-model.ts -> ../../../../runtime/permission-broker/src/{decide,grants}.ts
+//   runtime/permission-broker/src/* -> ../../../sdk/manifests/src/package-contract.ts
+//   sdk/manifests/src/package-contract.ts -> ../../typescript/src/capabilities.ts -> ./plan.ts
+// (full graph enumerated with `deno info` = 18 local modules, 5 of them outside the puter dir.)
+//
+// So we stage the repo-relative tree under /usr/lib/vita/app-platform/<repo-relative-path>:
+//   app-platform/ui_kits/desktop/runtime/puter/**      (the server spine + boot entry)
+//   app-platform/ui_kits/desktop/_vendor/**            (vendored Apache-2.0 puter.js)
+//   app-platform/runtime/permission-broker/src/{decide,grants}.ts
+//   app-platform/sdk/manifests/src/package-contract.ts
+//   app-platform/sdk/typescript/src/{capabilities,plan}.ts
+// Then server-entry.ts at .../app-platform/ui_kits/desktop/runtime/puter/server/server-entry.ts has
+//   ../../../../runtime/...  -> /usr/lib/vita/app-platform/runtime/...   (resolves)
+//   server.ts ../../_vendor  -> /usr/lib/vita/app-platform/ui_kits/desktop/_vendor (resolves)
+// EXCLUDING the dev-only spike/ + *.test.ts. The Deno binary itself is staged by ts-image.mjs.
 function installPuterOverlay() {
   if (DRY) return useNative ? join(OUT, "puter-overlay") : "/work/os/x86_64/out/puter-overlay";
   const staged = join(OUT, "puter-overlay");
+  const APP_ROOT_REL = ["usr", "lib", "vita", "app-platform"];
+  const stagedAppRoot = join(staged, ...APP_ROOT_REL);
   const puterSrc = join(REPO, "ui_kits", "desktop", "runtime", "puter");
   const vendorSrc = join(REPO, "ui_kits", "desktop", "_vendor");
   if (!existsSync(puterSrc)) fail(`1e · puter runtime missing: ${puterSrc} (did the platform-server merge land?)`);
   if (!existsSync(join(vendorSrc, "puter", "v2.js"))) fail(`1e · vendored puter.js missing: ${join(vendorSrc, "puter", "v2.js")}`);
-  const puterDst = join(staged, "usr", "lib", "vita", "puter");
-  const vendorDst = join(staged, "usr", "lib", "vita", "_vendor");
   rmSync(staged, { recursive: true, force: true });
+
+  // 1) the puter runtime (minus spike/ + *.test.ts) at app-platform/ui_kits/desktop/runtime/puter
+  const puterDst = join(stagedAppRoot, "ui_kits", "desktop", "runtime", "puter");
   mkdirSync(dirname(puterDst), { recursive: true });
-  // Copy the runtime, dropping the dev-only spike dir + every *.test.ts (the on-device server never runs them).
   cpSync(puterSrc, puterDst, {
     recursive: true,
     filter: (src) => {
@@ -457,8 +467,24 @@ function installPuterOverlay() {
       return true;
     },
   });
-  cpSync(vendorSrc, vendorDst, { recursive: true });
-  log(`   staged puter platform runtime → ${puterDst} (+ vendored puter.js → ${vendorDst})`);
+  // 2) the vendored puter.js at app-platform/ui_kits/desktop/_vendor
+  cpSync(vendorSrc, join(stagedAppRoot, "ui_kits", "desktop", "_vendor"), { recursive: true });
+  // 3) the external server-graph deps, repo-relative (enumerated via deno info — keep in lockstep).
+  const externalDeps = [
+    ["runtime", "permission-broker", "src", "decide.ts"],
+    ["runtime", "permission-broker", "src", "grants.ts"],
+    ["sdk", "manifests", "src", "package-contract.ts"],
+    ["sdk", "typescript", "src", "capabilities.ts"],
+    ["sdk", "typescript", "src", "plan.ts"],
+  ];
+  for (const parts of externalDeps) {
+    const from = join(REPO, ...parts);
+    if (!existsSync(from)) fail(`1e · puter server dep missing: ${from} (server-graph changed — re-run deno info)`);
+    const to = join(stagedAppRoot, ...parts);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+  }
+  log(`   staged puter platform runtime (repo-mirror) → ${stagedAppRoot}`);
   return useNative ? staged : "/work/os/x86_64/out/puter-overlay";
 }
 

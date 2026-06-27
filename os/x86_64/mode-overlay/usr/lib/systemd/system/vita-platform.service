@@ -38,11 +38,11 @@ RequiresMountsFor=/var/lib/vita/apps
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/lib/vita/deno run --no-remote --cached-only --no-config --quiet \
-  --allow-read=/usr/lib/vita/puter,/var/lib/vita/apps,/var/lib/vita/tls,/run/vita \
+  --allow-read=/usr/lib/vita/app-platform,/var/lib/vita/apps,/var/lib/vita/tls,/run/vita \
   --allow-write=/var/lib/vita/apps,/run/vita \
   --allow-net \
   --allow-env \
-  /usr/lib/vita/puter/server/server-entry.ts
+  /usr/lib/vita/app-platform/ui_kits/desktop/runtime/puter/server/server-entry.ts
 Restart=on-failure
 RestartSec=2s
 TimeoutStartSec=60s
