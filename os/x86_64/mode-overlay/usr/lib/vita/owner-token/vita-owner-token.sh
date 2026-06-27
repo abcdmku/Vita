@@ -25,19 +25,49 @@
 #     mutation authority, so a narrow root oneshot (write-once, no network, no exec of payload) is
 #     sufficient and keeps agentd's surface unchanged.
 #
-# Idempotent: if the token file already exists and is non-empty, this is a no-op (the persisted token is
-# kept across reboots/updates). Fail-LOUD only if it cannot create the dir/file (the network face would
-# otherwise come up with an ephemeral token the owner never sees).
+# Idempotent (default / first-boot mode): if the token file already exists and is non-empty, this is a
+# no-op (the persisted token is kept across reboots/updates). Fail-LOUD only if it cannot create the
+# dir/file (the network face would otherwise come up with an ephemeral token the owner never sees).
+#
+# ROTATION (--rotate / --force): regenerate the token even when one is present, persisting the NEW token
+# atomically over the old. The rotation FLOW (see vita-owner-token-rotate.service) is: this script writes
+# the new token on /var, then the rotate unit `systemctl restart vita-platform.service` (NOT a reboot) so
+# server-entry.ts re-reads VITA_OWNER_TOKEN_FILE and the network-face gate adopts the new secret in ~2s.
+# The persisted apps store on /var is untouched, so only the network face's bearer changes — local kiosk
+# sessions and on-disk data are unaffected. The previous token is invalid the moment the server restarts.
 set -u
 
 MARKER=VITA-OWNER-TOKEN
 TTY=/dev/ttyS0
-OWNER_DIR=/var/lib/vita/owner
+# VITA_OWNER_DIR overrides the persisted-token dir (the on-device default is /var/lib/vita/owner). The
+# override exists ONLY for the offline harness (it drives this script against a temp root with no /var,
+# no root, no systemd); on-device the unit never sets it, so the default path is authoritative.
+OWNER_DIR="${VITA_OWNER_DIR:-/var/lib/vita/owner}"
 TOKEN_FILE="${OWNER_DIR}/owner.token"
+
+# Mode: default mint-if-absent, or --rotate/--force to regenerate over an existing token.
+MODE=mint
+case "${1:-}" in
+  --rotate|--force|rotate) MODE=rotate ;;
+  "") MODE=mint ;;
+  *) MODE=mint ;;
+esac
 
 emit() {
   printf '%s\n' "$1"
   if [ -w "$TTY" ]; then printf '%s\n' "$1" > "$TTY" 2>/dev/null || true; fi
+}
+
+# Mint a 256-bit random token, hex-encoded (64 chars). Prefer the kernel CSPRNG; fall back to openssl.
+mint_token() {
+  local t=""
+  if command -v od >/dev/null 2>&1 && [ -r /dev/urandom ]; then
+    t=$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fi
+  if [ -z "$t" ] && command -v openssl >/dev/null 2>&1; then
+    t=$(openssl rand -hex 32 2>/dev/null)
+  fi
+  printf '%s' "$t"
 }
 
 # /var/lib/vita is created by tmpfiles (0750 root:vita-agent) on the var.mount data partition. Ensure the
@@ -48,33 +78,38 @@ if ! mkdir -p "$OWNER_DIR" 2>/dev/null; then
 fi
 chmod 0750 "$OWNER_DIR" 2>/dev/null || true
 
-if [ -s "$TOKEN_FILE" ]; then
+if [ "$MODE" = "mint" ] && [ -s "$TOKEN_FILE" ]; then
   emit "$MARKER: existing owner token present (persisted) — keeping it"
   exit 0
 fi
 
-# Mint a 256-bit random token, hex-encoded (64 chars). Prefer the kernel CSPRNG; fall back to openssl.
-TOKEN=""
-if [ -r /proc/sys/kernel/random/uuid ] && command -v od >/dev/null 2>&1 && [ -r /dev/urandom ]; then
-  TOKEN=$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n')
-fi
-if [ -z "$TOKEN" ] && command -v openssl >/dev/null 2>&1; then
-  TOKEN=$(openssl rand -hex 32 2>/dev/null)
-fi
+TOKEN=$(mint_token)
 if [ -z "$TOKEN" ]; then
   emit "$MARKER: FATAL no CSPRNG source (/dev/urandom, openssl) to mint the owner token"
   exit 1
 fi
 
 # Write 0640 root:vita-agent so the platform DynamicUser (SupplementaryGroups=vita-agent) can read
-# it directly via VITA_OWNER_TOKEN_FILE; persisted on /var (survives reboot).
+# it directly via VITA_OWNER_TOKEN_FILE; persisted on /var (survives reboot). ATOMIC replace via a
+# temp file + rename so a concurrent reader never sees a half-written token (matters for --rotate).
 umask 0027
-if ! printf '%s\n' "$TOKEN" > "$TOKEN_FILE"; then
-  emit "$MARKER: FATAL could not write ${TOKEN_FILE}"
+TMP_FILE="${TOKEN_FILE}.new.$$"
+if ! printf '%s\n' "$TOKEN" > "$TMP_FILE"; then
+  emit "$MARKER: FATAL could not write ${TMP_FILE}"
+  rm -f "$TMP_FILE" 2>/dev/null || true
   exit 1
 fi
-chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
-chgrp vita-agent "$TOKEN_FILE" 2>/dev/null || true
+chmod 0640 "$TMP_FILE" 2>/dev/null || true
+chgrp vita-agent "$TMP_FILE" 2>/dev/null || true
+if ! mv -f "$TMP_FILE" "$TOKEN_FILE"; then
+  emit "$MARKER: FATAL could not install ${TOKEN_FILE}"
+  rm -f "$TMP_FILE" 2>/dev/null || true
+  exit 1
+fi
 
-emit "$MARKER: minted + persisted a new owner token at ${TOKEN_FILE} (read it out-of-band to log into the network face)"
+if [ "$MODE" = "rotate" ]; then
+  emit "$MARKER: ROTATED the owner token at ${TOKEN_FILE} (restart vita-platform.service to adopt it; read it out-of-band to re-log in)"
+else
+  emit "$MARKER: minted + persisted a new owner token at ${TOKEN_FILE} (read it out-of-band to log into the network face)"
+fi
 exit 0
