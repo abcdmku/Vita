@@ -111,6 +111,15 @@ export interface CapabilityRegistryOptions {
   // The authorization authority the registry delegates every `authorize` call to. Default: the
   // session-grant model. Pass a broker-backed model for REAL on-device enforcement.
   readonly permissionModel?: PuterPermissionModel;
+  // The node's REAL owner identity, consulted as the live owner-auth source instead of the
+  // hardcoded DEFAULT_OWNER. On a real node this is supplied by the host from the node's persisted
+  // owner record (agentd's identity.attestation / owner.identity — see resolveOwnerIdentity in the
+  // platform server entry), NEVER from a transport request and NEVER from a caller. When absent the
+  // registry falls back to DEFAULT_OWNER (the trust-on-host single-owner default) so existing
+  // single-owner deployments keep working. A minted session's owner is THIS identity unless an
+  // explicit per-mint override is given (and a per-mint override may only NARROW within the same
+  // owner — it can never name a different owner; see mintAppSession).
+  readonly ownerIdentity?: PuterOwner;
 }
 
 export interface MintInput {
@@ -131,10 +140,40 @@ const DEFAULT_OWNER: PuterOwner = Object.freeze({
   uuid: "owner-0000-0000-0000-000000000000",
 });
 
+// Validate + freeze a host-supplied owner identity into the registry's trusted owner. Fail-closed:
+// a non-plain object, a missing/empty/non-string id (uuid) or username, or an unknown field is
+// REJECTED (throws) rather than silently coerced — a malformed identity must never mint a session.
+// Mirrors the SDK loader's strict ownerIdentity validation (owner-auth-port.test.ts) so the live
+// server and the SDK agree on what a trustworthy owner identity is.
+function resolveTrustedOwner(identity: PuterOwner | undefined): PuterOwner {
+  if (identity === undefined) return DEFAULT_OWNER;
+
+  if (identity === null || typeof identity !== "object" || Object.getPrototypeOf(identity) !== Object.prototype) {
+    throw new Error("ownerIdentity must be a plain object");
+  }
+
+  const allowed = new Set(["emailConfirmed", "username", "uuid"]);
+
+  for (const key of Object.keys(identity)) {
+    if (!allowed.has(key)) throw new Error(`ownerIdentity has unexpected field '${key}'`);
+  }
+
+  const { username, uuid, emailConfirmed } = identity;
+
+  if (typeof uuid !== "string" || uuid.length === 0) throw new Error("ownerIdentity.uuid must be a non-empty string");
+  if (typeof username !== "string" || username.length === 0) throw new Error("ownerIdentity.username must be a non-empty string");
+  if (typeof emailConfirmed !== "boolean") throw new Error("ownerIdentity.emailConfirmed must be a boolean");
+
+  return Object.freeze({ emailConfirmed, username, uuid });
+}
+
 export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}): PuterCapabilityRegistry {
   const byToken = new Map<string, PuterAppSession>();
   const byInstance = new Map<string, PuterAppSession>();
   const permissionModel = options.permissionModel ?? createSessionGrantModel();
+  // The node's trusted owner identity (validated once at construction). Every minted session is
+  // bound to THIS owner. A per-mint override may not name a different owner uuid (see mintAppSession).
+  const trustedOwner = resolveTrustedOwner(options.ownerIdentity);
 
   function denial(code: GateDenialCode, message: string, status: number): GateResult {
     return Object.freeze({ code, message, ok: false, status });
@@ -165,10 +204,20 @@ export function createCapabilityRegistry(options: CapabilityRegistryOptions = {}
     },
     mintAppSession(input: MintInput): PuterAppSession {
       const token = input.token ?? (input.randomToken ?? randomOpaqueToken)();
+      // The session owner is the node's TRUSTED owner identity (the live owner-auth source),
+      // never caller-fabricated. A per-mint override may supply username/emailConfirmed but may
+      // NOT name a different uuid: an override uuid that disagrees with the trusted owner is
+      // rejected fail-closed (a caller must not be able to forge a different owner's identity).
+      const overrideUuid = input.owner?.uuid;
+
+      if (overrideUuid !== undefined && overrideUuid !== trustedOwner.uuid) {
+        throw new Error("mintAppSession: owner.uuid override does not match the trusted owner identity");
+      }
+
       const owner: PuterOwner = Object.freeze({
-        emailConfirmed: input.owner?.emailConfirmed ?? DEFAULT_OWNER.emailConfirmed,
-        username: input.owner?.username ?? DEFAULT_OWNER.username,
-        uuid: input.owner?.uuid ?? DEFAULT_OWNER.uuid,
+        emailConfirmed: input.owner?.emailConfirmed ?? trustedOwner.emailConfirmed,
+        username: input.owner?.username ?? trustedOwner.username,
+        uuid: trustedOwner.uuid,
       });
       const session: PuterAppSession = Object.freeze({
         appId: input.appId,

@@ -25,6 +25,7 @@ import {
   KIOSK_ENTRY_PATH,
   randomOpaqueToken,
   startPuterPlatformService,
+  type PuterOwner,
   type ServiceOptions,
   type VitaMode,
 } from "./index.ts";
@@ -167,6 +168,64 @@ function readOwnerToken(): string | undefined {
   }
 }
 
+// Resolve the node's REAL owner identity for the LIVE owner-auth path. §16: the owner HOLDS the
+// private key; the node only ever consults the owner's PUBLIC identity (a uuid + a display
+// username + an emailConfirmed flag). We read it from a small JSON record the node persists on /var
+// (VITA_OWNER_IDENTITY_FILE, default /var/lib/vita/owner/owner-identity.json), which the on-device
+// owner-identity provisioning writes from agentd's owner record (identity.attestation /
+// owner.identity). This file carries NO key material — only the public owner identity — so reading
+// it here never touches the owner's private key.
+//
+// Returns undefined when the file is absent/unreadable/malformed (the platform then falls back to
+// the trust-on-host single-owner default "owner"). The registry re-validates the identity strictly
+// and refuses to mint a session on a malformed identity, so a bad file fails closed rather than
+// minting a forged owner.
+function readOwnerIdentity(): PuterOwner | undefined {
+  const path = env("VITA_OWNER_IDENTITY_FILE") ?? "/var/lib/vita/owner/owner-identity.json";
+
+  let raw: string;
+
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return undefined; // not provisioned → fall back to the default owner
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    emit(`${MARKER}: owner-identity file is not valid JSON at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    emit(`${MARKER}: owner-identity file is not an object at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const uuid = record["uuid"];
+  const username = record["username"];
+  // emailConfirmed is optional in the file; default true for the single trusted owner.
+  const emailConfirmed = record["emailConfirmed"];
+
+  if (typeof uuid !== "string" || uuid.length === 0 || typeof username !== "string" || username.length === 0) {
+    emit(`${MARKER}: owner-identity file is missing uuid/username at ${path} — falling back to default owner`);
+
+    return undefined;
+  }
+
+  return Object.freeze({
+    emailConfirmed: typeof emailConfirmed === "boolean" ? emailConfirmed : true,
+    username,
+    uuid,
+  });
+}
+
 // Persist a small file under /run/vita (tmpfs, per-boot). The platform DynamicUser can write here via
 // RuntimeDirectory=; the baked boot probe reads these to present the local session token + owner token.
 function writeRunFile(path: string, contents: string): void {
@@ -199,6 +258,11 @@ async function main(): Promise<void> {
   //   3. a freshly minted ephemeral token (logged) - bootstrap with no persisted token.
   const ownerToken = readOwnerToken() ?? env("VITA_OWNER_TOKEN") ?? randomOpaqueToken();
 
+  // The node's REAL owner identity (the LIVE owner-auth source). Resolved from the node's persisted
+  // PUBLIC owner record (no key material — §16). Absent ⇒ the platform uses the trust-on-host
+  // default owner. The owner identity is what /whoami + minted sessions answer as.
+  const ownerIdentity = readOwnerIdentity();
+
   // Owner-provided TLS material (spec §16: the owner holds the private key). The unit ALWAYS points
   // VITA_TLS_CERT/KEY at the conventional /var/lib/vita/tls paths, but those files exist only when the
   // owner actually delivered a cert. So we only hand the paths to the service when BOTH files are
@@ -227,8 +291,15 @@ async function main(): Promise<void> {
     faces: { localHost, localPort, networkHost, networkPort },
     mode: serverMode,
     ownerToken,
+    ...(ownerIdentity !== undefined ? { ownerIdentity } : {}),
     ...(tlsCert !== undefined && tlsKey !== undefined ? { tls: { certPath: tlsCert, keyPath: tlsKey } } : {}),
   };
+
+  if (ownerIdentity !== undefined) {
+    emit(`${MARKER}: owner identity resolved (uuid=${ownerIdentity.uuid} username=${ownerIdentity.username}) — live owner-auth source`);
+  } else {
+    emit(`${MARKER}: no owner-identity record — using trust-on-host default owner`);
+  }
 
   let service;
 
