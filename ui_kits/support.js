@@ -1,4 +1,9 @@
 // GENERATED from dc-runtime/src/*.ts — do not edit. Rebuild with `cd dc-runtime && bun run build`.
+// VITA LOCAL-VENDOR PATCH (offline OS): the BABEL_URL / REACT_URL / REACT_DOM_URL constants below
+// were repointed from the unpkg CDN to ./_vendor/{babel,react,react-dom}.min.js — exact React 18.3.1
+// (UMD prod) + @babel/standalone 7.26.4 bytes; the React SRI hashes are unchanged and verified to match.
+// The dc-runtime generator is not in this repo; if support.js is ever regenerated, re-apply these three
+// local paths (see ui_kits/_vendor/). Keeps the design-system gallery fully offline per the no-remote rule.
 "use strict";
 (() => {
   var __defProp = Object.defineProperty;
@@ -1004,7 +1009,7 @@
     }
     return cur;
   }
-  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js";
+  var BABEL_URL = "./_vendor/babel.min.js";
   var GLOBAL_POLL_INTERVAL_MS = 50;
   var GLOBAL_POLL_TIMEOUT_MS = 3e4;
   function createExternalModules(onResolved) {
@@ -1491,9 +1496,9 @@
   }
 
   // src/index.ts
-  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_URL = "./_vendor/react.min.js";
   var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
-  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_URL = "./_vendor/react-dom.min.js";
   var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
   function hideRawTemplate() {
     const s = document.createElement("style");
