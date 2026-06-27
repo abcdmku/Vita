@@ -41,7 +41,9 @@ export interface ShellAppEntry {
   // The capabilities this app's session is granted. The launcher does NOT widen these; the service
   // mints EXACTLY this set (default-deny on anything absent). `control` is held only by the console.
   readonly grants: readonly PuterCapability[];
-  // Open this app automatically when the shell boots (Vita Desk does; the rest are launcher-only).
+  // Open this app automatically when the shell boots. Default OFF for every app — the shell boots to
+  // a clean desktop and the user launches apps from the dock. Kept in the type so an embedder can opt
+  // a kiosk-style single-app build back in, but no default app sets it.
   readonly autostart?: boolean;
   // Initial window size hint (px). The WM falls back to its default rect when absent.
   readonly window?: { readonly width: number; readonly height: number };
@@ -74,7 +76,9 @@ const TERMINAL_GRANTS: readonly PuterCapability[] = Object.freeze([...FULL_GRANT
 // third-party Puter apps (serverless-todo, notepad). Ordering = launcher order.
 export const DEFAULT_SHELL_APPS: readonly ShellAppEntry[] = Object.freeze([
   Object.freeze({
-    autostart: true,
+    // No autostart: the shell boots to a CLEAN desktop (wallpaper + system bar + dock). The user
+    // launches Vita Desk (and everything else) from the dock launcher. Auto-opening an app made the
+    // desktop read as "a random app is open with no system bar/taskbar" (see feat/vita-shell-polish).
     description: "Files, notes, and KV-backed settings — Vita's own desk.",
     entry: "/kiosk-entry.html",
     grants: FULL_GRANTS,

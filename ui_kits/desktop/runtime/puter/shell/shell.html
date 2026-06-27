@@ -24,10 +24,98 @@
   <link rel="stylesheet" href="/ui_kits/desktop/kit.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
   <style>
-    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #08090c; }
-    .v-screen { width: 100vw; height: 100vh; }
-    /* The dock tiles + launcher use cursor:pointer affordance. */
-    .v-dtile { cursor: pointer; }
+    /* ---------------------------------------------------------------------------------------------
+       Vita DESKTOP SHELL layout. This is the LIVE multi-window desktop (not a static design-canvas
+       mockup). kit.css sizes `.v-screen` to a fixed 1280x800 design canvas for the mockup screens
+       (Files.html, Activity.html, …); that fixed size is WRONG for the live shell, which must fill
+       the real display (e.g. the on-device 1920x1440 CEF surface). We therefore own the shell's
+       layout HERE, scoped to `.v-desktop-shell`, and force full-viewport so it can never collapse to
+       the 1280x800 canvas regardless of CSS cascade/order on-device. `!important` is deliberate: the
+       on-device build must not be able to clip the desktop to the design canvas.
+       --------------------------------------------------------------------------------------------- */
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #08090c; }
+    html, body { height: 100dvh; }
+
+    /* The shell root fills the viewport (overrides kit.css `.v-screen{width:1280px;height:800px}`). */
+    .v-desktop-shell.v-screen {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      overflow: hidden !important;
+    }
+
+    /* The desktop area between the system bar (top) and the dock (bottom). App windows mount here. */
+    .v-desktop-shell .v-desk-area { position: absolute; inset: 0; }
+
+    /* System bar pinned to the TOP edge, prominent + opaque (not the faint translucent mockup bar). */
+    .v-desktop-shell .v-menubar {
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 44px;
+      padding: 0 18px;
+      background: linear-gradient(180deg, #171b22 0%, #12151b 100%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.28);
+      backdrop-filter: none; -webkit-backdrop-filter: none;
+      z-index: 60;
+    }
+    .v-desktop-shell .v-brand { font-size: 15px; color: #f1f4f8; }
+    .v-desktop-shell .v-brand i { font-size: 11px; color: var(--accent, #4f9dff); }
+    .v-desktop-shell .v-menus { font-size: 13px; color: var(--text-secondary, #b3bcc8); }
+    .v-desktop-shell .v-status { gap: 14px; }
+    .v-desktop-shell .v-status .clk {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 13px; color: #f1f4f8; font-variant-numeric: tabular-nums;
+    }
+    /* Connectivity pill on the right of the system bar. */
+    .v-desktop-shell .v-net {
+      display: inline-flex; align-items: center; gap: 6px;
+      font: 600 11.5px var(--font-sans, system-ui); color: #b9c2cf;
+      padding: 3px 9px; border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .v-desktop-shell .v-net::before {
+      content: ''; width: 7px; height: 7px; border-radius: 50%;
+      background: #46d07f; box-shadow: 0 0 8px rgba(70, 208, 127, 0.8);
+    }
+
+    /* Dock pinned to the BOTTOM edge — prominent, clearly visible, larger tiles. */
+    .v-desktop-shell .v-dock {
+      position: fixed;
+      left: 50%;
+      bottom: 16px;
+      top: auto;
+      transform: translateX(-50%);
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 13px;
+      background: rgba(20, 24, 31, 0.82);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px;
+      box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(18px) saturate(1.3); -webkit-backdrop-filter: blur(18px) saturate(1.3);
+      z-index: 55;
+    }
+    .v-desktop-shell .v-dtile {
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #20252e 0%, #181c23 100%);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 6px rgba(0, 0, 0, 0.4);
+      color: #e6e8ee;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; line-height: 1; cursor: pointer; position: relative;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .v-desktop-shell .v-dtile:hover { transform: translateY(-3px); border-color: rgba(255, 255, 255, 0.22); }
+    .v-desktop-shell .v-dtile.on { border-color: var(--accent, #4f9dff); color: var(--accent, #4f9dff); }
+    .v-desktop-shell .v-dtile.on::after {
+      content: ''; position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
+      width: 5px; height: 5px; border-radius: 50%; background: var(--accent, #4f9dff);
+    }
   </style>
   <!-- Publishes the api origin + per-app session tokens the shell hands each app iframe. Served by the
        LOCAL face only (like /session.js). On the network face it 404s and the shell falls back to
@@ -35,7 +123,7 @@
   <script src="/shell-session.js"></script>
 </head>
 <body>
-  <div class="v-screen theme-dark v-wall-dark" id="screen" data-vita-screen="desktop"></div>
+  <div class="v-desktop-shell v-screen theme-dark v-wall-dark" id="screen" data-vita-screen="desktop"></div>
   <!-- The offline shell bundle: real WM + web-app window host + ui broker + dock/launcher. -->
   <script type="module" src="/shell/shell.js"></script>
 </body>

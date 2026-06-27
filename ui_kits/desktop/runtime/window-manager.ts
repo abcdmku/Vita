@@ -137,7 +137,8 @@ const MIN_HEIGHT = 200;
 const TITLEBAR_H = 36;
 // Keep at least this much of the title bar reachable on every edge when dragging.
 const CLAMP_MARGIN = 24;
-const MENUBAR_H = 32; // windows never cover the top menu bar
+const MENUBAR_H = 44; // windows never cover the top system bar (matches the shell's 44px bar)
+const DOCK_RESERVE = 92; // keep new windows clear of the bottom dock when centering on large screens
 const Z_BASE = 70; // matches the prior single-window z-index; dock/menubar are 40, palette 50
 
 interface WmHostEnv {
@@ -204,7 +205,13 @@ export function createWindowManager(doc: WmDocument, env?: Partial<WmHostEnv>): 
   }
 
   function open(appId: string, seed: WindowContent): ManagedWindow {
-    const rect = cascadedRect(DEFAULT_RECT, cascadeIndex, viewport());
+    const vp = viewport();
+    // Center the spawn base in the desktop area (between the system bar + dock) so windows open in
+    // the middle of the screen rather than clustered in the top-left corner — important on large
+    // displays (e.g. the on-device 1920x1440 surface) where a fixed left:150/top:92 base looks
+    // marooned. The cascade then offsets each subsequent window from this centered base.
+    const base = centeredBase(DEFAULT_RECT, vp);
+    const rect = cascadedRect(base, cascadeIndex, vp);
     cascadeIndex += 1;
 
     const win = new ManagedWindow(doc, appId, seed, rect, {
@@ -821,6 +828,23 @@ export function clamp(value: number, min: number, max: number): number {
   if (value < min) return min;
   if (value > max) return max;
   return value;
+}
+
+// Compute a spawn base centered in the desktop AREA (the band between the top system bar and the
+// bottom dock). Keeps the configured window size; only repositions left/top. Pure. Clamped so the
+// base is never above the system bar or below the dock reserve.
+export function centeredBase(base: Readonly<WmRect>, vp: WmHostEnv): WmRect {
+  const areaTop = MENUBAR_H;
+  const areaBottom = vp.innerHeight - DOCK_RESERVE;
+  const left = Math.round((vp.innerWidth - base.width) / 2);
+  const top = Math.round(areaTop + (areaBottom - areaTop - base.height) / 2);
+
+  return {
+    height: base.height,
+    left: Math.max(CLAMP_MARGIN, left),
+    top: Math.max(areaTop, top),
+    width: base.width,
+  };
 }
 
 // Cascade each new window +28,+28 from the default, wrapping before it runs off the workspace.

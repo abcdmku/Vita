@@ -37,11 +37,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TODO_TEXT = "Buy milk " + Date.now();
 
 async function main() {
+  // Verify at the ON-DEVICE resolution (1920x1440). The full-viewport layout bug only surfaces at
+  // large sizes — a smaller viewport masked it because the shell happened to nearly fill it.
+  const VW = Number(process.env.SHELL_VW ?? "1920");
+  const VH = Number(process.env.SHELL_VH ?? "1440");
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: "new",
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900"],
-    defaultViewport: { width: 1440, height: 900 },
+    args: ["--no-sandbox", "--disable-dev-shm-usage", `--window-size=${VW},${VH}`],
+    defaultViewport: { width: VW, height: VH },
   });
   const page = await browser.newPage();
   const consoleErrors = [];
@@ -60,11 +64,36 @@ async function main() {
     const hasLauncherBtn = await page.$("[data-shell-launcher-btn]") !== null;
     check("dock launcher button present", hasLauncherBtn);
 
-    // ---- 2. Vita Desk auto-started as a WINDOW ----
+    // ---- 2. FULL-VIEWPORT LAYOUT: shell fills the screen; system bar pinned TOP, dock pinned BOTTOM ----
+    const layout = await page.evaluate(() => {
+      const r = (sel) => { const el = document.querySelector(sel); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height), bottom: Math.round(b.bottom) }; };
+      return { vw: window.innerWidth, vh: window.innerHeight, screen: r(".v-screen"), bar: r(".v-menubar"), dock: r("[data-shell-dock]") };
+    });
+    check("shell FILLS the viewport (no top-left clustering)",
+      layout.screen && layout.screen.x === 0 && layout.screen.y === 0 && layout.screen.w === layout.vw && layout.screen.h === layout.vh,
+      JSON.stringify(layout.screen));
+    check("system bar pinned to the TOP edge (full width)",
+      layout.bar && layout.bar.y === 0 && layout.bar.x === 0 && layout.bar.w === layout.vw && layout.bar.h >= 40,
+      JSON.stringify(layout.bar));
+    check("dock pinned to the BOTTOM edge (not floating mid-page)",
+      layout.dock && (layout.vh - layout.dock.bottom) <= 40 && layout.dock.y > layout.vh * 0.7,
+      `bottom-gap=${layout.dock ? layout.vh - layout.dock.bottom : "n/a"}px`);
+
+    // ---- 2b. CLEAN desktop on boot — NO app auto-opened (the user launches from the dock) ----
+    const bootWindows = await page.$$('[data-vita-window]');
+    check("CLEAN desktop on boot — no app pre-opened", bootWindows.length === 0, `${bootWindows.length} window(s)`);
+    await page.screenshot({ path: join(SHOT_DIR, "01-shell-booted.png") });
+
+    // ---- 2c. Launch Vita Desk FROM THE DOCK (it no longer auto-starts) ----
+    await page.click("[data-shell-launcher-btn]");
+    await page.waitForFunction(
+      () => { const el = document.querySelector("[data-shell-launcher]"); return el && getComputedStyle(el).display !== "none"; },
+      { timeout: 5000 },
+    );
+    await page.click('[data-shell-app="vita.desk"]');
     await page.waitForSelector('[data-vita-window="vita.desk"]', { timeout: 15000 });
     const deskWindows = await page.$$('[data-vita-window]');
-    check("Vita Desk auto-opened as a managed window", deskWindows.length >= 1, `${deskWindows.length} window(s)`);
-    await page.screenshot({ path: join(SHOT_DIR, "01-shell-booted.png") });
+    check("Vita Desk opens as a managed window from the dock", deskWindows.length >= 1, `${deskWindows.length} window(s)`);
 
     // ---- 3. Open the launcher + launch a REAL third-party app (serverless-todo) ----
     await page.click("[data-shell-launcher-btn]");
