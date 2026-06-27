@@ -40,14 +40,20 @@ export type {
   ShellSessionPayload,
 } from "../shell/app-registry.ts";
 
-// ── the on-device host-proxy: agentd unix socket → /control/* bridge ──
+// ── the on-device host-proxy: agentd unix socket → /control/* bridge + the streaming /pty (Terminal) ──
 export {
+  createAgentdPtyStream,
   createAgentdUnixFetch,
   createOnDeviceControlPlane,
   DEFAULT_AGENTD_SOCKET,
+  encodePtyFrame,
+  encodeResizePayload,
 } from "./agentd-host-proxy.ts";
 export type {
   AgentdHostProxyOptions,
+  AgentdPtyOptions,
+  AgentdPtyStream,
+  PtyFrame,
 } from "./agentd-host-proxy.ts";
 
 // ── the control-plane bridge contract (the console-facing projection + the agentd client) ──
@@ -135,14 +141,23 @@ export type {
   PuterPermissionModel,
 } from "../capability.ts";
 
-// ── the EXEC/PTY backend (the Terminal's process plane; node:child_process-backed dev sandbox) ──
+// ── the EXEC/PTY backend (the Terminal's process plane) ──
+//   - createAgentExecBackend : the PRODUCTION on-device backend (forwards to agentd's hardened
+//     `capsule.exec` over the streaming /pty unix socket). This is what the service wires.
+//   - createDevExecBackend   : the build-host-only spike sandbox (allow-list, no-shell). NEVER wired in
+//     service — kept exported for the spike harnesses only.
 export {
+  createAgentExecBackend,
   createDevExecBackend,
 } from "../exec-plane.ts";
 export type {
+  AgentExecOptions,
   ChildProcessLike,
   DevExecBackendOptions,
   ExecBackend,
+  ExecClientMessage,
+  ExecServerMessage,
+  PtyFrameStream,
 } from "../exec-plane.ts";
 
 // ── REAL enforcement: delegate to the platform permission-broker ──

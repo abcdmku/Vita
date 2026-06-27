@@ -278,55 +278,139 @@ export function createDevExecBackend(options: DevExecBackendOptions): ExecBacken
 }
 
 // ---------------------------------------------------------------------------------------------
-// ON-DEVICE agentd capsule backend — the production target. Maps a /pty session to a hardened, one-shot
-// capsule launched through agentd's capsule runtime. NOT fully wired until a node boot lands a
-// `capsule.exec` agentd capability (agentd today exposes capsule.execute = launch a FIXED entrypoint,
-// not run-arbitrary-command-in-capsule). Written against that documented future RPC so the on-device
-// adapter has a concrete contract to fill; see EXEC-PLANE.md.
+// ON-DEVICE agentd capsule backend — the PRODUCTION terminal. Maps a /pty websocket session to a
+// hardened, PTY-backed, cgroup-gated capsule launched through agentd's `capsule.exec` capability. The
+// session is forwarded over agentd's streaming /pty unix-socket endpoint (transport/pty.go) via the
+// host-proxy's duplex frame stream (server/agentd-host-proxy.ts createAgentdPtyStream). The capsule has
+// the SAME hardening as the rest of the OS (DynamicUser, NoNewPrivileges, ProtectSystem=strict,
+// read-only rootfs, seccomp, AF_UNIX-only / NO network, MemoryMax/CPUQuota/TasksMax). See CAPSULE-EXEC.md.
+//
+// This module stays browser-bundle-safe: the Deno-only unix-socket stream is INJECTED (the same DI
+// pattern the rest of the file uses with `fetch`), so exec-plane.ts never imports Deno/node. The boot
+// entry (server-entry.ts) wires the real createAgentdPtyStream; tests inject a fake.
 // ---------------------------------------------------------------------------------------------
 
-export interface AgentExecOptions {
-  // The agentd base URL the host-proxy exposes (same origin control-plane.ts uses). The on-device
-  // adapter injects this; over the host-proxy it forwards to the unix socket.
-  readonly baseUrl: string;
-  // A fetch implementation (node:fetch / undici). Injected so this stays runtime-agnostic + testable.
-  readonly fetch: typeof fetch;
-  // The capsule id to exec into (the hardened "terminal" capsule the OS image ships with the right
-  // runtime + read-only rootfs). The session runs a login shell inside THIS capsule's sandbox.
-  readonly capsuleId: string;
+// The duplex frame stream the backend forwards over (matches host-proxy's AgentdPtyStream). Kept as a
+// local structural type so exec-plane.ts has no import from the Deno-only host-proxy module.
+export interface PtyFrameStream {
+  onFrame(cb: (frame: { readonly type: number; readonly payload: Uint8Array }) => void): void;
+  onClose(cb: () => void): void;
+  send(type: number, payload: Uint8Array): void;
+  close(): void;
 }
 
-// agentd's (future) capsule.exec response — an opaque session handle + the runtime it bound to. The
-// on-device host-proxy upgrades this to a duplex stream; this stub documents the shape.
-interface AgentExecOpenResponse {
-  readonly sessionId: string;
-  readonly runtime: string;
-  readonly cwd: string;
+// Frame types — MUST match agent/capabilities/capsule/exec.go + host-proxy.
+const PTY_FRAME_STDIN = 0x01;
+const PTY_FRAME_RESIZE = 0x02;
+const PTY_FRAME_STDOUT = 0x03;
+const PTY_FRAME_EXIT = 0x04;
+const PTY_FRAME_ERROR = 0x05;
+const PTY_FRAME_READY = 0x06;
+
+export interface AgentExecOptions {
+  // Open the duplex /pty stream to agentd (over the host-proxy unix socket). Injected so this stays
+  // runtime-agnostic + browser-bundle-safe; the boot entry passes the real createAgentdPtyStream.
+  readonly openStream: (opts: { readonly cols: number; readonly rows: number }) => Promise<PtyFrameStream>;
+  // Initial terminal geometry until the client sends its first resize. Default 80x24.
+  readonly cols?: number;
+  readonly rows?: number;
 }
 
 export function createAgentExecBackend(opts: AgentExecOptions): ExecBackend {
   return Object.freeze({
     label: "agentd-capsule",
-    open(emit: ExecEmit, _context: ExecSessionContext): ExecSession {
-      // The real adapter POSTs /apply { capability:"capsule.exec", request:{ desired:{ id, tty:true } } }
-      // to agentd over the host-proxy, then bridges the returned duplex stream to `emit` / `send`. That
-      // bridge requires the on-device host-proxy + a booted node, so here we fail closed with a clear,
-      // operator-actionable message rather than pretend. This keeps the production wiring honest: the
-      // capability + websocket + app are all real and tested via the dev backend; ONLY the final
-      // capsule-exec hop needs the boot. See EXEC-PLANE.md "What needs a boot".
-      void opts;
+    open(emit: ExecEmit, context: ExecSessionContext): ExecSession {
+      const cols = opts.cols ?? 80;
+      const rows = opts.rows ?? 24;
 
-      emit({
-        t: "error",
-        message:
-          "exec: on-device capsule backend not yet wired — agentd needs a `capsule.exec` capability " +
-          "(this requires a node boot; the dev-sandbox backend is used in the preview).",
-      });
-      emit({ t: "exit", code: 1 });
+      let stream: PtyFrameStream | undefined;
+      let closed = false;
+      let exited = false;
+      // Client messages that arrive before the stream connects are buffered, then flushed in order.
+      const pending: ExecClientMessage[] = [];
+      const decoder = new TextDecoder();
+
+      const sendFrame = (message: ExecClientMessage): void => {
+        if (stream === undefined || closed) return;
+        if (message.t === "stdin") {
+          stream.send(PTY_FRAME_STDIN, new TextEncoder().encode(message.data));
+        } else if (message.t === "resize") {
+          const p = new Uint8Array(4);
+          p[0] = (message.cols >>> 8) & 0xff;
+          p[1] = message.cols & 0xff;
+          p[2] = (message.rows >>> 8) & 0xff;
+          p[3] = message.rows & 0xff;
+          stream.send(PTY_FRAME_RESIZE, p);
+        } else if (message.t === "signal") {
+          // A tty carries Ctrl-C as the byte 0x03 in stdin; SIGINT maps to that. SIGTERM/SIGKILL end the
+          // session by closing the stream (the shell gets SIGHUP when the pty master closes).
+          if (message.signal === "SIGINT") {
+            stream.send(PTY_FRAME_STDIN, new Uint8Array([0x03]));
+          } else {
+            stream.close();
+          }
+        }
+      };
+
+      const emitExit = (code: number | null): void => {
+        if (exited) return;
+        exited = true;
+        emit({ t: "exit", code });
+      };
+
+      opts
+        .openStream({ cols, rows })
+        .then((s) => {
+          if (closed) { s.close(); return; }
+          stream = s;
+
+          s.onFrame((frame) => {
+            switch (frame.type) {
+              case PTY_FRAME_READY:
+                emit({ t: "ready", runtime: "agentd-capsule", capsule: decoder.decode(frame.payload), cwd: "/" });
+                break;
+              case PTY_FRAME_STDOUT:
+                emit({ t: "stdout", data: decoder.decode(frame.payload) });
+                break;
+              case PTY_FRAME_ERROR:
+                emit({ t: "error", message: decoder.decode(frame.payload) });
+                break;
+              case PTY_FRAME_EXIT: {
+                const p = frame.payload;
+                const code = p.length >= 4 ? ((p[0]! << 24) | (p[1]! << 16) | (p[2]! << 8) | p[3]!) : null;
+                emitExit(code);
+                break;
+              }
+              default:
+                break;
+            }
+          });
+          s.onClose(() => { emitExit(exited ? null : 0); });
+
+          // Flush anything the client typed before the stream was ready.
+          for (const message of pending) sendFrame(message);
+          pending.length = 0;
+        })
+        .catch((err: unknown) => {
+          emit({
+            t: "error",
+            message: `exec: could not open on-device capsule session: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          emitExit(1);
+        });
+
+      void context;
 
       return Object.freeze({
-        send(_message: ExecClientMessage): void { /* no session */ },
-        close(): void { /* nothing to tear down */ },
+        send(message: ExecClientMessage): void {
+          if (closed) return;
+          if (stream === undefined) { pending.push(message); return; }
+          sendFrame(message);
+        },
+        close(): void {
+          closed = true;
+          if (stream !== undefined) { try { stream.close(); } catch { /* ignore */ } }
+        },
       });
     },
   });

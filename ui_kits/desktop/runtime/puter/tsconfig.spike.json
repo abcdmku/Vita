@@ -32,6 +32,7 @@
     "spike/preview-entry.ts",
     "spike/headless-spike.ts",
     "spike/headless-exec.ts",
+    "spike/contract-capsule-exec.ts",
     "spike/serve-spike.ts",
     "spike/serve-terminal.ts",
     "spike/dual-face-harness.ts",

@@ -91,6 +91,172 @@ export function createOnDeviceControlPlane(options: AgentdHostProxyOptions = {})
   });
 }
 
+// ---------------------------------------------------------------------------------------------
+// STREAMING /pty host-proxy — the duplex byte stream that backs the on-device Terminal (capsule.exec).
+//
+// agentd's normal surface is buffered request/response (createAgentdUnixFetch above). The Terminal needs
+// a full-duplex stream: an interactive shell's stdin/stdout/window-resize for the life of the session.
+// This proxy dials agentd's unix socket, sends `GET /pty?cols=&rows=` with `Upgrade: vita-pty`, reads the
+// 101, and then exposes the raw duplex stream as length-prefixed FRAMES (the SAME wire format the Go
+// transport/pty.go + capsule/exec.go use):  uint8 type | uint32be length | payload.
+//
+// The exec backend (exec-plane.ts createAgentExecBackend) bridges the api_origin's JSON /pty websocket
+// protocol to these frames over this stream. Deno-only (Deno.connect unix). Never in the browser bundle.
+// ---------------------------------------------------------------------------------------------
+
+// Frame types — MUST match agent/capabilities/capsule/exec.go ExecFrameType.
+export const PTY_FRAME_STDIN = 0x01; // client→agentd: raw bytes → pty
+export const PTY_FRAME_RESIZE = 0x02; // client→agentd: uint16be cols | uint16be rows
+export const PTY_FRAME_STDOUT = 0x03; // agentd→client: raw pty output
+export const PTY_FRAME_EXIT = 0x04; // agentd→client: int32be exit code
+export const PTY_FRAME_ERROR = 0x05; // agentd→client: utf-8 message
+export const PTY_FRAME_READY = 0x06; // agentd→client: utf-8 runtime label (unit name)
+
+const PTY_FRAME_HEADER_BYTES = 5;
+// Mirror the Go cap (capsule.ExecMaxFramePayloadBytes): reject an announced length above this.
+const PTY_MAX_FRAME_PAYLOAD_BYTES = 1 << 20;
+
+export interface PtyFrame {
+  readonly type: number;
+  readonly payload: Uint8Array;
+}
+
+// A live duplex frame stream to agentd's /pty. The exec backend reads frames (onFrame), sends frames
+// (send), and closes it when the websocket drops.
+export interface AgentdPtyStream {
+  // Register the per-frame sink. Called for every agentd→client frame (READY/STDOUT/EXIT/ERROR).
+  onFrame(cb: (frame: PtyFrame) => void): void;
+  // Register the stream-closed sink (socket EOF / error / explicit close). Called exactly once.
+  onClose(cb: () => void): void;
+  // Send a client→agentd frame (STDIN/RESIZE). No-op after close.
+  send(type: number, payload: Uint8Array): void;
+  // Tear down: close the unix socket. Idempotent.
+  close(): void;
+}
+
+export interface AgentdPtyOptions extends AgentdHostProxyOptions {
+  // Initial terminal geometry (forwarded as the ?cols=&rows= query). Defaults 80x24.
+  readonly cols?: number;
+  readonly rows?: number;
+}
+
+export function encodePtyFrame(type: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(PTY_FRAME_HEADER_BYTES + payload.length);
+  out[0] = type & 0xff;
+  const len = payload.length;
+  out[1] = (len >>> 24) & 0xff;
+  out[2] = (len >>> 16) & 0xff;
+  out[3] = (len >>> 8) & 0xff;
+  out[4] = len & 0xff;
+  out.set(payload, PTY_FRAME_HEADER_BYTES);
+  return out;
+}
+
+export function encodeResizePayload(cols: number, rows: number): Uint8Array {
+  const p = new Uint8Array(4);
+  p[0] = (cols >>> 8) & 0xff;
+  p[1] = cols & 0xff;
+  p[2] = (rows >>> 8) & 0xff;
+  p[3] = rows & 0xff;
+  return p;
+}
+
+// Open the duplex /pty stream to agentd over the unix socket. Connects, performs the upgrade, then runs
+// a read loop that reassembles frames and dispatches them. Fail-closed: a connect/upgrade failure invokes
+// onClose (the backend surfaces it as an error to the terminal).
+export async function createAgentdPtyStream(options: AgentdPtyOptions = {}): Promise<AgentdPtyStream> {
+  const socketPath = options.socketPath ?? DEFAULT_AGENTD_SOCKET;
+  const deno = options.deno ?? denoGlobal();
+  const cols = options.cols ?? 80;
+  const rows = options.rows ?? 24;
+
+  const conn = await deno.connect({ transport: "unix", path: socketPath });
+
+  // Send the upgrade request.
+  const request =
+    `GET /pty?cols=${cols}&rows=${rows} HTTP/1.1\r\n` +
+    "Host: agentd\r\n" +
+    "Upgrade: vita-pty\r\n" +
+    "Connection: Upgrade\r\n\r\n";
+  await writeAll(conn, new TextEncoder().encode(request));
+
+  const frameSinks: ((frame: PtyFrame) => void)[] = [];
+  const closeSinks: (() => void)[] = [];
+  let closed = false;
+  let inbound: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  let upgraded = false;
+
+  const fireClose = (): void => {
+    if (closed) return;
+    closed = true;
+    try { conn.close(); } catch { /* already closed */ }
+    for (const cb of closeSinks) { try { cb(); } catch { /* ignore */ } }
+  };
+
+  const stream: AgentdPtyStream = {
+    onFrame(cb) { frameSinks.push(cb); },
+    onClose(cb) { closeSinks.push(cb); },
+    send(type, payload) {
+      if (closed) return;
+      void writeAll(conn, encodePtyFrame(type, payload)).catch(() => fireClose());
+    },
+    close() { fireClose(); },
+  };
+
+  // The read loop: pull bytes, strip the 101 upgrade response (once), then reassemble + dispatch frames.
+  void (async (): Promise<void> => {
+    const buf = new Uint8Array(64 * 1024);
+    try {
+      for (;;) {
+        const n = await conn.read(buf);
+        if (n === null) break; // EOF
+        inbound = concatChunks([inbound, buf.slice(0, n)], inbound.length + n);
+
+        if (!upgraded) {
+          const headerEnd = indexOfCRLFCRLF(inbound);
+          if (headerEnd < 0) continue; // upgrade headers not complete yet
+          const status = new TextDecoder().decode(inbound.slice(0, headerEnd));
+          if (!/^HTTP\/1\.[01] 101/u.test(status)) {
+            // agentd refused the upgrade (e.g. /pty not mounted → 404). Surface as a close.
+            break;
+          }
+          upgraded = true;
+          inbound = inbound.slice(headerEnd + 4);
+        }
+
+        // Drain complete frames.
+        for (;;) {
+          if (inbound.length < PTY_FRAME_HEADER_BYTES) break;
+          const length =
+            (inbound[1]! << 24) | (inbound[2]! << 16) | (inbound[3]! << 8) | inbound[4]!;
+          if (length < 0 || length > PTY_MAX_FRAME_PAYLOAD_BYTES) {
+            // A corrupt/oversized announced length → abort the stream rather than allocate.
+            break;
+          }
+          const total = PTY_FRAME_HEADER_BYTES + length;
+          if (inbound.length < total) break;
+          const frame: PtyFrame = { type: inbound[0]!, payload: inbound.slice(PTY_FRAME_HEADER_BYTES, total) };
+          inbound = inbound.slice(total);
+          for (const cb of frameSinks) { try { cb(frame); } catch { /* ignore */ } }
+        }
+      }
+    } catch { /* read error */ } finally {
+      fireClose();
+    }
+  })();
+
+  return stream;
+}
+
+function indexOfCRLFCRLF(buf: Uint8Array): number {
+  for (let i = 0; i + 3 < buf.length; i += 1) {
+    if (buf[i] === 0x0d && buf[i + 1] === 0x0a && buf[i + 2] === 0x0d && buf[i + 3] === 0x0a) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // The control-plane client only ever passes a plain Record header bag (see control-plane.ts), but accept
 // the full RequestInit.headers union defensively. Typed inline so this module needs no DOM lib type
 // (HeadersInit) it can't resolve under the project's tsconfig.
