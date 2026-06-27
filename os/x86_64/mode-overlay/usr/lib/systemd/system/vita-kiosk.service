@@ -32,8 +32,12 @@ StandardOutput=journal+console
 StandardError=journal+console
 
 # Local face the kiosk browser loads. Kept in lockstep with vita-platform.service's port.
+# The root path serves the MULTI-WINDOW SHELL (the platform server's shell config, on by default): a
+# real desktop with a dock/launcher hosting Vita Desk + deploy console + terminal + editor + package
+# manager + the third-party apps as windows. (With VITA_SHELL=0 on the platform unit, `/` falls back to
+# the single-app Vita Desk; point this at /kiosk-entry.html for the legacy single-app kiosk.)
 Environment=VITA_PLATFORM_PORT=7681
-Environment=VITA_KIOSK_URL=http://127.0.0.1:7681/kiosk-entry.html
+Environment=VITA_KIOSK_URL=http://127.0.0.1:7681/
 # cage/chromium need a writable HOME + XDG_RUNTIME_DIR (wayland socket, chromium profile). A read-only
 # verity root has none, so point them at /run (tmpfs) created per-start by RuntimeDirectory=.
 Environment=HOME=/run/vita-kiosk

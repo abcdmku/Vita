@@ -57,6 +57,13 @@ export interface DualFaceDeps {
   // The PACKAGE-MANAGER meta plane (/meta/*). When present, mounted on the shared api_origin and gated on
   // the `meta` capability (Package Manager only). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
   readonly metaPlane?: MetaPlane;
+  // LOCAL FACE ONLY: extra dynamic GET routes (exact-path → {contentType, body}) served on the
+  // trust-on-host loopback/kiosk listener BEFORE static serving. Used to serve the multi-window SHELL —
+  // `/` + `/shell.html` (the shell page) and `/shell-session.js` (the per-app token map). NEVER mounted on
+  // the network face: the shell session map carries trust-on-host per-app tokens, exactly like
+  // `/session.js`, so a remote client must never receive them (the network face is owner-token gated and
+  // serves the static kiosk-entry only). Absent → no extra routes (the legacy single-app kiosk path).
+  readonly localExtraRoutes?: Readonly<Record<string, () => { readonly contentType: string; readonly body: string }>>;
 }
 
 export interface DualFaceBackend {
@@ -108,6 +115,8 @@ export async function startDualFaceBackend(deps: DualFaceDeps): Promise<DualFace
     ...(aliases !== undefined ? { staticAliases: aliases } : {}),
     // LOCAL FACE ONLY: serve /session.js carrying the minted app token (trust-on-host).
     ...(deps.localSessionToken !== undefined ? { localSessionToken: deps.localSessionToken } : {}),
+    // LOCAL FACE ONLY: the SHELL page + per-app session map (trust-on-host; never on the network face).
+    ...(deps.localExtraRoutes !== undefined ? { extraRoutes: deps.localExtraRoutes } : {}),
     // No faceGate on the local face: trust-on-host.
   });
 

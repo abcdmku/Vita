@@ -19,6 +19,8 @@
     "exec-plane.ts",
     "server/index.ts",
     "server/service.ts",
+    "server/server-entry.ts",
+    "server/agentd-host-proxy.ts",
     "server/tls.ts",
     "pkgmgr/index.ts",
     "pkgmgr/audit-log.ts",

@@ -62,6 +62,14 @@ const FULL_GRANTS: readonly PuterCapability[] = Object.freeze([
 // The deploy console additionally holds `control` (the only app that does — default-deny elsewhere).
 const CONSOLE_GRANTS: readonly PuterCapability[] = Object.freeze([...FULL_GRANTS, "control"]);
 
+// The Package Manager additionally holds `meta` (the ONLY app that does — the control plane for
+// permissions; default-deny elsewhere). It reads/edits package source + alters per-package grants.
+const PKGMGR_GRANTS: readonly PuterCapability[] = Object.freeze([...FULL_GRANTS, "meta"]);
+
+// The Terminal additionally holds `exec` (the ONLY app that does — opens the /pty websocket to run a
+// real command in a hardened capsule; the MOST privileged compat capability; default-deny elsewhere).
+const TERMINAL_GRANTS: readonly PuterCapability[] = Object.freeze([...FULL_GRANTS, "exec"]);
+
 // The default shell catalog. Two Vita apps (Vita Desk + deploy console) and two real, unmodified
 // third-party Puter apps (serverless-todo, notepad). Ordering = launcher order.
 export const DEFAULT_SHELL_APPS: readonly ShellAppEntry[] = Object.freeze([
@@ -111,6 +119,39 @@ export const DEFAULT_SHELL_APPS: readonly ShellAppEntry[] = Object.freeze([
     origin: "third-party",
     title: "Notepad",
     window: { height: 480, width: 640 },
+  }),
+  Object.freeze({
+    description: "A real terminal on the node — runs commands in a hardened capsule over /pty (exec).",
+    entry: "/apps/terminal/index.html",
+    grants: TERMINAL_GRANTS,
+    icon: "⌨️",
+    id: "vita.app.terminal",
+    kind: "webapp",
+    origin: "vita",
+    title: "Terminal",
+    window: { height: 480, width: 720 },
+  }),
+  Object.freeze({
+    description: "Inspect + edit installed package source and alter per-package permissions (meta).",
+    entry: "/pkgmgr-app/index.html",
+    grants: PKGMGR_GRANTS,
+    icon: "📦",
+    id: "vita.app.package-manager",
+    kind: "webapp",
+    origin: "vita",
+    title: "Package Manager",
+    window: { height: 560, width: 820 },
+  }),
+  Object.freeze({
+    description: "Vita Code — open, edit, and save files through puter.fs (the dev-loop editor).",
+    entry: "/editor/index.html",
+    grants: FULL_GRANTS,
+    icon: "✏️",
+    id: "vita.app.editor",
+    kind: "webapp",
+    origin: "vita",
+    title: "Vita Code",
+    window: { height: 600, width: 860 },
   }),
 ]);
 

@@ -19,11 +19,13 @@
 // NEVER import from the browser bundle. node-only modules + Deno-only globals (Deno.env / Deno.Command).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   createOnDeviceControlPlane,
   DEFAULT_AGENTD_SOCKET,
+  DEFAULT_SHELL_APPS,
   KIOSK_ENTRY_PATH,
   randomOpaqueToken,
   startPuterPlatformService,
@@ -322,6 +324,45 @@ async function main(): Promise<void> {
     emit(`${MARKER}: control plane disabled (no agentd socket at ${agentdSocket}, VITA_CONTROL_PLANE!=1) — /control/* will 404`);
   }
 
+  // MULTI-WINDOW SHELL (the on-device kiosk desktop). On by default — the local/kiosk face serves the
+  // shell page (multi-window desktop hosting Vita Desk + deploy console + terminal + editor + package
+  // manager + the third-party apps, each in its own capability-gated window) at `/`, instead of the
+  // single-app Vita Desk kiosk-entry. Set VITA_SHELL=0 to fall back to the legacy single-app kiosk.
+  // The service mints ONE default-deny capability session per registry app (console=control,
+  // package-manager=meta, terminal=exec, others minimal); the per-app map is served only on the local face.
+  //
+  // Path layout (staged + dev both): the runtime dir is .../ui_kits/desktop/runtime/puter. The shell
+  // page + bundle live under shell/; Vita Desk (app/) + the third-party apps (apps/) + the package
+  // manager (pkgmgr-app/) are sub-paths of staticRoot (the runtime dir) and need no alias. The deploy
+  // console (apps/vita-deploy-console) and the editor (runtime/devloop/editor) live OUTSIDE the runtime
+  // dir, so they get explicit aliases (/console, /editor); /ui_kits + /shell serve the shell's own assets.
+  const shellEnabled = env("VITA_SHELL") !== "0";
+  const runtimeDir = resolve(fileURLToPath(import.meta.url), "..", ".."); // .../runtime/puter
+  const repoRootStaged = resolve(runtimeDir, "..", "..", "..", ".."); // app-platform root (or repo root)
+  let shell: ServiceOptions["shell"];
+
+  if (shellEnabled) {
+    const shellHtmlPath = resolve(runtimeDir, "shell", "shell.html");
+
+    if (existsSync(shellHtmlPath)) {
+      shell = {
+        apps: DEFAULT_SHELL_APPS,
+        htmlPath: shellHtmlPath,
+        staticAliases: {
+          "/console": resolve(repoRootStaged, "apps", "vita-deploy-console"),
+          "/editor": resolve(runtimeDir, "..", "devloop", "editor"),
+          "/shell": resolve(runtimeDir, "shell"),
+          "/ui_kits": resolve(repoRootStaged, "ui_kits"),
+        },
+      };
+      emit(`${MARKER}: SHELL enabled — local face serves the multi-window desktop (${DEFAULT_SHELL_APPS.length} apps) at /`);
+    } else {
+      emit(`${MARKER}: SHELL requested but shell.html not found at ${shellHtmlPath} — falling back to single-app kiosk`);
+    }
+  } else {
+    emit(`${MARKER}: SHELL disabled (VITA_SHELL=0) — local face serves the single-app kiosk-entry`);
+  }
+
   const options: ServiceOptions = {
     appsRoot,
     faces: { localHost, localPort, networkHost, networkPort },
@@ -329,6 +370,7 @@ async function main(): Promise<void> {
     ownerToken,
     ...(controlPlane !== undefined ? { controlPlane } : {}),
     ...(ownerIdentity !== undefined ? { ownerIdentity } : {}),
+    ...(shell !== undefined ? { shell } : {}),
     ...(tlsCert !== undefined && tlsKey !== undefined ? { tls: { certPath: tlsCert, keyPath: tlsKey } } : {}),
   };
 
@@ -368,12 +410,24 @@ async function main(): Promise<void> {
   // session-token provider, so the token is NEVER served to a remote client (owner-gated separately).
   service.setLocalSessionToken(localApp.token);
 
-  // DEPLOY CONSOLE session: when the control plane is wired, mint the console app's session with the
-  // `control` grant (and its data-plane grants) so it can clear the api_origin's /control/* gate. It is
-  // the ONLY app minted `control` (default-deny everywhere else). The token is published to /run for the
-  // launcher/probe; the console reads it from its launch URL exactly like any launched app. When the
-  // control plane is NOT wired we skip this (no point minting control no app can use).
-  if (controlPlane !== undefined) {
+  // SHELL sessions: when the shell is on, the service already minted ONE default-deny capability session
+  // per registry app (console=control, package-manager=meta, terminal=exec, others minimal) and serves the
+  // map at /shell-session.js on the local face. Publish that map to /run so the diagnostic probe can
+  // confirm each app got exactly its grants (and the console + pkgmgr + terminal carry their privileged caps).
+  if (shell !== undefined && Object.keys(service.shellSessions).length > 0) {
+    writeRunFile(`${runDir}/shell-sessions.json`, `${JSON.stringify({
+      apiOrigin: "/api",
+      sessions: service.shellSessions,
+    }, null, 2)}\n`);
+    const summary = DEFAULT_SHELL_APPS.map((a) => `${a.id}[${a.grants.join("+")}]`).join(" ");
+    emit(`${MARKER}: SHELL sessions minted (${Object.keys(service.shellSessions).length} apps): ${summary}`);
+  }
+
+  // DEPLOY CONSOLE session (legacy single-app kiosk path): when the shell is OFF and the control plane is
+  // wired, mint the console app's session with the `control` grant so it can clear /control/*. With the
+  // shell ON, the registry's `vita.app.deploy-console` entry already holds `control` via the shared
+  // registry (minted above), so this separate mint is skipped to avoid a redundant duplicate.
+  if (shell === undefined && controlPlane !== undefined) {
     const consoleApp = service.mintApp({
       appId: DEPLOY_CONSOLE_APP_ID,
       grants: [...DEPLOY_CONSOLE_GRANTS],

@@ -19,6 +19,7 @@
 // Node-only (node:http/https via backend.ts + server.ts, node:fs via fs-store.ts). NEVER import from
 // the browser bundle.
 
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { startDualFaceBackend, type DualFaceBackend } from "../backend.ts";
@@ -27,6 +28,8 @@ import type { AgentControlPlane } from "../control-plane.ts";
 import { openAppStore, DEFAULT_APPS_ROOT } from "../fs-store.ts";
 import { createAppGrantRegistry, createBrokerPermissionModel, type AppGrantRegistry } from "../permission-model.ts";
 import type { MetaPlane } from "../pkgmgr/meta-plane.ts";
+import type { ShellAppEntry, ShellAppSession } from "../shell/app-registry.ts";
+import { buildShellSessionScript, mintShellSessions } from "../shell/shell-session.ts";
 import { resolveTlsMaterial, type TlsMaterial, type TlsSourceOptions } from "./tls.ts";
 
 // The Vita mode the service runs in. Affects WHICH faces are exposed (see resolveFaces):
@@ -88,6 +91,18 @@ export interface ServiceOptions {
   // capability registry once they exist, so the meta plane writes the SAME grant store the broker reads
   // (a revoke takes effect on the next gated call). Absent → /meta/* answers 404. See pkgmgr/meta-plane.ts.
   readonly metaPlaneFactory?: (deps: { readonly grants: AppGrantRegistry; readonly capabilities: PuterCapabilityRegistry }) => MetaPlane;
+  // The MULTI-WINDOW SHELL config. When present the LOCAL (kiosk) face serves the shell page at `/` +
+  // `/shell.html` plus `/shell-session.js` (a per-app capability-session map), instead of the single-app
+  // kiosk-entry. ONE capability session is minted per registry app (each app gets EXACTLY its declared
+  // grants — default-deny: console=control, package-manager=meta, terminal=exec, others minimal); the map
+  // is published ONLY to the trust-on-host local face (never the owner-token network face). `htmlPath` is
+  // the absolute shell.html file; `staticAliases` are URL-prefix → absolute-dir mounts for the app assets
+  // (e.g. /apps, /console, /editor, /shell, /ui_kits). Absent → the legacy single-app kiosk path.
+  readonly shell?: {
+    readonly apps: readonly ShellAppEntry[];
+    readonly htmlPath: string;
+    readonly staticAliases?: Readonly<Record<string, string>>;
+  };
 }
 
 // A live app session the host minted in-process. The api_origin honors `token`; a sandboxed iframe
@@ -124,6 +139,10 @@ export interface PuterPlatformService {
   // to the in-browser puter.js SDK (which then authenticates to the local api_origin — no 401). The
   // token is NEVER published to the network face (that listener has no session-token provider).
   setLocalSessionToken(token: string | undefined): void;
+  // The per-app SHELL sessions minted at startup (when `shell` was supplied), keyed by appId. Empty when
+  // the shell was not configured. The boot entry publishes these to /run for the diagnostic probe; the
+  // browser receives them via `/shell-session.js` on the local face.
+  readonly shellSessions: Readonly<Record<string, ShellAppSession>>;
   close(): Promise<void>;
 }
 
@@ -187,9 +206,42 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
   // KIOSK_ENTRY_PATH; the network face requires the owner token before serving any of it.)
   const runtimeDir = resolve(import.meta.dirname, "..");
   const vendorDir = resolve(runtimeDir, "../../_vendor");
-  const staticAliases = {
+  const staticAliases: Record<string, string> = {
     "/_vendor": vendorDir,
+    // The shell's app assets reach these via the page's <link>/<iframe>; harmless when the shell is off
+    // (no page references them). The runtime dir already serves /apps, /pkgmgr-app, /app, /shell as
+    // sub-paths of staticRoot, so they need no alias — only out-of-tree dirs (the console + editor) do,
+    // supplied via options.shell.staticAliases below.
+    ...(options.shell?.staticAliases ?? {}),
   };
+
+  // ── MULTI-WINDOW SHELL (optional, LOCAL face only) ──
+  // When a shell config is supplied, mint ONE capability session per registry app (each gets EXACTLY its
+  // declared grants — default-deny) and build the local-face routes: the shell page at `/` + `/shell.html`
+  // and the per-app session map at `/shell-session.js`. These are trust-on-host (per-app tokens) and are
+  // served ONLY on the loopback/kiosk face — never the owner-token network face (the shell session map
+  // must never reach a remote client; the network face serves the static kiosk-entry under its owner gate).
+  let shellSessions: Record<string, ShellAppSession> = {};
+  let localExtraRoutes: Record<string, () => { readonly contentType: string; readonly body: string }> | undefined;
+
+  if (options.shell !== undefined) {
+    // Declare each app's grants in the shared grant registry (fail-closed otherwise) BEFORE minting, so the
+    // broker authorizes each app to exactly its registry grants and nothing more.
+    for (const app of options.shell.apps) {
+      if (!grants.has(app.id)) grants.declare(app.id, app.grants);
+    }
+    shellSessions = mintShellSessions(capabilities, options.shell.apps);
+
+    const shellHtml = readFileSync(options.shell.htmlPath, "utf8");
+    const htmlRoute = (): { contentType: string; body: string } => ({ body: shellHtml, contentType: "text/html; charset=utf-8" });
+    const sessionScript = buildShellSessionScript({ apiOrigin: "/api", sessions: shellSessions });
+
+    localExtraRoutes = {
+      "/": htmlRoute,
+      "/shell-session.js": () => ({ body: sessionScript, contentType: "text/javascript; charset=utf-8" }),
+      "/shell.html": htmlRoute,
+    };
+  }
 
   // ── LOCAL-face session token holder ──
   // The boot entry mints the well-known kiosk app session AFTER this service resolves, then calls
@@ -216,6 +268,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
       localSessionToken: localSessionTokenProvider,
       ...(options.controlPlane !== undefined ? { controlPlane: options.controlPlane } : {}),
       ...(metaPlane !== undefined ? { metaPlane } : {}),
+      ...(localExtraRoutes !== undefined ? { localExtraRoutes } : {}),
       ...(tls !== undefined ? { networkTls: { cert: tls.cert, key: tls.key } } : {}),
     });
 
@@ -249,6 +302,7 @@ export async function startPuterPlatformService(options: ServiceOptions): Promis
     setLocalSessionToken(token: string | undefined): void {
       localSessionToken = token;
     },
+    shellSessions,
     tls,
   });
 }

@@ -27,6 +27,19 @@ export {
   startPuterPlatformService,
 } from "./service.ts";
 
+// ── the MULTI-WINDOW SHELL registry (the catalog the launcher reads + the service mints sessions from) ──
+export {
+  DEFAULT_SHELL_APPS,
+  findShellApp,
+} from "../shell/app-registry.ts";
+export type {
+  ShellAppEntry,
+  ShellAppKind,
+  ShellAppOrigin,
+  ShellAppSession,
+  ShellSessionPayload,
+} from "../shell/app-registry.ts";
+
 // ── the on-device host-proxy: agentd unix socket → /control/* bridge ──
 export {
   createAgentdUnixFetch,
