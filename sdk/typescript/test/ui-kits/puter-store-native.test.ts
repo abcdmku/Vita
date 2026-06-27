@@ -13,7 +13,7 @@ import { NativeCapabilityError, createVitaPuter } from "../../../../ui_kits/desk
 import { buildLaunchSearch, buildLaunchUrl, parseLaunchParams } from "../../../../ui_kits/desktop/runtime/puter/launch-url.ts";
 import { createWebAppWindowHost } from "../../../../ui_kits/desktop/runtime/puter/web-app-window.ts";
 import { createUiBroker } from "../../../../ui_kits/desktop/runtime/puter/ui-broker.ts";
-import type { BrokerSinks, BrokerWindow } from "../../../../ui_kits/desktop/runtime/puter/ui-broker.ts";
+import type { BrokerSinks, BrokerWindow, PickedFsEntry } from "../../../../ui_kits/desktop/runtime/puter/ui-broker.ts";
 import type {
   WindowContent,
   WindowHandle,
@@ -163,6 +163,23 @@ test("buildLaunchSearch preserves an existing app query", () => {
   assert.equal(typeof buildLaunchSearch({ apiOrigin: "o", appInstanceId: "i", appUrl: "/x", authToken: "t" }), "string");
 });
 
+test("buildLaunchUrl emits puter.item.* for a launch item (onLaunchedWithItems)", () => {
+  const url = buildLaunchUrl({
+    apiOrigin: "/api",
+    appInstanceId: "i",
+    appUrl: "/app.html",
+    authToken: "t",
+    launchItem: { name: "doc.txt", path: "/notes/doc.txt", readUrl: "http://127.0.0.1/api/read?file=%2Fnotes%2Fdoc.txt", uid: "uid-1" },
+  });
+  const params = parseLaunchParams(url);
+
+  // The SDK gates onLaunchedWithItems on these three being present.
+  assert.equal(params["puter.item.name"], "doc.txt");
+  assert.equal(params["puter.item.uid"], "uid-1");
+  assert.equal(params["puter.item.path"], "/notes/doc.txt");
+  assert.ok(typeof params["puter.item.read_url"] === "string" && params["puter.item.read_url"].length > 0);
+});
+
 // ---- web-app window host (mounts an iframe into a fake WM window) ----
 
 // A test element node carrying the attrs the host sets (sandbox/src/style) so we can assert on them.
@@ -268,7 +285,12 @@ function stubSinks(): BrokerSinks {
     launchApp(): void {},
     async prompt(): Promise<string | null> { return null; },
     setWindowTitle(): void {},
+    showColorPicker(): Promise<string | null> { return Promise.resolve(null); },
+    showDirectoryPicker(): Promise<readonly PickedFsEntry[] | null> { return Promise.resolve(null); },
+    showFontPicker(): Promise<string | null> { return Promise.resolve(null); },
     showNotification(): void {},
+    showOpenFilePicker(): Promise<readonly PickedFsEntry[] | null> { return Promise.resolve(null); },
+    showSaveFilePicker(): Promise<PickedFsEntry | null> { return Promise.resolve(null); },
   };
 }
 

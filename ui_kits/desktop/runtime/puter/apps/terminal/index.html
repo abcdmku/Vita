@@ -9,37 +9,169 @@
   term.write. Commands run inside a hardened, cgroup-gated capsule on the node (on-device) or a
   scrubbed dev sandbox (preview) — see exec-plane.ts.
 
+  LOOK & FEEL — the owner handoff "Shell" aesthetic (ui_kits/desktop/Shell.html): a syntax-highlighted
+  TypeScript REPL. The chrome (neutral-dot title bar, a `surface-sunken` content area, the `›` accent
+  prompt + solid accent block cursor, the syntax-highlighted intro, and the status footer
+  `~/vita · git-branch main · TS 5.9 · UTF-8`) is all driven by the canonical design tokens — we link the
+  same /ui_kits/styles.css (Geist Mono + the `--syn-*` syntax ladder + the `.theme-dark` surface ladder)
+  and the /ui_kits/vita-app-theme.css bridge the shell + every first-party app share. The LIVE xterm grid
+  reads the same tokens for its theme (background `--surface-sunken`, cursor `--accent`, foreground/green
+  from the syntax ladder), so the live pty output matches the mock byte-for-byte in spirit.
+
   The app reads two launch params from its URL (set by the launcher / harness):
     puter.api_origin   — the api_origin base (we derive the ws:// /pty URL from it)
     puter.auth.token   — the opaque owner token (rides the /pty query string; a browser WebSocket
                          cannot set an Authorization header). The exec gate validates it.
 -->
-<html>
+<html class="theme-dark">
 <head>
   <meta charset="utf-8" />
   <title>Vita Terminal</title>
-  <link rel="stylesheet" href="/_vendor/xterm/xterm.css" />
-  <style>
-    html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e8ee; font: 13px system-ui, sans-serif; }
-    #bar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid #20232c; background: #11141b; }
-    #bar .dot { width: 9px; height: 9px; border-radius: 50%; background: #f87171; }
-    #bar .dot.up { background: #4ade80; }
-    #bar .title { font-weight: 600; }
-    #bar .meta { color: #8b8f9c; font-size: 12px; }
-    #term { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; padding: 6px 8px; }
-    .xterm { height: 100%; }
-  </style>
   <!-- Vendored, offline, MIT-licensed xterm.js (no runtime CDN). -->
+  <link rel="stylesheet" href="/_vendor/xterm/xterm.css" />
+  <!-- Shared design-system: tokens (Geist Mono, --syn-*, the dark surface ladder) THEN the bridge.
+       Both are vendored/offline (no CDN); served from the repo's ui_kits dir by the platform server. -->
+  <link rel="stylesheet" href="/ui_kits/styles.css" />
+  <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body {
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Window chrome — neutral-dot title bar (matches WindowChrome.jsx / Shell.html). ── */
+    #bar {
+      height: 38px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 11px;
+      padding: 0 14px;
+      background: var(--surface-raised);
+      border-bottom: 1px solid var(--hairline);
+      user-select: none;
+    }
+    #bar .dots { display: flex; gap: 8px; }
+    #bar .dots span {
+      width: 12px; height: 12px; border-radius: 50%;
+      background: var(--border-strong);
+      box-shadow: inset 0 0 0 .5px rgba(0,0,0,.25), 0 1px 1px rgba(0,0,0,.15);
+    }
+    #bar .ticon { color: var(--accent); display: inline-flex; margin-left: 3px; }
+    #bar .title {
+      font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+      color: var(--text-secondary);
+    }
+    #bar .meta { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+    #bar .meta .live {
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    #bar .meta .live .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--text-faint);
+    }
+    #bar .meta .live.up .dot {
+      background: var(--success);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--success) 70%, transparent);
+    }
+    #bar .meta .live.denied .dot { background: var(--danger); box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 70%, transparent); }
+
+    /* ── Content — the sunken REPL surface. The syntax-highlighted intro sits on top; the live xterm
+         grid fills the rest. Both share the same surface so the seam is invisible. ── */
+    #content {
+      flex: 1; min-height: 0;
+      display: flex; flex-direction: column;
+      background: var(--surface-sunken);
+      padding: 14px 18px 6px;
+      overflow: hidden;
+    }
+    #intro {
+      font-family: var(--font-mono); font-size: 13px; line-height: 1.95;
+      flex-shrink: 0; padding-bottom: 6px;
+    }
+    #intro .c { color: var(--syn-comment); }
+    #intro .k { color: var(--syn-keyword); }
+    #intro .s { color: var(--syn-string); }
+    #intro .n { color: var(--syn-number); }
+    #intro .f { color: var(--syn-fn); }
+    #intro .p { color: var(--syn-punct); }
+    #intro .id { color: var(--syn-ident); }
+    #intro .ok { color: var(--success); }
+    #intro .prompt { color: var(--accent); user-select: none; }
+    /* The solid accent BLOCK cursor (matches Shell.html's caret block). */
+    #intro .caret {
+      display: inline-block; width: 8px; height: 15px;
+      background: var(--accent); vertical-align: -2px;
+      animation: vita-caret 1.05s steps(1) infinite;
+    }
+    @keyframes vita-caret { 50% { opacity: 0; } }
+
+    /* The live terminal grid — flush to the same sunken surface; xterm paints its own background from
+       the theme we hand it (also --surface-sunken), so there is no visible seam with #intro. */
+    #term { flex: 1; min-height: 0; }
+    .xterm { height: 100%; }
+    .xterm .xterm-viewport { background: transparent !important; }
+
+    /* ── Status footer — ~/vita · git-branch main · TS 5.9 · UTF-8. ── */
+    #footer {
+      height: 28px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 14px;
+      border-top: 1px solid var(--hairline);
+      background: var(--surface-raised);
+      font-family: var(--font-mono); font-size: 10.5px;
+      color: var(--text-muted);
+      user-select: none;
+    }
+    #footer .cwd { color: var(--accent); }
+    #footer .branch {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 5px;
+      color: var(--success);
+    }
+    #footer .branch svg { display: block; }
+    #footer .enc { color: var(--text-faint); }
+  </style>
   <script src="/_vendor/xterm/xterm.js"></script>
   <script src="/_vendor/xterm/addon-fit.js"></script>
 </head>
 <body>
   <div id="bar">
-    <span class="dot" id="dot"></span>
-    <span class="title">Vita Terminal</span>
-    <span class="meta" id="meta">connecting…</span>
+    <span class="dots"><span></span><span></span><span></span></span>
+    <span class="ticon" title="terminal" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+    </span>
+    <span class="title">kernel — ~/vita</span>
+    <span class="meta"><span class="live" id="live"><span class="dot"></span><span id="meta">connecting…</span></span></span>
   </div>
-  <div id="term"></div>
+
+  <div id="content">
+    <!-- The syntax-highlighted REPL intro (the Shell.html banner). Static; the live pty renders below. -->
+    <div id="intro">
+      <div><span class="c">// Vita shell — a TypeScript REPL with full system access</span></div>
+      <div><span class="prompt">›</span> <span class="k">import</span> <span class="p">{</span> Kernel <span class="p">}</span> <span class="k">from</span> <span class="s">"./kernel.ts"</span></div>
+      <div><span class="prompt">›</span> <span class="k">const</span> <span class="id">k</span> <span class="p">=</span> <span class="k">new</span> <span class="f">Kernel</span><span class="p">()</span></div>
+      <div><span class="prompt">›</span> <span class="k">await</span> <span class="id">k</span><span class="p">.</span><span class="f">boot</span><span class="p">(</span><span class="s">"init.ts"</span><span class="p">)</span></div>
+      <div class="ok">&nbsp;&nbsp;✓ kernel ready · <span class="n">0.42s</span></div>
+      <div class="ok">&nbsp;&nbsp;✓ compositor online · <span class="n">60fps</span></div>
+      <div><span class="prompt">›</span> <span class="id">k</span><span class="p">.</span><span class="f">shell</span><span class="p">()</span> <span class="c">// live pty ↓</span></div>
+      <div><span class="prompt">›</span> <span class="caret"></span></div>
+    </div>
+    <div id="term"></div>
+  </div>
+
+  <div id="footer">
+    <span class="cwd">~/vita</span>
+    <span class="branch">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+      <span id="branch">main</span>
+    </span>
+    <span>TS 5.9</span>
+    <span class="enc">UTF-8</span>
+  </div>
+
   <script>
     // Expose state for the headless/browser verification to assert against.
     window.__VITA_TERM__ = { connected: false, ready: false, runtime: null, lastError: null, output: "" };
@@ -63,14 +195,35 @@
       return wsProto + "//" + base.host + "/pty?auth_token=" + encodeURIComponent(token);
     }
 
-    const dot = document.getElementById("dot");
+    const live = document.getElementById("live");
     const meta = document.getElementById("meta");
+
+    // Resolve a CSS custom property off the live cascade so the xterm grid matches the token theme
+    // exactly (no second hardcoded palette to drift). Falls back to a sane default if unresolved.
+    function tok(name, fallback) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    }
 
     const term = new Terminal({
       cursorBlink: true,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+      fontFamily: "var(--font-mono), 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
       fontSize: 13,
-      theme: { background: "#0b0d12", foreground: "#e6e8ee", cursor: "#5b9dff" },
+      // Wire the live grid off the SAME design tokens the chrome uses: sunken surface, accent cursor,
+      // the syntax ladder's ident/green/red for foreground + stderr.
+      theme: {
+        background: tok("--surface-sunken", "#11151b"),
+        foreground: tok("--syn-ident", "#cdd5e0"),
+        cursor: tok("--accent", "#4f9dff"),
+        cursorAccent: tok("--surface-sunken", "#11151b"),
+        green: tok("--syn-string", "#5bbf86"),
+        brightGreen: tok("--success", "#5bbf86"),
+        red: tok("--danger", "#f08a8a"),
+        yellow: tok("--syn-number", "#e0a86b"),
+        blue: tok("--syn-fn", "#7fd99a"),
+        magenta: tok("--syn-keyword", "#c08bff"),
+        brightBlack: tok("--syn-comment", "#5d6877"),
+      },
       convertEol: false,
     });
     const fit = new FitAddon.FitAddon();
@@ -90,7 +243,8 @@
 
       ws.onopen = () => {
         window.__VITA_TERM__.connected = true;
-        dot.classList.add("up");
+        live.classList.remove("denied");
+        live.classList.add("up");
         meta.textContent = "connected";
       };
 
@@ -118,7 +272,7 @@
 
       ws.onerror = () => { fail("websocket error (exec denied? gate refused the upgrade)"); };
       ws.onclose = (ev) => {
-        dot.classList.remove("up");
+        live.classList.remove("up");
         // A 1006/abnormal close right after a refused HTTP upgrade is how the exec gate's 401/403 shows
         // up to the browser (no 101). Surface it so the verification can read DENIED.
         if (!window.__VITA_TERM__.connected) {
@@ -131,7 +285,8 @@
 
     function fail(message) {
       window.__VITA_TERM__.lastError = message;
-      dot.classList.remove("up");
+      live.classList.remove("up");
+      live.classList.add("denied");
       meta.textContent = "denied";
       term.writeln("\r\n\x1b[31m" + message + "\x1b[0m");
     }

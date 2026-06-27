@@ -14,6 +14,13 @@ Type=simple
 ExecStart=/usr/lib/vita/agentd
 Restart=on-failure
 RestartSec=5s
+# Route agentd's stdout/stderr to BOTH the journal and the console (= the serial console on the QEMU
+# boot, -serial). Without this, agentd's witness markers — notably VITA-NODE-FIREWALL (the default-deny
+# node firewall confirm) and the owner-identity / capsule witnesses — land only in the journal and never
+# appear on the serial log the on-device boot verification scrapes. journal+console keeps the durable
+# journal copy AND surfaces the markers on serial so the boot confirm can assert them.
+StandardOutput=journal+console
+StandardError=journal+console
 # agentd still runs as UID 0, but its primary group owns /run/vita-agent and
 # agentd.sock so the DynamicUser TS runtime can connect via SupplementaryGroups
 # without making the privileged socket world-accessible.

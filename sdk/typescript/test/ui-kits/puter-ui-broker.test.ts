@@ -11,9 +11,11 @@ import {
   type BrokerMessageListener,
   type BrokerSinks,
   type BrokerWindow,
+  type PickedFsEntry,
   createUiBroker,
 } from "../../../../ui_kits/desktop/runtime/puter/ui-broker.ts";
 import { createCapabilityRegistry } from "../../../../ui_kits/desktop/runtime/puter/capability.ts";
+import type { PuterAppSession } from "../../../../ui_kits/desktop/runtime/puter/capability.ts";
 
 const INSTANCE = "ui-instance";
 const APP_ID = "ui.app";
@@ -49,8 +51,42 @@ function fakeAppSource(): { source: object; replies: unknown[] } {
   return { replies, source };
 }
 
-function recordingSinks(): { sinks: BrokerSinks; calls: { type: string; args: unknown[] }[] } {
+// Scripted picker results a test can set before dispatching, so we can assert the broker maps the
+// sink result into the exact SDK reply shape.
+interface PickerScript {
+  open: readonly PickedFsEntry[] | null;
+  save: PickedFsEntry | null;
+  directory: readonly PickedFsEntry[] | null;
+  font: string | null;
+  color: string | null;
+}
+
+function entry(path: string, name: string): PickedFsEntry {
+  return Object.freeze({
+    created: 1000,
+    is_dir: false,
+    modified: 2000,
+    name,
+    path,
+    read_url: `http://127.0.0.1/api/read?file=${encodeURIComponent(path)}&signature=x&expires=0`,
+    size: 7,
+    uid: `uid-${path}`,
+    write_url: `http://127.0.0.1/api/batch?path=${encodeURIComponent(path)}&signature=x&expires=0`,
+  });
+}
+
+function recordingSinks(script?: Partial<PickerScript>): {
+  sinks: BrokerSinks;
+  calls: { type: string; args: unknown[] }[];
+} {
   const calls: { type: string; args: unknown[] }[] = [];
+  const s: PickerScript = {
+    color: script?.color ?? null,
+    directory: script?.directory ?? null,
+    font: script?.font ?? null,
+    open: script?.open ?? null,
+    save: script?.save ?? null,
+  };
 
   return {
     calls,
@@ -73,14 +109,37 @@ function recordingSinks(): { sinks: BrokerSinks; calls: { type: string; args: un
       setWindowTitle(instance, title): void {
         calls.push({ args: [instance, title], type: "setWindowTitle" });
       },
+      async showColorPicker(session: PuterAppSession, options): Promise<string | null> {
+        calls.push({ args: [session.appInstanceId, options], type: "showColorPicker" });
+        return s.color;
+      },
+      async showDirectoryPicker(session: PuterAppSession, options): Promise<readonly PickedFsEntry[] | null> {
+        calls.push({ args: [session.appInstanceId, options], type: "showDirectoryPicker" });
+        return s.directory;
+      },
+      async showFontPicker(session: PuterAppSession, options): Promise<string | null> {
+        calls.push({ args: [session.appInstanceId, options], type: "showFontPicker" });
+        return s.font;
+      },
       showNotification(instance, input): void {
         calls.push({ args: [instance, input], type: "showNotification" });
+      },
+      async showOpenFilePicker(session: PuterAppSession, options): Promise<readonly PickedFsEntry[] | null> {
+        calls.push({ args: [session.appInstanceId, options], type: "showOpenFilePicker" });
+        return s.open;
+      },
+      async showSaveFilePicker(session: PuterAppSession, input): Promise<PickedFsEntry | null> {
+        calls.push({ args: [session.appInstanceId, input], type: "showSaveFilePicker" });
+        return s.save;
       },
     },
   };
 }
 
-function setup(grants: readonly import("../../../../ui_kits/desktop/runtime/puter/capability.ts").PuterCapability[] = ["ui"]): {
+function setup(
+  grants: readonly import("../../../../ui_kits/desktop/runtime/puter/capability.ts").PuterCapability[] = ["ui"],
+  script?: Partial<PickerScript>,
+): {
   dispatch: (e: BrokerMessageEvent) => void;
   broker: ReturnType<typeof createUiBroker>;
   calls: { type: string; args: unknown[] }[];
@@ -88,7 +147,7 @@ function setup(grants: readonly import("../../../../ui_kits/desktop/runtime/pute
   caps: ReturnType<typeof createCapabilityRegistry>;
 } {
   const { win, dispatch } = fakeWindow();
-  const { sinks, calls } = recordingSinks();
+  const { sinks, calls } = recordingSinks(script);
   const appSource = fakeAppSource();
   const caps = createCapabilityRegistry();
 
@@ -247,4 +306,158 @@ test("non-envelope postMessages are ignored", async () => {
   await tick();
 
   assert.equal(appSource.replies.length, 0);
+});
+
+// ----- PICKERS -----
+
+test("showOpenFilePicker replies with fileOpenPicked + the SDK FSItem item shape", async () => {
+  const picked = entry("/notes/hello.txt", "hello.txt");
+  const { dispatch, calls, appSource } = setup(["ui", "fs.read"], { open: [picked] });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showOpenFilePicker", options: {}, uuid: "of-1" }, source: appSource.source });
+  await tick();
+
+  assert.equal(calls.find((c) => c.type === "showOpenFilePicker") !== undefined, true);
+  const reply = appSource.replies.at(-1) as { msg?: string; original_msg_id?: string; items?: { path?: string; name?: string; read_url?: string }[] };
+
+  assert.equal(reply?.msg, "fileOpenPicked");
+  assert.equal(reply?.original_msg_id, "of-1");
+  assert.equal(reply?.items?.[0]?.path, "/notes/hello.txt");
+  assert.equal(reply?.items?.[0]?.name, "hello.txt");
+  // The item carries a parseable read_url so the SDK's FSItem constructor does not throw.
+  assert.doesNotThrow(() => new URL(reply!.items![0]!.read_url!));
+});
+
+test("showOpenFilePicker reply item survives the genuine FSItem constructor's URL parse", async () => {
+  const picked = entry("/a b/with space.txt", "with space.txt");
+  const { dispatch, appSource } = setup(["ui", "fs.read"], { open: [picked] });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showOpenFilePicker", options: {}, uuid: "of-2" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { items?: Record<string, unknown>[] };
+  const item = reply?.items?.[0] as Record<string, unknown>;
+
+  // Mimic the SDK's FSItem constructor's signature/expires read: it never throws given our item.
+  assert.doesNotThrow(() => {
+    const u = new URL(String(item["write_url"] ?? item["read_url"]));
+    u.searchParams.get("signature");
+  });
+});
+
+test("showOpenFilePicker on cancel replies fileOpenCancelled", async () => {
+  const { dispatch, appSource } = setup(["ui", "fs.read"], { open: null });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showOpenFilePicker", options: {}, uuid: "of-3" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { msg?: string; original_msg_id?: string };
+
+  assert.equal(reply?.msg, "fileOpenCancelled");
+  assert.equal(reply?.original_msg_id, "of-3");
+});
+
+test("showOpenFilePicker is DENIED for an app without fs.read (capability gating)", async () => {
+  const { dispatch, calls, appSource } = setup(["ui"], { open: [entry("/x.txt", "x.txt")] }); // no fs.read
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showOpenFilePicker", options: {}, uuid: "of-deny" }, source: appSource.source });
+  await tick();
+
+  assert.equal(calls.some((c) => c.type === "showOpenFilePicker"), false, "picker sink must not run without fs.read");
+  const reply = appSource.replies.at(-1) as { error?: { code?: string }; original_msg_id?: string };
+
+  assert.equal(reply?.error?.code, "CAP_DENIED");
+  assert.equal(reply?.original_msg_id, "of-deny");
+});
+
+test("showSaveFilePicker writes via the sink and replies fileSaved with saved_file", async () => {
+  const saved = entry("/notes/Untitled.txt", "Untitled.txt");
+  const { dispatch, calls, appSource } = setup(["ui", "fs.write"], { save: saved });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, content: "hello world", env: "app", msg: "showSaveFilePicker", suggestedName: "Untitled.txt", uuid: "sv-1" }, source: appSource.source });
+  await tick();
+
+  const call = calls.find((c) => c.type === "showSaveFilePicker");
+
+  assert.equal(call !== undefined, true);
+  assert.deepEqual((call?.args[1] as { content?: unknown; suggestedName?: string }).content, "hello world");
+  const reply = appSource.replies.at(-1) as { msg?: string; original_msg_id?: string; saved_file?: { path?: string } };
+
+  assert.equal(reply?.msg, "fileSaved");
+  assert.equal(reply?.original_msg_id, "sv-1");
+  assert.equal(reply?.saved_file?.path, "/notes/Untitled.txt");
+});
+
+test("showSaveFilePicker is DENIED without fs.write", async () => {
+  const { dispatch, appSource } = setup(["ui", "fs.read"], { save: entry("/x.txt", "x.txt") }); // no fs.write
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, content: "x", env: "app", msg: "showSaveFilePicker", uuid: "sv-deny" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { error?: { code?: string } };
+
+  assert.equal(reply?.error?.code, "CAP_DENIED");
+});
+
+test("showFontPicker replies fontPicked with the chosen font", async () => {
+  const { dispatch, appSource } = setup(["ui"], { font: "Georgia" });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showFontPicker", options: {}, uuid: "ft-1" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { msg?: string; font?: { fontFamily?: string }; original_msg_id?: string };
+
+  assert.equal(reply?.msg, "fontPicked");
+  // The genuine SDK contract: apps read `new_font.fontFamily` (e.g. Notepad), so font is an object.
+  assert.equal(reply?.font?.fontFamily, "Georgia");
+  assert.equal(reply?.original_msg_id, "ft-1");
+});
+
+test("showColorPicker replies colorPicked with the chosen color", async () => {
+  const { dispatch, appSource } = setup(["ui"], { color: "#ff8800" });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showColorPicker", options: {}, uuid: "cl-1" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { msg?: string; color?: string; original_msg_id?: string };
+
+  assert.equal(reply?.msg, "colorPicked");
+  assert.equal(reply?.color, "#ff8800");
+  assert.equal(reply?.original_msg_id, "cl-1");
+});
+
+test("showDirectoryPicker replies directoryPicked with snake_case fsentry items", async () => {
+  const dir = { ...entry("/projects", "projects"), is_dir: true };
+  const { dispatch, appSource } = setup(["ui", "fs.read"], { directory: [dir] });
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  dispatch({ data: { appInstanceID: INSTANCE, env: "app", msg: "showDirectoryPicker", options: {}, uuid: "dp-1" }, source: appSource.source });
+  await tick();
+
+  const reply = appSource.replies.at(-1) as { msg?: string; items?: { path?: string; fsentry_name?: string; read_url?: string }[] };
+
+  assert.equal(reply?.msg, "directoryPicked");
+  assert.equal(reply?.items?.[0]?.path, "/projects");
+  assert.equal(reply?.items?.[0]?.fsentry_name, "projects");
+});
+
+test("pushLaunchItems posts itemsOpened with the item list (onLaunchedWithItems live path)", async () => {
+  const { broker, dispatch, appSource } = setup(["ui", "fs.read"]);
+
+  dispatch({ data: { appInstanceID: INSTANCE, msg: "READY" }, source: appSource.source });
+  broker.pushLaunchItems(INSTANCE, [entry("/inbox/launch.txt", "launch.txt")]);
+  await tick();
+
+  const msg = appSource.replies.at(-1) as { msg?: string; items?: { path?: string }[] };
+
+  assert.equal(msg?.msg, "itemsOpened");
+  assert.equal(msg?.items?.[0]?.path, "/inbox/launch.txt");
 });

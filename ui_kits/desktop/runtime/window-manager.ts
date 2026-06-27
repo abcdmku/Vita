@@ -137,7 +137,8 @@ const MIN_HEIGHT = 200;
 const TITLEBAR_H = 36;
 // Keep at least this much of the title bar reachable on every edge when dragging.
 const CLAMP_MARGIN = 24;
-const MENUBAR_H = 32; // windows never cover the top menu bar
+const MENUBAR_H = 44; // windows never cover the top system bar (matches the shell's 44px bar)
+const DOCK_RESERVE = 92; // keep new windows clear of the bottom dock when centering on large screens
 const Z_BASE = 70; // matches the prior single-window z-index; dock/menubar are 40, palette 50
 
 interface WmHostEnv {
@@ -204,7 +205,13 @@ export function createWindowManager(doc: WmDocument, env?: Partial<WmHostEnv>): 
   }
 
   function open(appId: string, seed: WindowContent): ManagedWindow {
-    const rect = cascadedRect(DEFAULT_RECT, cascadeIndex, viewport());
+    const vp = viewport();
+    // Center the spawn base in the desktop area (between the system bar + dock) so windows open in
+    // the middle of the screen rather than clustered in the top-left corner — important on large
+    // displays (e.g. the on-device 1920x1440 surface) where a fixed left:150/top:92 base looks
+    // marooned. The cascade then offsets each subsequent window from this centered base.
+    const base = centeredBase(DEFAULT_RECT, vp);
+    const rect = cascadedRect(base, cascadeIndex, vp);
     cascadeIndex += 1;
 
     const win = new ManagedWindow(doc, appId, seed, rect, {
@@ -358,6 +365,11 @@ class ManagedWindow implements WindowHandle {
     const host = this.#screenHost();
 
     if (host !== null) host.appendChild(el);
+
+    // The title-bar app icon is a Lucide <i data-lucide>; upgrade it to an <svg> (no-op if Lucide is
+    // absent, e.g. the test stub). Dock/menubar icons are upgraded by the shell; this covers icons
+    // added after boot when a window opens.
+    refreshLucideIcons();
   }
 
   // Resolve the dark desktop host the window should mount into: the live `.v-screen` (which carries
@@ -414,29 +426,38 @@ class ManagedWindow implements WindowHandle {
       `font:13px var(--font-sans,system-ui);color:var(--text)`;
   }
 
-  // Build the dark window chrome: title bar (.v-tt) with traffic-light dots (.v-dots) + caption,
-  // a scrollable body, and a bottom-right resize grip. Everything is token-driven (dark).
+  // Build the window chrome to match the handoff design system (WindowChrome / Shell.html): a
+  // monospace, path-style title bar (.v-tt) with THREE NEUTRAL DOT controls (.v-dots) — NOT colored
+  // macOS traffic-lights — a Lucide app icon, a scrollable body, and a bottom-right resize grip.
   frame(content: WindowContent): string {
     const badge = content.badge === undefined ? "" : content.badge;
+    // A NEUTRAL control dot. At rest the fill comes from kit.css (`.v-dots span` => var(--border-strong));
+    // the glyph fades in only when the dot-group is hovered, so the controls stay discoverable without
+    // the always-on candy of colored traffic-lights. `hover` is the per-dot hover tint (semantic).
+    const dot = (attr: string, label: string, glyph: string, hover: string): string =>
+      `<span ${attr} data-vita-window-hovertint="${hover}" title="${label}" role="button" aria-label="${label}" ` +
+      `style="cursor:pointer;position:relative;display:flex;align-items:center;justify-content:center">` +
+      `<span data-vita-window-glyph style="font-size:7px;font-weight:700;line-height:1;color:var(--text);opacity:0">${glyph}</span></span>`;
+    // Title-bar app icon rendered as a Lucide icon (handoff uses Lucide everywhere, no emoji). Map a
+    // legacy emoji glyph to a Lucide name; fall back to rendering the raw glyph if unknown.
+    const iconName = lucideName(content.icon);
+    const iconMarkup = iconName === null
+      ? `<span data-vita-window-icon style="font-size:14px;line-height:1">${escapeHtml(content.icon)}</span>`
+      : `<span class="ico" data-vita-window-icon style="width:14px;height:14px;color:var(--accent)">` +
+        `<i data-lucide="${escapeHtml(iconName)}"></i></span>`;
 
     return (
       `<div class="v-tt" data-vita-window-titlebar style="cursor:move;user-select:none">` +
       `<div class="v-dots" data-vita-window-controls>` +
-      // Close (red) — hover reveals an ✕. Title color via CSS var; the dot fill is set inline so
-      // it reads as a real traffic light against the dark title bar.
-      `<span data-vita-window-close title="Close" role="button" aria-label="Close window" ` +
-      `style="background:#f0584f;cursor:pointer;position:relative;display:flex;align-items:center;justify-content:center">` +
-      `<span data-vita-window-glyph style="font-size:8px;line-height:1;color:rgba(0,0,0,.55);opacity:0">✕</span></span>` +
-      // Minimize (amber) — hide for now.
-      `<span data-vita-window-min title="Minimize" role="button" aria-label="Minimize window" ` +
-      `style="background:#f0b429;cursor:pointer"></span>` +
-      // Maximize / restore (green).
-      `<span data-vita-window-zoom title="Zoom" role="button" aria-label="Maximize or restore window" ` +
-      `style="background:#23c65a;cursor:pointer"></span>` +
+      dot('data-vita-window-close', 'Close window', '✕', 'var(--danger)') +
+      dot('data-vita-window-min', 'Minimize window', '–', 'var(--warning)') +
+      dot('data-vita-window-zoom', 'Maximize or restore window', '+', 'var(--success)') +
       `</div>` +
-      `<span style="display:flex;align-items:center;gap:8px;margin-left:4px">` +
-      `<span data-vita-window-icon style="font-size:13px">${content.icon}</span>` +
-      `<span class="v-tname" data-vita-window-title style="color:var(--text-secondary)">${escapeHtml(content.title)}</span>` +
+      `<span style="display:flex;align-items:center;gap:8px;margin-left:6px;min-width:0">` +
+      iconMarkup +
+      `<span class="v-tname" data-vita-window-title ` +
+      `style="color:var(--text-secondary);font-family:var(--font-mono);font-size:12px;font-weight:500;` +
+      `letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(content.title)}</span>` +
       `</span>` +
       `<span class="v-tname" data-vita-window-badge ` +
       `style="margin-left:auto;color:var(--text-faint);font-size:10.5px">${escapeHtml(badge)}</span>` +
@@ -553,18 +574,42 @@ class ManagedWindow implements WindowHandle {
   }
 
   wireControls(): void {
+    // Neutral dots at rest (handoff): reveal ALL three glyphs together when the pointer is anywhere
+    // over the dot group, and tint EACH dot to its own semantic hover color (close=danger,
+    // min=warning, zoom=success) so the cluster reads as discoverable controls — not always-on
+    // colored traffic-lights. On leave, restore the neutral rest fill (kit.css var(--border-strong)).
+    const controls = safeQuery(this.element, "[data-vita-window-controls]");
+
+    if (controls !== null) {
+      const dots = collectControlDots(controls);
+      const glyphs = collectGlyphs(controls);
+      const setOpacity = (value: string): void => {
+        for (const glyph of glyphs) glyph.style.setProperty("opacity", value);
+      };
+      const tintDots = (on: boolean): void => {
+        for (const d of dots) {
+          const hue = d.getAttribute?.("data-vita-window-hovertint") ?? null;
+          d.style.setProperty("background", on && hue !== null ? hue : "");
+        }
+      };
+
+      this.addListener(controls, "pointerenter", () => {
+        setOpacity("1");
+        tintDots(true);
+      });
+      this.addListener(controls, "pointerleave", () => {
+        setOpacity("0");
+        tintDots(false);
+      });
+    }
+
     if (this.#closeDot !== null) {
-      const glyph = safeQuery(this.#closeDot, "[data-vita-window-glyph]");
-      const onEnter: WmListener = () => glyph?.style.setProperty("opacity", "1");
-      const onLeave: WmListener = () => glyph?.style.setProperty("opacity", "0");
       const onClick: WmListener = (event) => {
         event.stopPropagation?.();
         this.close();
       };
 
-      this.addListener(this.#closeDot, "pointerenter", onEnter);
-      this.addListener(this.#closeDot, "pointerleave", onLeave);
-      // Close on pointerup (so the focus pointerdown doesn't swallow it) AND click for robustness.
+      // Close on click (the focus pointerdown doesn't swallow it).
       this.addListener(this.#closeDot, "click", onClick);
     }
 
@@ -712,7 +757,16 @@ class ManagedWindow implements WindowHandle {
     // Active title bar reads brighter; inactive recedes. Token-driven so it stays dark-correct.
     this.#title?.style.setProperty("background", active ? "var(--surface-raised)" : "var(--surface-sunken)");
     this.#titleName?.style.setProperty("color", active ? "var(--text)" : "var(--text-muted)");
-    this.element.style.setProperty("border-color", active ? "var(--border-strong)" : "var(--border)");
+    // Handoff: the active window carries an ACCENT border (+ accent glow in dark); inactive windows
+    // recede to a neutral border + lighter shadow. --glow-accent is `none` in light and an accent halo
+    // in dark, so this is correct in both themes without branching.
+    if (active) {
+      this.element.style.setProperty("border-color", "var(--accent)");
+      this.element.style.setProperty("box-shadow", "var(--glow-accent), var(--shadow-window)");
+    } else {
+      this.element.style.setProperty("border-color", "var(--border)");
+      this.element.style.setProperty("box-shadow", "var(--shadow-2)");
+    }
   }
 
   // ----- content updates -----
@@ -823,6 +877,23 @@ export function clamp(value: number, min: number, max: number): number {
   return value;
 }
 
+// Compute a spawn base centered in the desktop AREA (the band between the top system bar and the
+// bottom dock). Keeps the configured window size; only repositions left/top. Pure. Clamped so the
+// base is never above the system bar or below the dock reserve.
+export function centeredBase(base: Readonly<WmRect>, vp: WmHostEnv): WmRect {
+  const areaTop = MENUBAR_H;
+  const areaBottom = vp.innerHeight - DOCK_RESERVE;
+  const left = Math.round((vp.innerWidth - base.width) / 2);
+  const top = Math.round(areaTop + (areaBottom - areaTop - base.height) / 2);
+
+  return {
+    height: base.height,
+    left: Math.max(CLAMP_MARGIN, left),
+    top: Math.max(areaTop, top),
+    width: base.width,
+  };
+}
+
 // Cascade each new window +28,+28 from the default, wrapping before it runs off the workspace.
 export function cascadedRect(base: Readonly<WmRect>, index: number, vp: WmHostEnv): WmRect {
   const span = 6; // wrap after 6 steps
@@ -887,6 +958,111 @@ function safeQuery(root: WmElement, selector: string): WmElement | null {
     return root.querySelector?.(selector) ?? null;
   } catch {
     return null;
+  }
+}
+
+// Collect every traffic-light glyph under the control group (structural, no DOM lib). Returns [] when
+// querySelectorAll is unavailable (stub) so callers stay safe.
+function collectGlyphs(controls: WmElement): WmElement[] {
+  try {
+    const list = controls.querySelectorAll?.("[data-vita-window-glyph]");
+
+    if (list === undefined) return [];
+
+    const out: WmElement[] = [];
+
+    for (let i = 0; i < list.length; i += 1) {
+      const el = list[i];
+
+      if (el !== undefined) out.push(el);
+    }
+
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// Collect the three NEUTRAL control dots (direct children of the control group). Used to apply the
+// per-dot semantic hover tint and restore the neutral rest fill. Structural; [] when unavailable.
+function collectControlDots(controls: WmElement): WmElement[] {
+  try {
+    const list = controls.querySelectorAll?.("[data-vita-window-hovertint]");
+
+    if (list === undefined) return [];
+
+    const out: WmElement[] = [];
+
+    for (let i = 0; i < list.length; i += 1) {
+      const el = list[i];
+
+      if (el !== undefined) out.push(el);
+    }
+
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// The handoff design system uses Lucide icons everywhere (no emoji). App manifests historically seed
+// a glyph/emoji `icon`; map the known glyphs (and pass through bare Lucide names) so the title-bar
+// icon matches the dock. Returns the Lucide name, or null for an unknown glyph (render as text).
+const GLYPH_TO_LUCIDE: Readonly<Record<string, string>> = Object.freeze({
+  "⌨": "terminal",
+  "⌨️": "terminal",
+  "📝": "code",
+  "📄": "file-text",
+  "📁": "folder",
+  "📂": "folder",
+  "✉": "mail",
+  "✉️": "mail",
+  "🌐": "globe",
+  "📊": "activity",
+  "⚙": "settings",
+  "⚙️": "settings",
+  "🪟": "app-window",
+  "📦": "package",
+  "✅": "check-square",
+  "🖥": "monitor",
+  "🖥️": "monitor",
+  "🎵": "music",
+  "🖼": "image",
+  "🖼️": "image",
+});
+
+// A bare Lucide name is lowercase letters, digits and hyphens (e.g. "terminal", "chevron-right").
+const LUCIDE_NAME_RE = /^[a-z][a-z0-9-]*$/u;
+
+export function lucideName(icon: string): string | null {
+  const trimmed = icon.trim();
+
+  if (trimmed.length === 0) return null;
+
+  const mapped = GLYPH_TO_LUCIDE[trimmed];
+
+  if (mapped !== undefined) return mapped;
+  if (LUCIDE_NAME_RE.test(trimmed)) return trimmed;
+
+  return null;
+}
+
+// Best-effort upgrade of `<i data-lucide>` placeholders to inline SVGs via the global Lucide runtime
+// (window.lucide.createIcons). No-op when Lucide is unavailable (test stub / pre-boot).
+function refreshLucideIcons(): void {
+  try {
+    const g = globalThis as Record<string, unknown>;
+    const lucide = g["lucide"];
+
+    if (lucide === null || typeof lucide !== "object") return;
+
+    const createIcons = (lucide as Record<string, unknown>)["createIcons"];
+
+    if (typeof createIcons !== "function") return;
+
+    (createIcons as () => void).call(lucide);
+  } catch {
+    // ignore — icons are a progressive enhancement.
   }
 }
 

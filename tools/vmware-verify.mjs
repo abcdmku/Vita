@@ -411,11 +411,21 @@ function renderVmx(config) {
     `svga.autodetect = "FALSE"`,
     `svga.vramSize = "268435456"`,
     `svga.graphicsMemoryKB = "262144"`,
+    // vmwgfx exposes only 16:10 / 4:3 modes (no 1920x1080). Pin the largest <=1920 4:3 mode (1920x1440)
+    // and disable VMware autofit/resolution hints so cage/chromium picks a stable fullscreen mode.
     `svga.maxWidth = "1920"`,
-    `svga.maxHeight = "1080"`,
+    `svga.maxHeight = "1440"`,
+    `svga.minVRAMSize = "268435456"`,
+    `svga.guestBackedPrimaryAware = "TRUE"`,
     `vmotion.checkpointFBSize = "134217728"`,
     `vmotion.checkpointSVGAPrimarySize = "268435456"`,
-    `ethernet0.present = "FALSE"`,
+    // e1000 NIC on a host-only/NAT segment so the platform's network face (and any update path) has a
+    // link; the on-device Terminal/Console reach agentd over the LOCAL AF_UNIX socket, not this NIC.
+    `ethernet0.present = "TRUE"`,
+    `ethernet0.connectionType = "nat"`,
+    `ethernet0.virtualDev = "e1000"`,
+    `ethernet0.addressType = "generated"`,
+    `ethernet0.startConnected = "TRUE"`,
     `usb.present = "FALSE"`,
     `sound.present = "FALSE"`,
     `floppy0.present = "FALSE"`,

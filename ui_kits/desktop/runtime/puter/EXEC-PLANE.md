@@ -71,12 +71,18 @@ server → client : {t:"ready",runtime,capsule,cwd} | {t:"stdout",data} | {t:"st
 - Verifications: `spike/headless-exec.ts` (Node WS, 9/9) and `spike/verify-terminal.mjs` (real headless
   Chrome, 10/10 — granted runs commands; ungranted is refused).
 
-**Needs a node boot (flagged):**
-- `createAgentExecBackend` targets an agentd **`capsule.exec`** capability that does **not exist yet** —
-  agentd today exposes `capsule.execute` (launch a *fixed-entrypoint* capsule), not run-a-command-in-a-
-  running-capsule with a duplex tty. Landing the real on-device terminal requires: (a) a `capsule.exec`
-  agentd capability that opens a tty into a hardened transient unit, (b) the host-proxy forwarding the
-  `/pty` stream to agentd's unix socket, (c) a Borg51 QEMU boot to verify the markers + node-survival.
-  Until then, `createAgentExecBackend.open` fails closed with an operator-actionable message; the
-  preview uses the dev-sandbox backend. The capability, websocket, protocol, gate, and app are all real
-  and tested — only the final capsule-exec hop is deferred to the batched boot.
+**Wired now (the production path — see CAPSULE-EXEC.md):**
+- The agentd **`capsule.exec`** capability EXISTS (`agent/capabilities/capsule/exec.go`): it runs an
+  arbitrary interactive command WITH A PTY inside a one-shot hardened transient unit (the SAME hardening
+  `capsule.execute` composes), grant/peer-cred gated, NO network. The streaming **`/pty`** endpoint on
+  agentd's unix socket (`agent/transport/pty.go`) carries the duplex frames.
+- `createAgentExecBackend` is WIRED: it forwards each `/pty` websocket session to agentd's streaming
+  `/pty` over the host-proxy (`server/agentd-host-proxy.ts createAgentdPtyStream`), bridging the JSON
+  protocol to the binary frames. **The on-device service now uses this backend, NOT the dev sandbox**
+  (`server/server-entry.ts`). The dev sandbox is a build-host-only spike harness.
+
+**Needs the batched Borg51 boot (flagged):**
+- The end-to-end RUN of a real command in a real hardened PTY capsule on the node (PTY allocation +
+  seccomp + DynamicUser only exist on a live linux+systemd node), and the on-device assertion of the
+  `VITA-NODE-FIREWALL` marker now routed to the serial console. The host build proves the wiring +
+  isolation composition + the frame contract (Go + TS tests); the boot proves it runs + survives.

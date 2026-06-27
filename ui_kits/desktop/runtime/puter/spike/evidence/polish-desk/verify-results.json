@@ -1,0 +1,92 @@
+{
+  "passed": 17,
+  "total": 17,
+  "results": [
+    {
+      "name": "app booted (window.__vitaDeskReady)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "api_origin connected (whoami)",
+      "ok": true,
+      "detail": "conn=connected"
+    },
+    {
+      "name": "whoami rendered owner",
+      "ok": true,
+      "detail": "who=owner"
+    },
+    {
+      "name": "New folder created (fs.mkdir)",
+      "ok": true,
+      "detail": "verify-folder-1782565660557"
+    },
+    {
+      "name": "New file created + opened in Notes",
+      "ok": true,
+      "detail": "verify-1782565660557.txt"
+    },
+    {
+      "name": "Note saved (fs.write overwrite)",
+      "ok": true,
+      "detail": "/home/notes/welcome.txt"
+    },
+    {
+      "name": "Theme set (kv.set)",
+      "ok": true,
+      "detail": "slate"
+    },
+    {
+      "name": "Accent set (kv.set)",
+      "ok": true,
+      "detail": "emerald"
+    },
+    {
+      "name": "Default view set to grid (kv.set)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "New file appears in file list",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "PERSIST: folder survives reload",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "PERSIST: file survives reload",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "PERSIST: theme survives reload (KV)",
+      "ok": true,
+      "detail": "theme=slate"
+    },
+    {
+      "name": "PERSIST: accent survives reload (KV)",
+      "ok": true,
+      "detail": "accent=emerald"
+    },
+    {
+      "name": "PERSIST: default view survives reload (KV)",
+      "ok": true,
+      "detail": "view=grid"
+    },
+    {
+      "name": "PERSIST: note content survives reload",
+      "ok": true,
+      "detail": "len=67"
+    },
+    {
+      "name": "no uncaught console errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "consoleErrors": []
+}

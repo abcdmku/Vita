@@ -46,9 +46,14 @@ export interface ConsoleHarness {
   close(): Promise<void>;
 }
 
-export async function startConsoleHarness(opts: { port?: number; dir?: string } = {}): Promise<ConsoleHarness> {
+export async function startConsoleHarness(opts: { port?: number; dir?: string; controlPlane?: boolean } = {}): Promise<ConsoleHarness> {
   const port = opts.port ?? 0;
   const dataDir = opts.dir ?? mkdtempSync(join(tmpdir(), "vita-console-preview-"));
+  // When `controlPlane` is false, the api_origin is mounted DATA-PLANE-ONLY (no /control/*). This models
+  // a browser / dev / off-device context where the capability-gated bridge to agentd is absent — the
+  // console must then show its clean "Control plane unavailable — running off-device" state (NOT an
+  // infinite spinner). Defaults to true (the live, fully-exercisable stub node).
+  const withControlPlane = opts.controlPlane ?? true;
 
   const store = createNodeFsStore({ fs: nodeFsAdapter, path: { join }, rootDir: dataDir });
   const capabilities = createCapabilityRegistry();
@@ -62,8 +67,9 @@ export async function startConsoleHarness(opts: { port?: number; dir?: string } 
     token: CONSOLE_TOKEN,
   });
 
-  const controlPlane = createStubControlPlane();
-  const apiOrigin = createApiOrigin({ capabilities, store, controlPlane });
+  const apiOrigin = withControlPlane
+    ? createApiOrigin({ capabilities, store, controlPlane: createStubControlPlane() })
+    : createApiOrigin({ capabilities, store });
 
   const vendorDir = resolve(uiKitsDesktop, "_vendor"); // → /_vendor/puter/v2.js
   const server = await startHarnessServer({
@@ -85,10 +91,17 @@ export async function startConsoleHarness(opts: { port?: number; dir?: string } 
   return Object.freeze({ url: server.url, appUrl, close: () => server.close() });
 }
 
+function hasFlag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
 async function main(): Promise<void> {
   const dir = arg("dir");
+  // `--no-control-plane` mounts the api_origin without the control bridge (off-device context).
+  const controlPlane = !hasFlag("no-control-plane");
   const harness = await startConsoleHarness({
     port: Number(arg("port") ?? "8190"),
+    controlPlane,
     ...(dir !== undefined ? { dir } : {}),
   });
 

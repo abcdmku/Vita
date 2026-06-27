@@ -11,28 +11,42 @@
   package's source or change a package's grants. The app authenticates via /session.js (the minted
   vita.pkgmgr app-session token) exactly like the kiosk app.
 
-  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) is third-party. This app is Vita's own
-  code (AGPL-clean). No AGPL Puter desktop bundle is shipped or fetched.
+  Licensing: only /_vendor/puter/v2.js (Apache-2.0 puter.js SDK) and /_vendor/lucide.min.js (ISC Lucide,
+  vendored offline) are third-party. This app's HTML/CSS/JS is Vita's own (AGPL-clean). No AGPL Puter
+  desktop bundle is shipped or fetched. No external fonts, CDNs, or web requests beyond the local
+  api_origin and same-origin /_vendor + /ui_kits — this runs offline on the node.
 -->
-<html lang="en">
+<html lang="en" class="theme-dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Vita Package Manager</title>
+  <!-- Handoff design system: tokens (surfaces/text/accent/semantic, Geist fonts, radii, spacing,
+       elevation, motion) then the shared app theme. Linked BEFORE the app's own stylesheet so app.css
+       can consume + selectively override the token variables. -->
+  <link rel="stylesheet" href="/ui_kits/styles.css" />
+  <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
   <link rel="stylesheet" href="/pkgmgr-app/app.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%237c5cff'/&gt;&lt;/svg&gt;" />
-  <!-- PRE-SDK origin pin: target our same-origin /api from the SDK's first call (never the cloud). -->
-  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <!-- PRE-SDK origin pins (api base + GUI/auth origin): target our same-origin /api AND keep the SDK's
+       GUI/auth origin local, so it never POSTs the cloud puter.com/auth/migrate-token (which HANGS on an
+       offline node). See kiosk-entry.html. -->
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.PUTER_ORIGIN = window.location.origin; window.puter_gui_enabled = false;</script>
   <!-- Vendored, offline, Apache-2.0 puter.js client SDK. Same-origin on the local face. -->
   <script src="/_vendor/puter/v2.js"></script>
+  <!-- Vendored, offline Lucide icon set (sets window.lucide; non-module). Loaded before the app module
+       so window.lucide.createIcons() is available on first paint and after every dynamic render. -->
+  <script src="/ui_kits/_vendor/lucide.min.js"></script>
   <!-- LOCAL-FACE session bootstrap: points puter.js at /api + injects the vita.pkgmgr app-session token. -->
   <script src="/session.js"></script>
 </head>
-<body>
+<body class="vita-surface theme-dark">
   <div id="app" class="app" data-state="booting">
     <header class="topbar">
       <div class="brand">
-        <span class="logo" aria-hidden="true"></span>
+        <span class="logo" aria-hidden="true">
+          <span class="ico"><i data-lucide="package"></i></span>
+        </span>
         <div class="brand-text">
           <span class="brand-name">Package Manager</span>
           <span class="brand-sub">open source · on device · capability-gated</span>
@@ -49,7 +63,9 @@
       <aside class="sidebar">
         <div class="sidebar-head">
           <h2>Installed</h2>
-          <button id="btn-refresh" class="btn btn-ghost" title="Reload package list">↻</button>
+          <button id="btn-refresh" class="btn btn-icon btn-ghost" title="Reload package list" aria-label="Reload package list">
+            <span class="ico"><i data-lucide="rotate-cw"></i></span>
+          </button>
         </div>
         <ul id="pkg-list" class="pkg-list" role="listbox" aria-label="Installed packages"></ul>
       </aside>
@@ -77,9 +93,15 @@
         </div>
 
         <nav class="tabs" role="tablist">
-          <button class="tab is-active" data-tab="source" role="tab">Source</button>
-          <button class="tab" data-tab="perms" role="tab">Permissions</button>
-          <button class="tab" data-tab="activity" role="tab">Activity</button>
+          <button class="tab is-active" data-tab="source" role="tab">
+            <span class="ico"><i data-lucide="file-code"></i></span><span>Source</span>
+          </button>
+          <button class="tab" data-tab="perms" role="tab">
+            <span class="ico"><i data-lucide="shield-check"></i></span><span>Permissions</span>
+          </button>
+          <button class="tab" data-tab="activity" role="tab">
+            <span class="ico"><i data-lucide="history"></i></span><span>Activity</span>
+          </button>
         </nav>
 
         <!-- SOURCE TAB (requirement 2): browse the raw tree, open + edit a file, save → rebuild. -->
@@ -94,7 +116,9 @@
                 <span id="editor-path" class="editor-path">select a file</span>
                 <div class="editor-actions">
                   <span id="editor-status" class="editor-status"></span>
-                  <button id="btn-save" class="btn btn-ok" disabled>Save &amp; rebuild</button>
+                  <button id="btn-save" class="btn btn-primary" disabled>
+                    <span class="ico"><i data-lucide="save"></i></span><span>Save &amp; rebuild</span>
+                  </button>
                 </div>
               </div>
               <textarea id="editor" class="editor" spellcheck="false"
@@ -121,7 +145,9 @@
               <strong>denials</strong>. Unexpected denials flag malicious behavior.</p>
             <div class="activity-meta">
               <span id="denial-badge" class="denial-badge" hidden>0 denials</span>
-              <button id="btn-reload-audit" class="btn btn-ghost">↻ Reload</button>
+              <button id="btn-reload-audit" class="btn btn-ghost btn-sm">
+                <span class="ico"><i data-lucide="rotate-cw"></i></span><span>Reload</span>
+              </button>
             </div>
           </div>
           <ul id="audit" class="audit" aria-label="Capability activity"></ul>
@@ -130,7 +156,9 @@
 
       <section class="detail detail-empty" id="detail-empty">
         <div class="empty">
-          <span class="empty-glyph" aria-hidden="true"></span>
+          <span class="empty-glyph" aria-hidden="true">
+            <span class="ico"><i data-lucide="package"></i></span>
+          </span>
           <p>Select a package to inspect its source, permissions, and activity.</p>
         </div>
       </section>

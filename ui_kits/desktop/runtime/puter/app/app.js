@@ -18,32 +18,50 @@ const els = {
   bootMsg: $("#boot-msg"),
   bootErr: $("#boot-err"),
   whoName: $("#who-name"),
+  whoAvatar: $("#who-avatar"),
   conn: $("#conn"),
+  connLabel: $(".conn-label"),
   // files
   filelist: $("#filelist"),
   filesEmpty: $("#files-empty"),
-  cwd: $("#cwd"),
+  crumbs: $("#crumbs"),
+  listhead: $("#listhead"),
   btnUp: $("#btn-up"),
   btnNewFolder: $("#btn-newfolder"),
   btnNewFile: $("#btn-newfile"),
   btnRefresh: $("#btn-refresh"),
+  viewList: $("#view-list"),
+  viewGrid: $("#view-grid"),
+  statItems: $("#stat-items"),
+  statFolders: $("#stat-folders"),
+  statFiles: $("#stat-files"),
+  sideHome: $("#side-home"),
+  sideNotes: $("#side-notes"),
   // notes
+  notelist: $("#notelist"),
+  notesEmpty: $("#notes-empty"),
+  noteTitle: $("#note-title"),
   notePath: $("#note-path"),
+  noteDirty: $("#note-dirty"),
   noteBody: $("#note-body"),
   noteStatus: $("#note-status"),
-  btnOpen: $("#btn-open"),
+  noteMeta: $("#note-meta"),
   btnSave: $("#btn-save"),
+  btnNewNote: $("#btn-newnote"),
   // settings
-  themeSelect: $("#theme-select"),
-  btnCount: $("#btn-count"),
-  count: $("#count"),
-  btnCountReset: $("#btn-count-reset"),
+  themePicker: $("#theme-picker"),
+  accentPicker: $("#accent-picker"),
+  setViewList: $("#set-view-list"),
+  setViewGrid: $("#set-view-grid"),
+  toggleFoldersFirst: $("#toggle-foldersfirst"),
+  dbgStatus: $("#dbg-status"),
+  dbgUser: $("#dbg-user"),
   dbgOrigin: $("#dbg-origin"),
-  dbgWhoami: $("#dbg-whoami"),
   dbgToken: $("#dbg-token"),
   // modal
   modal: $("#modal"),
   modalTitle: $("#modal-title"),
+  modalDesc: $("#modal-desc"),
   modalInput: $("#modal-input"),
   modalOk: $("#modal-ok"),
   modalCancel: $("#modal-cancel"),
@@ -55,7 +73,19 @@ const els = {
 // home directory, never directly at "/". Files/notes live under HOME; the file manager is rooted here.
 const HOME = "/home";
 const NOTES_DIR = HOME + "/notes";
-const state = { cwd: HOME };
+
+const state = {
+  cwd: HOME,
+  fileView: "list",       // "list" | "grid"
+  foldersFirst: true,
+  selected: null,         // currently selected entry name in Files
+  notes: [],              // [{name, path, size, modified}]
+  noteCurrent: NOTES_DIR + "/welcome.txt",
+  noteDirty: false,
+  noteSavedText: "",
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- the SDK handle ----
 // Await the SDK AND its injected session token. /session.js (loaded in <head>) points the SDK at our
@@ -69,7 +99,6 @@ async function getPuter(timeoutMs = 10000) {
   for (;;) {
     const p = window.puter;
     if (p && p.fs && p.kv && p.auth) {
-      // Silence the SDK's promotional console banner + realtime chatter.
       try { p.quiet = true; } catch (_) {}
       const tokenReady = !wantToken || (typeof p.authToken === "string" && p.authToken.length > 0);
       if (tokenReady) return p;
@@ -82,26 +111,29 @@ async function getPuter(timeoutMs = 10000) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ---- tiny UI helpers ----
+// =================================================================================================
+// tiny UI helpers
+// =================================================================================================
 function toast(message, kind = "") {
   const el = document.createElement("div");
   el.className = "toast" + (kind ? " " + kind : "");
   el.textContent = message;
   els.toasts.appendChild(el);
   setTimeout(() => {
-    el.style.transition = "opacity .25s";
-    el.style.opacity = "0";
-    setTimeout(() => el.remove(), 260);
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 280);
   }, 2600);
 }
 
 // A themed prompt (so we don't depend on puter.ui being brokered for input). Resolves to the string
-// or null on cancel.
-function promptModal(title, value = "") {
+// or null on cancel. `opts.okLabel` / `opts.desc` customize the dialog.
+function promptModal(title, value = "", opts = {}) {
   return new Promise((resolve) => {
     els.modalTitle.textContent = title;
+    if (opts.desc) { els.modalDesc.textContent = opts.desc; els.modalDesc.hidden = false; }
+    else els.modalDesc.hidden = true;
+    els.modalOk.textContent = opts.okLabel || "OK";
+    els.modalOk.classList.toggle("btn-primary", !opts.danger);
     els.modalInput.value = value;
     els.modal.hidden = false;
     els.modalInput.focus();
@@ -109,6 +141,8 @@ function promptModal(title, value = "") {
 
     const done = (result) => {
       els.modal.hidden = true;
+      els.modalOk.textContent = "OK";
+      els.modalOk.classList.add("btn-primary");
       els.modalOk.removeEventListener("click", onOk);
       els.modalCancel.removeEventListener("click", onCancel);
       els.modalInput.removeEventListener("keydown", onKey);
@@ -117,8 +151,8 @@ function promptModal(title, value = "") {
     const onOk = () => done(els.modalInput.value.trim() || null);
     const onCancel = () => done(null);
     const onKey = (e) => {
-      if (e.key === "Enter") onOk();
-      else if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") { e.preventDefault(); onOk(); }
+      else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
     };
     els.modalOk.addEventListener("click", onOk);
     els.modalCancel.addEventListener("click", onCancel);
@@ -127,15 +161,20 @@ function promptModal(title, value = "") {
 }
 
 function fmtSize(n) {
-  if (!n) return "—";
+  if (!n || n < 0) return "—";
   if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
   return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
-function fmtTime(secs) {
+function fmtWhen(secs) {
   if (!secs) return "";
   const d = new Date(secs * 1000);
-  return d.toLocaleString();
+  const now = Date.now();
+  const diff = (now - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 function joinPath(dir, name) {
   if (dir === "/") return "/" + name;
@@ -145,24 +184,104 @@ function parentOf(path) {
   if (path === "/" || path === "") return "/";
   const i = path.replace(/\/$/, "").lastIndexOf("/");
   const parent = i <= 0 ? "/" : path.slice(0, i);
-  // Don't let the file manager climb above HOME (the app's namespace root).
   return parent === "/" && path !== "/" ? "/" : parent;
 }
 function navParentOf(path) {
-  // Like parentOf but clamped to HOME for the file-manager "Up" button.
   const p = parentOf(path);
   return p === "/" ? HOME : p;
 }
+function baseName(path) {
+  return path.replace(/\/+$/, "").split("/").pop() || path;
+}
+
+// ---- Lucide icon helpers ----
+// Emit a Lucide placeholder (<i data-lucide="NAME">) wrapped in a sizing span. window.lucide.createIcons()
+// (called via refreshIcons after each render) swaps the <i> for an inline SVG. Offline, AGPL-clean.
+function lucideIco(name, px = 16) {
+  return '<span class="ico" style="width:' + px + 'px;height:' + px + 'px"><i data-lucide="' + name + '"></i></span>';
+}
+// Replace any pending <i data-lucide> placeholders with their SVGs. Safe to call repeatedly and before
+// the UMD has loaded (no-op if window.lucide is absent).
+function refreshIcons() {
+  try { window.lucide && window.lucide.createIcons(); } catch (_) {}
+}
+
+// Classify a filename into an icon family (class + Lucide glyph). AGPL-clean (no emoji).
+function fileKind(name, isDir) {
+  if (isDir) return { cls: "ic-folder", label: "Folder", svg: SVG.folder };
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["md", "markdown"].includes(ext)) return { cls: "ic-note", label: "Markdown", svg: SVG.note };
+  if (["txt", "rtf", "log"].includes(ext)) return { cls: "ic-text", label: "Text", svg: SVG.text };
+  if (["js", "ts", "tsx", "jsx", "json", "html", "css", "sh", "py", "go", "rs", "c", "cpp", "java"].includes(ext))
+    return { cls: "ic-code", label: ext.toUpperCase(), svg: SVG.code };
+  if (["png", "jpg", "jpeg", "gif", "svg", "webp", "ico"].includes(ext)) return { cls: "ic-img", label: "Image", svg: SVG.img };
+  if (["csv", "tsv", "yaml", "yml", "toml", "xml"].includes(ext)) return { cls: "ic-data", label: "Data", svg: SVG.data };
+  if (["zip", "tar", "gz", "tgz", "7z", "rar"].includes(ext)) return { cls: "ic-archive", label: "Archive", svg: SVG.archive };
+  return { cls: "ic-text", label: ext ? ext.toUpperCase() : "File", svg: SVG.text };
+}
+
+// Icon glyphs are now vendored Lucide (offline). Each entry is the data-lucide name emitted as an
+// <i data-lucide> placeholder that window.lucide.createIcons() replaces with an inline SVG after the
+// row is in the DOM. See lucideIco()/refreshIcons() below.
+const SVG = {
+  folder:  lucideIco("folder"),
+  text:    lucideIco("file-text"),
+  note:    lucideIco("file-text"),
+  code:    lucideIco("file-code"),
+  img:     lucideIco("image"),
+  data:    lucideIco("database"),
+  archive: lucideIco("archive"),
+};
+
+let puter; // resolved in boot()
 
 // =================================================================================================
 // FILES
 // =================================================================================================
-let puter; // resolved in boot()
+function setFileView(view) {
+  state.fileView = view === "grid" ? "grid" : "list";
+  els.app.dataset.fileview = state.fileView;
+  els.viewList.classList.toggle("is-active", state.fileView === "list");
+  els.viewGrid.classList.toggle("is-active", state.fileView === "grid");
+  if (els.setViewList) els.setViewList.classList.toggle("is-active", state.fileView === "list");
+  if (els.setViewGrid) els.setViewGrid.classList.toggle("is-active", state.fileView === "grid");
+}
+
+function renderCrumbs() {
+  els.crumbs.innerHTML = "";
+  // Build segments from HOME down to cwd. HOME shows as "Home".
+  const rel = state.cwd === HOME ? "" : state.cwd.slice(HOME.length).replace(/^\//, "");
+  const parts = rel ? rel.split("/") : [];
+  const mk = (label, path, isCurrent) => {
+    const b = document.createElement("button");
+    b.className = "crumb" + (isCurrent ? " is-current" : "");
+    b.textContent = label;
+    b.title = path;
+    if (!isCurrent) b.addEventListener("click", () => { state.cwd = path; state.selected = null; refreshFiles(); });
+    return b;
+  };
+  els.crumbs.appendChild(mk("Home", HOME, parts.length === 0));
+  let acc = HOME;
+  parts.forEach((seg, i) => {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep"; sep.textContent = "/";
+    els.crumbs.appendChild(sep);
+    acc = acc + "/" + seg;
+    els.crumbs.appendChild(mk(seg, acc, i === parts.length - 1));
+  });
+}
+
+function syncSidebar() {
+  els.sideHome.classList.toggle("is-active", state.cwd === HOME);
+  els.sideNotes.classList.toggle("is-active", state.cwd === NOTES_DIR);
+}
 
 async function refreshFiles() {
-  els.cwd.textContent = state.cwd;
-  // Stay within HOME — the app namespace is rooted there (root writes are blocked by the SDK anyway).
+  renderCrumbs();
+  syncSidebar();
   els.btnUp.disabled = state.cwd === HOME || state.cwd === "/";
+  els.btnUp.style.opacity = els.btnUp.disabled ? ".4" : "";
+
   let entries;
   try {
     entries = await puter.fs.readdir(state.cwd);
@@ -170,47 +289,86 @@ async function refreshFiles() {
     toast("Could not read " + state.cwd + ": " + errText(e), "err");
     return;
   }
-  // Normalize SDK shape: array of fsentries { name, is_dir, size, modified, path }.
   const list = (Array.isArray(entries) ? entries : []).map(normalizeEntry);
-  list.sort((a, b) => (b.is_dir - a.is_dir) || a.name.localeCompare(b.name));
+  list.sort((a, b) => (state.foldersFirst ? (b.is_dir - a.is_dir) : 0) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  const folders = list.filter((e) => e.is_dir).length;
+  els.statItems.textContent = String(list.length);
+  els.statFolders.textContent = String(folders);
+  els.statFiles.textContent = String(list.length - folders);
 
   els.filelist.innerHTML = "";
   els.filesEmpty.hidden = list.length > 0;
 
-  for (const ent of list) {
+  list.forEach((ent, idx) => {
     const li = document.createElement("li");
-    li.className = "file";
+    li.className = "file" + (ent.is_dir ? " is-dir" : "") + (state.selected === ent.name ? " is-selected" : "");
     li.dataset.name = ent.name;
     li.dataset.dir = ent.is_dir ? "1" : "0";
+    li.style.animationDelay = Math.min(idx * 12, 160) + "ms";
 
+    const kind = fileKind(ent.name, ent.is_dir);
+
+    const cell = document.createElement("div");
+    cell.className = "cell-name";
     const icon = document.createElement("span");
-    icon.className = "icon";
-    icon.textContent = ent.is_dir ? "📁" : "📄";
-
+    icon.className = "ficon " + kind.cls;
+    icon.innerHTML = kind.svg;
     const name = document.createElement("span");
     name.className = "name" + (ent.is_dir ? " dir" : "");
     name.textContent = ent.name;
     name.title = ent.name;
-    if (ent.is_dir) name.addEventListener("click", () => { state.cwd = joinPath(state.cwd, ent.name); refreshFiles(); });
-    else name.addEventListener("click", () => openInNotes(joinPath(state.cwd, ent.name)));
+    cell.append(icon, name);
 
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = ent.is_dir ? "folder" : fmtSize(ent.size);
+    const kindCell = document.createElement("span");
+    kindCell.className = "kind";
+    kindCell.textContent = kind.label;
+
+    const size = document.createElement("span");
+    size.className = "size";
+    size.textContent = ent.is_dir ? "—" : fmtSize(ent.size);
 
     const actions = document.createElement("span");
     actions.className = "row-actions";
-    const rn = document.createElement("button");
-    rn.className = "icon-btn"; rn.textContent = "Rename"; rn.title = "Rename";
-    rn.addEventListener("click", () => renameEntry(ent));
-    const del = document.createElement("button");
-    del.className = "icon-btn danger"; del.textContent = "Delete"; del.title = "Delete";
-    del.addEventListener("click", () => deleteEntry(ent));
+    const rn = mkIconBtn(SVG_RENAME, "Rename", () => renameEntry(ent));
+    const del = mkIconBtn(SVG_DELETE, "Delete", () => deleteEntry(ent), true);
     actions.append(rn, del);
 
-    li.append(icon, name, meta, actions);
+    // selection + open behavior
+    li.addEventListener("click", (e) => {
+      if (e.target.closest(".row-actions")) return;
+      selectFile(ent.name);
+    });
+    const open = () => {
+      if (ent.is_dir) { state.cwd = joinPath(state.cwd, ent.name); state.selected = null; refreshFiles(); }
+      else openInNotes(joinPath(state.cwd, ent.name));
+    };
+    li.addEventListener("dblclick", (e) => { if (!e.target.closest(".row-actions")) open(); });
+    if (ent.is_dir) cell.addEventListener("click", (e) => { e.stopPropagation(); open(); });
+    else cell.addEventListener("click", (e) => { e.stopPropagation(); open(); });
+
+    li.append(cell, kindCell, size, actions);
     els.filelist.appendChild(li);
-  }
+  });
+  refreshIcons(); // swap the <i data-lucide> placeholders (row icons + rename/delete) for SVGs
+}
+
+function selectFile(name) {
+  state.selected = name;
+  $$(".file").forEach((li) => li.classList.toggle("is-selected", li.dataset.name === name));
+}
+
+const SVG_RENAME = lucideIco("pencil", 15);
+const SVG_DELETE = lucideIco("trash-2", 15);
+
+function mkIconBtn(svg, title, onClick, danger) {
+  const b = document.createElement("button");
+  b.className = "icon-btn" + (danger ? " danger" : "");
+  b.innerHTML = svg;
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  return b;
 }
 
 function normalizeEntry(e) {
@@ -218,58 +376,66 @@ function normalizeEntry(e) {
     name: e.name ?? e.path?.split("/").pop() ?? "(unknown)",
     is_dir: !!(e.is_dir ?? e.isDirectory),
     size: e.size ?? 0,
-    modified: e.modified ?? 0,
+    modified: e.modified ?? e.mtime ?? 0,
     path: e.path ?? joinPath(state.cwd, e.name ?? ""),
   };
 }
 
 async function newFolder() {
-  const name = await promptModal("New folder name", "untitled-folder");
+  const name = await promptModal("New folder", "untitled-folder", { desc: "Create a folder in " + state.cwd, okLabel: "Create" });
   if (!name) return;
   try {
     await puter.fs.mkdir(joinPath(state.cwd, name));
-    toast("Folder created: " + name, "ok");
-    refreshFiles();
-  } catch (e) { toast("mkdir failed: " + errText(e), "err"); }
+    toast("Folder created · " + name, "ok");
+    state.selected = name;
+    await refreshFiles();
+  } catch (e) { toast("Couldn't create folder: " + errText(e), "err"); }
 }
 
 async function newFile() {
-  const name = await promptModal("New file name", "untitled.txt");
+  const name = await promptModal("New file", "untitled.txt", { desc: "Create a file in " + state.cwd, okLabel: "Create" });
   if (!name) return;
   const path = joinPath(state.cwd, name);
   try {
-    // Real browser-only upload path: puter.fs.write(path, Blob/string).
     await puter.fs.write(path, new Blob([""], { type: "text/plain" }), { overwrite: false });
-    toast("File created: " + name, "ok");
-    refreshFiles();
+    toast("File created · " + name, "ok");
+    state.selected = name;
+    await refreshFiles();
     openInNotes(path);
-  } catch (e) { toast("write failed: " + errText(e), "err"); }
+  } catch (e) { toast("Couldn't create file: " + errText(e), "err"); }
 }
 
 async function renameEntry(ent) {
-  const next = await promptModal("Rename “" + ent.name + "” to", ent.name);
+  const next = await promptModal("Rename", ent.name, { desc: "Rename “" + ent.name + "”", okLabel: "Rename" });
   if (!next || next === ent.name) return;
   try {
     await puter.fs.rename(joinPath(state.cwd, ent.name), next);
     toast("Renamed to " + next, "ok");
-    refreshFiles();
-  } catch (e) { toast("rename failed: " + errText(e), "err"); }
+    state.selected = next;
+    await refreshFiles();
+  } catch (e) { toast("Rename failed: " + errText(e), "err"); }
 }
 
 async function deleteEntry(ent) {
-  const ok = await promptModal("Type DELETE to remove “" + ent.name + "”", "");
-  if (ok !== "DELETE") { if (ok !== null) toast("Delete cancelled (type DELETE to confirm)"); return; }
+  const ok = await promptModal("Delete “" + ent.name + "”?", "", {
+    desc: "This permanently removes it from Vita's store. Type DELETE to confirm.",
+    okLabel: "Delete", danger: true,
+  });
+  if (ok !== "DELETE") { if (ok !== null) toast("Delete cancelled — type DELETE to confirm"); return; }
   try {
     await puter.fs.delete(joinPath(state.cwd, ent.name), { recursive: true });
     toast("Deleted " + ent.name, "ok");
-    refreshFiles();
-  } catch (e) { toast("delete failed: " + errText(e), "err"); }
+    if (state.selected === ent.name) state.selected = null;
+    await refreshFiles();
+    if (state.cwd === NOTES_DIR || joinPath(state.cwd, ent.name) === NOTES_DIR) refreshNoteList();
+  } catch (e) { toast("Delete failed: " + errText(e), "err"); }
 }
 
 // =================================================================================================
-// NOTES
+// VIEW SWITCHING
 // =================================================================================================
 function switchTo(view) {
+  els.app.dataset.view = view;
   $$(".tab").forEach((t) => {
     const on = t.dataset.view === view;
     t.classList.toggle("is-active", on);
@@ -277,50 +443,133 @@ function switchTo(view) {
   });
   $$(".view").forEach((v) => v.classList.toggle("is-active", v.dataset.view === view));
   if (view === "files") refreshFiles();
+  if (view === "notes") { refreshNoteList(); if (els.noteBody) els.noteBody.focus(); }
+}
+
+// =================================================================================================
+// NOTES — a real editor with a saved-notes list (everything under NOTES_DIR).
+// =================================================================================================
+async function refreshNoteList() {
+  try { await puter.fs.mkdir(NOTES_DIR).catch(() => {}); } catch (_) {}
+  let entries = [];
+  try { entries = await puter.fs.readdir(NOTES_DIR); } catch (_) { entries = []; }
+  state.notes = (Array.isArray(entries) ? entries : [])
+    .map(normalizeEntry)
+    .filter((e) => !e.is_dir)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  els.notelist.innerHTML = "";
+  els.notesEmpty.hidden = state.notes.length > 0;
+
+  for (const n of state.notes) {
+    const path = joinPath(NOTES_DIR, n.name);
+    const li = document.createElement("li");
+    li.className = "note-item" + (path === state.noteCurrent ? " is-active" : "");
+    li.dataset.path = path;
+    const icon = document.createElement("span");
+    icon.className = "ni-icon";
+    icon.innerHTML = lucideIco("file-text", 15);
+    const body = document.createElement("div");
+    body.className = "ni-body";
+    const name = document.createElement("div");
+    name.className = "ni-name"; name.textContent = n.name; name.title = n.name;
+    const meta = document.createElement("div");
+    meta.className = "ni-meta";
+    meta.textContent = fmtSize(n.size) + (n.modified ? " · " + fmtWhen(n.modified) : "");
+    body.append(name, meta);
+    li.append(icon, body);
+    li.addEventListener("click", () => openNote(path));
+    els.notelist.appendChild(li);
+  }
+  refreshIcons(); // swap the <i data-lucide> placeholders (note row icons) for SVGs
+}
+
+function markActiveNote() {
+  $$(".note-item").forEach((li) => li.classList.toggle("is-active", li.dataset.path === state.noteCurrent));
+}
+
+function setNoteHeader(path) {
+  els.noteTitle.textContent = baseName(path);
+  els.noteTitle.title = baseName(path);
+  els.notePath.textContent = path;
+  els.notePath.title = path;
+}
+
+function setDirty(dirty) {
+  state.noteDirty = dirty;
+  els.noteDirty.hidden = !dirty;
+  if (dirty) { els.noteStatus.textContent = "Unsaved"; els.noteStatus.className = "note-status"; }
+}
+
+function updateNoteMeta() {
+  const t = els.noteBody.value;
+  const words = t.trim() ? t.trim().split(/\s+/).length : 0;
+  els.noteMeta.textContent = `${words} word${words === 1 ? "" : "s"} · ${t.length} char${t.length === 1 ? "" : "s"}`;
 }
 
 function openInNotes(path) {
-  els.notePath.value = path;
   switchTo("notes");
-  openNote();
+  openNote(path);
 }
 
-async function openNote() {
-  const path = els.notePath.value.trim();
+async function openNote(path) {
+  path = (path || state.noteCurrent || "").trim();
   if (!path) return;
-  els.noteStatus.textContent = "opening…";
-  els.noteStatus.className = "note-status";
+  state.noteCurrent = path;
+  setNoteHeader(path);
+  markActiveNote();
+  els.noteStatus.textContent = "Opening…";
+  els.noteStatus.className = "note-status saving";
   try {
     const blob = await puter.fs.read(path);
     const text = await blobText(blob);
     els.noteBody.value = text;
-    els.noteStatus.textContent = "opened";
+    state.noteSavedText = text;
+    els.noteStatus.textContent = "Opened";
     els.noteStatus.className = "note-status";
   } catch (e) {
     // A not-found file is fine — start a blank buffer the user can Save to create it.
     els.noteBody.value = "";
-    els.noteStatus.textContent = "new file (not saved yet)";
+    state.noteSavedText = "";
+    els.noteStatus.textContent = "New file";
     els.noteStatus.className = "note-status";
   }
+  setDirty(false);
+  updateNoteMeta();
+}
+
+async function newNote() {
+  const name = await promptModal("New note", "note.txt", { desc: "Create a note in " + NOTES_DIR, okLabel: "Create" });
+  if (!name) return;
+  const path = joinPath(NOTES_DIR, name);
+  els.noteBody.value = "";
+  state.noteSavedText = "";
+  state.noteCurrent = path;
+  setNoteHeader(path);
+  await saveNote(); // persist the empty file so it appears in the list immediately
+  els.noteBody.focus();
 }
 
 async function saveNote() {
-  const path = els.notePath.value.trim();
-  if (!path) { toast("Enter a path first", "err"); return; }
-  els.noteStatus.textContent = "saving…";
-  els.noteStatus.className = "note-status";
+  const path = (state.noteCurrent || "").trim();
+  if (!path) { toast("No note open", "err"); return; }
+  els.noteStatus.textContent = "Saving…";
+  els.noteStatus.className = "note-status saving";
   try {
-    // Ensure the parent dir exists (mkdir is idempotent here), then write.
     const dir = parentOf(path);
     if (dir !== "/") { try { await puter.fs.mkdir(dir); } catch (_) { /* exists */ } }
     await puter.fs.write(path, new Blob([els.noteBody.value], { type: "text/plain" }), { overwrite: true });
-    els.noteStatus.textContent = "saved ✓";
+    state.noteSavedText = els.noteBody.value;
+    els.noteStatus.textContent = "Saved";
     els.noteStatus.className = "note-status saved";
-    toast("Saved " + path, "ok");
+    setDirty(false);
+    els.noteDirty.hidden = true;
+    toast("Saved · " + baseName(path), "ok");
+    await refreshNoteList();
   } catch (e) {
-    els.noteStatus.textContent = "save failed";
+    els.noteStatus.textContent = "Save failed";
     els.noteStatus.className = "note-status err";
-    toast("save failed: " + errText(e), "err");
+    toast("Save failed: " + errText(e), "err");
   }
 }
 
@@ -335,32 +584,50 @@ async function blobText(b) {
 }
 
 // =================================================================================================
-// SETTINGS (KV-backed)
+// SETTINGS (KV-backed) — theme, accent, default file view, folders-first
 // =================================================================================================
-const KV_THEME = "vita.desk.theme";
-const KV_COUNT = "vita.desk.clicks";
+const KV = {
+  theme: "vita.desk.theme",
+  accent: "vita.desk.accent",
+  view: "vita.desk.fileview",
+  foldersFirst: "vita.desk.foldersFirst",
+};
 
 async function loadSettings() {
   try {
-    const theme = await puter.kv.get(KV_THEME);
-    if (theme) { document.documentElement.dataset.theme = theme; els.themeSelect.value = theme; }
-    const count = await puter.kv.get(KV_COUNT);
-    els.count.textContent = String(Number(count) || 0);
-  } catch (e) { /* first run: keys absent */ }
+    const [theme, accent, view, ff] = await Promise.all([
+      puter.kv.get(KV.theme), puter.kv.get(KV.accent), puter.kv.get(KV.view), puter.kv.get(KV.foldersFirst),
+    ]);
+    applyTheme(theme || "dark", false);
+    applyAccent(accent || "blue", false);
+    setFileView(view === "grid" ? "grid" : "list");
+    state.foldersFirst = ff == null ? true : ff === "true" || ff === true;
+    els.toggleFoldersFirst.classList.toggle("is-on", state.foldersFirst);
+    els.toggleFoldersFirst.setAttribute("aria-checked", String(state.foldersFirst));
+  } catch (_) { /* first run: keys absent */ }
 }
 
-async function setTheme(theme) {
+function applyTheme(theme, persist = true) {
   document.documentElement.dataset.theme = theme;
-  try { await puter.kv.set(KV_THEME, theme); toast("Theme saved", "ok"); }
-  catch (e) { toast("kv.set failed: " + errText(e), "err"); }
+  $$("#theme-picker .swatch").forEach((s) => s.setAttribute("aria-checked", String(s.dataset.theme === theme)));
+  if (persist) puter.kv.set(KV.theme, theme).then(() => toast("Theme · " + theme, "ok")).catch((e) => toast("Couldn't save theme: " + errText(e), "err"));
 }
-
-async function bumpCount(delta) {
-  const next = (Number(els.count.textContent) || 0) + delta;
-  const val = delta === 0 ? 0 : next;
-  els.count.textContent = String(val < 0 ? 0 : val);
-  try { await puter.kv.set(KV_COUNT, String(val < 0 ? 0 : val)); }
-  catch (e) { toast("kv.set failed: " + errText(e), "err"); }
+function applyAccent(accent, persist = true) {
+  document.documentElement.dataset.accent = accent;
+  $$("#accent-picker .dot").forEach((d) => d.setAttribute("aria-checked", String(d.dataset.accent === accent)));
+  if (persist) puter.kv.set(KV.accent, accent).then(() => toast("Accent · " + accent, "ok")).catch((e) => toast("Couldn't save accent: " + errText(e), "err"));
+}
+function persistFileView(view) {
+  setFileView(view);
+  puter.kv.set(KV.view, view).catch((e) => toast("Couldn't save view: " + errText(e), "err"));
+  refreshFiles();
+}
+function toggleFoldersFirst() {
+  state.foldersFirst = !state.foldersFirst;
+  els.toggleFoldersFirst.classList.toggle("is-on", state.foldersFirst);
+  els.toggleFoldersFirst.setAttribute("aria-checked", String(state.foldersFirst));
+  puter.kv.set(KV.foldersFirst, String(state.foldersFirst)).catch((e) => toast("Couldn't save: " + errText(e), "err"));
+  refreshFiles();
 }
 
 // =================================================================================================
@@ -374,43 +641,67 @@ function errText(e) {
 
 function wireEvents() {
   $$(".tab").forEach((t) => t.addEventListener("click", () => switchTo(t.dataset.view)));
-  els.btnUp.addEventListener("click", () => { state.cwd = navParentOf(state.cwd); refreshFiles(); });
+
+  // files
+  els.btnUp.addEventListener("click", () => { state.cwd = navParentOf(state.cwd); state.selected = null; refreshFiles(); });
   els.btnNewFolder.addEventListener("click", newFolder);
   els.btnNewFile.addEventListener("click", newFile);
-  els.btnRefresh.addEventListener("click", refreshFiles);
-  els.btnOpen.addEventListener("click", openNote);
+  els.btnRefresh.addEventListener("click", () => { refreshFiles(); toast("Refreshed", "ok"); });
+  els.viewList.addEventListener("click", () => persistFileView("list"));
+  els.viewGrid.addEventListener("click", () => persistFileView("grid"));
+  els.sideHome.addEventListener("click", () => { state.cwd = HOME; state.selected = null; refreshFiles(); });
+  els.sideNotes.addEventListener("click", () => { state.cwd = NOTES_DIR; state.selected = null; refreshFiles(); });
+  // empty-state shortcuts
+  $$("#files-empty [data-act]").forEach((b) => b.addEventListener("click", () => (b.dataset.act === "newfolder" ? newFolder() : newFile())));
+
+  // notes
   els.btnSave.addEventListener("click", saveNote);
-  els.themeSelect.addEventListener("change", () => setTheme(els.themeSelect.value));
-  els.btnCount.addEventListener("click", () => bumpCount(1));
-  els.btnCountReset.addEventListener("click", () => bumpCount(0));
-  // Ctrl/Cmd-S saves when in the notes view.
+  els.btnNewNote.addEventListener("click", newNote);
+  els.noteBody.addEventListener("input", () => {
+    updateNoteMeta();
+    setDirty(els.noteBody.value !== state.noteSavedText);
+  });
+
+  // settings
+  els.themePicker.addEventListener("click", (e) => { const s = e.target.closest(".swatch"); if (s) applyTheme(s.dataset.theme); });
+  els.accentPicker.addEventListener("click", (e) => { const d = e.target.closest(".dot"); if (d) applyAccent(d.dataset.accent); });
+  els.setViewList.addEventListener("click", () => persistFileView("list"));
+  els.setViewGrid.addEventListener("click", () => persistFileView("grid"));
+  els.toggleFoldersFirst.addEventListener("click", toggleFoldersFirst);
+
+  // keyboard: Ctrl/Cmd-S saves in notes; Delete removes selection in files
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-      if ($(".view-notes").classList.contains("is-active")) { e.preventDefault(); saveNote(); }
+      if (els.app.dataset.view === "notes") { e.preventDefault(); saveNote(); }
     }
   });
+
+  // Paint the static chrome icons (tabs, sidebar, toolbar, save, boot logo, empty state) on first frame.
+  refreshIcons();
 }
 
 async function ensureSeedContent() {
-  // On first run, seed a welcome note + a sample folder so the desktop is never empty (and the
+  // On first run, seed a welcome note + the notes folder so the desktop is never empty (and the
   // verification has something to click). Idempotent: only writes if absent.
   try {
-    // Ensure HOME exists (the app namespace root). mkdir is idempotent.
     await puter.fs.mkdir(HOME).catch(() => {});
     const root = await puter.fs.readdir(HOME).catch(() => []);
     const names = (Array.isArray(root) ? root : []).map((e) => e.name);
     if (!names.includes("notes")) await puter.fs.mkdir(NOTES_DIR).catch(() => {});
     const welcome = NOTES_DIR + "/welcome.txt";
-    // Check existence via readdir (avoids a noisy 404 from stat on a missing path).
     const notesEntries = await puter.fs.readdir(NOTES_DIR).catch(() => []);
     const exists = (Array.isArray(notesEntries) ? notesEntries : []).some((e) => e.name === "welcome.txt");
     if (!exists) {
       const body = [
         "Welcome to Vita Desk.",
         "",
-        "This is a real, interactive Puter app running on Vita's own api_origin.",
-        "Try: create a file, rename it, edit this note and press Save, then reload —",
-        "everything persists to /var/lib/vita/apps.",
+        "This is a real, interactive app running on Vita's own api_origin.",
+        "Try it out:",
+        "  • Create a file or folder in Files",
+        "  • Edit this note and press Ctrl/Cmd-S to save",
+        "  • Pick a theme + accent in Settings",
+        "",
+        "Everything persists to /var/lib/vita/apps and survives a reload or reboot.",
       ].join("\n");
       await puter.fs.write(welcome, new Blob([body], { type: "text/plain" }), { overwrite: false }).catch(() => {});
     }
@@ -428,40 +719,53 @@ async function boot() {
 
   const origin = (puter.APIOrigin || (window.__vitaSession && window.__vitaSession.apiOrigin) || (location.origin + "/api"));
   els.dbgOrigin.textContent = origin;
-  els.dbgToken.textContent = puter.authToken ? (String(puter.authToken).slice(0, 8) + "…") : "(none)";
+  els.dbgToken.textContent = puter.authToken ? (String(puter.authToken).slice(0, 10) + "…") : "(none)";
 
   els.bootMsg.textContent = "Authenticating with api_origin…";
   try {
     const me = await puter.auth.whoami();
-    const name = me && (me.username || me.user?.username) || "owner";
+    const name = (me && (me.username || me.user?.username)) || "owner";
     els.whoName.textContent = name;
-    els.dbgWhoami.textContent = JSON.stringify(me);
-    els.conn.textContent = "connected";
-    els.conn.className = "conn ok";
+    els.whoAvatar.textContent = name.slice(0, 1) || "·";
+    els.dbgUser.textContent = name;
+    setConn("connected", "ok");
+    els.dbgStatus.textContent = "Connected";
+    els.dbgStatus.className = "badge ok";
   } catch (e) {
-    els.conn.textContent = "auth failed";
-    els.conn.className = "conn err";
-    els.dbgWhoami.textContent = "FAILED: " + errText(e);
-    // Not fatal for browsing if the gate is open on the local face, but surface it.
+    setConn("auth failed", "err");
+    els.dbgStatus.textContent = "Auth failed";
+    els.dbgStatus.className = "badge err";
+    els.dbgUser.textContent = "—";
     toast("whoami failed: " + errText(e), "err");
   }
 
   await loadSettings();
   await ensureSeedContent();
   await refreshFiles();
+  await refreshNoteList();
+  // Pre-open the welcome note so the editor is never blank on first paint.
+  await openNote(state.noteCurrent).catch(() => {});
 
   els.app.dataset.state = "ready";
+  // Explicitly remove the boot overlay from layout once ready (belt-and-suspenders over the CSS fade) so
+  // its spinner can never flash back or sit (invisible) atop the desk. Reset the message first so a stale
+  // "Authenticating…" never lingers if the overlay is ever shown again.
+  try { els.bootMsg.textContent = ""; els.boot.hidden = true; els.boot.style.display = "none"; } catch (_) {}
   // Mark for the boot-log / screenshot verification.
   document.title = "Vita Desk — ready";
   window.__vitaDeskReady = true;
+}
+
+function setConn(label, kind) {
+  els.connLabel.textContent = label;
+  els.conn.className = "conn" + (kind ? " " + kind : "");
 }
 
 function bootFail(msg) {
   els.bootMsg.textContent = "Could not start.";
   els.bootErr.hidden = false;
   els.bootErr.textContent = msg;
-  els.conn.textContent = "offline";
-  els.conn.className = "conn err";
+  setConn("offline", "err");
 }
 
 boot();

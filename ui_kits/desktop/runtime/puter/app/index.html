@@ -7,110 +7,248 @@
   kiosk (local face) loads full-screen so the owner can CLICK and DO things:
     - a FILE MANAGER  : browse / create folders / new files / rename / delete  (→ puter.fs.* over HTTP)
     - a NOTES EDITOR  : open a file, edit, Save                                (→ puter.fs.write upload)
-    - a SETTINGS panel: theme + a counter persisted in KV                      (→ puter.kv.* over HTTP)
+    - a SETTINGS panel: theme + view prefs persisted in KV                     (→ puter.kv.* over HTTP)
   Everything persists to /var/lib/vita/apps via the api_origin's file-backed store, so a reload (or a
   reboot) shows it again. This exercises the genuine browser-only fs.write signed-batch/upload path
   the earlier Node-VM shim could not reach.
 
   Licensing: only `/_vendor/puter/v2.js` (Apache-2.0 puter.js SDK) is third-party + vendored. This
-  HTML/CSS/JS is Vita's own (AGPL-clean). No AGPL Puter desktop bundle is shipped or fetched.
+  HTML/CSS/JS is Vita's own (AGPL-clean). No AGPL Puter desktop bundle is shipped or fetched. No
+  external fonts, CDNs, or web requests beyond the local api_origin — this runs offline on the kiosk.
+  The visual language consumes the shared Vita OS design system (/ui_kits/styles.css) so Vita Desk
+  reads as one product with the shell. Icons are vendored Lucide (offline UMD at /_vendor/lucide.min.js).
 -->
-<html lang="en">
+<html lang="en" class="theme-dark" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Vita Desk</title>
-  <link rel="stylesheet" href="./app.css" />
-  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
   <!-- PRE-SDK origin pin (see kiosk-entry.html): target our same-origin /api from the SDK's first call
-       so it never races a boot call against the cloud api.puter.com. -->
+       so it never races a boot call against the cloud api.puter.com. MUST come first. -->
   <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
   <!-- Vendored, offline, Apache-2.0 puter.js client SDK (no runtime CDN). -->
   <script src="/_vendor/puter/v2.js"></script>
   <!-- LOCAL-FACE session bootstrap: points the SDK at our same-origin /api and injects the minted
        vita.kiosk app-session token. On the network face /session.js 404s (owner-gated separately). -->
   <script src="/session.js"></script>
+  <!-- Vendored Lucide (offline UMD). NON-module so window.lucide is ready synchronously for app.js. -->
+  <script src="/ui_kits/_vendor/lucide.min.js"></script>
+  <!-- Shared Vita OS design tokens (Geist fonts, surface/text/accent ladders, radii, motion). MUST
+       come BEFORE app.css so the app's local theme rules can build on the handoff tokens. -->
+  <link rel="stylesheet" href="/ui_kits/styles.css" />
+  <link rel="stylesheet" href="./app.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235a9bf6'/&gt;&lt;/svg&gt;" />
 </head>
 <body>
-  <div id="app" class="app" data-state="booting">
+  <div id="app" class="app" data-state="booting" data-view="files">
     <!-- Top bar -->
     <header class="topbar">
       <div class="brand">
-        <span class="logo" aria-hidden="true"></span>
-        <span class="brand-name">Vita Desk</span>
+        <span class="logo" aria-hidden="true"><span class="ico" style="width:17px;height:17px"><i data-lucide="box"></i></span></span>
+        <span class="brand-name">Vita<i class="ts">.ts</i> Desk</span>
       </div>
-      <nav class="tabs" role="tablist">
-        <button class="tab is-active" data-view="files" role="tab" aria-selected="true">Files</button>
-        <button class="tab" data-view="notes" role="tab" aria-selected="false">Notes</button>
-        <button class="tab" data-view="settings" role="tab" aria-selected="false">Settings</button>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab is-active" data-view="files" role="tab" aria-selected="true">
+          <span class="ico tab-ico" style="width:16px;height:16px"><i data-lucide="folder"></i></span>
+          <span>Files</span>
+        </button>
+        <button class="tab" data-view="notes" role="tab" aria-selected="false">
+          <span class="ico tab-ico" style="width:16px;height:16px"><i data-lucide="file-text"></i></span>
+          <span>Notes</span>
+        </button>
+        <button class="tab" data-view="settings" role="tab" aria-selected="false">
+          <span class="ico tab-ico" style="width:16px;height:16px"><i data-lucide="settings"></i></span>
+          <span>Settings</span>
+        </button>
       </nav>
       <div class="who">
-        <span id="who-name" class="who-name">…</span>
-        <span id="conn" class="conn" title="api_origin connectivity">connecting…</span>
+        <span class="who-chip">
+          <span class="who-avatar" id="who-avatar" aria-hidden="true">·</span>
+          <span id="who-name" class="who-name">…</span>
+        </span>
+        <span id="conn" class="conn" title="api_origin connectivity"><span class="conn-dot"></span><span class="conn-label">connecting…</span></span>
       </div>
     </header>
 
     <!-- FILES view -->
-    <section class="view view-files is-active" data-view="files">
-      <div class="toolbar">
-        <button id="btn-up" class="btn" title="Parent folder">↑ Up</button>
-        <span id="cwd" class="cwd">/</span>
-        <span class="spacer"></span>
-        <button id="btn-newfolder" class="btn">New folder</button>
-        <button id="btn-newfile" class="btn btn-primary">New file</button>
-        <button id="btn-refresh" class="btn" title="Reload directory">Refresh</button>
+    <section class="view view-files is-active" data-view="files" role="tabpanel" aria-label="Files">
+      <aside class="sidebar" aria-label="Locations">
+        <div class="side-group">
+          <div class="side-title">Locations</div>
+          <button class="side-item is-active" data-go="/home" id="side-home">
+            <span class="ico" style="width:16px;height:16px"><i data-lucide="house"></i></span>
+            <span>Home</span>
+          </button>
+          <button class="side-item" data-go="/home/notes" id="side-notes">
+            <span class="ico" style="width:16px;height:16px"><i data-lucide="file-text"></i></span>
+            <span>Notes</span>
+          </button>
+        </div>
+        <div class="side-group side-spacer"></div>
+        <div class="side-group">
+          <div class="side-title">This folder</div>
+          <dl class="side-stats">
+            <div><dt>Items</dt><dd id="stat-items">0</dd></div>
+            <div><dt>Folders</dt><dd id="stat-folders">0</dd></div>
+            <div><dt>Files</dt><dd id="stat-files">0</dd></div>
+          </dl>
+        </div>
+      </aside>
+
+      <div class="files-main">
+        <div class="toolbar">
+          <button id="btn-up" class="btn btn-icon" title="Parent folder" aria-label="Parent folder">
+            <span class="ico" style="width:16px;height:16px"><i data-lucide="arrow-up"></i></span>
+          </button>
+          <nav id="crumbs" class="crumbs" aria-label="Path"></nav>
+          <span class="spacer"></span>
+          <div class="seg" role="group" aria-label="View mode">
+            <button id="view-list" class="seg-btn is-active" title="List view" aria-label="List view">
+              <span class="ico" style="width:15px;height:15px"><i data-lucide="list"></i></span>
+            </button>
+            <button id="view-grid" class="seg-btn" title="Grid view" aria-label="Grid view">
+              <span class="ico" style="width:15px;height:15px"><i data-lucide="layout-grid"></i></span>
+            </button>
+          </div>
+          <button id="btn-refresh" class="btn btn-icon" title="Reload directory" aria-label="Refresh">
+            <span class="ico" style="width:16px;height:16px"><i data-lucide="refresh-cw"></i></span>
+          </button>
+          <span class="tbar-div" aria-hidden="true"></span>
+          <button id="btn-newfolder" class="btn">
+            <span class="ico" style="width:15px;height:15px"><i data-lucide="folder-plus"></i></span>
+            <span>New folder</span>
+          </button>
+          <button id="btn-newfile" class="btn btn-primary">
+            <span class="ico" style="width:15px;height:15px"><i data-lucide="file-plus"></i></span>
+            <span>New file</span>
+          </button>
+        </div>
+
+        <div class="filewrap">
+          <div class="listhead" id="listhead">
+            <span class="lh-name">Name</span>
+            <span class="lh-kind">Type</span>
+            <span class="lh-size">Size</span>
+            <span class="lh-actions"></span>
+          </div>
+          <ul id="filelist" class="filelist" aria-label="Files in the current folder"></ul>
+          <div id="files-empty" class="empty" hidden>
+            <div class="empty-art" aria-hidden="true"><span class="ico" style="width:40px;height:40px"><i data-lucide="folder-open"></i></span></div>
+            <div class="empty-title">This folder is empty</div>
+            <div class="empty-sub">Create a file or folder to get started.</div>
+            <div class="empty-actions">
+              <button class="btn" data-act="newfolder">New folder</button>
+              <button class="btn btn-primary" data-act="newfile">New file</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <ul id="filelist" class="filelist" aria-label="Files in the current folder"></ul>
-      <div id="files-empty" class="empty" hidden>This folder is empty. Create a file or folder to get started.</div>
     </section>
 
     <!-- NOTES view -->
-    <section class="view view-notes" data-view="notes">
-      <div class="toolbar">
-        <input id="note-path" class="note-path" value="/home/notes/welcome.txt"
-               aria-label="Note file path" spellcheck="false" />
-        <button id="btn-open" class="btn">Open</button>
-        <span class="spacer"></span>
-        <span id="note-status" class="note-status"></span>
-        <button id="btn-save" class="btn btn-primary">Save</button>
+    <section class="view view-notes" data-view="notes" role="tabpanel" aria-label="Notes">
+      <aside class="notes-list" aria-label="Notes">
+        <div class="notes-list-head">
+          <span class="nl-title">Notes</span>
+          <button id="btn-newnote" class="btn btn-icon btn-sm" title="New note" aria-label="New note">
+            <span class="ico" style="width:15px;height:15px"><i data-lucide="plus"></i></span>
+          </button>
+        </div>
+        <ul id="notelist" class="notelist" aria-label="Saved notes"></ul>
+        <div id="notes-empty" class="notes-empty" hidden>No notes yet. Create one to start writing.</div>
+      </aside>
+
+      <div class="editor">
+        <div class="editor-head">
+          <div class="editor-title">
+            <span id="note-title" class="note-title">welcome.txt</span>
+            <span id="note-dirty" class="note-dirty" hidden title="Unsaved changes">●</span>
+          </div>
+          <span id="note-path" class="note-path" title="/home/notes/welcome.txt">/home/notes/welcome.txt</span>
+          <span class="spacer"></span>
+          <span id="note-status" class="note-status"></span>
+          <button id="btn-save" class="btn btn-primary">
+            <span class="ico" style="width:15px;height:15px"><i data-lucide="save"></i></span>
+            <span>Save</span>
+          </button>
+        </div>
+        <div class="editor-body">
+          <textarea id="note-body" class="note-textarea" spellcheck="false"
+                    placeholder="Start typing… your note saves to Vita's store and survives a reload (⌘/Ctrl-S)."></textarea>
+          <div class="editor-foot">
+            <span id="note-meta" class="note-meta">0 words · 0 chars</span>
+            <span class="spacer"></span>
+            <span class="kbd-hint"><kbd>⌘</kbd><kbd>S</kbd> to save</span>
+          </div>
+        </div>
       </div>
-      <textarea id="note-body" class="note-body" spellcheck="false"
-                placeholder="Type here, then Save. The text persists to Vita's store and survives a reload."></textarea>
     </section>
 
     <!-- SETTINGS view -->
-    <section class="view view-settings" data-view="settings">
-      <div class="settings-card">
-        <h2>Appearance</h2>
-        <label class="row">
-          <span>Theme</span>
-          <select id="theme-select">
-            <option value="dark">Dark</option>
-            <option value="midnight">Midnight</option>
-            <option value="slate">Slate</option>
-          </select>
-        </label>
-        <h2>Persisted counter (KV)</h2>
-        <p class="muted">Stored in <code>puter.kv</code> against Vita's api_origin. Reload to confirm it sticks.</p>
-        <div class="row">
-          <button id="btn-count" class="btn btn-primary">Clicks: <span id="count">0</span></button>
-          <button id="btn-count-reset" class="btn">Reset</button>
+    <section class="view view-settings" data-view="settings" role="tabpanel" aria-label="Settings">
+      <div class="settings-scroll">
+        <div class="settings-head">
+          <h1>Settings</h1>
+          <p class="settings-sub">Preferences persist to Vita's key-value store and survive a reload.</p>
         </div>
-        <h2>Backend</h2>
-        <dl class="kvs">
-          <dt>api_origin</dt><dd id="dbg-origin">—</dd>
-          <dt>whoami</dt><dd id="dbg-whoami">—</dd>
-          <dt>token</dt><dd id="dbg-token">—</dd>
-        </dl>
+
+        <div class="settings-eyebrow">Appearance</div>
+        <section class="setting-card">
+          <div class="setting-row">
+            <div class="setting-label"><span>Theme</span><small>Color scheme for the whole app.</small></div>
+            <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="Theme">
+              <button class="swatch" data-theme="dark"     role="radio" aria-checked="true"  title="Dark"><span class="sw-dark"></span><em>Dark</em></button>
+              <button class="swatch" data-theme="midnight" role="radio" aria-checked="false" title="Midnight"><span class="sw-mid"></span><em>Midnight</em></button>
+              <button class="swatch" data-theme="slate"    role="radio" aria-checked="false" title="Slate"><span class="sw-slate"></span><em>Slate</em></button>
+              <button class="swatch" data-theme="aurora"   role="radio" aria-checked="false" title="Aurora"><span class="sw-aurora"></span><em>Aurora</em></button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label"><span>Accent</span><small>Highlight color for buttons and links.</small></div>
+            <div class="accent-picker" id="accent-picker" role="radiogroup" aria-label="Accent color">
+              <button class="dot" data-accent="blue"   role="radio" aria-checked="true"  style="--d:#5a9bf6" title="Blue"></button>
+              <button class="dot" data-accent="violet" role="radio" aria-checked="false" style="--d:#a78bfa" title="Violet"></button>
+              <button class="dot" data-accent="emerald"role="radio" aria-checked="false" style="--d:#34d399" title="Emerald"></button>
+              <button class="dot" data-accent="amber"  role="radio" aria-checked="false" style="--d:#fbbf24" title="Amber"></button>
+              <button class="dot" data-accent="rose"   role="radio" aria-checked="false" style="--d:#fb7185" title="Rose"></button>
+            </div>
+          </div>
+        </section>
+
+        <div class="settings-eyebrow">Files</div>
+        <section class="setting-card">
+          <div class="setting-row">
+            <div class="setting-label"><span>Default view</span><small>List or grid when you open Files.</small></div>
+            <div class="seg seg-lg" role="group" aria-label="Default file view">
+              <button class="seg-btn is-active" data-setview="list" id="set-view-list">List</button>
+              <button class="seg-btn" data-setview="grid" id="set-view-grid">Grid</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label"><span>Sort folders first</span><small>Keep folders above files in the list.</small></div>
+            <button class="toggle is-on" id="toggle-foldersfirst" role="switch" aria-checked="true" aria-label="Sort folders first"><span class="toggle-knob"></span></button>
+          </div>
+        </section>
+
+        <div class="settings-eyebrow">Connection</div>
+        <section class="setting-card">
+          <dl class="kvs">
+            <div><dt>Status</dt><dd><span id="dbg-status" class="badge">—</span></dd></div>
+            <div><dt>Signed in as</dt><dd id="dbg-user">—</dd></div>
+            <div><dt>api_origin</dt><dd id="dbg-origin" class="mono">—</dd></div>
+            <div><dt>Session token</dt><dd id="dbg-token" class="mono">—</dd></div>
+          </dl>
+        </section>
       </div>
     </section>
 
     <!-- Toasts + modal prompt -->
     <div id="toasts" class="toasts" aria-live="polite"></div>
     <div id="modal" class="modal" hidden>
-      <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <div id="modal-title" class="modal-title">Name</div>
-        <input id="modal-input" class="modal-input" />
+        <div id="modal-desc" class="modal-desc" hidden></div>
+        <input id="modal-input" class="modal-input" autocomplete="off" spellcheck="false" />
         <div class="modal-actions">
           <button id="modal-cancel" class="btn">Cancel</button>
           <button id="modal-ok" class="btn btn-primary">OK</button>
@@ -121,6 +259,7 @@
     <!-- Boot overlay (hidden once the SDK + whoami resolve) -->
     <div id="boot" class="boot">
       <div class="boot-inner">
+        <div class="boot-logo" aria-hidden="true"><span class="ico" style="width:30px;height:30px"><i data-lucide="box"></i></span></div>
         <div class="boot-spinner" aria-hidden="true"></div>
         <div id="boot-msg" class="boot-msg">Starting Vita Desk…</div>
         <div id="boot-err" class="boot-err" hidden></div>
