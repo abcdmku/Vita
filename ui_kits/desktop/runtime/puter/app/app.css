@@ -1,39 +1,31 @@
-/* Vita Desk — styles. Vita's own (AGPL-clean). Themeable via [data-theme] on <html>. */
+/* Vita Desk — styles. Vita's own (AGPL-clean). Themeable via [data-theme] on <html>.
+
+   Vita Desk sources its palette/typography from the SHARED Vita OS design system: its local
+   variable names are kept (so app.js + selectors below are untouched) but each one now resolves to
+   a canonical token via the --vita-* bridge (ui_kits/vita-app-theme.css, linked before this file),
+   with the previous hardcoded values as offline fallbacks. This is what makes Vita Desk look like
+   one product with the shell + Deploy Console instead of its own slightly-off blue. */
 
 :root {
-  --bg: #0e0f13;
-  --bg-2: #15171d;
-  --bg-3: #1a1c22;
-  --panel: #12141a;
-  --line: #262932;
-  --fg: #e6e8ee;
-  --fg-dim: #9aa0ac;
-  --accent: #5b8cff;
-  --accent-2: #3d6ae0;
-  --ok: #4ade80;
-  --err: #f87171;
-  --radius: 10px;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --bg: var(--vita-color-surface, #0e0f13);
+  --bg-2: var(--vita-color-raised, #15171d);
+  --bg-3: var(--vita-color-elevated, #1a1c22);
+  --panel: var(--vita-color-panel, #12141a);
+  --line: var(--vita-color-border, #262932);
+  --fg: var(--vita-color-text, #e6e8ee);
+  --fg-dim: var(--vita-color-muted, #9aa0ac);
+  --accent: var(--vita-color-accent, #5b8cff);
+  --accent-2: var(--vita-color-accent-active, #3d6ae0);
+  --ok: var(--vita-color-success, #4ade80);
+  --err: var(--vita-color-danger, #f87171);
+  --radius: var(--vita-radius-card, 10px);
+  --shadow: var(--vita-shadow-popover, 0 8px 30px rgba(0, 0, 0, 0.45));
 }
 
-html[data-theme="midnight"] {
-  --bg: #080a14;
-  --bg-2: #0e1222;
-  --bg-3: #141a30;
-  --panel: #0b0e1c;
-  --line: #1d2540;
-  --accent: #7aa2ff;
-}
-
-html[data-theme="slate"] {
-  --bg: #14171c;
-  --bg-2: #1c2128;
-  --bg-3: #232a33;
-  --panel: #181c22;
-  --line: #2c333d;
-  --accent: #6ee7b7;
-  --accent-2: #34d399;
-}
+/* In-app theme variants still nudge the accent (the user can pick one in Settings); they layer ON
+   TOP of the shared dark surfaces so they stay cohesive with the rest of the OS. */
+html[data-theme="midnight"] { --accent: color-mix(in srgb, var(--vita-color-accent, #7aa2ff) 80%, #ffffff 20%); }
+html[data-theme="slate"]    { --accent: var(--vita-color-success, #6ee7b7); --accent-2: var(--vita-color-success, #34d399); }
 
 * { box-sizing: border-box; }
 
@@ -42,7 +34,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: var(--fs-body, 14px)/1.5 var(--vita-font-ui, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   -webkit-font-smoothing: antialiased;
 }
 

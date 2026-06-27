@@ -19,11 +19,15 @@
 
   A minimal connectivity-proof page is still available at /proof.html for boot diagnostics.
 -->
-<html lang="en">
+<html lang="en" class="theme-dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Vita Desk</title>
+  <!-- Shared Vita OS design system: canonical tokens + the --vita-* bridge. Linked BEFORE app.css so
+       Vita Desk's local vars source the system palette/typography. Keeps the shell + apps cohesive. -->
+  <link rel="stylesheet" href="/ui_kits/styles.css" />
+  <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
   <link rel="stylesheet" href="/app/app.css" />
   <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%235b8cff'/&gt;&lt;/svg&gt;" />
   <!-- PRE-SDK origin pin: the puter.js bundle reads globalThis.PUTER_API_ORIGIN at INIT for its default
@@ -38,7 +42,7 @@
   <script src="/session.js"></script>
 </head>
 <body>
-  <div id="app" class="app" data-state="booting">
+  <div id="app" class="app vita-surface" data-state="booting">
     <header class="topbar">
       <div class="brand">
         <span class="logo" aria-hidden="true"></span>

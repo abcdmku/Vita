@@ -1,0 +1,247 @@
+/* =============================================================================================
+   Vita OS — SHARED APP THEME (the one stylesheet that makes the shell + every first-party app
+   look like one product). AGPL-clean: Vita's own code, no third-party CSS.
+
+   WHY THIS FILE EXISTS
+   --------------------
+   Every first-party app (Vita Desk, Deploy Console, and the apps/* surfaces) already reads a
+   `--vita-color-* / --vita-radius-* / --vita-font-*` bridge namespace via CSS fallbacks, e.g.
+       --accent: var(--vita-color-accent, #5b8cff);
+   …but nothing DEFINED that namespace, so they all fell back to their own divergent hardcoded
+   colors/fonts/radii. This file is the single source of truth that DEFINES the bridge by mapping
+   it onto the canonical design tokens (tokens/colors.css, typography.css, spacing.css, …).
+
+   Link `ui_kits/styles.css` (the tokens) BEFORE this file. App pages should:
+       <link rel="stylesheet" href="/ui_kits/styles.css" />
+       <link rel="stylesheet" href="/ui_kits/vita-app-theme.css" />
+   and put `class="theme-dark"` (or the shell sets it) on <html>/<body> so the dark ladder applies.
+
+   It contains two things:
+     1. The :root/.theme-dark BRIDGE — `--vita-*` mapped onto canonical tokens.
+     2. Restrained, premium shared COMPONENT styles for first-party surfaces (buttons, inputs,
+        lists, cards, scrollbars, focus rings) under the `.vita-surface` scope, so a first-party
+        app can opt every default-browser element into the system look by adding ONE class.
+   ============================================================================================= */
+
+/* ---------------------------------------------------------------------------------------------
+   1. THE BRIDGE — `--vita-*` namespace ← canonical tokens.
+   Defined on :root so it resolves even inside same-origin app iframes that link this file directly,
+   and re-asserted under .theme-dark for the dark ladder (the OS default).
+   --------------------------------------------------------------------------------------------- */
+:root,
+.theme-dark {
+  /* colors */
+  --vita-color-accent: var(--accent);
+  --vita-color-accent-hover: var(--accent-hover);
+  --vita-color-accent-active: var(--accent-active);
+  --vita-color-accent-soft: var(--accent-subtle);
+  --vita-color-accent-fg: var(--accent-fg);
+
+  --vita-color-surface: var(--surface);
+  --vita-color-bg: var(--surface);
+  --vita-color-base: var(--surface-base);
+  --vita-color-panel: var(--surface-panel);
+  --vita-color-panel-muted: var(--surface-inset);
+  --vita-color-raised: var(--surface-raised);
+  --vita-color-elevated: var(--surface-elevated);
+  --vita-color-sunken: var(--surface-sunken);
+  --vita-color-hover: var(--surface-hover);
+  --vita-color-active: var(--surface-active);
+
+  --vita-color-border: var(--border);
+  --vita-color-border-strong: var(--border-strong);
+  --vita-color-hairline: var(--hairline);
+
+  --vita-color-text: var(--text);
+  --vita-color-strong: var(--text);
+  --vita-color-text-soft: var(--text-secondary);
+  --vita-color-text-secondary: var(--text-secondary);
+  --vita-color-muted: var(--text-muted);
+  --vita-color-text-muted: var(--text-muted);
+  --vita-color-faint: var(--text-faint);
+
+  --vita-color-success: var(--success);
+  --vita-color-warning: var(--warning);
+  --vita-color-danger: var(--danger);
+  --vita-color-error: var(--danger);
+  --vita-color-ok: var(--success);
+  --vita-color-warn: var(--warning);
+
+  --vita-color-focus-ring: var(--focus-ring);
+  --vita-focus-ring: var(--focus-ring);
+
+  /* radii */
+  --vita-radius-sm: var(--radius-sm);
+  --vita-radius-control: var(--radius-control);
+  --vita-radius-card: var(--radius-xl);
+  --vita-radius-window: var(--radius-window);
+  --vita-radius-pill: var(--radius-pill);
+
+  /* typography */
+  --vita-font-ui: var(--font-sans);
+  --vita-font-body: var(--font-sans);
+  --vita-font-mono: var(--font-mono);
+
+  /* spacing (4px grid passthrough for apps that want it) */
+  --vita-space-1: var(--space-1);
+  --vita-space-2: var(--space-2);
+  --vita-space-3: var(--space-3);
+  --vita-space-4: var(--space-4);
+  --vita-space-6: var(--space-6);
+  --vita-space-sm: var(--space-2);   /* 8px  — t-shirt aliases some apps read */
+  --vita-space-md: var(--space-4);   /* 16px */
+
+  /* elevation */
+  --vita-shadow-card: var(--shadow-3);
+  --vita-shadow-popover: var(--shadow-popover);
+
+  /* motion */
+  --vita-dur-fast: var(--dur-fast);
+  --vita-dur-base: var(--dur-base);
+  --vita-ease: var(--ease-standard);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   2. SHARED COMPONENT STYLES — opt-in via `class="vita-surface"` on an app's root element.
+   First-party apps add this one class to inherit the system look for the common primitives so no
+   raw/default-browser control ships on a first-party surface. Everything is token-driven and
+   scoped under .vita-surface so it NEVER bleeds into third-party Puter app iframes.
+   --------------------------------------------------------------------------------------------- */
+.vita-surface {
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  accent-color: var(--accent);
+}
+
+/* Selection + focus — one accent, everywhere. */
+.vita-surface ::selection { background: color-mix(in srgb, var(--accent) 36%, transparent); }
+.vita-surface :focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+/* Headings rhythm. */
+.vita-surface h1 { font-size: var(--fs-h2); line-height: var(--lh-h2); letter-spacing: var(--tr-h2); font-weight: var(--fw-semibold); margin: 0; }
+.vita-surface h2 { font-size: var(--fs-h3); line-height: var(--lh-h3); letter-spacing: var(--tr-h3); font-weight: var(--fw-semibold); margin: 0; }
+.vita-surface .vita-overline {
+  font-size: var(--fs-overline); letter-spacing: var(--tr-overline);
+  text-transform: uppercase; color: var(--text-muted); font-weight: var(--fw-semibold);
+}
+
+/* ---- Buttons ---- */
+.vita-surface .vita-btn,
+.vita-surface button.vita-btn {
+  appearance: none;
+  font: var(--fw-medium) var(--fs-body-sm)/1 var(--font-sans);
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  height: var(--size-control);
+  padding: 0 var(--space-3);
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard),
+              border-color var(--dur-fast) var(--ease-standard),
+              transform var(--dur-instant) var(--ease-standard);
+}
+.vita-surface .vita-btn:hover { background: var(--surface-elevated); border-color: var(--border-strong); }
+.vita-surface .vita-btn:active { transform: translateY(0.5px); background: var(--surface-active); }
+.vita-surface .vita-btn:disabled { opacity: .45; cursor: default; transform: none; }
+
+.vita-surface .vita-btn--primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+  box-shadow: 0 1px 0 rgba(255,255,255,.12) inset;
+}
+.vita-surface .vita-btn--primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.vita-surface .vita-btn--primary:active { background: var(--accent-active); }
+
+.vita-surface .vita-btn--ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+.vita-surface .vita-btn--ghost:hover { background: var(--surface-hover); color: var(--text); }
+
+.vita-surface .vita-btn--danger:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-subtle); }
+
+/* ---- Inputs / selects / textareas ---- */
+.vita-surface .vita-input,
+.vita-surface input[type="text"].vita-input,
+.vita-surface input[type="search"].vita-input,
+.vita-surface select.vita-input,
+.vita-surface textarea.vita-input {
+  appearance: none;
+  font: var(--fw-regular) var(--fs-body)/1.3 var(--font-sans);
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 0 var(--space-3);
+  height: var(--size-control);
+  transition: border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+}
+.vita-surface textarea.vita-input { height: auto; padding: var(--space-2) var(--space-3); resize: vertical; }
+.vita-surface .vita-input::placeholder { color: var(--text-faint); }
+.vita-surface .vita-input:focus,
+.vita-surface .vita-input:focus-visible {
+  outline: none;
+  border-color: var(--accent-border, var(--accent));
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+/* ---- Cards / panels ---- */
+.vita-surface .vita-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-2);
+}
+.vita-surface .vita-panel {
+  background: var(--surface-panel);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* ---- Lists / rows ---- */
+.vita-surface .vita-list { list-style: none; margin: 0; padding: var(--space-1); }
+.vita-surface .vita-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  transition: background var(--dur-fast) var(--ease-standard);
+}
+.vita-surface .vita-row:hover { background: var(--surface-hover); }
+.vita-surface .vita-row[aria-selected="true"],
+.vita-surface .vita-row.is-selected { background: var(--accent-subtle); box-shadow: inset 0 0 0 1px var(--accent-border, var(--accent)); }
+
+/* ---- Pills / badges ---- */
+.vita-surface .vita-pill {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  font: var(--fw-medium) var(--fs-caption)/1 var(--font-sans);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+.vita-surface .vita-pill .vita-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.vita-surface .vita-pill .vita-dot.ok { background: var(--success); box-shadow: 0 0 8px color-mix(in srgb, var(--success) 70%, transparent); }
+.vita-surface .vita-pill .vita-dot.bad { background: var(--danger); box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 70%, transparent); }
+
+/* ---- Scrollbars — subtle, themed (no chunky default-browser bars on first-party surfaces) ---- */
+.vita-surface * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.vita-surface ::-webkit-scrollbar { width: 11px; height: 11px; }
+.vita-surface ::-webkit-scrollbar-track { background: transparent; }
+.vita-surface ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+.vita-surface ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  .vita-surface * { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}
