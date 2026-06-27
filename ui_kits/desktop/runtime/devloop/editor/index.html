@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+  Vita Code — the dev-loop EDITOR. A REAL Puter app (Vita's own code, AGPL-clean) that opens, edits,
+  and SAVES files through `puter.fs` against Vita's LOCAL api_origin. The code surface is CodeMirror 5
+  (MIT, vendored offline at /_vendor/codemirror). Every Open/Save is a genuine HTTP call to the
+  capability-gated api_origin and persists to /var/lib/vita/apps, so edits survive a reload + reboot.
+
+  Boot wiring is identical to the kiosk entry:
+    1. window.PUTER_API_ORIGIN pins the SDK at our same-origin /api BEFORE v2.js loads.
+    2. /_vendor/puter/v2.js  — the Apache-2.0 puter.js SDK (offline, same-origin).
+    3. /session.js           — injects the minted local app-session token (local face only).
+
+  Licensing: /_vendor/puter/v2.js is Apache-2.0; /_vendor/codemirror/* is MIT. This app is Vita's own.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vita Code</title>
+  <link rel="stylesheet" href="/_vendor/codemirror/codemirror.min.css" />
+  <link rel="stylesheet" href="./editor.css" />
+  <link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;rect width='16' height='16' rx='4' fill='%2342d18a'/&gt;&lt;/svg&gt;" />
+  <script>window.PUTER_API_ORIGIN = window.location.origin + "/api"; window.puter_gui_enabled = false;</script>
+  <script src="/_vendor/puter/v2.js"></script>
+  <script src="/session.js"></script>
+  <!-- CodeMirror 5 (MIT) + the language modes the editor highlights, vendored offline. -->
+  <script src="/_vendor/codemirror/codemirror.min.js"></script>
+  <script src="/_vendor/codemirror/xml.min.js"></script>
+  <script src="/_vendor/codemirror/javascript.min.js"></script>
+  <script src="/_vendor/codemirror/css.min.js"></script>
+  <script src="/_vendor/codemirror/htmlmixed.min.js"></script>
+  <script src="/_vendor/codemirror/markdown.min.js"></script>
+</head>
+<body>
+  <div id="app" class="app" data-state="booting">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <span class="brand-name">Vita Code</span>
+      </div>
+      <div class="path-wrap">
+        <input id="path" class="path" spellcheck="false" autocomplete="off"
+               value="/home/notes/welcome.txt" aria-label="File path" />
+        <button id="btn-open" class="btn">Open</button>
+        <button id="btn-new" class="btn">New</button>
+      </div>
+      <div class="spacer"></div>
+      <span id="lang" class="lang">Plain</span>
+      <span id="dirty" class="dirty" data-dirty="false">Saved</span>
+      <button id="btn-save" class="btn btn-primary" title="Save (Ctrl+S)">Save</button>
+    </header>
+
+    <main class="editor-wrap">
+      <textarea id="code" aria-label="Code editor"></textarea>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status" class="status">Ready</span>
+      <span class="spacer"></span>
+      <span id="cursor" class="cursor">Ln 1, Col 1</span>
+    </footer>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <div id="boot" class="boot">
+      <div class="boot-inner">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div id="boot-msg" class="boot-msg">Starting Vita Code…</div>
+        <div id="boot-err" class="boot-err" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./editor.js"></script>
+</body>
+</html>

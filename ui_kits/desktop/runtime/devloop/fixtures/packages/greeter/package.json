@@ -1,0 +1,11 @@
+{
+  "name": "@vita/greeter",
+  "version": "1.0.0",
+  "description": "A tiny greeter UI, packaged into a Vita app.",
+  "module": "lib/greeter.mjs",
+  "vita": {
+    "icon": "👋",
+    "title": "Greeter",
+    "ui": "default"
+  }
+}
