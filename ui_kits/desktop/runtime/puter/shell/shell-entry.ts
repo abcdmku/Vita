@@ -254,15 +254,20 @@ function mountChrome(
   const menubar = doc.createElement("div");
 
   menubar.classList.add("v-menubar");
+  // Handoff MenuBar: the clean Vita.ts wordmark + File/Edit/View/Go/Window/Help, and a right status
+  // cluster of Lucide wifi/battery + a monospace clock. Sentence-case copy; no gradient logo square.
+  const menuTitles = ["File", "Edit", "View", "Go", "Window", "Help"];
   menubar.innerHTML =
     `<div class="v-bar-left">` +
-    `<span class="v-brand"><span class="v-logo">V</span>Vita<i>.ts</i></span>` +
-    `<span class="v-bar-sep"></span>` +
-    `<div class="v-menus"><span data-shell-status>Desktop</span></div>` +
+    `<span class="v-brand">Vita<i>.ts</i></span>` +
+    `<div class="v-menus">` +
+    menuTitles.map((m) => `<span>${m}</span>`).join("") +
+    `<span data-shell-status>Desktop</span>` +
+    `</div>` +
     `</div>` +
     `<div class="v-status">` +
-    `<span class="v-net" data-shell-net title="Connected to this node">Connected</span>` +
-    `<span class="v-sysbtn" data-shell-quicksettings role="button" title="Quick settings" aria-label="Quick settings">${ICON_SLIDERS}</span>` +
+    `<span class="ico" data-shell-net style="width:15px;height:15px" title="Connected to this node">${ICON_WIFI}</span>` +
+    `<span class="ico" style="width:19px;height:19px" title="Battery">${ICON_BATTERY}</span>` +
     `<span class="clk" data-shell-clock><span class="clk-time">--:--</span><span class="clk-date">———</span></span>` +
     `</div>`;
   screen?.appendChild(menubar);
@@ -315,8 +320,8 @@ function mountChrome(
 
     tile.innerHTML =
       `<div style="display:flex;align-items:center;justify-content:space-between">` +
-      `<span style="width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;` +
-      `background:${appTint(app.id)};color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 2px 6px rgba(0,0,0,.35)">` +
+      `<span style="width:34px;height:34px;border-radius:var(--radius-control,8px);display:inline-flex;align-items:center;justify-content:center;` +
+      `background:var(--accent-subtle);color:var(--accent)">` +
       `${appIconMarkup(app, 20)}</span>${badge}</div>` +
       `<div style="font:600 13.5px system-ui">${escapeHtml(app.title)}</div>` +
       `<div style="font:11.5px system-ui;color:var(--text-faint,#8b8f9c);line-height:1.4">${escapeHtml(app.description)}</div>` +
@@ -365,9 +370,10 @@ function mountChrome(
     }
     if (focused) tile.classList.add("focused");
 
+    // Handoff Dock: the icon sits DIRECTLY on the neutral tile in currentColor — no colored tint chip.
+    // The tile color (var(--text-secondary), → accent when running/focused) flows into the SVG stroke.
     tile.innerHTML =
-      `<span style="width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;` +
-      `background:${appTint(app.id)};box-shadow:inset 0 1px 0 rgba(255,255,255,.16)">${appIconMarkup(app, 19)}</span>` +
+      `<span style="width:25px;height:25px;display:flex;align-items:center;justify-content:center;color:currentColor">${appIconMarkup(app, 25)}</span>` +
       `<span class="v-run-dot"></span>` +
       `<span class="v-dtip">${escapeHtml(app.title)}${running ? " · running" : ""}</span>`;
     tile.addEventListener("click", (() => {
@@ -682,8 +688,9 @@ function svg(body: string): string {
   );
 }
 
-// System-bar glyphs.
-const ICON_SLIDERS = svg(`<line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.3" fill="currentColor" stroke="none"/><circle cx="15" cy="16" r="2.3" fill="currentColor" stroke="none"/>`);
+// System-bar glyphs (Lucide-matched: wifi, battery-full, grid for the launcher).
+const ICON_WIFI = svg(`<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>`);
+const ICON_BATTERY = svg(`<rect x="1" y="6" width="18" height="12" rx="2" ry="2"/><line x1="23" y1="13" x2="23" y2="11"/><rect x="3" y="8" width="12" height="8" rx="1" fill="currentColor" stroke="none"/>`);
 const ICON_GRID = svg(`<rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/>`);
 
 // App icons (Files / Console / Todo / Notepad / Terminal / Package Manager / Editor).
@@ -697,28 +704,14 @@ const APP_ICONS: Readonly<Record<string, string>> = Object.freeze({
   "vita.desk": svg(`<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2Z"/>`),
 });
 
-// Per-app icon-chip tint (a subtle brand gradient behind the glyph so the dock reads as a real app
-// shelf, not a row of identical tiles). Pure, id-keyed, with a neutral default.
-const APP_TINTS: Readonly<Record<string, string>> = Object.freeze({
-  "com.puter-apps.notepad": "linear-gradient(150deg,#f0b429,#d4881f)",
-  "com.puter-apps.serverless-todo": "linear-gradient(150deg,#5bbf86,#2f9d63)",
-  "vita.app.deploy-console": "linear-gradient(150deg,#7c5cf6,#5a3ed6)",
-  "vita.app.editor": "linear-gradient(150deg,#4f9dff,#3178c6)",
-  "vita.app.package-manager": "linear-gradient(150deg,#e0795c,#c4543a)",
-  "vita.app.terminal": "linear-gradient(150deg,#3a4658,#232c39)",
-  "vita.desk": "linear-gradient(150deg,#4f9dff,#7c5cf6)",
-});
-
-function appTint(appId: string): string {
-  return APP_TINTS[appId] ?? "linear-gradient(150deg,#2f3947,#222a35)";
-}
-
-// The bespoke line icon for an app, or its registry emoji as a fallback. `size` sets the box.
+// The bespoke line icon for an app, or its registry emoji as a fallback. `size` sets the box. The
+// icon inherits currentColor (handoff: Lucide icons recolor via currentColor) so it takes the tile's
+// neutral/accent ink rather than a baked-in white.
 function appIconMarkup(app: ShellAppEntry, size: number): string {
   const icon = APP_ICONS[app.id];
 
   if (icon !== undefined) {
-    return `<span style="width:${size}px;height:${size}px;display:inline-flex;color:#fff">${icon}</span>`;
+    return `<span style="width:${size}px;height:${size}px;display:inline-flex;color:currentColor">${icon}</span>`;
   }
 
   return `<span class="v-demoji" style="font-size:${Math.round(size * 1.05)}px">${app.icon}</span>`;

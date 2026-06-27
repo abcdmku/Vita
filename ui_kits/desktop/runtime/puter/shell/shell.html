@@ -80,150 +80,123 @@
     /* The desktop area between the system bar (top) and the dock (bottom). App windows mount here. */
     .v-desktop-shell .v-desk-area { position: absolute; inset: 0; }
 
-    /* ----- SYSTEM BAR (top) ----------------------------------------------------------------------
-       A real OS menu bar: opaque, elevated, well-contrasted. brand + active context on the left, a
-       live status cluster (Connected pill, quick-settings affordance, clock + date) on the right. */
+    /* ----- SYSTEM BAR (top) — handoff MenuBar ----------------------------------------------------
+       Translucent + backdrop-blur over the wallpaper, hairline border, token-driven. brand + menus
+       on the left; a live status cluster (Lucide wifi/battery + clock) on the right. All colors come
+       from the design tokens so it stays correct in light + dark. */
     .v-desktop-shell .v-menubar {
       position: absolute; top: 0; left: 0; right: 0;
-      height: 46px;
+      height: 34px;
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0 14px 0 16px;
-      background: linear-gradient(180deg, #1b2029 0%, #14181f 100%);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 8px 24px rgba(0, 0, 0, 0.34);
-      backdrop-filter: none; -webkit-backdrop-filter: none;
+      padding: 0 14px;
+      background: var(--surface-translucent);
+      border-bottom: 1px solid var(--hairline);
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      box-shadow: none;
       z-index: 60;
       font-family: var(--font-sans, system-ui);
     }
-    .v-desktop-shell .v-bar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
-    /* Brand: a real logo mark + wordmark, clearly legible against the bar. */
+    .v-desktop-shell .v-bar-left { display: flex; align-items: center; gap: 18px; min-width: 0; }
+    /* Brand: the clean Vita.ts wordmark — Geist + a monospace `.ts` in the accent. No logo square. */
     .v-desktop-shell .v-brand {
-      display: inline-flex; align-items: center; gap: 9px;
-      font-weight: 650; font-size: 14.5px; letter-spacing: 0.01em; color: #f4f6fa;
-    }
-    .v-desktop-shell .v-brand .v-logo {
-      width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
-      display: inline-flex; align-items: center; justify-content: center;
-      background: linear-gradient(150deg, #5ba2ff 0%, #3178c6 62%, #7c5cf6 130%);
-      box-shadow: 0 2px 6px rgba(49, 120, 198, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35);
-      font: 800 12px var(--font-mono, ui-monospace, monospace); color: #fff;
+      display: inline-flex; align-items: baseline; gap: 1px;
+      font-weight: 600; font-size: 13.5px; letter-spacing: 0; color: var(--text);
     }
     .v-desktop-shell .v-brand i {
-      font-style: normal; font: 700 11px var(--font-mono, ui-monospace, monospace);
-      color: #8fc0ff; opacity: 0.95;
+      font-style: normal; font-family: var(--font-mono, ui-monospace, monospace);
+      font-weight: 600; font-size: 10.5px; color: var(--accent);
     }
-    .v-desktop-shell .v-bar-sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.12); }
-    /* Active window / menu context. */
-    .v-desktop-shell .v-menus { font-size: 13px; color: #c4cdd9; font-weight: 550; }
-    .v-desktop-shell .v-menus [data-shell-status] { color: #d7dee8; }
+    /* The menu titles (File/Edit/View/Go/Window/Help) + active-window context. */
+    .v-desktop-shell .v-menus { display: flex; align-items: center; gap: 15px; font-size: 12.5px; color: var(--text-secondary); font-weight: 500; }
+    .v-desktop-shell .v-menus > span { cursor: default; user-select: none; }
+    .v-desktop-shell .v-menus [data-shell-status] { color: var(--text-muted); }
 
-    .v-desktop-shell .v-status { display: flex; align-items: center; gap: 10px; }
+    .v-desktop-shell .v-status { display: flex; align-items: center; gap: 11px; color: var(--text-secondary); }
+    .v-desktop-shell .v-status .ico { display: inline-flex; align-items: center; justify-content: center; }
+    .v-desktop-shell .v-status .ico svg { display: block; stroke-width: 2; }
     .v-desktop-shell .v-status .clk {
-      display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1;
       font-family: var(--font-mono, ui-monospace, monospace);
-      color: #f1f4f8; font-variant-numeric: tabular-nums;
+      font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums;
     }
-    .v-desktop-shell .v-status .clk .clk-time { font-size: 13.5px; font-weight: 600; }
     .v-desktop-shell .v-status .clk .clk-date {
-      font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
-      color: #7e8a9a; font-family: var(--font-sans, system-ui); margin-top: 1px;
+      font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      color: var(--text-faint); font-family: var(--font-sans, system-ui); margin-left: 6px;
     }
-    /* Connectivity pill. */
-    .v-desktop-shell .v-net {
-      display: inline-flex; align-items: center; gap: 7px;
-      font: 600 11.5px var(--font-sans, system-ui); color: #cdd5e0;
-      padding: 4px 11px; border-radius: 999px;
-      background: rgba(91, 191, 134, 0.10); border: 1px solid rgba(91, 191, 134, 0.30);
-    }
-    .v-desktop-shell .v-net::before {
-      content: ''; width: 7px; height: 7px; border-radius: 50%;
-      background: #5bd08a; box-shadow: 0 0 9px rgba(91, 208, 138, 0.95);
-    }
-    /* Quick-settings affordance (control center button). */
-    .v-desktop-shell .v-sysbtn {
-      width: 30px; height: 30px; border-radius: 9px;
-      display: inline-flex; align-items: center; justify-content: center;
-      color: #aeb8c6; cursor: pointer;
-      background: rgba(255, 255, 255, 0.045); border: 1px solid rgba(255, 255, 255, 0.07);
-      transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease;
-    }
-    .v-desktop-shell .v-sysbtn:hover { background: rgba(255, 255, 255, 0.10); color: #eef2f7; border-color: rgba(255, 255, 255, 0.16); }
-    .v-desktop-shell .v-sysbtn svg { width: 16px; height: 16px; display: block; }
 
-    /* ----- DOCK (bottom) -------------------------------------------------------------------------
-       A macOS/Windows-quality dock: a launcher (all apps), PINNED apps always visible, and a section
-       for any extra running windows. Real, recognizable icons; hover lift; active accent ring; a
-       running-window indicator dot under each pinned/running app. */
+    /* ----- DOCK (bottom) — handoff Dock ----------------------------------------------------------
+       A translucent + backdrop-blur pill of SUBTLE NEUTRAL tiles (var(--surface)/var(--border)) with
+       Lucide icons in currentColor — NOT colored tint chips. A launcher (all apps), PINNED apps always
+       visible, and a section for extra running windows. Hover lift; accent ring + indicator when
+       running/focused. Token-driven so it stays correct in light + dark. */
     .v-desktop-shell .v-dock {
       position: fixed;
       left: 50%;
       bottom: 14px;
       top: auto;
       transform: translateX(-50%);
-      display: flex; align-items: center; gap: 8px;
-      padding: 8px 12px;
-      background: linear-gradient(180deg, rgba(30, 36, 46, 0.78) 0%, rgba(18, 22, 29, 0.86) 100%);
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      border-radius: 22px;
-      box-shadow:
-        0 18px 48px rgba(0, 0, 0, 0.62),
-        0 2px 0 rgba(0, 0, 0, 0.4),
-        inset 0 1px 0 rgba(255, 255, 255, 0.10);
-      backdrop-filter: blur(22px) saturate(1.4); -webkit-backdrop-filter: blur(22px) saturate(1.4);
+      display: flex; align-items: flex-end; gap: 9px;
+      padding: 8px 11px;
+      background: var(--surface-translucent);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-2xl);
+      box-shadow: var(--shadow-3);
+      backdrop-filter: var(--blur-thick); -webkit-backdrop-filter: var(--blur-thick);
       z-index: 55;
     }
     .v-desktop-shell .v-dsep {
-      width: 1px; height: 36px; align-self: center; margin: 0 3px;
-      background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+      width: 1px; height: 36px; align-self: center; margin: 0 2px;
+      background: var(--hairline);
     }
     .v-desktop-shell .v-dtile {
-      width: 54px; height: 54px;
-      border-radius: 15px;
-      background: linear-gradient(158deg, #2a313d 0%, #1b212a 64%, #151a22 100%);
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 8px rgba(0, 0, 0, 0.45);
-      color: #e6e8ee;
+      width: 50px; height: 50px;
+      border-radius: var(--radius-tile);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-1);
+      color: var(--text-secondary);
       display: flex; align-items: center; justify-content: center;
       cursor: pointer; position: relative;
-      transition: transform 0.14s cubic-bezier(.2,.8,.3,1.2), border-color 0.14s ease, box-shadow 0.14s ease;
+      transition: transform 0.14s cubic-bezier(.2,.8,.3,1.2), border-color 0.14s ease, box-shadow 0.14s ease, color 0.14s ease;
     }
-    .v-desktop-shell .v-dtile svg { width: 26px; height: 26px; display: block; }
-    .v-desktop-shell .v-dtile .v-demoji { font-size: 25px; line-height: 1; }
+    .v-desktop-shell .v-dtile svg { width: 25px; height: 25px; display: block; stroke-width: 2; }
+    .v-desktop-shell .v-dtile .v-demoji { font-size: 23px; line-height: 1; }
     .v-desktop-shell .v-dtile:hover {
-      transform: translateY(-7px) scale(1.04);
-      border-color: rgba(255, 255, 255, 0.26);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 12px 22px rgba(0, 0, 0, 0.5);
+      transform: translateY(-6px) scale(1.04);
+      border-color: var(--border-strong);
+      color: var(--text);
+      box-shadow: var(--shadow-3);
     }
     .v-desktop-shell .v-dtile:active { transform: translateY(-3px) scale(0.99); }
-    /* Token-driven active state from the design system (additive to the polish running/focused dots). */
-    .v-desktop-shell .v-dtile.on { border-color: var(--accent); color: var(--accent); }
+    /* Token-driven active state from the design system. */
+    .v-desktop-shell .v-dtile.on { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow-accent), var(--shadow-1); }
     /* Tooltip label that floats above a tile on hover. */
     .v-desktop-shell .v-dtile .v-dtip {
       position: absolute; bottom: calc(100% + 12px); left: 50%; transform: translateX(-50%) translateY(4px);
-      padding: 4px 9px; border-radius: 7px; white-space: nowrap;
-      font: 600 11.5px var(--font-sans, system-ui); color: #eef2f7;
-      background: rgba(20, 24, 31, 0.96); border: 1px solid rgba(255, 255, 255, 0.12);
-      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+      padding: 4px 9px; border-radius: var(--radius-sm); white-space: nowrap;
+      font: 600 11.5px var(--font-sans, system-ui); color: var(--text);
+      background: var(--surface-overlay); border: 1px solid var(--border);
+      box-shadow: var(--shadow-3);
       opacity: 0; pointer-events: none; transition: opacity 0.12s ease, transform 0.12s ease;
     }
     .v-desktop-shell .v-dtile:hover .v-dtip { opacity: 1; transform: translateX(-50%) translateY(0); }
-    /* The launcher tile reads as the primary action — subtle accent wash. */
+    /* The launcher tile reads as the primary action — accent tile (white-on-accent). */
     .v-desktop-shell .v-dtile.v-launcher {
-      background: linear-gradient(158deg, #2f6fc0 0%, #2756a0 70%, #244a8c 100%);
-      border-color: rgba(143, 192, 255, 0.45);
-      color: #fff;
+      background: var(--accent);
+      border-color: transparent;
+      color: var(--accent-fg);
+      box-shadow: var(--glow-accent), var(--shadow-1);
     }
-    .v-desktop-shell .v-dtile.v-launcher:hover { border-color: rgba(180, 214, 255, 0.7); }
+    .v-desktop-shell .v-dtile.v-launcher:hover { background: var(--accent-hover); color: var(--accent-fg); }
     /* Running-window indicator under a tile. */
     .v-desktop-shell .v-dtile .v-run-dot {
       content: ''; position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
-      width: 6px; height: 6px; border-radius: 50%; background: #6c7280;
+      width: 4px; height: 4px; border-radius: 50%; background: var(--text-faint);
       opacity: 0; transition: opacity 0.14s ease, background 0.14s ease, width 0.14s ease;
     }
-    .v-desktop-shell .v-dtile.running .v-run-dot { opacity: 1; background: var(--accent, #4f9dff); box-shadow: 0 0 8px rgba(79, 157, 255, 0.85); }
-    .v-desktop-shell .v-dtile.focused .v-run-dot { width: 18px; border-radius: 3px; background: var(--accent, #4f9dff); box-shadow: 0 0 10px rgba(79, 157, 255, 0.9); }
-    .v-desktop-shell .v-dtile.running { border-color: rgba(79, 157, 255, 0.32); }
-    .v-desktop-shell .v-dtile.focused { border-color: rgba(79, 157, 255, 0.6); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(79, 157, 255, 0.35), 0 4px 12px rgba(0, 0, 0, 0.5); }
+    .v-desktop-shell .v-dtile.running .v-run-dot { opacity: 1; background: var(--accent); }
+    .v-desktop-shell .v-dtile.focused .v-run-dot { width: 16px; border-radius: 2px; background: var(--accent); }
+    .v-desktop-shell .v-dtile.running { border-color: var(--accent); color: var(--accent); }
+    .v-desktop-shell .v-dtile.focused { border-color: var(--accent); box-shadow: var(--glow-accent), var(--shadow-1); }
   </style>
   <!-- Publishes the api origin + per-app session tokens the shell hands each app iframe. Served by the
        LOCAL face only (like /session.js). On the network face it 404s and the shell falls back to
@@ -235,6 +208,9 @@
     <!-- Wallpaper texture/vignette layer (sits behind all chrome + windows; z-index:0). -->
     <div class="v-wallpaper-fx" aria-hidden="true"></div>
   </div>
+  <!-- Vendored Lucide (offline, no CDN) — exposes window.lucide so the window manager can render
+       Lucide title-bar icons (the dock/menu-bar SVGs are inline and need no runtime). -->
+  <script src="/ui_kits/_vendor/lucide.min.js"></script>
   <!-- The offline shell bundle: real WM + web-app window host + ui broker + dock/launcher. -->
   <script type="module" src="/shell/shell.js"></script>
 </body>
