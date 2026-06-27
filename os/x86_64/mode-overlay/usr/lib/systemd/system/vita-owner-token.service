@@ -35,6 +35,12 @@ LockPersonality=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+# Allow the chown/fchownat family back: the mint script chgrp's the token to vita-agent so the platform
+# DynamicUser can read it. fchownat lives in @privileged, which the line above denies — re-allow exactly
+# the chown family (this unit is the legitimate provisioner of that file's group) so the explicit chgrp
+# works even on a filesystem that ignores the setgid bit on owner/. (Primary fix is the SETGID dir in
+# tmpfiles.d/vita-apps.conf; this keeps the script's chgrp from being a silent no-op as defense-in-depth.)
+SystemCallFilter=@chown
 
 [Install]
 WantedBy=multi-user.target
