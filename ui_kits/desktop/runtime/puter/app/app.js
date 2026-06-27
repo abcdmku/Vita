@@ -194,7 +194,19 @@ function baseName(path) {
   return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
-// Classify a filename into an icon family (class + inline svg). AGPL-clean inline glyphs (no emoji).
+// ---- Lucide icon helpers ----
+// Emit a Lucide placeholder (<i data-lucide="NAME">) wrapped in a sizing span. window.lucide.createIcons()
+// (called via refreshIcons after each render) swaps the <i> for an inline SVG. Offline, AGPL-clean.
+function lucideIco(name, px = 16) {
+  return '<span class="ico" style="width:' + px + 'px;height:' + px + 'px"><i data-lucide="' + name + '"></i></span>';
+}
+// Replace any pending <i data-lucide> placeholders with their SVGs. Safe to call repeatedly and before
+// the UMD has loaded (no-op if window.lucide is absent).
+function refreshIcons() {
+  try { window.lucide && window.lucide.createIcons(); } catch (_) {}
+}
+
+// Classify a filename into an icon family (class + Lucide glyph). AGPL-clean (no emoji).
 function fileKind(name, isDir) {
   if (isDir) return { cls: "ic-folder", label: "Folder", svg: SVG.folder };
   const ext = (name.split(".").pop() || "").toLowerCase();
@@ -208,14 +220,17 @@ function fileKind(name, isDir) {
   return { cls: "ic-text", label: ext ? ext.toUpperCase() : "File", svg: SVG.text };
 }
 
+// Icon glyphs are now vendored Lucide (offline). Each entry is the data-lucide name emitted as an
+// <i data-lucide> placeholder that window.lucide.createIcons() replaces with an inline SVG after the
+// row is in the DOM. See lucideIco()/refreshIcons() below.
 const SVG = {
-  folder:  '<svg viewBox="0 0 24 24" fill="none"><path d="M3 7A1.5 1.5 0 0 1 4.5 5.5h4l2 2.2h7A1.5 1.5 0 0 1 19 9.2v8A1.5 1.5 0 0 1 17.5 18.7h-13A1.5 1.5 0 0 1 3 17.2z" fill="currentColor"/></svg>',
-  text:    '<svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.5"/><path d="M14 3v4h4M9 12h6M9 15h6M9 9h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-  note:    '<svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.5"/><path d="M14 3v4h4M9 12l1.5 3 1.5-3 1.5 3 1.5-3" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
-  code:    '<svg viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.5"/><path d="M14 3v4h4M10 11l-2 2 2 2M14 11l2 2-2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  img:     '<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="10" r="1.6" fill="currentColor"/><path d="M5 17l4-4 3 3 3-3 4 4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
-  data:    '<svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="7" ry="2.6" stroke="currentColor" stroke-width="1.5"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6" stroke="currentColor" stroke-width="1.5"/></svg>',
-  archive: '<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M12 4v3M12 9v2M12 13v2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  folder:  lucideIco("folder"),
+  text:    lucideIco("file-text"),
+  note:    lucideIco("file-text"),
+  code:    lucideIco("file-code"),
+  img:     lucideIco("image"),
+  data:    lucideIco("database"),
+  archive: lucideIco("archive"),
 };
 
 let puter; // resolved in boot()
@@ -335,6 +350,7 @@ async function refreshFiles() {
     li.append(cell, kindCell, size, actions);
     els.filelist.appendChild(li);
   });
+  refreshIcons(); // swap the <i data-lucide> placeholders (row icons + rename/delete) for SVGs
 }
 
 function selectFile(name) {
@@ -342,8 +358,8 @@ function selectFile(name) {
   $$(".file").forEach((li) => li.classList.toggle("is-selected", li.dataset.name === name));
 }
 
-const SVG_RENAME = '<svg viewBox="0 0 24 24" fill="none"><path d="M4 16.5V20h3.5L18 9.5 14.5 6zM13 7.5 16.5 11" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
-const SVG_DELETE = '<svg viewBox="0 0 24 24" fill="none"><path d="M5 7h14M10 7V5h4v2M6 7l1 13h10l1-13M10 11v6M14 11v6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const SVG_RENAME = lucideIco("pencil", 15);
+const SVG_DELETE = lucideIco("trash-2", 15);
 
 function mkIconBtn(svg, title, onClick, danger) {
   const b = document.createElement("button");
@@ -450,15 +466,22 @@ async function refreshNoteList() {
     const li = document.createElement("li");
     li.className = "note-item" + (path === state.noteCurrent ? " is-active" : "");
     li.dataset.path = path;
+    const icon = document.createElement("span");
+    icon.className = "ni-icon";
+    icon.innerHTML = lucideIco("file-text", 15);
+    const body = document.createElement("div");
+    body.className = "ni-body";
     const name = document.createElement("div");
     name.className = "ni-name"; name.textContent = n.name; name.title = n.name;
     const meta = document.createElement("div");
     meta.className = "ni-meta";
     meta.textContent = fmtSize(n.size) + (n.modified ? " · " + fmtWhen(n.modified) : "");
-    li.append(name, meta);
+    body.append(name, meta);
+    li.append(icon, body);
     li.addEventListener("click", () => openNote(path));
     els.notelist.appendChild(li);
   }
+  refreshIcons(); // swap the <i data-lucide> placeholders (note row icons) for SVGs
 }
 
 function markActiveNote() {
@@ -652,6 +675,9 @@ function wireEvents() {
       if (els.app.dataset.view === "notes") { e.preventDefault(); saveNote(); }
     }
   });
+
+  // Paint the static chrome icons (tabs, sidebar, toolbar, save, boot logo, empty state) on first frame.
+  refreshIcons();
 }
 
 async function ensureSeedContent() {
